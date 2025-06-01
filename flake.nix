@@ -2,7 +2,7 @@
   description = "Simple flake exporting a Rust package";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/release-nixos-25.05";
+    nixpkgs.url = "github:nixos/nixpkgs/release-25.05";
     flake-utils.url = "github:numtide/flake-utils";
     campground.url = "gitlab:usmcamp0811/dotfiles";
     snowfall-lib = {
