@@ -7,7 +7,7 @@ use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::PathBuf};
 
 fn log_to_db(current_system: &OsStr) -> Result<()> {
     let mut client = Client::connect(
-        "host=localhost user=crystal_forge password=password dbname=crystal_forge",
+        "host=reckless user=crystal_forge password=password dbname=crystal_forge",
         NoTls,
     )?;
 
