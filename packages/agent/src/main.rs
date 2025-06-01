@@ -2,16 +2,17 @@ use anyhow::Result;
 use nix::fcntl::readlink;
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use postgres::{Client, NoTls};
+use std::path::Path;
 use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::PathBuf};
 
-fn log_to_db(current_system: &Path) -> Result<()> {
+fn log_to_db(current_system: &OsStr) -> Result<()> {
     let mut client = Client::connect(
         "host=localhost user=crystal_forge password=password dbname=crystal_forge",
         NoTls,
     )?;
 
     let hostname = hostname::get()?.to_string_lossy().into_owned();
-    let system_hash = current_system
+    let system_hash = Path::new(current_system)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
