@@ -4,14 +4,19 @@
   ...
 }: let
   crystal-forge-agent = pkgs.rustPlatform.buildRustPackage {
-    pname = "crystal-forge-agent";
+    pname = "agent";
     version = "0.1.0";
 
     src = ./.;
 
     cargoLock = {lockFile = ./Cargo.lock;};
     nativeBuildInputs = with pkgs; [pkg-config];
-    buildInputs = with pkgs; [openssl];
+    buildInputs = [
+      pkgs.rustc
+      pkgs.cargo
+      pkgs.pkg-config
+      pkgs.openssl
+    ];
   };
 in
   crystal-forge-agent
