@@ -4,7 +4,7 @@ Do this to make the SQL tables:
 CREATE TABLE system_state (
 id SERIAL PRIMARY KEY,
 hostname TEXT NOT NULL,
-system_hash TEXT NOT NULL,
+system_derivation_id TEXT NOT NULL,
 inserted_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

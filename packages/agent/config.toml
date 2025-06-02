@@ -1,0 +1,5 @@
+[database]
+host = "reckless"
+user = "crystal_forge"
+password = "password"
+dbname = "crystal_forge"
