@@ -28,6 +28,7 @@ dependencies = [
  "hostname",
  "nix",
  "postgres",
+ "serde",
  "tracing",
  "tracing-subscriber",
  "uuid",

@@ -2,6 +2,7 @@ use crate::db::insert_system_state;
 use anyhow::Result;
 use nix::fcntl::readlink;
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+use std::ffi::OsStr;
 
 pub fn watch_system() -> Result<()> {
     let target = OsStr::new("current-system");
