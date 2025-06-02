@@ -88,18 +88,13 @@ pkgs.testers.runNixOSTest {
     db.wait_for_unit("postgresql")
     assert "code=exited, status=0/SUCCESS" in db.execute("systemctl status createSchema.service")[1]
 
-    print(agent.succeed("journalctl -u agent.service --no-pager"))
     agent.wait_for_unit("agent.service")
 
-
+    # Simulate a rebuild by reapplying the current configuration
     current_system = agent.succeed("readlink /run/current-system").strip()
+    agent.succeed("/run/current-system/sw/bin/switch-to-configuration switch")
+
+    print(agent.succeed("journalctl -u agent.service --no-pager"))
     print("current_system:", repr(current_system))
-
-    def check_db(_):
-        print("retrying...")
-        out = db.execute("psql -U crystal_forge -d crystal_forge -t -c 'SELECT system_derivation_id FROM system_state'")[1]
-        print(out)
-        return current_system in out
-
   '';
 }
