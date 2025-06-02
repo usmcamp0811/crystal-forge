@@ -19,10 +19,10 @@
       src = ./.;
       snowfall = {
         meta = {
-          name = "crystal-froge";
+          name = "crystal-forge";
           title = "Crystal Forge";
         };
-        namespace = "crystal-froge";
+        namespace = "crystal-forge";
       };
     };
   in
