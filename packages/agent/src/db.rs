@@ -3,6 +3,7 @@ use postgres::{Client, NoTls};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::{env, fs};
+mod config;
 
 pub fn insert_system_state(current_system: &OsStr) -> Result<()> {
     let db_config = config::load_config()?;

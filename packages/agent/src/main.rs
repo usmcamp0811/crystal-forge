@@ -1,5 +1,6 @@
 use anyhow::Result;
 
+mod config;
 mod db;
 mod system_watcher;
 
