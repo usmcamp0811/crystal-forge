@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use config::{Config, ConfigError};
+use postgres::{Client, NoTls};
 use serde::Deserialize;
 use std::env;
 
@@ -33,4 +34,10 @@ pub fn load_config() -> Result<DbConfig> {
     settings
         .get::<DbConfig>("database")
         .context("parsing [database] section")
+}
+
+pub fn validate_db_connection(db_url: &str) -> Result<()> {
+    Client::connect(db_url, NoTls)
+        .context("Failed to connect to the database with provided credentials")?;
+    Ok(())
 }
