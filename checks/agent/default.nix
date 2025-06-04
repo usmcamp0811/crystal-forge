@@ -3,49 +3,6 @@
   pkgs,
   ...
 }: let
-  agent-update-system = inputs.nixpkgs.lib.nixosSystem {
-    system = "x86_64-linux";
-    pkgs = pkgs; 
-    modules = [
-      ({pkgs, ...}: {
-        system.nixos.label = "updated-agent";
-        system.stateVersion = "24.11"; # or your preferred value
-
-        boot.isContainer = true;
-        fileSystems."/" = {
-          device = "fake";
-          fsType = "ext4";
-        };
-
-        networking.useDHCP = true;
-        networking.firewall.enable = false;
-
-        environment.systemPackages = [pkgs.crystal-forge.agent pkgs.bash];
-
-        environment.etc."crystal-forge/config.toml".text = ''
-          [database]
-          host = "db"
-          user = "crystal_forge"
-          password = "password"
-          dbname = "crystal_forge"
-        '';
-
-        systemd.services.agent = {
-          wantedBy = ["multi-user.target"];
-          after = ["network.target"];
-          environment = {
-            CRYSTAL_FORGE_CONFIG = "/etc/crystal-forge/config.toml";
-          };
-          serviceConfig = {
-            ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
-            Restart = "on-failure";
-          };
-        };
-      })
-    ];
-  };
-
-  agent-update = agent-update-system.config.system.build.toplevel;
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
@@ -137,13 +94,13 @@ in
       assert "code=exited, status=0/SUCCESS" in db.execute("systemctl status createSchema.service")[1]
       agent.wait_for_unit("agent.service")
 
+      print(agent.execute("readlink /run/current-system"))
       # Copy alternate system derivation into the VM
-      agent.copy_from_host("${agent-update}", "/nix/store/updated-system")
+      agent.copy_from_host("${inputs.self.nixosConfigurations.test-agent.config.system.build.toplevel}", "/nix/store/updated-system")
 
       # Perform the switch inside the VM
       agent.succeed("/nix/store/updated-system/bin/switch-to-configuration switch")
+      print(agent.execute("readlink /run/current-system"))
 
-      print(agent.succeed("readlink /run/current-system"))
-      print(agent.succeed("journalctl -u agent.service --no-pager"))
     '';
   }
