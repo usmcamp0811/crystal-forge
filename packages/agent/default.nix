@@ -7,9 +7,10 @@
     pname = "agent";
     version = "0.1.0";
 
-    src = ./.;
-
-    cargoLock = {lockFile = ./Cargo.lock;};
+    src = ../../.;
+    cargoLock = {
+      lockFile = ../../Cargo.lock;
+    };
     nativeBuildInputs = with pkgs; [pkg-config];
     buildInputs = [
       pkgs.rustc

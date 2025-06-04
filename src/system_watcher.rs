@@ -47,6 +47,8 @@ where
     }
 }
 
+/// Initializes an inotify watcher on `/run` for "current-system" and records updates
+/// to the system state in the database.
 pub fn watch_system() -> Result<()> {
     let mut inotify = Inotify::init(InitFlags::empty())?;
     inotify.add_watch(
