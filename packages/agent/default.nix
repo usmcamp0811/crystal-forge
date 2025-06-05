@@ -3,24 +3,15 @@
   pkgs,
   ...
 }: let
-  crystal-forge-agent = pkgs.rustPlatform.buildRustPackage {
-    pname = "agent";
-    version = "0.1.0";
-    src = ./.;
-
-    cargoLock = {
-      lockFile = ./Cargo.lock;
-    };
-    nativeBuildInputs = with pkgs; [pkg-config];
-    buildInputs = [
-      pkgs.rustc
-      pkgs.cargo
-      pkgs.pkg-config
-      pkgs.openssl
-    ];
-    # installPhase = ''
-    #   install -Dm755 target/release/agent $out/bin/agent
-    # '';
+  pname = "agent";
+  crystal-forge-agent = pkgs.stdenv.mkDerivation {
+    inherit pname;
+    version = pkgs.crystal-forge.default.version;
+    src = pkgs.crystal-forge.default;
+    installPhase = ''
+      mkdir -p $out/bin
+      cp ${pkgs.crystal-forge.default}/bin/${pname} $out/bin/${pname}
+    '';
   };
 in
   crystal-forge-agent

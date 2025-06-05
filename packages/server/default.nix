@@ -3,21 +3,15 @@
   pkgs,
   ...
 }: let
-  crystal-forge-server = pkgs.rustPlatform.buildRustPackage {
-    pname = "server";
-    version = "0.1.0";
-
-    src = ./.;
-    cargoLock = {
-      lockFile = ./Cargo.lock;
-    };
-    nativeBuildInputs = with pkgs; [pkg-config];
-    buildInputs = [
-      pkgs.rustc
-      pkgs.cargo
-      pkgs.pkg-config
-      pkgs.openssl
-    ];
+  pname = "server";
+  crystal-forge-server = pkgs.stdenv.mkDerivation {
+    inherit pname;
+    version = pkgs.crystal-forge.default.version;
+    src = pkgs.crystal-forge.default;
+    installPhase = ''
+      mkdir -p $out/bin
+      cp ${pkgs.crystal-forge.default}/bin/${pname} $out/bin/${pname}
+    '';
   };
 in
   crystal-forge-server

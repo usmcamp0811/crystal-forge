@@ -18,9 +18,6 @@
       pkgs.pkg-config
       pkgs.openssl
     ];
-    # installPhase = ''
-    #   install -Dm755 target/release/agent $out/bin/agent
-    # '';
   };
 in
   crystal-forge
