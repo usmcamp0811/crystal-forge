@@ -37,6 +37,7 @@ pub fn load_config() -> Result<DbConfig> {
 }
 
 pub fn validate_db_connection(db_url: &str) -> Result<()> {
+
     Client::connect(db_url, NoTls)
         .context("Failed to connect to the database with provided credentials")?;
     Ok(())

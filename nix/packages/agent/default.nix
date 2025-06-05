@@ -7,9 +7,9 @@
     pname = "agent";
     version = "0.1.0";
 
-    src = ../../.;
+    src = ../../../.;
     cargoLock = {
-      lockFile = ../../Cargo.lock;
+      lockFile = ../../../Cargo.lock;
     };
     nativeBuildInputs = with pkgs; [pkg-config];
     buildInputs = [
@@ -18,9 +18,9 @@
       pkgs.pkg-config
       pkgs.openssl
     ];
-    installPhase = ''
-      install -Dm755 target/release/agent $out/bin/agent
-    '';
+    # installPhase = ''
+    #   install -Dm755 target/release/agent $out/bin/agent
+    # '';
   };
 in
   crystal-forge-agent
