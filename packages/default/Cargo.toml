@@ -1,5 +1,5 @@
 [package]
-name = "agent"
+name = "crystal-forge"
 version = "0.1.0"
 edition = "2024"  
 
@@ -17,6 +17,9 @@ config = { version = "0.15", features = ["toml", "json"] }
 serde = "1.0.219"
 tempfile = "3.20.0"
 
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "agent"
 path = "src/bin/agent.rs"
@@ -25,6 +28,4 @@ path = "src/bin/agent.rs"
 name = "server"
 path = "src/bin/server.rs"
 
-[lib]
-path = "src/lib.rs"
 
