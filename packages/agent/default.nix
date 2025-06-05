@@ -4,12 +4,12 @@
   ...
 }: let
   crystal-forge-agent = pkgs.rustPlatform.buildRustPackage {
-    inherit src;
     pname = "agent";
     version = "0.1.0";
+    src = ./.;
 
     cargoLock = {
-      lockFile = "${src}/Cargo.lock";
+      lockFile = ./Cargo.lock;
     };
     nativeBuildInputs = with pkgs; [pkg-config];
     buildInputs = [

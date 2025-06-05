@@ -18,7 +18,6 @@
       inherit inputs;
       src = ./.;
       snowfall = {
-        root = ./nix;
         meta = {
           name = "crystal-forge";
           title = "Crystal Forge";
