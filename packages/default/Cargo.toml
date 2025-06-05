@@ -21,8 +21,10 @@ tempfile = "3.20.0"
 name = "agent"
 path = "src/bin/agent.rs"
 
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
 [lib]
 path = "src/lib.rs"
-# [[bin]]
-# name = "server"
-# path = "src/bin/server.rs"
+
