@@ -151,3 +151,4 @@ packages/websites/nix-slide-deck/.vite/deps
 packages/websites/nix-slide-deck/themes
 resume.pdf
 packages/nix-rmf-slides/.vite/deps
+nix/packages/nix-rmf-slides/.vite/deps

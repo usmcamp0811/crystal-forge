@@ -16,3 +16,11 @@ uuid = "1.17.0"
 config = { version = "0.15", features = ["toml", "json"] }
 serde = "1.0.219"
 tempfile = "3.20.0"
+
+[[bin]]
+name = "agent"
+path = "src/bin/agent.rs"
+
+# [[bin]]
+# name = "server"
+# path = "src/bin/server.rs"

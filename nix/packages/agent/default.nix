@@ -1,0 +1,26 @@
+{
+  lib,
+  pkgs,
+  ...
+}: let
+  crystal-forge-agent = pkgs.rustPlatform.buildRustPackage {
+    pname = "agent";
+    version = "0.1.0";
+
+    src = ../../.;
+    cargoLock = {
+      lockFile = ../../Cargo.lock;
+    };
+    nativeBuildInputs = with pkgs; [pkg-config];
+    buildInputs = [
+      pkgs.rustc
+      pkgs.cargo
+      pkgs.pkg-config
+      pkgs.openssl
+    ];
+    installPhase = ''
+      install -Dm755 target/release/agent $out/bin/agent
+    '';
+  };
+in
+  crystal-forge-agent

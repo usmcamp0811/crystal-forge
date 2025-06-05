@@ -3,8 +3,8 @@
   pkgs,
   ...
 }: let
-  crystal-forge-agent = pkgs.rustPlatform.buildRustPackage {
-    pname = "agent";
+  crystal-forge-server = pkgs.rustPlatform.buildRustPackage {
+    pname = "server";
     version = "0.1.0";
 
     src = ../../.;
@@ -20,4 +20,4 @@
     ];
   };
 in
-  crystal-forge-agent
+  crystal-forge-server
