@@ -1,6 +1,6 @@
-mod config;
-mod db;
-mod system_watcher;
+use crate::config;
+use crate::db;
+use crate::system_watcher;
 
 use anyhow::Result;
 

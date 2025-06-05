@@ -23,4 +23,4 @@
     # '';
   };
 in
-  src
+  crystal-forge-agent
