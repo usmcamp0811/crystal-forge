@@ -1,5 +1,5 @@
 use base64::{Engine as _, engine::general_purpose};
-use ed25519_dalek::{SigningKey, Verifier};
+use ed25519_dalek::SigningKey;
 use rand::rngs::OsRng;
 use std::{
     env, fs,
@@ -24,17 +24,6 @@ Example:
   {program} -f /var/lib/crystal_forge/agent.key
 "
     );
-}
-
-fn confirm_overwrite(path: &PathBuf) {
-    eprint!("⚠️  {} already exists. Overwrite? [y/N] ", path.display());
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    if !input.trim().eq_ignore_ascii_case("y") {
-        eprintln!("Aborted.");
-        process::exit(0);
-    }
 }
 
 fn get_default_path() -> PathBuf {
