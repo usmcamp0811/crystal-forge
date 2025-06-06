@@ -6,7 +6,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load_config()?;
     let db_url = config.to_url();
 
-    config::validate_db_connection(&db_url)?;
+    config::validate_db_connection(&db_url).await?;
     // initialize tracing
     tracing_subscriber::fmt::init();
 
@@ -16,6 +16,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(handle_post));
 
     // run our app with hyper, listening globally on port 3000
+
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();
 

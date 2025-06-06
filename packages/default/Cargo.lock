@@ -272,6 +272,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tokio-postgres",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -938,6 +939,7 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "uuid",
 ]
 
 [[package]]

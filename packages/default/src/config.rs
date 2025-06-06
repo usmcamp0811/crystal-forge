@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
-use config::{Config, ConfigError};
-use postgres::{Client, NoTls};
+use config::Config;
 use serde::Deserialize;
 use std::env;
-
+use tokio_postgres::NoTls;
 #[derive(Debug, Deserialize)]
 pub struct DbConfig {
     pub host: String,
@@ -36,9 +35,8 @@ pub fn load_config() -> Result<DbConfig> {
         .context("parsing [database] section")
 }
 
-pub fn validate_db_connection(db_url: &str) -> Result<()> {
-
-    Client::connect(db_url, NoTls)
-        .context("Failed to connect to the database with provided credentials")?;
+pub async fn validate_db_connection(db_url: &str) -> anyhow::Result<()> {
+    let (_client, connection) = tokio_postgres::connect(db_url, NoTls).await?;
+    tokio::spawn(connection); // run connection in background
     Ok(())
 }
