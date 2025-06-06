@@ -23,3 +23,7 @@ pub fn insert_system_state(current_system: &OsStr) -> Result<()> {
 
     Ok(())
 }
+
+// pub fn post_system_state(current_system: &OnStr) -> Result<()> {
+//     let server_config = config::load_config()?;
+// }
