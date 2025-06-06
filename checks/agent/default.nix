@@ -87,6 +87,8 @@ in
       };
     };
 
+    # TODO: Test key creation
+
     testScript = ''
       start_all()
 
