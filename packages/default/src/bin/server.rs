@@ -1,4 +1,5 @@
 use anyhow::Context;
+
 use axum::{
     Router,
     body::Bytes,
@@ -9,6 +10,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::config;
+use ed25519_dalek::Verifier;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::{collections::HashMap, fs};
 use tokio::net::TcpListener;
@@ -17,7 +19,7 @@ use tokio::net::TcpListener;
 #[derive(Clone)]
 struct AppState {
     /// Map of agent identifiers to their Ed25519 verifying keys.
-    authorized_keys: HashMap<String, Result<VerifyingKey, _>>,
+    authorized_keys: HashMap<String, VerifyingKey>,
 }
 
 /// Entry point for the server. Initializes configuration, tracing, and starts the Axum HTTP server.
@@ -78,15 +80,23 @@ async fn main() -> anyhow::Result<()> {
 /// let map = parse_authorized_keys(&config.server.authorized_keys)?;
 /// let key = map.get("agent-0").unwrap();
 /// ```
+
 fn parse_authorized_keys(b64_keys: &[String]) -> anyhow::Result<HashMap<String, VerifyingKey>> {
     let mut map = HashMap::new();
 
     for (i, b64) in b64_keys.iter().enumerate() {
-        let bytes = base64::decode(b64.trim())
+        let bytes = general_purpose::STANDARD
+            .decode(b64.trim())
             .with_context(|| format!("Invalid base64 key at index {}", i))?;
 
-        let key = VerifyingKey::from_bytes(bytes.as_slice().try_into()?)
-            .context(format!("Invalid base64 key at index {}", i))?;
+        let key_bytes: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .context("Failed to convert to [u8; 32]")?;
+
+        let key = VerifyingKey::from_bytes(&key_bytes)
+            .context(format!("Invalid public key at index {}", i))?;
+
         map.insert(format!("agent-{i}"), key);
     }
 
@@ -134,16 +144,12 @@ async fn handle_current_system(
         Err(_) => return StatusCode::BAD_REQUEST,
     };
 
-    // Convert to Signature type
     let bytes: [u8; 64] = match signature_bytes.try_into() {
         Ok(b) => b,
         Err(_) => return StatusCode::BAD_REQUEST,
     };
 
-    let signature = match Signature::from_bytes(&bytes) {
-        Ok(sig) => sig,
-        Err(_) => return StatusCode::BAD_REQUEST,
-    };
+    let signature = Signature::from_bytes(&bytes);
 
     // Look up the key
     let key = match state.authorized_keys.get(key_id) {
