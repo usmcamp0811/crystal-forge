@@ -41,7 +41,7 @@ pub fn post_system_state(current_system: &OsStr) -> Result<()> {
     let cfg = config::load_config()?;
     let server_cfg = cfg.server;
     let client_cfg = cfg.client;
-
+    // TODO: Add MAC Address & Hardware fingerprint along with hostname
     let hostname = hostname::get()?.to_string_lossy().into_owned();
     let system_hash = Path::new(current_system)
         .file_name()
