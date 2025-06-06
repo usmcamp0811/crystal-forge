@@ -126,6 +126,7 @@ where
     }
 }
 
+// TODO: Update watch_system to take in the private key path
 /// Initializes an inotify watcher on `/run` for "current-system" and records updates
 /// to the system state in the database.
 pub fn watch_system() -> Result<()> {
