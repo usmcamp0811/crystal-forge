@@ -7,7 +7,8 @@ use std::{env, fs};
 
 pub fn insert_system_state(current_system: &OsStr) -> Result<()> {
     let db_config = config::load_config()?;
-    let db_url = db_config.to_url();
+    let db_url = db_config.database.to_url();
+
     let mut client = Client::connect(&db_url, NoTls)?;
 
     let hostname = hostname::get()?.to_string_lossy().into_owned();
@@ -23,7 +24,3 @@ pub fn insert_system_state(current_system: &OsStr) -> Result<()> {
 
     Ok(())
 }
-
-// pub fn post_system_state(current_system: &OnStr) -> Result<()> {
-//     let server_config = config::load_config()?;
-// }

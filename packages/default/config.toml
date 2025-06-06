@@ -7,9 +7,11 @@ dbname = "crystal_forge"
 [server]
 host = "0.0.0.0"
 port = 3000
-authorized_keys = "/var/lib/crystal_forge/authorized_keys"
+authorized_keys = [
+  "hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY=", # agent-0 pubkey base64
+]
 
 [client]
 server_host = "daly"
 server_port = 3000
-private_key = "/var/lib/crystal_forge/client_key.pem"
+private_key = "/var/lib/crystal_forge/client_key.key"

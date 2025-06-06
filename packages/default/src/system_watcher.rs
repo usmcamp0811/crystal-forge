@@ -1,12 +1,91 @@
+use crate::config;
 use crate::db::insert_system_state;
-use anyhow::Result;
+use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
+use ed25519_dalek::Signer;
+use ed25519_dalek::SigningKey;
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+use reqwest::blocking::Client;
 use std::ffi::OsStr;
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
-
 /// Reads a symlink and returns its target as a `PathBuf`.
 fn readlink_path(path: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(nix::fcntl::readlink(path)?))
+}
+
+/// Posts the current Nix system derivation ID to a configured server.
+///
+/// This function:
+/// 1. Loads the client and server configuration from the config file.
+/// 2. Reads and decodes the Ed25519 private key from the configured path.
+/// 3. Constructs a payload using the system hostname and derivation ID.
+/// 4. Signs the payload using the private key.
+/// 5. Sends the payload to the server with signature headers.
+///
+/// The server is expected to:
+/// - Verify the signature using the public key listed in its authorized keys
+/// - Accept a POST at `/ingest` with headers `X-Signature` and `X-Key-ID`
+///
+/// # Arguments
+///
+/// * `current_system` - A reference to the `OsStr` path pointing to the derivation in /nix/store
+///
+/// # Errors
+///
+/// Returns an error if configuration cannot be loaded, the key cannot be read,
+/// signing fails, or the HTTP request fails.
+pub fn post_system_state(current_system: &OsStr) -> Result<()> {
+    let cfg = config::load_config()?;
+    let server_cfg = cfg.server;
+    let client_cfg = cfg.client;
+
+    let hostname = hostname::get()?.to_string_lossy().into_owned();
+    let system_hash = Path::new(current_system)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
+
+    // Construct payload: "<hostname>:<system_hash>"
+    let payload = format!("{hostname}:{system_hash}");
+
+    // Load and decode private key from file
+    let key_bytes = STANDARD
+        .decode(fs::read_to_string(&client_cfg.private_key)?.trim())
+        .context("failed to decode base64 private key")?;
+
+    let signing_key = SigningKey::from_bytes(
+        key_bytes
+            .as_slice()
+            .try_into()
+            .context("expected a 32-byte Ed25519 private key")?,
+    );
+    let signature = signing_key.sign(payload.as_bytes());
+
+    let signature_b64 = STANDARD.encode(signature.to_bytes());
+
+    // Send HTTP POST with signed payload
+    let client = Client::new();
+    let url = format!(
+        "http://{}:{}/current-system",
+        server_cfg.host, server_cfg.port
+    );
+
+    let res = client
+        .post(url)
+        .header("X-Signature", signature_b64)
+        .header("X-Key-ID", hostname)
+        .body(payload)
+        .send()
+        .context("failed to send POST")?;
+
+    if !res.status().is_success() {
+        anyhow::bail!("server responded with {}", res.status());
+    }
+
+    Ok(())
 }
 
 /// Handles an inotify event for a specific file name by reading the current system path
@@ -56,7 +135,8 @@ pub fn watch_system() -> Result<()> {
         AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO,
     )?;
 
-    watch_system_loop(&mut inotify, readlink_path, insert_system_state)
+    // TODO: add watch for home-manager too
+    watch_system_loop(&mut inotify, readlink_path, post_system_state)
 }
 
 #[cfg(test)]
