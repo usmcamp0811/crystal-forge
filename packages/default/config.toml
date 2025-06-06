@@ -1,17 +1,17 @@
 [database]
 host = "reckless"
 user = "crystal_forge"
-password = "1password"
+password = "password"
 dbname = "crystal_forge"
 
 [server]
 host = "0.0.0.0"
 port = 3000
 authorized_keys = [
-  "hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY=", # agent-0 pubkey base64
+  "hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY=", # gray
 ]
 
 [client]
-server_host = "daly"
+server_host = "reckless"
 server_port = 3000
-private_key = "/var/lib/crystal_forge/client_key.key"
+private_key = "/var/lib/crystal_forge/gray.key"
