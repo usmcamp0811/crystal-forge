@@ -179,7 +179,13 @@ async fn handle_current_system(
     // Parse JSON
     let payload: SystemPayload = match serde_json::from_slice(&body) {
         Ok(p) => p,
-        Err(_) => return StatusCode::BAD_REQUEST,
+        Err(e) => {
+            eprintln!(
+                "❌ JSON deserialization failed: {e}\nBody:\n{}",
+                String::from_utf8_lossy(&body)
+            );
+            return StatusCode::BAD_REQUEST;
+        }
     };
 
     println!(
