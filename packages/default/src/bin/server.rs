@@ -19,7 +19,7 @@ use tokio::net::TcpListener;
 
 /// Holds the loaded public keys for authorized agents.
 #[derive(Clone)]
-struct AppState {
+struct CFState {
     /// Map of agent identifiers to their Ed25519 verifying keys.
     authorized_keys: HashMap<String, VerifyingKey>,
 }
@@ -43,7 +43,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load authorized public keys for agent verification
     let authorized_keys = parse_authorized_keys(&cfg.server.authorized_keys)?;
-    let state = AppState {
+    let state = CFState {
         authorized_keys: authorized_keys,
     };
 
@@ -135,7 +135,7 @@ fn parse_authorized_keys(
 /// - `401 Unauthorized`: If the key ID is missing or the signature is invalid
 /// - `500 Internal Server Error`: If insertion into the database fails
 async fn handle_current_system(
-    State(state): State<AppState>,
+    State(state): State<CFState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {

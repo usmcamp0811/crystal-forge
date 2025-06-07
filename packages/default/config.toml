@@ -10,6 +10,7 @@ port = 3000
 
 [server.authorized_keys]
 gray = "hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY="
+reckless = "SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8="
 
 [client]
 server_host = "localhost"

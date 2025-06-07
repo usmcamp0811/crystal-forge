@@ -12,7 +12,7 @@ use tokio_postgres::NoTls;
 /// - `[server]`   → `ServerConfig`
 /// - `[client]`   → `AgentConfig`
 #[derive(Debug, Deserialize)]
-pub struct AppConfig {
+pub struct CrystalForgeConfig {
     pub database: DbConfig,
     pub server: ServerConfig,
     pub client: AgentConfig,
@@ -97,7 +97,7 @@ impl DbConfig {
 ///
 /// The default path is `/var/lib/crystal_forge/config.toml`,
 /// unless overridden by the `CRYSTAL_FORGE_CONFIG` environment variable.
-pub fn load_config() -> Result<AppConfig> {
+pub fn load_config() -> Result<CrystalForgeConfig> {
     let config_path = env::var("CRYSTAL_FORGE_CONFIG")
         .unwrap_or_else(|_| "/var/lib/crystal_forge/config.toml".to_string());
 
@@ -108,8 +108,8 @@ pub fn load_config() -> Result<AppConfig> {
         .context("loading configuration")?;
 
     settings
-        .try_deserialize::<AppConfig>()
-        .context("parsing full config into AppConfig")
+        .try_deserialize::<CrystalForgeConfig>()
+        .context("parsing full config into CrystalForgeConfig")
 }
 
 /// Attempts to connect to the PostgreSQL database.
