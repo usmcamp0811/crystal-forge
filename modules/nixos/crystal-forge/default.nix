@@ -71,7 +71,7 @@ in {
     database = {
       host = mkOption {
         type = types.str;
-        default = "reckless";
+        default = "localhost";
       };
       user = mkOption {
         type = types.str;
