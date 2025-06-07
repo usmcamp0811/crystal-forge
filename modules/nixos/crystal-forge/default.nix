@@ -3,11 +3,12 @@
   lib,
   pkgs,
   ...
-}:
-with lib; let
+}: let
   cfg = config.services.crystal-forge;
 
-  rawConfigFile = pkgs.writeText "crystal-forge-config.toml" (lib.generators.toTOML {} {
+  tomlFormat = pkgs.formats.toml {};
+
+  rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" {
     database = {
       inherit (cfg.database) host user dbname;
       password =
@@ -21,7 +22,7 @@ with lib; let
     client = {
       inherit (cfg.client) server_host server_port private_key;
     };
-  });
+  };
 
   generatedConfigPath = "/run/crystal-forge/config.toml";
 
@@ -33,72 +34,74 @@ with lib; let
     ''}
   '';
 in {
-  options.services.crystal-forge = with lib; {
-    enable = mkEnableOption "Enable the Crystal Forge service(s)";
-    configPath = mkOption {
-      type = types.path;
+  options.services.crystal-forge = {
+    enable = lib.mkEnableOption "Enable the Crystal Forge service(s)";
+    configPath = lib.mkOption {
+      type = lib.types.path;
       default = generatedConfigPath;
       description = "Path to the final config.toml file.";
     };
+
     database = {
-      host = mkOption {
-        type = types.str;
+      host = lib.mkOption {
+        type = lib.types.str;
         default = "localhost";
       };
-      user = mkOption {
-        type = types.str;
+      user = lib.mkOption {
+        type = lib.types.str;
         default = "crystal_forge";
       };
-      password = mkOption {
-        type = types.str;
+      password = lib.mkOption {
+        type = lib.types.str;
         default = "password";
       };
-      passwordFile = mkOption {
-        type = types.nullOr types.path;
+      passwordFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "Optional path to a file containing the database password. Overrides 'password'.";
+        description = "Optional path to a file containing the DB password.";
       };
-      dbname = mkOption {
-        type = types.str;
+      dbname = lib.mkOption {
+        type = lib.types.str;
         default = "crystal_forge";
       };
     };
+
     server = {
-      enable = mkEnableOption "Enable the Crystal Forge Server";
-      host = mkOption {
-        type = types.str;
+      enable = lib.mkEnableOption "Enable the Crystal Forge Server";
+      host = lib.mkOption {
+        type = lib.types.str;
         default = "0.0.0.0";
       };
-      port = mkOption {
-        type = types.port;
+      port = lib.mkOption {
+        type = lib.types.port;
         default = 3000;
       };
-      authorized_keys = mkOption {
-        type = types.attrsOf types.str;
+      authorized_keys = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
         default = {};
       };
     };
+
     client = {
-      enable = mkEnableOption "Enable the Crystal Forge Agent";
-      server_host = mkOption {
-        type = types.str;
+      enable = lib.mkEnableOption "Enable the Crystal Forge Agent";
+      server_host = lib.mkOption {
+        type = lib.types.str;
         default = "reckless";
       };
-      server_port = mkOption {
-        type = types.port;
+      server_port = lib.mkOption {
+        type = lib.types.port;
         default = 3000;
       };
-      private_key = mkOption {type = types.path;};
+      private_key = lib.mkOption {type = lib.types.path;};
     };
   };
 
   config = lib.mkIf cfg.enable {
-    # TODO: Add postgres
-    systemd.services.crystal-forge-agent = mkIf cfg.client.enable {
+    systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
       description = "Crystal Forge Agent";
       wantedBy = ["multi-user.target"];
       serviceConfig = {
-        ExecStartPre = ["${configScript}"];
+        ExecStartPre = [configScript];
         ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
         Environment = "CRYSTAL_FORGE_CONFIG=${generatedConfigPath}";
         User = "root";
@@ -107,13 +110,13 @@ in {
       };
     };
 
-    systemd.services.crystal-forge-server = mkIf cfg.server.enable {
+    systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
       after = ["postgresql.service"];
       wants = ["postgresql.service"];
       serviceConfig = {
-        ExecStartPre = ["${configScript}"];
+        ExecStartPre = [configScript];
         ExecStart = "${pkgs.crystal-forge.server}/bin/server";
         Environment = "CRYSTAL_FORGE_CONFIG=${generatedConfigPath}";
         User = "crystal_forge";
