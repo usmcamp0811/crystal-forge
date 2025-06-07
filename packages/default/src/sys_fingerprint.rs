@@ -60,6 +60,38 @@ impl fmt::Display for FingerprintParts {
     }
 }
 
+fn get_rootfs_uuid() -> Option<String> {
+    let dev = std::process::Command::new("df")
+        .arg("/")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                stdout
+                    .lines()
+                    .nth(1)?
+                    .split_whitespace()
+                    .next()
+                    .map(|s| s.to_string())
+            } else {
+                None
+            }
+        })?;
+
+    std::process::Command::new("blkid")
+        .args(["-s", "UUID", "-o", "value", &dev])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+}
+
 /// Generates a system fingerprint with hardware and OS details.
 ///
 /// # Returns
@@ -102,19 +134,7 @@ pub fn get_fingerprint() -> Result<FingerprintParts, Error> {
             }
         })?;
 
-    let rootfs_uuid = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("findmnt -no SOURCE / | xargs blkid -s UUID -o value")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
-
+    let rootfs_uuid = get_rootfs_uuid();
     Ok(FingerprintParts {
         os,
         kernel,
