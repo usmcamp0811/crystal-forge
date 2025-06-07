@@ -27,6 +27,7 @@
   generatedConfigPath = "/run/crystal-forge/config.toml";
 
   configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
+    mkdir -p /run/crsystal-forge
     install -d -m 0750 -o crystal_forge /run/crystal-forge
     cp ${rawConfigFile} ${generatedConfigPath}
     ${lib.optionalString (cfg.database.passwordFile != null) ''
