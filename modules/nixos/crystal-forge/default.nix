@@ -100,10 +100,12 @@ in {
     systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
       description = "Crystal Forge Agent";
       wantedBy = ["multi-user.target"];
+      environment = {
+        CRYSTAL_FORGE_CONFIG = "${generatedConfigPath}";
+      };
       serviceConfig = {
         ExecStartPre = [configScript];
         ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
-        Environment = "CRYSTAL_FORGE_CONFIG=${generatedConfigPath}";
         User = "root";
         Group = "root";
         RuntimeDirectory = "crystal-forge";
@@ -115,10 +117,12 @@ in {
       wantedBy = ["multi-user.target"];
       after = ["postgresql.service"];
       wants = ["postgresql.service"];
+      environment = {
+        CRYSTAL_FORGE_CONFIG = "${generatedConfigPath}";
+      };
       serviceConfig = {
         ExecStartPre = [configScript];
         ExecStart = "${pkgs.crystal-forge.server}/bin/server";
-        Environment = "CRYSTAL_FORGE_CONFIG=${generatedConfigPath}";
         User = "crystal_forge";
         Group = "crystal_forge";
         RuntimeDirectory = "crystal-forge";
