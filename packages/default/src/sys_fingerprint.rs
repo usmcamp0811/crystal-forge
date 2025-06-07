@@ -61,7 +61,7 @@ impl fmt::Display for FingerprintParts {
 }
 
 fn get_rootfs_uuid() -> Option<String> {
-    // Try resolving the real backing device from /
+    // Get the real source of /
     let dev = std::process::Command::new("findmnt")
         .args(["-n", "-o", "SOURCE", "-T", "/"])
         .output()
@@ -74,10 +74,17 @@ fn get_rootfs_uuid() -> Option<String> {
             }
         })?;
 
-    // Handle ZFS
-    if !dev.starts_with("/dev/") {
+    // Strip Btrfs subvolume suffix like /dev/sda2[/@]
+    let dev_clean = dev.split('[').next().unwrap_or("").trim();
+
+    if dev_clean.is_empty() {
+        return None;
+    }
+
+    if !dev_clean.starts_with("/dev/") {
+        // Likely ZFS
         return std::process::Command::new("zfs")
-            .args(["get", "-H", "-o", "value", "guid", &dev])
+            .args(["get", "-H", "-o", "value", "guid", &dev_clean])
             .output()
             .ok()
             .and_then(|out| {
@@ -89,9 +96,9 @@ fn get_rootfs_uuid() -> Option<String> {
             });
     }
 
-    // blkid UUID
+    // blkid for UUID
     std::process::Command::new("blkid")
-        .args(["-s", "UUID", "-o", "value", &dev])
+        .args(["-s", "UUID", "-o", "value", dev_clean])
         .output()
         .ok()
         .and_then(|out| {
