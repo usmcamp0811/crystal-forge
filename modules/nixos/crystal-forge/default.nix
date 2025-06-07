@@ -3,7 +3,8 @@
   lib,
   pkgs,
   ...
-}: let
+}:
+with lib; let
   cfg = config.services.crystal-forge;
 
   rawConfigFile = pkgs.writeText "crystal-forge-config.toml" (lib.generators.toTOML {} {
@@ -31,38 +32,9 @@
       sed -i "s|__USE_EXTERNAL_PASSWORD__|$(<${cfg.database.passwordFile})|" ${generatedConfigPath}
     ''}
   '';
-
-  mkService = role: {
-    description = "Crystal Forge ${role}";
-    wantedBy = ["multi-user.target"];
-    after = lib.optional (role == "server") "postgresql.service";
-    wants = lib.optional (role == "server") "postgresql.service";
-    serviceConfig = {
-      ExecStartPre = [configScript];
-      ExecStart =
-        if role == "server"
-        then "${pkgs.crystal-forge.server}/bin/server"
-        else "${pkgs.crystal-forge.agent}/bin/agent";
-      Environment = ["CRYSTAL_FORGE_CONFIG=${generatedConfigPath}"];
-      User =
-        if role == "server"
-        then "crystal_forge"
-        else "root";
-      Group =
-        if role == "server"
-        then "crystal_forge"
-        else "root";
-      RuntimeDirectory = "crystal-forge";
-    };
-  };
 in {
   options.services.crystal-forge = with lib; {
     enable = mkEnableOption "Enable the Crystal Forge service(s)";
-    roles = mkOption {
-      type = types.listOf (types.enum ["agent" "server"]);
-      default = ["agent"];
-      description = "Which roles to run on this system.";
-    };
     configPath = mkOption {
       type = types.path;
       default = generatedConfigPath;
@@ -92,6 +64,7 @@ in {
       };
     };
     server = {
+      enable = mkEnableOption "Enable the Crystal Forge Server";
       host = mkOption {
         type = types.str;
         default = "0.0.0.0";
@@ -106,6 +79,7 @@ in {
       };
     };
     client = {
+      enable = mkEnableOption "Enable the Crystal Forge Agent";
       server_host = mkOption {
         type = types.str;
         default = "reckless";
@@ -119,9 +93,32 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    systemd.services = lib.mkMerge (map (
-        role: {"crystal-forge-${role}" = mkService role;}
-      )
-      cfg.roles);
+    # TODO: Add postgres
+    systemd.services.crystal-forge-agent = mkIf cfg.client.enable {
+      description = "Crystal Forge Agent";
+      wantedBy = ["multi-user.target"];
+      serviceConfig = {
+        ExecStartPre = [configScript];
+        ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
+        Environment = ["CRYSTAL_FORGE_CONFIG=${generatedConfigPath}"];
+        User = "root";
+        Group = "root";
+        RuntimeDirectory = "crystal-forge";
+      };
+    };
+    systemd.services.crystal-forge-server = mkIf cfg.server.enable {
+      description = "Crystal Forge Server";
+      wantedBy = ["multi-user.target"];
+      after = "postgresql.service";
+      wants = "postgresql.service";
+      serviceConfig = {
+        ExecStartPre = [configScript];
+        ExecStart = "${pkgs.crystal-forge.server}/bin/server";
+        Environment = ["CRYSTAL_FORGE_CONFIG=${generatedConfigPath}"];
+        User = "crystal_forge";
+        Group = "crystal_forge";
+        RuntimeDirectory = "crystal-forge";
+      };
+    };
   };
 }
