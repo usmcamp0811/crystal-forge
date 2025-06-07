@@ -6,6 +6,7 @@ use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use sysinfo::System;
+use systemstat::{Platform, System as StatSystem};
 
 use reqwest::blocking::Client;
 use std::fmt;
@@ -66,11 +67,13 @@ impl fmt::Display for FingerprintParts {
 /// - `Err(std::io::Error)` if critical system reads fail
 pub fn get_fingerprint() -> Result<FingerprintParts, Error> {
     let mut sys = System::new_all();
+    let mut sysstat = StatSystem::new();
     sys.refresh_all();
+    let hostname = System::host_name().unwrap_or_default();
 
-    let uptime_secs = sys.uptime();
-    let os = sys.os_version().unwrap_or_default();
-    let kernel = sys.kernel_version().unwrap_or_default();
+    let uptime_secs = System::uptime();
+    let os = System::os_version().unwrap_or_default();
+    let kernel = System::kernel_version().unwrap_or_default();
     let memory_gb = sys.total_memory() as f64 / 1024.0 / 1024.0;
     let cpu_brand = sys
         .cpus()
