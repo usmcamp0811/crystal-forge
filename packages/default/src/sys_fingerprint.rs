@@ -5,10 +5,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
-use sysinfo::System;
-use systemstat::{Platform, System as StatSystem};
-
 use reqwest::blocking::Client;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::io::{Error, ErrorKind};
 use std::process::Command;
@@ -17,9 +15,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use sysinfo::System;
+use systemstat::System as StatSystem;
 
 /// Struct holding system fingerprint components.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FingerprintParts {
     /// Operating system version (e.g., "NixOS 24.05").
     pub os: String,
@@ -99,9 +99,7 @@ fn get_rootfs_uuid() -> Option<String> {
 /// - `Err(std::io::Error)` if critical system reads fail
 pub fn get_fingerprint() -> Result<FingerprintParts, Error> {
     let mut sys = System::new_all();
-    let mut sysstat = StatSystem::new();
     sys.refresh_all();
-    let hostname = System::host_name().unwrap_or_default();
 
     let uptime_secs = System::uptime();
     let os = System::os_version().unwrap_or_default();

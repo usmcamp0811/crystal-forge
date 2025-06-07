@@ -11,6 +11,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::config;
 use crystal_forge::db::insert_system_state;
+use crystal_forge::system_watcher::SystemPayload;
 use ed25519_dalek::Verifier;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::ffi::OsStr;
@@ -115,8 +116,8 @@ fn parse_authorized_keys(
 ///
 /// This endpoint:
 /// 1. Extracts the `X-Key-ID` and `X-Signature` headers.
-/// 2. Verifies the signature of the request body using the corresponding Ed25519 public key.
-/// 3. Parses the request body, which is expected to be in the format: `<hostname>:<system_hash>:<fingerprint>`.
+/// 2. Verifies the signature of the raw JSON request body using the corresponding Ed25519 public key.
+/// 3. Parses the request body as JSON into a `SystemPayload` struct.
 /// 4. Logs and stores the verified system state in the database.
 ///
 /// # Request
@@ -126,32 +127,35 @@ fn parse_authorized_keys(
 /// - `X-Signature`: The base64-encoded Ed25519 signature of the request body
 ///
 /// Body:
-/// - A UTF-8 encoded string with format: `hostname:system_hash:fingerprint`
+/// - A JSON object:
+///   {
+///     "hostname": "my-host",
+///     "system_hash": "abc123",
+///     "context": "startup",
+///     "fingerprint": { /* hardware & OS info */ }
+///   }
 ///
 /// # Response
 ///
 /// - `200 OK`: If the signature is valid and the data is successfully stored
-/// - `400 Bad Request`: If the signature is malformed or the payload is invalid
-/// - `401 Unauthorized`: If the key ID is missing or the signature is invalid
+/// - `400 Bad Request`: If the signature or payload is invalid
+/// - `401 Unauthorized`: If the key ID is missing or the signature verification fails
 /// - `500 Internal Server Error`: If insertion into the database fails
 async fn handle_current_system(
     State(state): State<CFState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Extract the Key ID
     let key_id = match headers.get("X-Key-ID") {
         Some(v) => v.to_str().unwrap_or(""),
         None => return StatusCode::UNAUTHORIZED,
     };
 
-    // Extract the base64 signature
     let sig = match headers.get("X-Signature") {
         Some(v) => v.to_str().unwrap_or(""),
         None => return StatusCode::UNAUTHORIZED,
     };
 
-    // Decode base64 signature
     let signature_bytes = match general_purpose::STANDARD.decode(sig) {
         Ok(bytes) => bytes,
         Err(_) => return StatusCode::BAD_REQUEST,
@@ -163,37 +167,33 @@ async fn handle_current_system(
     };
 
     let signature = Signature::from_bytes(&bytes);
-
-    // Look up the key
     let key = match state.authorized_keys.get(key_id) {
         Some(k) => k,
         None => return StatusCode::UNAUTHORIZED,
     };
 
-    // Verify signature
     if key.verify(&body, &signature).is_err() {
         return StatusCode::UNAUTHORIZED;
     }
 
-    // Decode and split payload
-    let payload = String::from_utf8_lossy(&body);
-    let parts: Vec<&str> = payload.split(':').collect();
-
-    if parts.len() != 3 {
-        return StatusCode::BAD_REQUEST;
-    }
-
-    let hostname = parts[0];
-    let system_hash: &OsStr = OsStr::new(parts[1]);
-    let fingerprint = parts[2];
+    // Parse JSON
+    let payload: SystemPayload = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(_) => return StatusCode::BAD_REQUEST,
+    };
 
     println!(
-        "✅ accepted from {key_id}: hostname={hostname}, hash={}, fingerprint={fingerprint}",
-        system_hash.to_string_lossy()
+        "✅ accepted from {key_id}: hostname={}, hash={}, context={}, fingerprint={:?}",
+        payload.hostname, payload.system_hash, payload.context, payload.fingerprint
     );
 
-    // insert into db (adapt insert function accordingly)
-    if let Err(e) = insert_system_state(hostname, system_hash, fingerprint).await {
+    if let Err(e) = insert_system_state(
+        &payload.hostname,
+        &payload.system_hash,
+        &payload.fingerprint,
+    )
+    .await
+    {
         eprintln!("❌ failed to insert into DB: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }

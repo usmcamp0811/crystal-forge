@@ -5,6 +5,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 
 use reqwest::blocking::Client;
@@ -17,6 +18,14 @@ use std::{
 /// Reads a symlink and returns its target as a `PathBuf`.
 fn readlink_path(path: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(nix::fcntl::readlink(path)?))
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SystemPayload {
+    pub hostname: String,
+    pub system_hash: String,
+    pub context: String,
+    pub fingerprint: FingerprintParts,
 }
 
 /// Posts the current Nix system derivation ID to a configured server.
@@ -54,8 +63,15 @@ pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
     println!("CONTEXT: {:#?}", context);
     println!("{:#?}", fingerprint);
 
-    // Construct payload: hostname:system_hash:fingerprint
-    let payload = format!("{hostname}:{system_hash}:{fingerprint}");
+    // construct payload to be sent to the server
+    let payload = SystemPayload {
+        hostname: hostname.clone(),
+        system_hash: system_hash,
+        context: context.to_string(),
+        fingerprint: fingerprint,
+    };
+
+    let payload_json = serde_json::to_string(&payload)?;
 
     // Load and decode private key from file
     let key_bytes = STANDARD
@@ -68,7 +84,7 @@ pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
             .try_into()
             .context("expected a 32-byte Ed25519 private key")?,
     );
-    let signature = signing_key.sign(payload.as_bytes());
+    let signature = signing_key.sign(payload_json.as_bytes());
 
     let signature_b64 = STANDARD.encode(signature.to_bytes());
 
@@ -85,7 +101,7 @@ pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
         .post(url)
         .header("X-Signature", signature_b64)
         .header("X-Key-ID", hostname)
-        .body(payload)
+        .body(payload_json)
         .send()
         .context("failed to send POST")?;
 
