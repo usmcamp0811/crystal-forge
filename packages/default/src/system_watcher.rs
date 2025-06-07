@@ -60,8 +60,6 @@ pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
         .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
 
     let fingerprint = get_fingerprint()?;
-    println!("CONTEXT: {:#?}", context);
-    println!("{:#?}", fingerprint);
 
     // construct payload to be sent to the server
     let payload = SystemPayload {
