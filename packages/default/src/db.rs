@@ -19,12 +19,39 @@ pub async fn insert_system_state(
     let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
     tokio::spawn(connection); // drive the connection
 
-    let fingerprint_json = serde_json::to_string(fingerprint)?;
-
-    client.execute(
-        "INSERT INTO system_state (hostname, system_derivation_id, fingerprint) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
-        &[&hostname, &system_hash, &fingerprint_json],
-    ).await?;
+    client
+        .execute(
+            "INSERT INTO system_state (
+            hostname,
+            system_derivation_id,
+            context,
+            os,
+            kernel,
+            memory_gb,
+            uptime_secs,
+            cpu_brand,
+            cpu_cores,
+            board_serial,
+            product_uuid,
+            rootfs_uuid
+        ) VALUES (
+            $1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11
+        ) ON CONFLICT DO NOTHING",
+            &[
+                &hostname,
+                &system_hash,
+                &fingerprint.os,
+                &fingerprint.kernel,
+                &fingerprint.memory_gb,
+                &(fingerprint.uptime_secs as i64), // u64 → i64
+                &fingerprint.cpu_brand,
+                &(fingerprint.cpu_cores as i32), // usize → i32
+                &fingerprint.board_serial,
+                &fingerprint.product_uuid,
+                &fingerprint.rootfs_uuid,
+            ],
+        )
+        .await?;
 
     Ok(())
 }
