@@ -3,17 +3,65 @@ use crate::db::insert_system_state;
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use ed25519_dalek::Signer;
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
-use std::ffi::OsStr;
-use std::fs;
-use std::path::Path;
-use std::path::PathBuf;
+use sha2::{Digest, Sha256};
+use std::{
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+};
+
 /// Reads a symlink and returns its target as a `PathBuf`.
 fn readlink_path(path: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(nix::fcntl::readlink(path)?))
+}
+
+/// Generates a hardware fingerprint for the current system.
+///
+/// This fingerprint is intended to uniquely and consistently identify a physical machine.
+/// It combines the following hardware-specific values:
+/// - Motherboard serial number (`/sys/class/dmi/id/board_serial`)
+/// - Product UUID (`/sys/class/dmi/id/product_uuid`)
+/// - Full contents of `/proc/cpuinfo`
+/// - UUID of the root filesystem (from `findmnt` + `blkid`)
+///
+/// The combined string is hashed using SHA-256 to produce a stable fingerprint that does not
+/// expose raw hardware values.
+///
+/// # Returns
+///
+/// * `Ok(String)` – A SHA-256 hexadecimal string representing the fingerprint
+/// * `Err(std::io::Error)` – If any required system files or commands fail
+///
+/// # Notes
+///
+/// - Requires read access to DMI and block device metadata
+/// - Designed to resist spoofing in non-virtualized environments
+/// - Not guaranteed to be unique across cloned VMs or containers
+pub fn get_fingerprint() -> Result<String, std::io::Error> {
+    let board_serial = fs::read_to_string("/sys/class/dmi/id/board_serial")?
+        .trim()
+        .to_string();
+    let product_uuid = fs::read_to_string("/sys/class/dmi/id/product_uuid")?
+        .trim()
+        .to_string();
+    let cpuinfo = fs::read_to_string("/proc/cpuinfo")?;
+    let disk_uuid = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("findmnt -no SOURCE / | xargs blkid -s UUID -o value")
+        .output()?
+        .stdout;
+    let disk_uuid = String::from_utf8_lossy(&disk_uuid).trim().to_string();
+
+    let mut hasher = Sha256::new();
+    hasher.update(board_serial);
+    hasher.update(product_uuid);
+    hasher.update(cpuinfo);
+    hasher.update(disk_uuid);
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /// Posts the current Nix system derivation ID to a configured server.
@@ -47,8 +95,11 @@ pub fn post_system_state(current_system: &OsStr) -> Result<()> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
 
-    // Construct payload: "<hostname>:<system_hash>"
-    let payload = format!("{hostname}:{system_hash}");
+    let fingerprint = get_fingerprint()?;
+    // let fingerprint = "fuck";
+
+    // Construct payload: hostname:system_hash:fingerprint
+    let payload = format!("{hostname}:{system_hash}:{fingerprint}");
 
     // Load and decode private key from file
     let key_bytes = STANDARD

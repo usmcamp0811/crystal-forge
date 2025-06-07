@@ -1,26 +1,27 @@
 use crate::config;
 use anyhow::{Context, Result};
-use postgres::{Client, NoTls};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::{env, fs};
+use tokio_postgres::{Client, NoTls};
 
-pub fn insert_system_state(current_system: &OsStr) -> Result<()> {
+pub async fn insert_system_state(
+    hostname: &str,
+    system_hash: &OsStr,
+    fingerprint: &str,
+) -> Result<()> {
     let db_config = config::load_config()?;
     let db_url = db_config.database.to_url();
 
-    let mut client = Client::connect(&db_url, NoTls)?;
+    let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
+    tokio::spawn(connection); // drive the connection
 
-    let hostname = hostname::get()?.to_string_lossy().into_owned();
-    let system_hash = Path::new(current_system)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
+    let system_hash = system_hash.to_string_lossy();
 
     client.execute(
-        "INSERT INTO system_state (hostname, system_derivation_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
-        &[&hostname, &system_hash],
-    )?;
+        "INSERT INTO system_state (hostname, system_derivation_id, fingerprint) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        &[&hostname, &system_hash, &fingerprint],
+    ).await?;
 
     Ok(())
 }

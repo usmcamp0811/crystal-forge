@@ -10,8 +10,10 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::config;
+use crystal_forge::db::insert_system_state;
 use ed25519_dalek::Verifier;
 use ed25519_dalek::{Signature, VerifyingKey};
+use std::ffi::OsStr;
 use std::{collections::HashMap, fs};
 use tokio::net::TcpListener;
 
@@ -113,20 +115,25 @@ fn parse_authorized_keys(
 ///
 /// This endpoint:
 /// 1. Extracts the `X-Key-ID` and `X-Signature` headers.
-/// 2. Verifies the signature against the request body using the key from authorized keys.
-/// 3. If valid, prints the payload; otherwise returns an error status.
+/// 2. Verifies the signature of the request body using the corresponding Ed25519 public key.
+/// 3. Parses the request body, which is expected to be in the format: `<hostname>:<system_hash>:<fingerprint>`.
+/// 4. Logs and stores the verified system state in the database.
 ///
-/// # Arguments
+/// # Request
 ///
-/// * `State(state)` - Shared application state (authorized keys)
-/// * `headers` - HTTP headers from the request
-/// * `body` - Raw request body (e.g., hostname:system_hash)
+/// Headers:
+/// - `X-Key-ID`: The identifier for the public key to verify the signature
+/// - `X-Signature`: The base64-encoded Ed25519 signature of the request body
 ///
-/// # Returns
+/// Body:
+/// - A UTF-8 encoded string with format: `hostname:system_hash:fingerprint`
 ///
-/// * `200 OK` if the signature is valid
-/// * `401 Unauthorized` if key is missing or signature is invalid
-/// * `400 Bad Request` if input formatting is invalid
+/// # Response
+///
+/// - `200 OK`: If the signature is valid and the data is successfully stored
+/// - `400 Bad Request`: If the signature is malformed or the payload is invalid
+/// - `401 Unauthorized`: If the key ID is missing or the signature is invalid
+/// - `500 Internal Server Error`: If insertion into the database fails
 async fn handle_current_system(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -168,10 +175,28 @@ async fn handle_current_system(
         return StatusCode::UNAUTHORIZED;
     }
 
-    // Success
+    // Decode and split payload
+    let payload = String::from_utf8_lossy(&body);
+    let parts: Vec<&str> = payload.split(':').collect();
+
+    if parts.len() != 3 {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    let hostname = parts[0];
+    let system_hash: &OsStr = OsStr::new(parts[1]);
+    let fingerprint = parts[2];
+
     println!(
-        "✅ accepted from {key_id}: {:?}",
-        String::from_utf8_lossy(&body)
+        "✅ accepted from {key_id}: hostname={hostname}, hash={}, fingerprint={fingerprint}",
+        system_hash.to_string_lossy()
     );
+
+    // insert into db (adapt insert function accordingly)
+    if let Err(e) = insert_system_state(hostname, system_hash, fingerprint).await {
+        eprintln!("❌ failed to insert into DB: {e}");
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
     StatusCode::OK
 }
