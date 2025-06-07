@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::env;
 use tokio_postgres::NoTls;
 
@@ -51,7 +52,7 @@ pub struct ServerConfig {
     pub port: u16,
 
     /// List of base64-encoded Ed25519 public keys authorized to post.
-    pub authorized_keys: Vec<String>,
+    pub authorized_keys: HashMap<String, String>,
 }
 
 impl ServerConfig {

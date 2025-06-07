@@ -32,6 +32,10 @@ async fn main() -> anyhow::Result<()> {
 
     config::validate_db_connection(&db_url).await?;
 
+    println!("Starting Crystal Forge Server...");
+    println!("Host: {}", "0.0.0.0");
+    println!("Port: {}", cfg.server.port);
+
     // Set up tracing/logging
     tracing_subscriber::fmt::init();
 
@@ -81,13 +85,15 @@ async fn main() -> anyhow::Result<()> {
 /// let key = map.get("agent-0").unwrap();
 /// ```
 
-fn parse_authorized_keys(b64_keys: &[String]) -> anyhow::Result<HashMap<String, VerifyingKey>> {
+fn parse_authorized_keys(
+    b64_keys: &HashMap<String, String>,
+) -> anyhow::Result<HashMap<String, VerifyingKey>> {
     let mut map = HashMap::new();
 
-    for (i, b64) in b64_keys.iter().enumerate() {
+    for (key_id, b64) in b64_keys {
         let bytes = general_purpose::STANDARD
             .decode(b64.trim())
-            .with_context(|| format!("Invalid base64 key at index {}", i))?;
+            .with_context(|| format!("Invalid base64 key for ID '{}'", key_id))?;
 
         let key_bytes: [u8; 32] = bytes
             .as_slice()
@@ -95,9 +101,9 @@ fn parse_authorized_keys(b64_keys: &[String]) -> anyhow::Result<HashMap<String, 
             .context("Failed to convert to [u8; 32]")?;
 
         let key = VerifyingKey::from_bytes(&key_bytes)
-            .context(format!("Invalid public key at index {}", i))?;
+            .context(format!("Invalid public key for ID '{}'", key_id))?;
 
-        map.insert(format!("agent-{i}"), key);
+        map.insert(key_id.clone(), key);
     }
 
     Ok(map)
