@@ -61,21 +61,20 @@ impl fmt::Display for FingerprintParts {
 }
 
 fn get_rootfs_uuid() -> Option<String> {
-    // Get the device or mount info for root
-    let df_output = std::process::Command::new("findmnt")
-        .args(["-no", "SOURCE", "/"])
+    // Try resolving the real backing device from /
+    let dev = std::process::Command::new("findmnt")
+        .args(["-n", "-o", "SOURCE", "-T", "/"])
         .output()
-        .ok()?;
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })?;
 
-    if !df_output.status.success() {
-        return None;
-    }
-
-    let dev = String::from_utf8_lossy(&df_output.stdout)
-        .trim()
-        .to_string();
-
-    // ZFS: If the source is a dataset name (not a /dev path)
+    // Handle ZFS
     if !dev.starts_with("/dev/") {
         return std::process::Command::new("zfs")
             .args(["get", "-H", "-o", "value", "guid", &dev])
@@ -90,7 +89,7 @@ fn get_rootfs_uuid() -> Option<String> {
             });
     }
 
-    // Otherwise try blkid UUID
+    // blkid UUID
     std::process::Command::new("blkid")
         .args(["-s", "UUID", "-o", "value", &dev])
         .output()
