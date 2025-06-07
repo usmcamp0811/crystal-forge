@@ -10,6 +10,7 @@ use tokio_postgres::{Client, NoTls};
 
 pub async fn insert_system_state(
     hostname: &str,
+    context: &str,
     system_hash: &str,
     fingerprint: &FingerprintParts,
 ) -> Result<()> {
@@ -35,11 +36,12 @@ pub async fn insert_system_state(
             product_uuid,
             rootfs_uuid
         ) VALUES (
-            $1, $2, '', $3, $4, $5, $6, $7, $8, $9, $10, $11
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
         ) ON CONFLICT DO NOTHING",
             &[
                 &hostname,
                 &system_hash,
+                &context,
                 &fingerprint.os,
                 &fingerprint.kernel,
                 &fingerprint.memory_gb,

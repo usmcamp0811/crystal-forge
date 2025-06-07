@@ -195,6 +195,7 @@ async fn handle_current_system(
 
     if let Err(e) = insert_system_state(
         &payload.hostname,
+        &payload.context,
         &payload.system_hash,
         &payload.fingerprint,
     )
