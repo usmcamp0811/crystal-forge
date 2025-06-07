@@ -61,24 +61,36 @@ impl fmt::Display for FingerprintParts {
 }
 
 fn get_rootfs_uuid() -> Option<String> {
-    let dev = std::process::Command::new("df")
-        .arg("/")
+    // Get the device or mount info for root
+    let df_output = std::process::Command::new("findmnt")
+        .args(["-no", "SOURCE", "/"])
         .output()
-        .ok()
-        .and_then(|out| {
-            if out.status.success() {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout
-                    .lines()
-                    .nth(1)?
-                    .split_whitespace()
-                    .next()
-                    .map(|s| s.to_string())
-            } else {
-                None
-            }
-        })?;
+        .ok()?;
 
+    if !df_output.status.success() {
+        return None;
+    }
+
+    let dev = String::from_utf8_lossy(&df_output.stdout)
+        .trim()
+        .to_string();
+
+    // ZFS: If the source is a dataset name (not a /dev path)
+    if !dev.starts_with("/dev/") {
+        return std::process::Command::new("zfs")
+            .args(["get", "-H", "-o", "value", "guid", &dev])
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+    }
+
+    // Otherwise try blkid UUID
     std::process::Command::new("blkid")
         .args(["-s", "UUID", "-o", "value", &dev])
         .output()
