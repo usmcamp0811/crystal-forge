@@ -13,6 +13,6 @@ gray = "hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY="
 reckless = "SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8="
 
 [client]
-server_host = "localhost"
-server_port = 3000
+server_host = "reckless"
+server_port = 3944
 private_key = "/var/lib/crystal_forge/gray.key"
