@@ -40,7 +40,7 @@ fn readlink_path(path: &str) -> Result<PathBuf> {
 ///
 /// Returns an error if configuration cannot be loaded, the key cannot be read,
 /// signing fails, or the HTTP request fails.
-pub fn post_system_state(current_system: &OsStr) -> Result<()> {
+pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
     let cfg = config::load_config()?;
     let client_cfg = cfg.client;
     // TODO: Add MAC Address & Hardware fingerprint along with hostname
@@ -51,6 +51,7 @@ pub fn post_system_state(current_system: &OsStr) -> Result<()> {
         .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
 
     let fingerprint = get_fingerprint()?;
+    println!("CONTEXT: {:#?}", context);
     println!("{:#?}", fingerprint);
 
     // Construct payload: hostname:system_hash:fingerprint
@@ -97,19 +98,22 @@ pub fn post_system_state(current_system: &OsStr) -> Result<()> {
 
 /// Handles an inotify event for a specific file name by reading the current system path
 /// and invoking a callback to record the system state if the event matches "current-system".
-fn handle_event<F, R>(name: &OsStr, readlink_fn: F, insert_fn: R) -> Result<()>
+fn handle_event<F, R>(name: &OsStr, context: &str, readlink_fn: F, insert_fn: R) -> Result<()>
 where
     F: Fn(&str) -> Result<PathBuf>,
-    R: Fn(&OsStr) -> Result<()>,
+    R: Fn(&OsStr, &str) -> Result<()>,
 {
     if name != OsStr::new("current-system") {
         return Ok(());
     }
 
     let current_system = readlink_fn("/run/current-system")?;
-    println!("Current System: {}", current_system.to_string_lossy());
-    insert_fn(current_system.as_os_str())?;
-
+    println!(
+        "[{}] Current System: {}",
+        context,
+        current_system.to_string_lossy()
+    );
+    insert_fn(current_system.as_os_str(), context)?;
     Ok(())
 }
 
@@ -118,16 +122,21 @@ where
 fn watch_system_loop<F, R>(inotify: &mut Inotify, readlink_fn: F, insert_fn: R) -> Result<()>
 where
     F: Fn(&str) -> Result<PathBuf>,
-    R: Fn(&OsStr) -> Result<()>,
+    R: Fn(&OsStr, &str) -> Result<()>,
 {
     println!("Watching /run for changes to current-system...");
-    let init = OsStr::new("current-system");
-    handle_event(init, &readlink_fn, &insert_fn)?;
+
+    handle_event(
+        OsStr::new("current-system"),
+        "startup",
+        &readlink_fn,
+        &insert_fn,
+    )?;
     loop {
         for event in inotify.read_events()? {
             if let Some(name) = event.name {
                 println!("Detected change to /run/current-system");
-                handle_event(&name, &readlink_fn, &insert_fn)?;
+                handle_event(&name, "loop", &readlink_fn, &insert_fn)?;
             }
         }
     }
@@ -159,13 +168,18 @@ mod tests {
         let called = RefCell::new(false);
 
         let readlink_mock = |_path: &str| Ok(PathBuf::from("/nix/store/fake-system"));
-        let insert_mock = |os: &OsStr| {
+        let insert_mock = |os: &OsStr, _ctx: &str| {
             assert_eq!(os.to_string_lossy(), "/nix/store/fake-system");
             *called.borrow_mut() = true;
             Ok(())
         };
 
-        let result = handle_event(OsStr::new("current-system"), readlink_mock, insert_mock);
+        let result = handle_event(
+            OsStr::new("current-system"),
+            "test",
+            readlink_mock,
+            insert_mock,
+        );
         assert!(result.is_ok());
         assert!(*called.borrow());
     }
@@ -173,9 +187,9 @@ mod tests {
     #[test]
     fn test_handle_event_ignores_other_files() {
         let readlink_mock = |_path: &str| panic!("should not be called");
-        let insert_mock = |_os: &OsStr| panic!("should not be called");
+        let insert_mock = |_os: &OsStr, _ctx: &str| panic!("should not be called"); // ← now takes 2 args
 
-        let result = handle_event(OsStr::new("other-file"), readlink_mock, insert_mock);
+        let result = handle_event(OsStr::new("other-file"), "test", readlink_mock, insert_mock);
         assert!(result.is_ok());
     }
 }
