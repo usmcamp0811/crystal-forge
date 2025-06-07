@@ -7,11 +7,11 @@ dbname = "crystal_forge"
 [server]
 host = "0.0.0.0"
 port = 3000
-authorized_keys = [
-  "hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY=", # gray
-]
+
+[server.authorized_keys]
+gray = "hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY="
 
 [client]
-server_host = "reckless"
+server_host = "localhost"
 server_port = 3000
 private_key = "/var/lib/crystal_forge/gray.key"
