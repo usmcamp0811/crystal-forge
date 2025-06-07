@@ -1,17 +1,17 @@
 use crate::config;
 use crate::db::insert_system_state;
-use crate::sys_fingerprint;
+use crate::sys_fingerprint::{FingerprintParts, get_fingerprint};
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
-use sysinfo::System;
+// use sysinfo::System;
 
 use reqwest::blocking::Client;
-use std::fmt;
-use std::io::{Error, ErrorKind};
-use std::process::Command;
+// use std::fmt;
+// use std::io::{Error, ErrorKind};
+// use std::process::Command;
 use std::{
     ffi::OsStr,
     fs,
