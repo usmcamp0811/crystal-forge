@@ -98,23 +98,24 @@ in {
       description = "Crystal Forge Agent";
       wantedBy = ["multi-user.target"];
       serviceConfig = {
-        ExecStartPre = [configScript];
+        ExecStartPre = ["${configScript}"];
         ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
-        Environment = ["CRYSTAL_FORGE_CONFIG=${generatedConfigPath}"];
+        Environment = "CRYSTAL_FORGE_CONFIG=${generatedConfigPath}";
         User = "root";
         Group = "root";
         RuntimeDirectory = "crystal-forge";
       };
     };
+
     systemd.services.crystal-forge-server = mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
-      after = "postgresql.service";
-      wants = "postgresql.service";
+      after = ["postgresql.service"];
+      wants = ["postgresql.service"];
       serviceConfig = {
-        ExecStartPre = [configScript];
+        ExecStartPre = ["${configScript}"];
         ExecStart = "${pkgs.crystal-forge.server}/bin/server";
-        Environment = ["CRYSTAL_FORGE_CONFIG=${generatedConfigPath}"];
+        Environment = "CRYSTAL_FORGE_CONFIG=${generatedConfigPath}";
         User = "crystal_forge";
         Group = "crystal_forge";
         RuntimeDirectory = "crystal-forge";
