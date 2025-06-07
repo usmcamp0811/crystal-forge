@@ -142,7 +142,7 @@ where
 
     handle_event(
         OsStr::new("current-system"),
-        "startup",
+        "agent-startup",
         &readlink_fn,
         &insert_fn,
     )?;
@@ -150,7 +150,7 @@ where
         for event in inotify.read_events()? {
             if let Some(name) = event.name {
                 println!("Detected change to /run/current-system");
-                handle_event(&name, "loop", &readlink_fn, &insert_fn)?;
+                handle_event(&name, "agent-loop", &readlink_fn, &insert_fn)?;
             }
         }
     }
