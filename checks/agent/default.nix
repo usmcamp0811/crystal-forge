@@ -71,23 +71,6 @@ in
         environment.etc."agent.key".source = "${key}/agent.key";
         environment.etc."agent.pub".source = "${pub}/agent.pub";
 
-        systemd.services.fake-dmi = {
-          wantedBy = ["multi-user.target"];
-          before = ["crystal-forge-agent.service"];
-          script = ''
-            mkdir -p /fake-dmi
-            echo "FAKE-BOARD-SERIAL" > /fake-dmi/board_serial
-            echo "FAKE-PRODUCT-UUID" > /fake-dmi/product_uuid
-            mkdir -p /sys/class/dmi
-            mount -t tmpfs tmpfs /sys/class/dmi
-            mkdir -p /sys/class/dmi/id
-            mount --bind /fake-dmi /sys/class/dmi/id
-          '';
-          serviceConfig = {
-            Type = "oneshot";
-            RemainAfterExit = true;
-          };
-        };
         services.crystal-forge = {
           enable = true;
           client = {
