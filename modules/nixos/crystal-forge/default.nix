@@ -102,27 +102,27 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    services.postgresql = {
-      enable = cfg.local-database;
+    services.postgresql = lib.mkIf cfg.local-database {
+      enable = true;
       ensureDatabases = [cfg.database.dbname];
       ensureUsers = [
         {
           name = cfg.database.user;
           ensureDBOwnership = true;
-          ensureClauses = {
-            login = true;
-          };
+          ensureClauses = {login = true;};
         }
       ];
     };
+
     systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
       description = "Crystal Forge Agent";
       wantedBy = ["multi-user.target"];
       environment = {
-        CRYSTAL_FORGE_CONFIG = "${generatedConfigPath}";
+        CRYSTAL_FORGE_CLIENT_SERVER_HOST = cfg.client.server_host;
+        CRYSTAL_FORGE_CLIENT_SERVER_PORT = toString cfg.client.server_port;
+        CRYSTAL_FORGE_CLIENT_PRIVATE_KEY = cfg.client.private_key;
       };
       serviceConfig = {
-        ExecStartPre = [configScript];
         ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
         User = "root";
         Group = "root";
@@ -135,12 +135,22 @@ in {
       wantedBy = ["multi-user.target"];
       after = ["postgresql.service"];
       wants = ["postgresql.service"];
-      environment = {
-        CRYSTAL_FORGE_CONFIG = "${generatedConfigPath}";
-        CRYSTAL_FORGE_DATABASE_URL = "postgres://${cfg.database.user}:${lib.optionalString (cfg.database.passwordFile != null) "$(cat ${cfg.database.passwordFile})"}@${cfg.database.host}/${cfg.database.dbname}";
-      };
+      environment =
+        {
+          CRYSTAL_FORGE_SERVER_HOST = cfg.server.host;
+          CRYSTAL_FORGE_SERVER_PORT = toString cfg.server.port;
+        }
+        // (lib.mapAttrs' (name: val: lib.nameValuePair "CRYSTAL_FORGE_SERVER_AUTHORIZED_KEYS_${name}" val) cfg.server.authorized_keys)
+        // {
+          CRYSTAL_FORGE_DATABASE_HOST = cfg.database.host;
+          CRYSTAL_FORGE_DATABASE_USER = cfg.database.user;
+          CRYSTAL_FORGE_DATABASE_DBNAME = cfg.database.dbname;
+          CRYSTAL_FORGE_DATABASE_PASSWORD =
+            if cfg.database.passwordFile != null
+            then builtins.readFile cfg.database.passwordFile
+            else cfg.database.password;
+        };
       serviceConfig = {
-        ExecStartPre = [configScript];
         ExecStart = "${pkgs.crystal-forge.server}/bin/server";
         User = "root";
         Group = "root";
