@@ -116,41 +116,54 @@ fn get_rootfs_uuid() -> Option<String> {
 /// - `Ok(FingerprintParts)` with collected metadata
 /// - `Err(std::io::Error)` if critical system reads fail
 pub fn get_fingerprint() -> Result<FingerprintParts, Error> {
+    eprintln!("[fingerprint] initializing sysinfo");
     let mut sys = System::new_all();
     sys.refresh_all();
 
+    eprintln!("[fingerprint] collecting uptime");
     let uptime_secs = System::uptime();
-    let os = System::os_version().unwrap_or_default();
-    let kernel = System::kernel_version().unwrap_or_default();
+
+    eprintln!("[fingerprint] collecting OS and kernel");
+    let os = System::os_version().unwrap_or_else(|| "unknown".to_string());
+    let kernel = System::kernel_version().unwrap_or_else(|| "unknown".to_string());
+
+    eprintln!("[fingerprint] collecting memory and CPU info");
     let memory_gb = sys.total_memory() as f64 / 1024.0 / 1024.0;
     let cpu_brand = sys
         .cpus()
         .get(0)
         .map(|c| c.brand().to_string())
-        .unwrap_or_default();
+        .unwrap_or_else(|| "unknown".to_string());
     let cpu_cores = sys.cpus().len();
 
+    eprintln!("[fingerprint] reading board_serial");
     let board_serial = fs::read_to_string("/sys/class/dmi/id/board_serial")
         .map(|s| Some(s.trim().to_string()))
         .or_else(|e| {
-            if e.kind() == ErrorKind::PermissionDenied {
+            eprintln!("[fingerprint] board_serial read error: {:?}", e);
+            if matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::NotFound) {
                 Ok(None)
             } else {
                 Err(e)
             }
         })?;
 
+    eprintln!("[fingerprint] reading product_uuid");
     let product_uuid = fs::read_to_string("/sys/class/dmi/id/product_uuid")
         .map(|s| Some(s.trim().to_string()))
         .or_else(|e| {
-            if e.kind() == ErrorKind::PermissionDenied {
+            eprintln!("[fingerprint] product_uuid read error: {:?}", e);
+            if matches!(e.kind(), ErrorKind::PermissionDenied | ErrorKind::NotFound) {
                 Ok(None)
             } else {
                 Err(e)
             }
         })?;
 
+    eprintln!("[fingerprint] reading rootfs_uuid");
     let rootfs_uuid = get_rootfs_uuid();
+
+    eprintln!("[fingerprint] done");
     Ok(FingerprintParts {
         os,
         kernel,

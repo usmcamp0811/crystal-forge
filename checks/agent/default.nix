@@ -1,108 +1,131 @@
 {
+  lib,
   inputs,
   pkgs,
   ...
 }: let
+  keyPair = pkgs.runCommand "agent-keypair" {} ''
+    mkdir -p $out
+    ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/agent.key
+  '';
+  key = pkgs.runCommand "agent.key" {} ''
+    mkdir -p $out
+    cp ${keyPair}/agent.key $out/
+  '';
+  pub = pkgs.runCommand "agent.pub" {} ''
+    mkdir -p $out
+    cp ${keyPair}/agent.pub $out/
+  '';
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
 
     nodes = {
-      db = {
+      server = {
         config,
         pkgs,
         ...
       }: {
+        imports = [inputs.self.nixosModules.crystal-forge];
+
         networking.useDHCP = true;
+        networking.firewall.allowedTCPPorts = [3000];
+
+        environment.etc."agent.key".source = "${key}/agent.key";
+        environment.etc."agent.pub".source = "${pub}/agent.pub";
 
         services.postgresql = {
           enable = true;
-          package = pkgs.postgresql_16;
-
-          initialScript = pkgs.writeText "init.sql" ''
-            CREATE USER crystal_forge WITH PASSWORD 'password';
-            CREATE DATABASE crystal_forge OWNER crystal_forge;
-          '';
-
-          authentication = ''
-            local   all             all                                     trust
-            host    all             all             127.0.0.1/32            trust
-            host    all             all             ::1/128                 trust
-          '';
+          authentication = lib.concatStringsSep "\n" [
+            "local all root trust"
+            "local all postgres peer"
+          ];
         };
-
-        systemd.services.createSchema = {
-          wantedBy = ["multi-user.target"];
-          after = ["postgresql.service"];
-          requires = ["postgresql.service"];
-          serviceConfig = {
-            Type = "oneshot";
-            ExecStart = pkgs.writeShellScript "create-schema" ''
-              cat <<'EOF' | ${pkgs.postgresql_16}/bin/psql -U crystal_forge -d crystal_forge
-              CREATE TABLE system_state (
-                id SERIAL PRIMARY KEY,
-                hostname TEXT NOT NULL,
-                system_derivation_id TEXT NOT NULL,
-                inserted_at TIMESTAMPTZ NOT NULL DEFAULT now()
-              );
-              GRANT SELECT, INSERT, UPDATE, DELETE ON system_state TO crystal_forge;
-              GRANT USAGE, SELECT ON SEQUENCE system_state_id_seq TO crystal_forge;
-              EOF
-            '';
+        services.crystal-forge = {
+          enable = true;
+          local-database = true;
+          database = {
+            user = "crystal_forge";
+            dbname = "crystal_forge";
+          };
+          server = {
+            enable = true;
+            host = "0.0.0.0";
+            port = 3000;
+            authorized_keys = {
+              agent = builtins.readFile "${pub}/agent.pub";
+            };
           };
         };
-
-        networking.firewall.allowedTCPPorts = [5432];
       };
-
       agent = {
         config,
         pkgs,
         ...
       }: {
+        imports = [inputs.self.nixosModules.crystal-forge];
+
         networking.useDHCP = true;
         networking.firewall.enable = false;
 
-        environment.systemPackages = [pkgs.crystal-forge.agent];
+        environment.etc."agent.key".source = "${key}/agent.key";
+        environment.etc."agent.pub".source = "${pub}/agent.pub";
 
-        environment.etc."crystal-forge/config.toml".text = ''
-          [database]
-          host = "db"
-          user = "crystal_forge"
-          password = "password"
-          dbname = "crystal_forge"
-        '';
-
-        systemd.services.agent = {
+        systemd.services.fake-dmi = {
           wantedBy = ["multi-user.target"];
-          after = ["network.target"];
-          environment = {
-            CRYSTAL_FORGE_CONFIG = "/etc/crystal-forge/config.toml";
-          };
+          before = ["crystal-forge-agent.service"];
+          script = ''
+            mkdir -p /fake-dmi
+            echo "FAKE-BOARD-SERIAL" > /fake-dmi/board_serial
+            echo "FAKE-PRODUCT-UUID" > /fake-dmi/product_uuid
+            mkdir -p /sys/class/dmi
+            mount -t tmpfs tmpfs /sys/class/dmi
+            mkdir -p /sys/class/dmi/id
+            mount --bind /fake-dmi /sys/class/dmi/id
+          '';
           serviceConfig = {
-            ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
-            Restart = "on-failure";
+            Type = "oneshot";
+            RemainAfterExit = true;
+          };
+        };
+        services.crystal-forge = {
+          enable = true;
+          client = {
+            enable = true;
+            server_host = "server";
+            server_port = 3000;
+            private_key = "/etc/agent.key";
           };
         };
       };
     };
 
-    # TODO: Test key creation
-
     testScript = ''
       start_all()
 
-      db.wait_for_unit("postgresql")
-      assert "code=exited, status=0/SUCCESS" in db.execute("systemctl status createSchema.service")[1]
-      agent.wait_for_unit("agent.service")
+      server.wait_for_unit("postgresql")
+      server.succeed("systemctl show -p Result crystal-forge-init-db.service | grep '=success'")
+      server.wait_for_unit("crystal-forge-server.service")
+      agent.wait_for_unit("crystal-forge-agent.service")
+      agent.wait_for_file("/run/current-system")
+      server.wait_for_unit("multi-user.target")
 
-      print(agent.execute("readlink /run/current-system"))
-      # Copy alternate system derivation into the VM
-      agent.copy_from_host("${inputs.self.nixosConfigurations.test-agent.config.system.build.toplevel}", "/nix/store/updated-system")
+      agent_hostname = agent.succeed("hostname -s").strip()
+      system_hash = agent.succeed("readlink /run/current-system").strip().split("-")[-1]
+      context = "agent-startup"
 
-      # Perform the switch inside the VM
-      agent.succeed("/nix/store/updated-system/bin/switch-to-configuration switch")
-      print(agent.execute("readlink /run/current-system"))
+      # Wait for server to log the submission
+      server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep 'accepted from agent'")
 
+      agent.log("=== agent logs ===")
+      agent.log(agent.succeed("journalctl -u crystal-forge-agent.service || true"))
+
+      # Now safe to query the DB
+      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, system_derivation_id, context FROM system_state;'")
+      server.log("Final DB state:\n" + output)
+
+      assert agent_hostname in output, f"hostname '{agent_hostname}' not found in DB"
+      assert context in output, f"context '{context}' not found in DB"
+      assert system_hash in output, f"system_derivation_id '{system_hash}' not found in DB"
     '';
   }
