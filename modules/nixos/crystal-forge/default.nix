@@ -162,15 +162,17 @@ in {
       wants = ["postgresql.service"];
       environment =
         {
-          CRYSTAL_FORGE_SERVER_HOST = cfg.server.host;
-          CRYSTAL_FORGE_SERVER_PORT = toString cfg.server.port;
+          CRYSTAL_FORGE__SERVER__HOST = cfg.server.host;
+          CRYSTAL_FORGE__SERVER__PORT = toString cfg.server.port;
         }
-        // (lib.mapAttrs' (name: val: lib.nameValuePair "CRYSTAL_FORGE_SERVER_AUTHORIZED_KEYS_${name}" val) cfg.server.authorized_keys)
+        // (lib.mapAttrs'
+          (name: val: lib.nameValuePair "CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__${name}" val)
+          cfg.server.authorized_keys)
         // {
-          CRYSTAL_FORGE_DATABASE_HOST = cfg.database.host;
-          CRYSTAL_FORGE_DATABASE_USER = cfg.database.user;
-          CRYSTAL_FORGE_DATABASE_DBNAME = cfg.database.dbname;
-          CRYSTAL_FORGE_DATABASE_PASSWORD =
+          CRYSTAL_FORGE__DATABASE__HOST = cfg.database.host;
+          CRYSTAL_FORGE__DATABASE__USER = cfg.database.user;
+          CRYSTAL_FORGE__DATABASE__DBNAME = cfg.database.dbname;
+          CRYSTAL_FORGE__DATABASE__PASSWORD =
             if cfg.database.passwordFile != null
             then builtins.readFile cfg.database.passwordFile
             else cfg.database.password;
@@ -190,9 +192,9 @@ in {
       wantedBy = ["multi-user.target"];
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
       environment = {
-        CRYSTAL_FORGE_CLIENT_SERVER_HOST = cfg.client.server_host;
-        CRYSTAL_FORGE_CLIENT_SERVER_PORT = toString cfg.client.server_port;
-        CRYSTAL_FORGE_CLIENT_PRIVATE_KEY = cfg.client.private_key;
+        CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
+        CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
+        CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
       };
       serviceConfig = {
         ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
