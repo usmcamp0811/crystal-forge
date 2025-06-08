@@ -120,7 +120,6 @@ in {
       wantedBy = ["multi-user.target"];
       environment = {
         CRYSTAL_FORGE_CONFIG = "${generatedConfigPath}";
-        CRYSTAL_FORGE_DATABASE_URL = "postgres://${cfg.database.user}:${lib.optionalString (cfg.database.passwordFile != null) "$(cat ${cfg.database.passwordFile})"}@${cfg.database.host}/${cfg.database.dbname}";
       };
       serviceConfig = {
         ExecStartPre = [configScript];
@@ -138,6 +137,7 @@ in {
       wants = ["postgresql.service"];
       environment = {
         CRYSTAL_FORGE_CONFIG = "${generatedConfigPath}";
+        CRYSTAL_FORGE_DATABASE_URL = "postgres://${cfg.database.user}:${lib.optionalString (cfg.database.passwordFile != null) "$(cat ${cfg.database.passwordFile})"}@${cfg.database.host}/${cfg.database.dbname}";
       };
       serviceConfig = {
         ExecStartPre = [configScript];
