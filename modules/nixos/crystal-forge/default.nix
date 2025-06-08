@@ -125,7 +125,7 @@ in {
         User = "postgres";
         ExecStart = pkgs.writeShellScript "init-crystal-forge-db" ''
           set -eu
-          psql -v ON_ERROR_STOP=1 <<'EOF'
+          ${pkgs.postgresql}/bin/psql -v ON_ERROR_STOP=1 <<'EOF'
           CREATE TABLE IF NOT EXISTS system_state (
               id SERIAL PRIMARY KEY,
               hostname TEXT NOT NULL,
