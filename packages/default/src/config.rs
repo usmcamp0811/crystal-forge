@@ -103,7 +103,7 @@ pub fn load_config() -> Result<CrystalForgeConfig> {
 
     let settings = Config::builder()
         .add_source(config::File::with_name(&config_path).required(false))
-        .add_source(config::Environment::with_prefix("CRYSTAL_FORGE").separator("_"))
+        .add_source(config::Environment::with_prefix("CRYSTAL_FORGE").separator("__"))
         .build()
         .context("loading configuration")?;
 
