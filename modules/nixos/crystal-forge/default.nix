@@ -42,6 +42,11 @@ in {
       description = "Path to the final config.toml file.";
     };
 
+    local-database = lib.mkOption {
+      type = lib.types.bool;
+      default = cfg.server.enable;
+      description = "Enable PostgreSQL setup for Crystal Forge";
+    };
     database = {
       host = lib.mkOption {
         type = lib.types.str;
@@ -97,6 +102,19 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    services.postgresql = {
+      enable = cfg.local-database;
+      ensureDatabases = [cfg.databse.dbname];
+      ensureUsers = [
+        {
+          name = cfg.database.user;
+          ensureDBOwnership = true;
+          ensureClauses = {
+            login = true;
+          };
+        }
+      ];
+    };
     systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
       description = "Crystal Forge Agent";
       wantedBy = ["multi-user.target"];
