@@ -141,8 +141,8 @@ in {
       serviceConfig = {
         ExecStartPre = [configScript];
         ExecStart = "${pkgs.crystal-forge.server}/bin/server";
-        User = "crystal_forge";
-        Group = "crystal_forge";
+        User = "root";
+        Group = "root";
         RuntimeDirectory = "crystal-forge";
       };
     };
