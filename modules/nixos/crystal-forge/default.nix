@@ -44,7 +44,7 @@ in {
 
     local-database = lib.mkOption {
       type = lib.types.bool;
-      default = cfg.server.enable;
+      default = true;
       description = "Enable PostgreSQL setup for Crystal Forge";
     };
     database = {
