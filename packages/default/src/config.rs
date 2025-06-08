@@ -13,9 +13,9 @@ use tokio_postgres::NoTls;
 /// - `[client]`   → `AgentConfig`
 #[derive(Debug, Deserialize)]
 pub struct CrystalForgeConfig {
-    pub database: DbConfig,
-    pub server: ServerConfig,
-    pub client: AgentConfig,
+    pub database: Option<DbConfig>,
+    pub server: Option<ServerConfig>,
+    pub client: Option<AgentConfig>,
 }
 
 /// Configuration for the agent/client.
