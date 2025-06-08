@@ -50,7 +50,7 @@ in {
     database = {
       host = lib.mkOption {
         type = lib.types.str;
-        default = "localhost";
+        default = "/run/postgresql";
       };
       user = lib.mkOption {
         type = lib.types.str;
