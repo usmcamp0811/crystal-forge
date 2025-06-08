@@ -51,7 +51,7 @@ pub struct SystemPayload {
 /// signing fails, or the HTTP request fails.
 pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
     let cfg = config::load_config()?;
-    let client_cfg = cfg.client;
+    let client_cfg = cfg.client.expect("client config is required for agent");
     // TODO: Add MAC Address & Hardware fingerprint along with hostname
     let hostname = hostname::get()?.to_string_lossy().into_owned();
     let system_hash = Path::new(current_system)

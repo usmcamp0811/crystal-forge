@@ -15,7 +15,11 @@ pub async fn insert_system_state(
     fingerprint: &FingerprintParts,
 ) -> Result<()> {
     let db_config = config::load_config()?;
-    let db_url = db_config.database.to_url();
+    let db_url = db_config
+        .database
+        .as_ref()
+        .expect("missing [database] section in config")
+        .to_url();
 
     let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
     tokio::spawn(connection); // drive the connection

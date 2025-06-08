@@ -31,19 +31,30 @@ async fn main() -> anyhow::Result<()> {
     // Load and validate config
 
     let cfg = config::load_config()?;
-    let db_url = cfg.database.to_url();
+
+    let db_url = cfg
+        .database
+        .as_ref()
+        .expect("missing [database] section in config")
+        .to_url();
 
     config::validate_db_connection(&db_url).await?;
 
     println!("Starting Crystal Forge Server...");
     println!("Host: {}", "0.0.0.0");
-    println!("Port: {}", cfg.server.port);
+
+    let server_cfg = cfg
+        .server
+        .as_ref()
+        .expect("missing [server] section in config");
+
+    println!("Port: {}", server_cfg.port);
 
     // Set up tracing/logging
     tracing_subscriber::fmt::init();
 
     // Load authorized public keys for agent verification
-    let authorized_keys = parse_authorized_keys(&cfg.server.authorized_keys)?;
+    let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
     let state = CFState {
         authorized_keys: authorized_keys,
     };
@@ -54,7 +65,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state);
 
     // Start server
-    let listener = TcpListener::bind(("0.0.0.0", cfg.server.port)).await?;
+    let listener = TcpListener::bind(("0.0.0.0", server_cfg.port)).await?;
     axum::serve(listener, app).await?;
 
     Ok(())
