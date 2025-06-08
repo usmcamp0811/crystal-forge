@@ -104,7 +104,7 @@ in {
   config = lib.mkIf cfg.enable {
     services.postgresql = {
       enable = cfg.local-database;
-      ensureDatabases = [cfg.databse.dbname];
+      ensureDatabases = [cfg.database.dbname];
       ensureUsers = [
         {
           name = cfg.database.user;
