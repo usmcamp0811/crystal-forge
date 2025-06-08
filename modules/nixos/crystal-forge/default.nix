@@ -112,6 +112,10 @@ in {
           ensureClauses = {login = true;};
         }
       ];
+      authentication = lib.concatStringsSep "\n" [
+        "host  crystal_forge  crystal_forge  127.0.0.1/32  trust"
+        "local  crystal_forge  crystal_forge  trust"
+      ];
     };
 
     systemd.services.crystal-forge-init-db = lib.mkIf (cfg.server.enable && cfg.local-database) {
