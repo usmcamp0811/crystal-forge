@@ -105,17 +105,12 @@ in {
     services.postgresql = {
       enable = cfg.local-database;
       ensureDatabases = [cfg.database.dbname];
-
       ensureUsers = [
         {
           name = cfg.database.user;
           ensureDBOwnership = true;
           ensureClauses = {
             login = true;
-            password =
-              if cfg.database.passwordFile != null
-              then builtins.readFile cfg.database.passwordFile
-              else cfg.database.password;
           };
         }
       ];
