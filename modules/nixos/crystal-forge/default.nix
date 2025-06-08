@@ -114,22 +114,6 @@ in {
       ];
     };
 
-    systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
-      description = "Crystal Forge Agent";
-      wantedBy = ["multi-user.target"];
-      environment = {
-        CRYSTAL_FORGE_CLIENT_SERVER_HOST = cfg.client.server_host;
-        CRYSTAL_FORGE_CLIENT_SERVER_PORT = toString cfg.client.server_port;
-        CRYSTAL_FORGE_CLIENT_PRIVATE_KEY = cfg.client.private_key;
-      };
-      serviceConfig = {
-        ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
-        User = "root";
-        Group = "root";
-        RuntimeDirectory = "crystal-forge";
-      };
-    };
-
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
@@ -155,6 +139,27 @@ in {
         User = "root";
         Group = "root";
         RuntimeDirectory = "crystal-forge";
+        Restart = "always";
+        RestartSec = 5;
+      };
+    };
+
+    systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
+      description = "Crystal Forge Agent";
+      wantedBy = ["multi-user.target"];
+      after = lib.optional cfg.server.enable "crystal-forge-server.service";
+      environment = {
+        CRYSTAL_FORGE_CLIENT_SERVER_HOST = cfg.client.server_host;
+        CRYSTAL_FORGE_CLIENT_SERVER_PORT = toString cfg.client.server_port;
+        CRYSTAL_FORGE_CLIENT_PRIVATE_KEY = cfg.client.private_key;
+      };
+      serviceConfig = {
+        ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
+        User = "root";
+        Group = "root";
+        RuntimeDirectory = "crystal-forge";
+        Restart = "always";
+        RestartSec = 5;
       };
     };
   };
