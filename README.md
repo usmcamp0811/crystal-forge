@@ -133,5 +133,4 @@ CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal_forge/host.key
 }
 ```
 
-The module will automatically generate the correct environment variables, systemd services, 
-and config paths based on your input.
+The module will automatically generate the correct environment variables, systemd services, and config paths based on your input.
