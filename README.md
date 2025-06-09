@@ -39,7 +39,8 @@ Crystal Forge is a lightweight monitoring and compliance system for NixOS machin
 
 ## 🛠️ Running
 
-Crystal Forge supports configuration via a `config.toml` file **or** via structured environment variables. A first-party NixOS module is provided to make setup seamless and reproducible.
+Crystal Forge supports configuration via a `config.toml` file **or** via structured environment variables. 
+A first-party NixOS module is provided to make setup seamless and reproducible.
 
 ---
 
