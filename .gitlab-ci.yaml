@@ -1,0 +1,12 @@
+stages:
+  - check
+
+flake-check:
+  stage: check
+  tags:
+    - nix
+  script:
+    - nix flake check
+  only:
+    - merge_requests
+    - main
