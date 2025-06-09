@@ -8,9 +8,10 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
+
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::config;
-use crystal_forge::db::insert_system_state;
+use crystal_forge::db::{init_db, insert_system_state};
 use crystal_forge::system_watcher::SystemPayload;
 use ed25519_dalek::Verifier;
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -39,6 +40,9 @@ async fn main() -> anyhow::Result<()> {
         .to_url();
 
     config::validate_db_connection(&db_url).await?;
+
+    // ensure DB table exists (idempotent)
+    init_db().await?;
 
     println!("Starting Crystal Forge Server...");
     println!("Host: {}", "0.0.0.0");

@@ -61,3 +61,39 @@ pub async fn insert_system_state(
 
     Ok(())
 }
+
+pub async fn init_db() -> Result<()> {
+    let db_config = config::load_config()?;
+    let db_url = db_config
+        .database
+        .as_ref()
+        .expect("missing [database] section in config")
+        .to_url();
+
+    let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
+    tokio::spawn(connection);
+
+    client
+        .batch_execute(
+            "
+            CREATE TABLE IF NOT EXISTS system_state (
+                id SERIAL PRIMARY KEY,
+                hostname TEXT NOT NULL,
+                system_derivation_id TEXT NOT NULL,
+                context TEXT NOT NULL,
+                os TEXT,
+                kernel TEXT,
+                memory_gb DOUBLE PRECISION,
+                uptime_secs BIGINT,
+                cpu_brand TEXT,
+                cpu_cores INT,
+                board_serial TEXT,
+                product_uuid TEXT,
+                rootfs_uuid TEXT
+            );
+            ",
+        )
+        .await?;
+
+    Ok(())
+}
