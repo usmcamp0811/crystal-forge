@@ -107,6 +107,9 @@ in
       output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, system_derivation_id, context FROM system_state;'")
       server.log("Final DB state:\n" + output)
 
+      # Ensure PostgreSQL is not running on the agent
+      assert "postgresql" not in agent.succeed("systemctl list-units --type=service --state=active"), "PostgreSQL is unexpectedly running on the agent"
+
       assert agent_hostname in output, f"hostname '{agent_hostname}' not found in DB"
       assert context in output, f"context '{context}' not found in DB"
       assert system_hash in output, f"system_derivation_id '{system_hash}' not found in DB"
