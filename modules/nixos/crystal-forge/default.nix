@@ -118,43 +118,6 @@ in {
       ];
     };
 
-    systemd.services.crystal-forge-init-db = lib.mkIf (cfg.server.enable && cfg.local-database) {
-      description = "Initialize Crystal Forge database schema";
-      before = ["crystal-forge-server.service"];
-      after = ["postgresql.service"];
-      wants = ["postgresql.service"];
-      wantedBy = ["multi-user.target"];
-      serviceConfig = {
-        Type = "oneshot";
-        User = "postgres";
-        ExecStart = pkgs.writeShellScript "init-crystal-forge-db" ''
-          set -eu
-          ${pkgs.postgresql}/bin/psql -v ON_ERROR_STOP=1 -d ${cfg.database.dbname} <<'EOF'
-          CREATE TABLE IF NOT EXISTS system_state (
-              id SERIAL PRIMARY KEY,
-              hostname TEXT NOT NULL,
-              system_derivation_id TEXT NOT NULL,
-              context TEXT NOT NULL,
-
-              os TEXT,
-              kernel TEXT,
-              memory_gb DOUBLE PRECISION,
-              uptime_secs BIGINT,
-              cpu_brand TEXT,
-              cpu_cores INT,
-              board_serial TEXT,
-              product_uuid TEXT,
-              rootfs_uuid TEXT,
-
-              inserted_at TIMESTAMPTZ NOT NULL DEFAULT now()
-          );
-
-          GRANT SELECT, INSERT, UPDATE, DELETE ON system_state TO ${cfg.database.user};
-          GRANT USAGE, SELECT ON SEQUENCE system_state_id_seq TO ${cfg.database.user};
-          EOF
-        '';
-      };
-    };
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
