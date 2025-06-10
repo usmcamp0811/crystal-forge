@@ -76,6 +76,29 @@ pub async fn init_db() -> Result<()> {
     client
         .batch_execute(
             "
+            CREATE TABLE IF NOT EXISTS flake (
+                id SERIAL PRIMARY KEY,
+                name TEXT NOT NULL,
+                repo_url TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS commit (
+                id SERIAL PRIMARY KEY,
+                flake_id INT NOT NULL REFERENCES flake(id) ON DELETE CASCADE,
+                git_commit_hash TEXT NOT NULL,
+                commit_timestamp TIMESTAMPTZ NOT NULL,
+                UNIQUE(flake_id, git_commit_hash)
+            );
+
+            CREATE TABLE IF NOT EXISTS system_build (
+                id SERIAL PRIMARY KEY,
+                commit_id INT NOT NULL REFERENCES commit(id) ON DELETE CASCADE,
+                system_name TEXT NOT NULL,
+                derivation_hash TEXT NOT NULL,
+                build_timestamp TIMESTAMPTZ DEFAULT now(),
+                UNIQUE(commit_id, system_name)
+            );
+
             CREATE TABLE IF NOT EXISTS system_state (
                 id SERIAL PRIMARY KEY,
                 hostname TEXT NOT NULL,
