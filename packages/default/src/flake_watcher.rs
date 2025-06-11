@@ -1,5 +1,6 @@
 use anyhow::Result;
 use futures::future::join_all;
+use futures::{StreamExt, stream};
 use serde_json::Value;
 use tokio::process::Command;
 
@@ -103,4 +104,42 @@ pub async fn get_all_derivations(
 
     let results = join_all(tasks).await;
     results.into_iter().collect()
+}
+
+/// Streams derivation hashes for each system and processes them as they complete.
+///
+/// Each result is yielded as soon as it's available, enabling immediate use (e.g., DB commit).
+pub async fn stream_derivations<F, Fut>(
+    systems: Vec<String>,
+    flake_path: &str,
+    mut handle_result: F,
+) -> Result<()>
+where
+    F: FnMut(String, String) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    let path = flake_path.to_string();
+
+    stream::iter(systems)
+        .map(|system| {
+            let path = path.clone();
+            async move {
+                let hash = get_system_derivation(&system, &path).await?;
+                Ok((system, hash))
+            }
+        })
+        .buffer_unordered(8) // Run up to 8 in parallel
+        .for_each_concurrent(None, |result| async {
+            match result {
+                Ok((system, hash)) => {
+                    if let Err(e) = handle_result(system, hash).await {
+                        eprintln!("Failed to handle result: {e}");
+                    }
+                }
+                Err(e) => eprintln!("Error calculating derivation: {e}"),
+            }
+        })
+        .await;
+
+    Ok(())
 }
