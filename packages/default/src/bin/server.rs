@@ -12,6 +12,7 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::config;
 use crystal_forge::db::{init_db, insert_system_state};
+use crystal_forge::flake_watcher::get_nixos_configurations;
 use crystal_forge::system_watcher::SystemPayload;
 use ed25519_dalek::Verifier;
 use ed25519_dalek::{Signature, VerifyingKey};
@@ -46,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Starting Crystal Forge Server...");
     println!("Host: {}", "0.0.0.0");
-
+    get_nixos_configurations("git+https://gitlab.com/usmcamp0811/dotfiles");
     let server_cfg = cfg
         .server
         .as_ref()
