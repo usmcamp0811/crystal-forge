@@ -1,10 +1,11 @@
 use crate::db::{insert_commit, insert_derivation_hash};
 use crate::flake_watcher::{get_nixos_configurations, stream_derivations};
-use anyhow::Result;
 use axum::{Json, http::StatusCode};
-use crystal_forge::db::{insert_commit, insert_system_state};
 use serde_json::Value;
-use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 pub async fn webhook_handler(Json(payload): Json<Value>) -> StatusCode {
     let Some(repo_url) = payload
@@ -32,23 +33,23 @@ pub async fn webhook_handler(Json(payload): Json<Value>) -> StatusCode {
     }
 
     // Spawn the background task
-    tokio::spawn(async move {
-        if let Ok(configs) = get_nixos_configurations(repo_url.clone()) {
-            let _ = stream_derivations(configs, &repo_url, |system, hash| async {
-                insert_derivation_hash(&commit_hash, &repo_url, &system, &hash).await
-            })
-            .await;
+    tokio::spawn({
+        let repo_url = repo_url.clone();
+        let commit_hash = commit_hash.clone();
+        async move {
+            if let Ok(configs) = get_nixos_configurations(repo_url.clone()).await {
+                let handle_result = Arc::new(Mutex::new(move |system: String, hash: String| {
+                    let repo_url = repo_url.clone();
+                    let commit_hash = commit_hash.clone();
+                    Box::pin(async move {
+                        insert_derivation_hash(&commit_hash, &repo_url, &system, &hash).await
+                    })
+                }));
+
+                let _ = stream_derivations(configs, &repo_url, handle_result).await;
+            }
         }
     });
 
     StatusCode::ACCEPTED
 }
-
-// Make a Queue that gets populated by webhook triggers
-// this will keep us from being bogged down by trying to eval too many systems at once
-// we could also in the future distribute this queue to multiple workers
-
-// queue = []
-// queue.append(webhook trigger)
-// all_systems = get_nixos_configurations(repo_url: String)
-// stream_derivations(all_systems) -> Postgres function to save derivation hash to crystal_forge.system_build table

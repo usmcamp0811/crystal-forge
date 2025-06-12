@@ -21,6 +21,49 @@ pub async fn get_db_client() -> Result<Client> {
     Ok(client)
 }
 
+pub async fn insert_derivation_hash(
+    commit_hash: &str,
+    repo_url: &str,
+    system_name: &str,
+    derivation_hash: &str,
+) -> Result<()> {
+    let client = get_db_client().await?;
+
+    // look up flake_id
+    let flake_row = client
+        .query_opt(
+            "SELECT id FROM tbl_flakes WHERE repo_url = $1",
+            &[&repo_url],
+        )
+        .await?
+        .context("No flake entry found for given repo_url")?;
+
+    let flake_id: i32 = flake_row.get("id");
+
+    // look up commit_id
+    let commit_row = client
+        .query_opt(
+            "SELECT id FROM tbl_commits WHERE flake_id = $1 AND git_commit_hash = $2",
+            &[&flake_id, &commit_hash],
+        )
+        .await?
+        .context("No commit entry found for given commit_hash and flake_id")?;
+
+    let commit_id: i32 = commit_row.get("id");
+
+    // insert system build
+    client
+        .execute(
+            "INSERT INTO tbl_system_builds (commit_id, system_name, derivation_hash)
+             VALUES ($1, $2, $3)
+             ON CONFLICT DO NOTHING",
+            &[&commit_id, &system_name, &derivation_hash],
+        )
+        .await?;
+
+    Ok(())
+}
+
 pub async fn insert_flake(name: &str, repo_url: &str) -> Result<()> {
     let client = get_db_client().await?;
 

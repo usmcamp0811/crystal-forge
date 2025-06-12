@@ -1,8 +1,13 @@
+use anyhow::Context;
 use anyhow::Result;
 use futures::future::join_all;
 use futures::{StreamExt, stream};
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
 /// Parses a Nix flake and extracts the defined NixOS configuration names.
 ///
@@ -18,20 +23,22 @@ use tokio::process::Command;
 ///
 /// Returns an error if the `nix flake show` command fails or if the output
 /// cannot be parsed as valid JSON.
-pub fn get_nixos_configurations(repo_url: String) -> Result<()> {
+pub async fn get_nixos_configurations(repo_url: String) -> anyhow::Result<Vec<String>> {
     let flake_show = Command::new("nix")
         .args(["flake", "show", "--json", &repo_url])
-        .output()?;
+        .output()
+        .await?;
     let flake_json: serde_json::Value = serde_json::from_slice(&flake_show.stdout)?;
+
     let nixos_configs = flake_json["nixosConfigurations"]
         .as_object()
-        .unwrap()
+        .context("missing nixosConfigurations")?
         .keys()
         .cloned()
-        .collect::<Vec<_>>();
+        .collect::<Vec<String>>();
 
     println!("nixosConfigurations: {:?}", nixos_configs);
-    Ok(())
+    Ok(nixos_configs)
 }
 
 /// Returns the derivation output path (hash) for a specific NixOS system from a given flake.
@@ -109,34 +116,41 @@ pub async fn get_all_derivations(
 /// Streams derivation hashes for each system and processes them as they complete.
 ///
 /// Each result is yielded as soon as it's available, enabling immediate use (e.g., DB commit).
-pub async fn stream_derivations<F, Fut>(
+
+pub async fn stream_derivations(
     systems: Vec<String>,
     flake_path: &str,
-    mut handle_result: F,
-) -> Result<()>
-where
-    F: FnMut(String, String) -> Fut,
-    Fut: std::future::Future<Output = Result<()>>,
-{
+    handle_result: Arc<
+        Mutex<dyn FnMut(String, String) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>,
+    >,
+) -> Result<()> {
     let path = flake_path.to_string();
 
     stream::iter(systems)
-        .map(|system| {
+        .map(|system: String| {
             let path = path.clone();
             async move {
-                let hash = get_system_derivation(&system, &path).await?;
-                Ok((system, hash))
+                let hash = super::get_system_derivation(&system, &path).await?;
+                Ok::<(String, String), anyhow::Error>((system, hash))
             }
         })
-        .buffer_unordered(8) // Run up to 8 in parallel
-        .for_each_concurrent(None, |result| async {
-            match result {
-                Ok((system, hash)) => {
-                    if let Err(e) = handle_result(system, hash).await {
-                        eprintln!("Failed to handle result: {e}");
+        .buffer_unordered(8)
+        .for_each_concurrent(None, {
+            let handle_result = handle_result.clone();
+            move |result| {
+                let handle_result = handle_result.clone();
+                async move {
+                    match result {
+                        Ok((system, hash)) => {
+                            if let Err(e) = handle_result.lock().await(system, hash).await {
+                                eprintln!("Failed to handle result: {e}");
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("Error calculating derivation: {e}");
+                        }
                     }
                 }
-                Err(e) => eprintln!("Error calculating derivation: {e}"),
             }
         })
         .await;
