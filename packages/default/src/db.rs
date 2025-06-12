@@ -21,6 +21,21 @@ pub async fn get_db_client() -> Result<Client> {
     Ok(client)
 }
 
+pub async fn insert_flake(name: &str, repo_url: &str) -> Result<()> {
+    let client = get_db_client().await?;
+
+    client
+        .execute(
+            "INSERT INTO tbl_flakes (name, repo_url)
+             VALUES ($1, $2)
+             ON CONFLICT DO NOTHING",
+            &[&name, &repo_url],
+        )
+        .await?;
+
+    Ok(())
+}
+
 pub async fn insert_commit(commit_hash: &str, repo_url: &str) -> Result<()> {
     let client = get_db_client().await?;
 
@@ -103,7 +118,7 @@ pub async fn init_db() -> Result<()> {
             CREATE TABLE IF NOT EXISTS tbl_flakes (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
-                repo_url TEXT NOT NULL
+                repo_url TEXT NOT NULL UNIQUE
             );
 
             CREATE TABLE IF NOT EXISTS tbl_commits (

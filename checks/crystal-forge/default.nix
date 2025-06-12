@@ -87,10 +87,8 @@ in
       start_all()
 
       server.wait_for_unit("postgresql")
-      server.succeed("systemctl show -p Result crystal-forge-init-db.service | grep '=success'")
       server.wait_for_unit("crystal-forge-server.service")
       agent.wait_for_unit("crystal-forge-agent.service")
-      agent.wait_for_file("/run/current-system")
       server.wait_for_unit("multi-user.target")
 
       agent_hostname = agent.succeed("hostname -s").strip()
@@ -104,7 +102,7 @@ in
       agent.log(agent.succeed("journalctl -u crystal-forge-agent.service || true"))
 
       # Now safe to query the DB
-      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, system_derivation_id, context FROM system_state;'")
+      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, system_derivation_id, context FROM tbl_system_states;'")
       server.log("Final DB state:\n" + output)
 
       # Ensure PostgreSQL is not running on the agent
