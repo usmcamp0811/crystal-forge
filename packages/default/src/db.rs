@@ -8,25 +8,57 @@ use std::path::Path;
 use std::{env, fs};
 use tokio_postgres::{Client, NoTls};
 
+pub async fn get_db_client() -> Result<Client> {
+    let db_config = config::load_config()?;
+    let db_url = db_config
+        .database
+        .as_ref()
+        .context("missing [database] section in config")?
+        .to_url();
+
+    let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
+    tokio::spawn(connection);
+    Ok(client)
+}
+
+pub async fn insert_commit(commit_hash: &str, repo_url: &str) -> Result<()> {
+    let client = get_db_client().await?;
+
+    // look up flake_id from repo_url
+    let flake_row = client
+        .query_opt(
+            "SELECT id FROM tbl_flakes WHERE repo_url = $1",
+            &[&repo_url],
+        )
+        .await?
+        .context("No flake entry found for given repo_url")?;
+
+    let flake_id: i32 = flake_row.get("id");
+
+    // insert commit
+    client
+        .execute(
+            "INSERT INTO tbl_commits (flake_id, git_commit_hash, commit_timestamp)
+             VALUES ($1, $2, now())
+             ON CONFLICT DO NOTHING",
+            &[&flake_id, &commit_hash],
+        )
+        .await?;
+
+    Ok(())
+}
+
 pub async fn insert_system_state(
     hostname: &str,
     context: &str,
     system_hash: &str,
     fingerprint: &FingerprintParts,
 ) -> Result<()> {
-    let db_config = config::load_config()?;
-    let db_url = db_config
-        .database
-        .as_ref()
-        .expect("missing [database] section in config")
-        .to_url();
-
-    let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
-    tokio::spawn(connection); // drive the connection
+    let client = get_db_client().await?;
 
     client
         .execute(
-            "INSERT INTO system_state (
+            "INSERT INTO tbl_system_states (
             hostname,
             system_derivation_id,
             context,
@@ -63,26 +95,18 @@ pub async fn insert_system_state(
 }
 
 pub async fn init_db() -> Result<()> {
-    let db_config = config::load_config()?;
-    let db_url = db_config
-        .database
-        .as_ref()
-        .expect("missing [database] section in config")
-        .to_url();
-
-    let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
-    tokio::spawn(connection);
+    let client = get_db_client().await?;
 
     client
         .batch_execute(
             "
-            CREATE TABLE IF NOT EXISTS flake (
+            CREATE TABLE IF NOT EXISTS tbl_flakes (
                 id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 repo_url TEXT NOT NULL
             );
 
-            CREATE TABLE IF NOT EXISTS commit (
+            CREATE TABLE IF NOT EXISTS tbl_commits (
                 id SERIAL PRIMARY KEY,
                 flake_id INT NOT NULL REFERENCES flake(id) ON DELETE CASCADE,
                 git_commit_hash TEXT NOT NULL,
@@ -90,7 +114,7 @@ pub async fn init_db() -> Result<()> {
                 UNIQUE(flake_id, git_commit_hash)
             );
 
-            CREATE TABLE IF NOT EXISTS system_build (
+            CREATE TABLE IF NOT EXISTS tbl_system_builds (
                 id SERIAL PRIMARY KEY,
                 commit_id INT NOT NULL REFERENCES commit(id) ON DELETE CASCADE,
                 system_name TEXT NOT NULL,
@@ -99,7 +123,7 @@ pub async fn init_db() -> Result<()> {
                 UNIQUE(commit_id, system_name)
             );
 
-            CREATE TABLE IF NOT EXISTS system_state (
+            CREATE TABLE IF NOT EXISTS tbl_system_states (
                 id SERIAL PRIMARY KEY,
                 hostname TEXT NOT NULL,
                 system_derivation_id TEXT NOT NULL,
