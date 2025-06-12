@@ -14,6 +14,7 @@ use crystal_forge::config;
 use crystal_forge::db::{init_db, insert_system_state};
 use crystal_forge::flake_watcher::get_nixos_configurations;
 use crystal_forge::system_watcher::SystemPayload;
+use crystal_forge::webhook_handler::webhook_handler;
 use ed25519_dalek::Verifier;
 use ed25519_dalek::{Signature, VerifyingKey};
 use std::ffi::OsStr;
@@ -47,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
 
     println!("Starting Crystal Forge Server...");
     println!("Host: {}", "0.0.0.0");
-    get_nixos_configurations("git+https://gitlab.com/usmcamp0811/dotfiles");
+
     let server_cfg = cfg
         .server
         .as_ref()
@@ -67,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     // Define routes and shared state
     let app = Router::new()
         .route("/current-system", post(handle_current_system))
+        .route("/webhook", post(webhook_handler))
         .with_state(state);
 
     // Start server
