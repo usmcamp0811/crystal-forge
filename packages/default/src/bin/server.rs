@@ -15,8 +15,7 @@ use crystal_forge::db::{init_db, insert_system_state};
 use crystal_forge::flake_watcher::get_nixos_configurations;
 use crystal_forge::system_watcher::SystemPayload;
 use crystal_forge::webhook_handler::webhook_handler;
-use ed25519_dalek::Verifier;
-use ed25519_dalek::{Signature, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use std::ffi::OsStr;
 use std::{collections::HashMap, fs};
 use tokio::net::TcpListener;
@@ -35,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::load_config()?;
 
+    // TODO: clean this up.. maybe I dunno
     let db_url = cfg
         .database
         .as_ref()
@@ -45,6 +45,14 @@ async fn main() -> anyhow::Result<()> {
 
     // ensure DB table exists (idempotent)
     init_db().await?;
+
+    // always insert the flakes from the config
+    // it has a unique constraint so we are fine
+    if let Some(watched) = &cfg.flakes {
+        for (name, repo_url) in &watched.watched {
+            insert_flake(name, repo_url).await?;
+        }
+    }
 
     println!("Starting Crystal Forge Server...");
     println!("Host: {}", "0.0.0.0");
