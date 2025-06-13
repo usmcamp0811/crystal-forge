@@ -154,6 +154,7 @@ pub async fn insert_system_state(
 
 pub async fn init_db() -> Result<()> {
     let client = get_db_client().await?;
+    println!("======== INITIALIZING DATABASE ========");
 
     client
         .batch_execute(
