@@ -61,6 +61,7 @@ pub async fn insert_derivation_hash(
         )
         .await?;
 
+    println!("✅ inserted derivation: {system_name} => {derivation_hash}");
     Ok(())
 }
 
@@ -76,6 +77,7 @@ pub async fn insert_flake(name: &str, repo_url: &str) -> Result<()> {
         )
         .await?;
 
+    println!("✅ inserted flake: {name} ({repo_url})");
     Ok(())
 }
 
@@ -103,6 +105,7 @@ pub async fn insert_commit(commit_hash: &str, repo_url: &str) -> Result<()> {
         )
         .await?;
 
+    println!("✅ inserted commit: {commit_hash} (flake_id={flake_id})");
     Ok(())
 }
 
@@ -149,6 +152,7 @@ pub async fn insert_system_state(
         )
         .await?;
 
+    println!("✅ inserted system state for {hostname} with hash {system_hash}");
     Ok(())
 }
 
