@@ -1,24 +1,31 @@
 use anyhow::Context;
 
 use axum::{
-    Router,
+    Json, Router,
     body::Bytes,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
 };
-
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::config;
-use crystal_forge::db::{init_db, insert_flake, insert_system_state};
-use crystal_forge::flake_watcher::get_nixos_configurations;
+use crystal_forge::db::{
+    init_db, insert_commit, insert_derivation_hash, insert_flake, insert_system_state,
+};
+use crystal_forge::flake_watcher::{get_nixos_configurations, stream_derivations};
 use crystal_forge::system_watcher::SystemPayload;
+use crystal_forge::webhook_handler::BoxedHandler;
 use crystal_forge::webhook_handler::webhook_handler;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use serde_json::Value;
 use std::ffi::OsStr;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::{collections::HashMap, fs};
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 /// Holds the loaded public keys for authorized agents.
 #[derive(Clone)]
@@ -73,10 +80,56 @@ async fn main() -> anyhow::Result<()> {
         authorized_keys: authorized_keys,
     };
 
+    let get_configs_boxed =
+        |repo_url: String| Box::pin(get_nixos_configurations(repo_url)) as Pin<Box<_>>;
+
+    let insert_derivation_hash_boxed = |a: String, b: String, c: String, d: String| {
+        Box::pin(async move { insert_derivation_hash(&a, &b, &c, &d).await }) as Pin<Box<_>>
+    };
+
+    let stream_derivations_boxed =
+        |systems: Vec<String>, flake_url: &str, handler: Arc<Mutex<BoxedHandler>>| {
+            let flake_url = flake_url.to_string();
+            Box::pin(async move {
+                let _ = stream_derivations(systems, &flake_url, handler).await;
+            }) as Pin<Box<dyn Future<Output = ()> + Send>>
+        };
+
+    let insert_commit_boxed = |commit: &str, repo: &str| {
+        let commit = commit.to_owned();
+        let repo = repo.to_owned();
+        Box::pin(async move { insert_commit(&commit, &repo).await })
+            as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
+    };
+
+    let webhook_handler_wrap = {
+        let get_configs_boxed = get_configs_boxed.clone();
+        let insert_commit_boxed = insert_commit_boxed.clone();
+        let stream_derivations_boxed = stream_derivations_boxed.clone();
+        let insert_derivation_hash_boxed = insert_derivation_hash_boxed.clone();
+
+        move |Json(payload): Json<Value>| {
+            let get_configs_boxed = get_configs_boxed.clone();
+            let insert_commit_boxed = insert_commit_boxed.clone();
+            let stream_derivations_boxed = stream_derivations_boxed.clone();
+            let insert_derivation_hash_boxed = insert_derivation_hash_boxed.clone();
+
+            async move {
+                webhook_handler(
+                    payload,
+                    insert_commit_boxed,
+                    get_configs_boxed,
+                    stream_derivations_boxed,
+                    insert_derivation_hash_boxed,
+                )
+                .await
+            }
+        }
+    };
     // Define routes and shared state
     let app = Router::new()
         .route("/current-system", post(handle_current_system))
-        .route("/webhook", post(webhook_handler))
+        .route("/webhook", post(webhook_handler_wrap))
         .with_state(state);
 
     // Start server
