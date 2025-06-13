@@ -54,9 +54,6 @@ pub async fn get_nixos_configurations(repo_url: String) -> anyhow::Result<Vec<St
 ///
 /// # Example
 ///
-/// ```rust
-/// let hash = get_system_derivation("x86_64-linux", "git+https://gitlab.com/example/dotfiles").await?;
-/// ```
 pub async fn get_system_derivation(system: &str, flake_url: &str) -> Result<String> {
     let target = format!("{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel");
 
@@ -91,12 +88,7 @@ pub async fn get_system_derivation(system: &str, flake_url: &str) -> Result<Stri
 ///
 /// Returns an error if any derivation fails to resolve or if the Nix command fails.
 ///
-/// # Example
 ///
-/// ```rust
-/// let systems = vec!["x86_64-linux".into(), "aarch64-linux".into()];
-/// let results = get_all_derivations(systems, "git+https://gitlab.com/example/flake").await?;
-/// ```
 pub async fn get_all_derivations(
     systems: Vec<String>,
     flake_url: &str,
@@ -130,7 +122,7 @@ pub async fn stream_derivations(
         .map(|system: String| {
             let path = path.clone();
             async move {
-                let hash = super::get_system_derivation(&system, &path).await?;
+                let hash = get_system_derivation(&system, &path).await?;
                 Ok::<(String, String), anyhow::Error>((system, hash))
             }
         })

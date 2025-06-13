@@ -11,7 +11,7 @@ use axum::{
 
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::config;
-use crystal_forge::db::{init_db, insert_system_state};
+use crystal_forge::db::{init_db, insert_flake, insert_system_state};
 use crystal_forge::flake_watcher::get_nixos_configurations;
 use crystal_forge::system_watcher::SystemPayload;
 use crystal_forge::webhook_handler::webhook_handler;

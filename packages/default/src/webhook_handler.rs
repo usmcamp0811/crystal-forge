@@ -33,23 +33,23 @@ pub async fn webhook_handler(Json(payload): Json<Value>) -> StatusCode {
     }
 
     // Spawn the background task
-    tokio::spawn({
-        let repo_url = repo_url.clone();
-        let commit_hash = commit_hash.clone();
-        async move {
-            if let Ok(configs) = get_nixos_configurations(repo_url.clone()).await {
-                let handle_result = Arc::new(Mutex::new(move |system: String, hash: String| {
-                    let repo_url = repo_url.clone();
-                    let commit_hash = commit_hash.clone();
-                    Box::pin(async move {
-                        insert_derivation_hash(&commit_hash, &repo_url, &system, &hash).await
-                    })
-                }));
-
-                let _ = stream_derivations(configs, &repo_url, handle_result).await;
-            }
-        }
-    });
+    // tokio::spawn({
+    //     let repo_url = repo_url.clone();
+    //     let commit_hash = commit_hash.clone();
+    //     async move {
+    //         if let Ok(configs) = get_nixos_configurations(repo_url.clone()).await {
+    //             let handle_result = Arc::new(Mutex::new(move |system: String, hash: String| {
+    //                 let repo_url = repo_url.clone();
+    //                 let commit_hash = commit_hash.clone();
+    //                 Box::pin(async move {
+    //                     insert_derivation_hash(&commit_hash, &repo_url, &system, &hash).await
+    //                 })
+    //             }));
+    //
+    //             let _ = stream_derivations(configs, &repo_url, handle_result).await;
+    //         }
+    //     }
+    // });
 
     StatusCode::ACCEPTED
 }
