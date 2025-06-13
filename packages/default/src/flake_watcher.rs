@@ -48,40 +48,22 @@ pub async fn get_nixos_configurations_at_commit(
     repo_url: &str,
     commit: &str,
 ) -> Result<Vec<String>> {
-    let tmpdir = tempdir()?;
-    let path = tmpdir.path();
+    let flake_uri = if repo_url.starts_with("git+") {
+        format!("{}?rev={}", repo_url, commit)
+    } else {
+        format!("git+{}?rev={}", repo_url, commit)
+    };
 
-    // TODO: Dont clone but use commit hash in flake path
-    // clone and checkout specific commit
-    let status = Command::new("git")
-        .args([
-            "clone",
-            "--quiet",
-            "--no-checkout",
-            repo_url,
-            path.to_str().unwrap(),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .await?;
-    if !status.success() {
-        anyhow::bail!("git clone failed");
-    }
-
-    let status = Command::new("git")
-        .args(["-C", path.to_str().unwrap(), "checkout", commit])
-        .status()
-        .await?;
-    if !status.success() {
-        anyhow::bail!("git checkout failed");
-    }
-
-    // run nix flake show
     let output = Command::new("nix")
-        .args(["flake", "show", "--json", path.to_str().unwrap()])
+        .args(["flake", "show", "--json", &flake_uri])
         .output()
         .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix flake show failed: {}", stderr.trim());
+    }
+
     let flake_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
     let nixos_configs = flake_json["nixosConfigurations"]
