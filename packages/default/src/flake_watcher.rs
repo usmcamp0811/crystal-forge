@@ -90,6 +90,7 @@ pub async fn get_nixos_configurations_at_commit(
         .cloned()
         .collect::<Vec<String>>();
 
+    println!("nixosConfigurations: {:?}", nixos_configs);
     Ok(nixos_configs)
 }
 
