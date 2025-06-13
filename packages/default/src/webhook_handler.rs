@@ -1,3 +1,8 @@
+/// This module handles incoming webhooks, triggering the fetching of NixOS
+/// configurations and streaming derivations to process them.
+///
+/// It expects a webhook payload containing repository and commit information,
+/// and uses injected async functions for database and derivation operations.
 use crate::db::{insert_commit, insert_derivation_hash};
 use crate::flake_watcher::{get_nixos_configurations, stream_derivations};
 use axum::{Json, http::StatusCode};
@@ -7,12 +12,25 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// Type alias for a boxed async handler function that inserts a derivation hash.
+/// The function takes two strings: the system name and the derivation hash.
 pub type BoxedHandler = Box<
     dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
         + Send
         + Sync,
 >;
 
+/// Handles webhook events for git pushes and triggers downstream processing.
+///
+/// # Arguments
+/// - `payload`: The incoming webhook JSON payload.
+/// - `insert_commit_fn`: Async function to insert commit hash into DB.
+/// - `get_configs_fn`: Async function to get NixOS configurations from a repo URL.
+/// - `stream_fn`: Async function to stream derivations and handle each result.
+/// - `insert_deriv_hash_fn`: Async function to insert derivation hash into DB.
+///
+/// # Returns
+/// `StatusCode::ACCEPTED` on success, appropriate error code on failure.
 pub async fn webhook_handler<F1, F2, F3, F4>(
     payload: Value,
     insert_commit_fn: F1,
@@ -47,6 +65,8 @@ where
         + 'static,
 {
     println!("========== PROCESSING WEBHOOK ==========");
+
+    // Extract repo URL from payload
     let Some(repo_url) = payload
         .pointer("/repository/clone_url")
         .or_else(|| payload.pointer("/project/web_url"))
@@ -56,6 +76,7 @@ where
         return StatusCode::BAD_REQUEST;
     };
 
+    // Extract commit hash from payload
     let Some(commit_hash) = payload
         .pointer("/after")
         .or_else(|| payload.pointer("/checkout_sha"))
@@ -65,11 +86,13 @@ where
         return StatusCode::BAD_REQUEST;
     };
 
+    // Try to insert commit into DB
     if let Err(e) = insert_commit_fn(&commit_hash, &repo_url).await {
         eprintln!("❌ insert_commit_fn failed: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
+    // Spawn async task to fetch and process configurations
     tokio::spawn({
         let repo_url_outer = repo_url.clone();
         let commit_hash_outer = commit_hash.clone();
@@ -82,6 +105,8 @@ where
             println!("🔧 starting config fetch for {repo_url_outer}");
             if let Ok(configs) = get_configs_fn(repo_url_outer.clone()).await {
                 println!("📦 fetched configs: {:?}", configs);
+
+                // Define closure to handle individual derivation hash insertions
                 let repo_url_for_closure = repo_url_outer.clone();
                 let handle_result: Arc<Mutex<BoxedHandler>> =
                     Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
@@ -91,6 +116,7 @@ where
                         Box::pin(insert_deriv_hash_fn(commit_hash, repo_url, system, hash))
                     })));
 
+                // Stream and handle derivations
                 let _ = stream_fn(configs, &repo_url_outer, handle_result).await;
             }
         }
