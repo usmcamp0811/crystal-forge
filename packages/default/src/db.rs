@@ -171,7 +171,7 @@ pub async fn init_db() -> Result<()> {
 
             CREATE TABLE IF NOT EXISTS tbl_commits (
                 id SERIAL PRIMARY KEY,
-                flake_id INT NOT NULL REFERENCES flake(id) ON DELETE CASCADE,
+                flake_id INT NOT NULL REFERENCES tbl_flakes(id) ON DELETE CASCADE,
                 git_commit_hash TEXT NOT NULL,
                 commit_timestamp TIMESTAMPTZ NOT NULL,
                 UNIQUE(flake_id, git_commit_hash)
@@ -179,7 +179,7 @@ pub async fn init_db() -> Result<()> {
 
             CREATE TABLE IF NOT EXISTS tbl_system_builds (
                 id SERIAL PRIMARY KEY,
-                commit_id INT NOT NULL REFERENCES commit(id) ON DELETE CASCADE,
+                commit_id INT NOT NULL REFERENCES tbl_commits(id) ON DELETE CASCADE,
                 system_name TEXT NOT NULL,
                 derivation_hash TEXT NOT NULL,
                 build_timestamp TIMESTAMPTZ DEFAULT now(),
