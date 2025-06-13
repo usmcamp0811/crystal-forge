@@ -65,8 +65,7 @@ where
         return StatusCode::BAD_REQUEST;
     };
 
-    if let Err(e) = insert_commit_fn(&commit_hash, &repo_url).await {
-        eprintln!("❌ insert_commit_fn failed: {e}");
+    if let Err(_) = insert_commit_fn(&commit_hash, &repo_url).await {
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
