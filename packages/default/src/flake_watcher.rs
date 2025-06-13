@@ -5,7 +5,10 @@ use futures::{StreamExt, stream};
 use serde_json::Value;
 use std::future::Future;
 use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::Arc;
+use tempfile::tempdir;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
@@ -38,6 +41,55 @@ pub async fn get_nixos_configurations(repo_url: String) -> anyhow::Result<Vec<St
         .collect::<Vec<String>>();
 
     println!("nixosConfigurations: {:?}", nixos_configs);
+    Ok(nixos_configs)
+}
+
+pub async fn get_nixos_configurations_at_commit(
+    repo_url: &str,
+    commit: &str,
+) -> Result<Vec<String>> {
+    let tmpdir = tempdir()?;
+    let path = tmpdir.path();
+
+    // clone and checkout specific commit
+    let status = Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            repo_url,
+            path.to_str().unwrap(),
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("git clone failed");
+    }
+
+    let status = Command::new("git")
+        .args(["-C", path.to_str().unwrap(), "checkout", commit])
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("git checkout failed");
+    }
+
+    // run nix flake show
+    let output = Command::new("nix")
+        .args(["flake", "show", "--json", path.to_str().unwrap()])
+        .output()
+        .await?;
+    let flake_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+
+    let nixos_configs = flake_json["nixosConfigurations"]
+        .as_object()
+        .context("missing nixosConfigurations")?
+        .keys()
+        .cloned()
+        .collect::<Vec<String>>();
+
     Ok(nixos_configs)
 }
 
