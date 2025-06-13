@@ -51,6 +51,7 @@ pub async fn get_nixos_configurations_at_commit(
     let tmpdir = tempdir()?;
     let path = tmpdir.path();
 
+    // TODO: Dont clone but use commit hash in flake path
     // clone and checkout specific commit
     let status = Command::new("git")
         .args([
