@@ -70,7 +70,13 @@ in {
         default = "crystal_forge";
       };
     };
-
+    flakes = {
+      watched = lib.mkOption {
+        type = lib.types.attrsOf lib.types.str;
+        default = {};
+        description = "Flakes to watch and auto-track (name → repo_url).";
+      };
+    };
     server = {
       enable = lib.mkEnableOption "Enable the Crystal Forge Server";
       host = lib.mkOption {
@@ -139,7 +145,10 @@ in {
             if cfg.database.passwordFile != null
             then builtins.readFile cfg.database.passwordFile
             else cfg.database.password;
-        };
+        }
+        // (lib.mapAttrs'
+          (name: val: lib.nameValuePair "CRYSTAL_FORGE__FLAKES__WATCHED__${name}" val)
+          cfg.flakes.watched);
       serviceConfig = {
         ExecStart = "${pkgs.crystal-forge.server}/bin/server";
         User = "root";
