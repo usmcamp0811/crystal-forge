@@ -15,25 +15,15 @@
   networking.useDHCP = true;
   networking.firewall.enable = false;
 
-  environment.systemPackages = [pkgs.crystal-forge.agent pkgs.bash];
-
-  environment.etc."crystal-forge/config.toml".text = ''
-    [database]
-    host = "db"
-    user = "crystal_forge"
-    password = "password"
-    dbname = "crystal_forge"
-  '';
-
-  systemd.services.agent = {
-    wantedBy = ["multi-user.target"];
-    after = ["network.target"];
-    environment = {
-      CRYSTAL_FORGE_CONFIG = "/etc/crystal-forge/config.toml";
-    };
-    serviceConfig = {
-      ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
-      Restart = "on-failure";
+  services.crystal-forge = {
+    enable = true;
+    client = {
+      enable = true;
+      server_host = "server";
+      server_port = 3000;
+      private_key = "/etc/agent.key";
     };
   };
+
+  environment.systemPackages = [pkgs.crystal-forge pkgs.bash];
 }
