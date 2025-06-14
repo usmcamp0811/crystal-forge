@@ -1,3 +1,4 @@
+use crate::db::insert_system_name;
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use futures::{StreamExt, stream};
@@ -253,6 +254,12 @@ pub async fn stream_derivations(
         systems.len(),
         commit_hash
     );
+
+    // insert all systems into db
+    for system in &systems {
+        insert_system_name(commit_hash, flake_path, system).await?;
+    }
+
     let path = flake_path.to_string();
     let commit = commit_hash.to_string();
     let insert_system_fn = insert_system_fn.clone();
