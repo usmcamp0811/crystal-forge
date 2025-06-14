@@ -278,10 +278,9 @@ pub async fn stream_derivations(
                     match result {
                         Ok((system, hash)) => {
                             debug!("📝 passing to handler: {} => {}", system, hash);
+                            let system_clone = system.clone();
                             if let Err(e) = handle_result.lock().await(system, hash).await {
-                                error!("❌ handler failed for {}: {:?}", system, e);
-                            } else {
-                                debug!("✅ handler succeeded for {}", system);
+                                error!("❌ handler failed for {}: {:?}", system_clone, e);
                             }
                         }
                         Err(e) => {
