@@ -68,15 +68,6 @@ async fn main() -> anyhow::Result<()> {
         Box::pin(async move { insert_derivation_hash(&a, &b, &c, &d).await }) as Pin<Box<_>>
     };
 
-    // Wrap derivation streamer with boxed output
-    let stream_derivations_boxed =
-        |systems: Vec<String>, flake_url: &str, handler: Arc<Mutex<BoxedHandler>>| {
-            let flake_url = flake_url.to_string();
-            Box::pin(async move {
-                let _ = stream_derivations(systems, &flake_url, handler).await;
-            }) as Pin<Box<dyn Future<Output = ()> + Send>>
-        };
-
     // Wrap commit insert
     let insert_commit_boxed = |commit: &str, repo: &str| {
         let commit = commit.to_owned();
@@ -89,12 +80,10 @@ async fn main() -> anyhow::Result<()> {
     /// builds config lookup closure, and invokes main `webhook_handler`.
     let webhook_handler_wrap = {
         let insert_commit_boxed = insert_commit_boxed.clone();
-        let stream_derivations_boxed = stream_derivations_boxed.clone();
         let insert_derivation_hash_boxed = insert_derivation_hash_boxed.clone();
 
         move |Json(payload): Json<Value>| {
             let insert_commit_boxed = insert_commit_boxed.clone();
-            let stream_derivations_boxed = stream_derivations_boxed.clone();
             let insert_derivation_hash_boxed = insert_derivation_hash_boxed.clone();
 
             async move {
@@ -117,7 +106,20 @@ async fn main() -> anyhow::Result<()> {
                     return StatusCode::BAD_REQUEST;
                 };
 
-                // Wrap configuration fetcher with commit context
+                // ✅ define stream_derivations_boxed now that commit_hash is available
+                let stream_derivations_boxed = {
+                    let commit = commit_hash.clone();
+                    move |systems: Vec<String>,
+                          flake_url: &str,
+                          handler: Arc<Mutex<BoxedHandler>>| {
+                        let flake_url = flake_url.to_string();
+                        let commit = commit.clone();
+                        Box::pin(async move {
+                            let _ = stream_derivations(systems, &flake_url, &commit, handler).await;
+                        }) as Pin<Box<dyn Future<Output = ()> + Send>>
+                    }
+                };
+
                 let get_configs_boxed = {
                     let commit_hash = commit_hash.clone();
                     Box::new(move |repo_url: String| {

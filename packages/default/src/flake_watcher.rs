@@ -1,9 +1,9 @@
-use anyhow::Context;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::future::join_all;
 use futures::{StreamExt, stream};
 use serde_json::Value;
 use std::future::Future;
+use std::path::Path;
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -11,7 +11,6 @@ use tempfile::tempdir;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
-
 /// Parses a Nix flake and extracts the defined NixOS configuration names.
 ///
 /// # Arguments
@@ -44,16 +43,59 @@ pub async fn get_nixos_configurations(repo_url: String) -> anyhow::Result<Vec<St
     Ok(nixos_configs)
 }
 
+/// Returns the list of NixOS configurations defined in a flake at a given Git commit.
+///
+/// If `repo_url` is a local filesystem path, this will attempt to run
+/// `git checkout <commit>` inside that path before evaluating the flake.
+///
+/// # Arguments
+/// - `repo_url`: Git URL or filesystem path to a Nix flake
+/// - `commit`: Git commit hash to evaluate the flake at
+///
+/// # Returns
+/// A list of configuration names under `nixosConfigurations` in the flake.
+///
+/// # Errors
+/// Returns an error if:
+/// - `git checkout` fails (for local paths)
+/// - `nix flake show` fails
+/// - `nixosConfigurations` is missing from the flake output
 pub async fn get_nixos_configurations_at_commit(
     repo_url: &str,
     commit: &str,
 ) -> Result<Vec<String>> {
-    let flake_uri = if repo_url.starts_with("git+") {
+    // Determine if the repo URL is a local path
+    let is_path = Path::new(repo_url).exists();
+
+    // Build the flake URI accordingly
+    let flake_uri = if is_path {
+        // Local path — use as-is
+        repo_url.to_string()
+    } else if repo_url.starts_with("git+") {
+        // Already prefixed — just add the rev
         format!("{}?rev={}", repo_url, commit)
     } else {
+        // Assume it's a plain git URL — add both prefix and rev
         format!("git+{}?rev={}", repo_url, commit)
     };
 
+    // If it's a local path, perform a git checkout at the requested rev
+    if is_path {
+        let status = Command::new("git")
+            .args(["-C", repo_url, "checkout", commit])
+            .status()
+            .await?;
+
+        if !status.success() {
+            anyhow::bail!(
+                "git checkout failed for path {} at rev {}",
+                repo_url,
+                commit
+            );
+        }
+    }
+
+    // Run `nix flake show` on the constructed flake URI
     let output = Command::new("nix")
         .args(["flake", "show", "--json", &flake_uri])
         .output()
@@ -64,8 +106,10 @@ pub async fn get_nixos_configurations_at_commit(
         anyhow::bail!("nix flake show failed: {}", stderr.trim());
     }
 
+    // Parse the output JSON
     let flake_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
+    // Extract nixosConfigurations keys
     let nixos_configs = flake_json["nixosConfigurations"]
         .as_object()
         .context("missing nixosConfigurations")?
@@ -79,41 +123,76 @@ pub async fn get_nixos_configurations_at_commit(
 
 /// Returns the derivation output path (hash) for a specific NixOS system from a given flake.
 ///
-/// # Arguments
+/// If the flake is a local path, the given commit will be checked out via `git`.
 ///
-/// * `system` - The name of the NixOS configuration (e.g., "x86_64-linux").
-/// * `flake_url` - A flake reference (local path or remote URL, e.g., `git+https://...`).
+/// # Arguments
+/// * `system` - The nixosConfigurations.<system> to target
+/// * `flake_url` - Local path or remote git URL
+/// * `commit` - Git commit to use if applicable
 ///
 /// # Returns
-///
-/// * A `Result<String>` containing the derivation output path (e.g., `/nix/store/<hash>-toplevel`).
-///
-/// # Example
-///
-pub async fn get_system_derivation(system: &str, flake_url: &str) -> Result<String> {
-    let target = format!("{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel");
+/// * A string like `/nix/store/<hash>-toplevel`
+pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) -> Result<String> {
+    let is_path = Path::new(flake_url).exists();
 
+    // If it's a local path, check out the commit in-place
+    if is_path {
+        let status = Command::new("git")
+            .args(["-C", flake_url, "checkout", commit])
+            .status()
+            .await?;
+
+        if !status.success() {
+            anyhow::bail!(
+                "git checkout failed for path {} at rev {}",
+                flake_url,
+                commit
+            );
+        }
+    }
+
+    // Construct flake target
+    let flake_target = if is_path {
+        format!("{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel")
+    } else if flake_url.starts_with("git+") {
+        format!(
+            "{flake_url}?rev={commit}#nixosConfigurations.{system}.config.system.build.toplevel"
+        )
+    } else {
+        format!(
+            "git+{flake_url}?rev={commit}#nixosConfigurations.{system}.config.system.build.toplevel"
+        )
+    };
+
+    // Run dry build to get the output path
     let output = Command::new("nix")
-        .args(["build", &target, "--dry-run", "--json"])
+        .args(["build", &flake_target, "--dry-run", "--json"])
         .output()
         .await?;
 
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix build failed: {}", stderr.trim());
+    }
+
+    // Parse output and extract .outputs.out
     let parsed: Value = serde_json::from_slice(&output.stdout)?;
     let hash = parsed
         .get(0)
         .and_then(|v| v["outputs"]["out"].as_str())
-        .ok_or_else(|| anyhow::anyhow!("Missing derivation output in nix build output"))?
+        .context("Missing derivation output in nix build output")?
         .to_string();
 
     Ok(hash)
 }
 
-/// Fetches derivation output paths for all provided NixOS system configurations in parallel.
+/// Fetches derivation output paths for all provided NixOS system configurations at a specific commit.
 ///
 /// # Arguments
 ///
 /// * `systems` - A list of NixOS system names (e.g., `"x86_64-linux"`, `"aarch64-linux"`).
 /// * `flake_url` - A Nix flake reference (local path or remote, e.g., `git+https://...`).
+/// * `commit_hash` - The Git commit to evaluate the flake at.
 ///
 /// # Returns
 ///
@@ -123,42 +202,54 @@ pub async fn get_system_derivation(system: &str, flake_url: &str) -> Result<Stri
 /// # Errors
 ///
 /// Returns an error if any derivation fails to resolve or if the Nix command fails.
-///
-///
 pub async fn get_all_derivations(
     systems: Vec<String>,
     flake_url: &str,
+    commit_hash: &str,
 ) -> Result<Vec<(String, String)>> {
     let tasks = systems.into_iter().map(|system| {
         let path = flake_url.to_string();
+        let commit = commit_hash.to_string();
         async move {
-            let hash = get_system_derivation(&system, &path).await?;
+            let hash = get_system_derivation(&system, &path, &commit).await?;
             Ok((system, hash)) as Result<_>
         }
     });
 
-    let results = join_all(tasks).await;
+    let results = futures::future::join_all(tasks).await;
     results.into_iter().collect()
 }
 
-/// Streams derivation hashes for each system and processes them as they complete.
+/// Streams derivation output hashes for each NixOS system configuration in parallel,
+/// calling `handle_result` as each one completes.
 ///
-/// Each result is yielded as soon as it's available, enabling immediate use (e.g., DB commit).
-
+/// # Arguments
+///
+/// * `systems` - List of NixOS system names to evaluate.
+/// * `flake_path` - Path or URL of the flake.
+/// * `commit_hash` - Git commit to use for evaluation.
+/// * `handle_result` - Async callback invoked with each `(system, hash)` pair.
+///
+/// # Returns
+///
+/// * `Ok(())` if all derivations are handled successfully, or early logs on failure.
 pub async fn stream_derivations(
     systems: Vec<String>,
     flake_path: &str,
+    commit_hash: &str,
     handle_result: Arc<
         Mutex<dyn FnMut(String, String) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>,
     >,
 ) -> Result<()> {
     let path = flake_path.to_string();
+    let commit = commit_hash.to_string();
 
     stream::iter(systems)
-        .map(|system: String| {
+        .map(move |system: String| {
             let path = path.clone();
+            let commit = commit.clone();
             async move {
-                let hash = get_system_derivation(&system, &path).await?;
+                let hash = get_system_derivation(&system, &path, &commit).await?;
                 Ok::<(String, String), anyhow::Error>((system, hash))
             }
         })
