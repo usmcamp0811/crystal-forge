@@ -16,3 +16,7 @@ reckless = "SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8="
 server_host = "reckless"
 server_port = 3944
 private_key = "/var/lib/crystal_forge/gray.key"
+
+[flakes.watched]
+dotfiles = "git+https://gitlab.com/usmcamp0811/dotfiles"
+
