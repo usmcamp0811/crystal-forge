@@ -239,6 +239,11 @@ pub async fn stream_derivations(
     systems: Vec<String>,
     flake_path: &str,
     commit_hash: &str,
+    insert_system_fn: Arc<
+        dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            + Send
+            + Sync,
+    >,
     handle_result: Arc<
         Mutex<dyn FnMut(String, String) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>,
     >,
@@ -250,8 +255,22 @@ pub async fn stream_derivations(
     );
     let path = flake_path.to_string();
     let commit = commit_hash.to_string();
+    let insert_system_fn = insert_system_fn.clone();
 
-    stream::iter(systems)
+    let systems_with_insert = futures::future::join_all(systems.into_iter().map(|system| {
+        let insert_system_fn = insert_system_fn.clone();
+        let repo_url = path.clone();
+        let commit = commit.clone();
+        async move {
+            insert_system_fn(repo_url.clone(), commit.clone(), system.clone()).await?;
+            Ok(system)
+        }
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+
+    stream::iter(systems_with_insert)
         .map(move |system: String| {
             let path = path.clone();
             let commit = commit.clone();

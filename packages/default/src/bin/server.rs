@@ -14,7 +14,8 @@ use axum::{
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::config;
 use crystal_forge::db::{
-    init_db, insert_commit, insert_derivation_hash, insert_flake, insert_system_state,
+    init_db, insert_commit, insert_derivation_hash, insert_flake, insert_system_name,
+    insert_system_state,
 };
 use crystal_forge::flake_watcher::{get_nixos_configurations_at_commit, stream_derivations};
 use crystal_forge::system_watcher::SystemPayload;
@@ -80,6 +81,9 @@ async fn main() -> anyhow::Result<()> {
             as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
     };
 
+    let insert_system_name_boxed = |a: String, b: String, c: String| {
+        Box::pin(async move { insert_system_name(&a, &b, &c).await }) as Pin<Box<_>>
+    };
     /// Handler function for the `/webhook` route. Extracts payload,
     /// builds config lookup closure, and invokes main `webhook_handler`.
     let webhook_handler_wrap = {
@@ -111,6 +115,7 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 // ✅ define stream_derivations_boxed now that commit_hash is available
+                let insert_system_fn = Arc::new(insert_system_name_boxed.clone());
                 let stream_derivations_boxed = {
                     let commit = commit_hash.clone();
                     move |systems: Vec<String>,
@@ -118,8 +123,16 @@ async fn main() -> anyhow::Result<()> {
                           handler: Arc<Mutex<BoxedHandler>>| {
                         let flake_url = flake_url.to_string();
                         let commit = commit.clone();
+                        let insert_system_fn = insert_system_fn.clone();
                         Box::pin(async move {
-                            let _ = stream_derivations(systems, &flake_url, &commit, handler).await;
+                            let _ = stream_derivations(
+                                systems,
+                                &flake_url,
+                                &commit,
+                                insert_system_fn,
+                                handler,
+                            )
+                            .await;
                         }) as Pin<Box<dyn Future<Output = ()> + Send>>
                     }
                 };

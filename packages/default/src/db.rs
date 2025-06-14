@@ -22,15 +22,14 @@ pub async fn get_db_client() -> Result<Client> {
     Ok(client)
 }
 
-pub async fn insert_derivation_hash(
+pub async fn insert_system_name(
     commit_hash: &str,
     repo_url: &str,
     system_name: &str,
-    derivation_hash: &str,
 ) -> Result<()> {
     let client = get_db_client().await?;
 
-    // look up flake_id
+    // Get flake_id
     let flake_row = client
         .query_opt(
             "SELECT id FROM tbl_flakes WHERE repo_url = $1",
@@ -41,7 +40,7 @@ pub async fn insert_derivation_hash(
 
     let flake_id: i32 = flake_row.get("id");
 
-    // look up commit_id
+    // Get commit_id
     let commit_row = client
         .query_opt(
             "SELECT id FROM tbl_commits WHERE flake_id = $1 AND git_commit_hash = $2",
@@ -52,17 +51,58 @@ pub async fn insert_derivation_hash(
 
     let commit_id: i32 = commit_row.get("id");
 
-    // insert system build
+    // Insert system_name (no hash yet)
     client
         .execute(
-            "INSERT INTO tbl_system_builds (commit_id, system_name, derivation_hash)
-             VALUES ($1, $2, $3)
-             ON CONFLICT DO NOTHING",
+            "INSERT INTO tbl_system_builds (commit_id, system_name)
+             VALUES ($1, $2)
+             ON CONFLICT (commit_id, system_name) DO NOTHING",
+            &[&commit_id, &system_name],
+        )
+        .await?;
+
+    info!("📥 inserted system: {system_name} for commit {commit_hash}");
+    Ok(())
+}
+
+pub async fn insert_derivation_hash(
+    commit_hash: &str,
+    repo_url: &str,
+    system_name: &str,
+    derivation_hash: &str,
+) -> Result<()> {
+    let client = get_db_client().await?;
+
+    let flake_row = client
+        .query_opt(
+            "SELECT id FROM tbl_flakes WHERE repo_url = $1",
+            &[&repo_url],
+        )
+        .await?
+        .context("No flake entry found for given repo_url")?;
+
+    let flake_id: i32 = flake_row.get("id");
+
+    let commit_row = client
+        .query_opt(
+            "SELECT id FROM tbl_commits WHERE flake_id = $1 AND git_commit_hash = $2",
+            &[&flake_id, &commit_hash],
+        )
+        .await?
+        .context("No commit entry found for given commit_hash and flake_id")?;
+
+    let commit_id: i32 = commit_row.get("id");
+
+    client
+        .execute(
+            "UPDATE tbl_system_builds
+             SET derivation_hash = $3
+             WHERE commit_id = $1 AND system_name = $2 AND derivation_hash IS NULL",
             &[&commit_id, &system_name, &derivation_hash],
         )
         .await?;
 
-    info!("✅ inserted derivation: {system_name} => {derivation_hash}");
+    info!("✅ updated derivation: {system_name} => {derivation_hash}");
     Ok(())
 }
 
