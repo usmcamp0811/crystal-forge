@@ -27,6 +27,10 @@ pub async fn insert_system_name(
     repo_url: &str,
     system_name: &str,
 ) -> Result<()> {
+    debug!(
+        "Inserting System {} - from {} @ {}",
+        system_name, repo_url, commit_hash
+    );
     let client = get_db_client().await?;
 
     // Get flake_id
