@@ -27,7 +27,7 @@ with lib.crystal-forge;
       export PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig
 
       export FZF_DEFAULT_OPTS="--height 40% --reverse --border"
-
+      export RUST_LOG=debug
       export CRYSTAL_FORGE__DATABASE__HOST=localhost
       export CRYSTAL_FORGE__DATABASE__PASSWORD=password
       export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
