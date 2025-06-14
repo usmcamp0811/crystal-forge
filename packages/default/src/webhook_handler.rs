@@ -106,18 +106,30 @@ where
             if let Ok(configs) = get_configs_fn(repo_url_outer.clone()).await {
                 println!("📦 fetched configs: {:?}", configs);
 
-                // Define closure to handle individual derivation hash insertions
+                if configs.is_empty() {
+                    println!("⚠️ no configs found, exiting stream task");
+                    return;
+                }
+
                 let repo_url_for_closure = repo_url_outer.clone();
                 let handle_result: Arc<Mutex<BoxedHandler>> =
                     Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
                         let repo_url = repo_url_for_closure.clone();
                         let commit_hash = commit_hash_outer.clone();
                         println!("📝 handling system: {system} => {hash}");
-                        Box::pin(insert_deriv_hash_fn(commit_hash, repo_url, system, hash))
+                        Box::pin(async move {
+                            if let Err(e) =
+                                insert_deriv_hash_fn(commit_hash, repo_url, system, hash).await
+                            {
+                                eprintln!("❌ insert_deriv_hash_fn failed: {e:?}");
+                            }
+                            Ok(())
+                        })
                     })));
 
-                // Stream and handle derivations
-                let _ = stream_fn(configs, &repo_url_outer, handle_result).await;
+                if let Err(e) = stream_fn(configs, &repo_url_outer, handle_result).await {
+                    eprintln!("❌ stream_fn failed: {e:?}");
+                }
             }
         }
     });
