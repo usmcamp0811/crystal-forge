@@ -81,8 +81,9 @@ async fn main() -> anyhow::Result<()> {
             as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
     };
 
-    let insert_system_name_boxed = |a: String, b: String, c: String| {
-        Box::pin(async move { insert_system_name(&a, &b, &c).await }) as Pin<Box<_>>
+    let insert_system_name_boxed = |commit_hash: String, repo_url: String, system_name: String| {
+        Box::pin(async move { insert_system_name(&commit_hash, &repo_url, &system_name).await })
+            as Pin<Box<_>>
     };
     /// Handler function for the `/webhook` route. Extracts payload,
     /// builds config lookup closure, and invokes main `webhook_handler`.
