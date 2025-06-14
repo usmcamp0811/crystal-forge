@@ -16,6 +16,16 @@ pub struct CrystalForgeConfig {
     pub database: Option<DbConfig>,
     pub server: Option<ServerConfig>,
     pub client: Option<AgentConfig>,
+    pub flakes: Option<FlakeConfig>,
+}
+
+/// Configuration for watched flakes.
+///
+/// This section is loaded from `[flakes]` in `config.toml`.
+#[derive(Debug, Deserialize)]
+pub struct FlakeConfig {
+    /// Map of flake name → flake URI.
+    pub watched: HashMap<String, String>,
 }
 
 /// Configuration for the agent/client.
