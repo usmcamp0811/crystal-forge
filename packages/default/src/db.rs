@@ -226,7 +226,7 @@ pub async fn init_db() -> Result<()> {
                 id SERIAL PRIMARY KEY,
                 commit_id INT NOT NULL REFERENCES tbl_commits(id) ON DELETE CASCADE,
                 system_name TEXT NOT NULL,
-                derivation_hash TEXT NOT NULL,
+                derivation_hash TEXT,
                 build_timestamp TIMESTAMPTZ DEFAULT now(),
                 UNIQUE(commit_id, system_name)
             );
