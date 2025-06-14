@@ -7,6 +7,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::{env, fs};
 use tokio_postgres::{Client, NoTls};
+use tracing::{debug, error, info, trace, warn};
 
 pub async fn get_db_client() -> Result<Client> {
     let db_config = config::load_config()?;
@@ -61,7 +62,7 @@ pub async fn insert_derivation_hash(
         )
         .await?;
 
-    println!("✅ inserted derivation: {system_name} => {derivation_hash}");
+    info!("✅ inserted derivation: {system_name} => {derivation_hash}");
     Ok(())
 }
 
@@ -77,7 +78,7 @@ pub async fn insert_flake(name: &str, repo_url: &str) -> Result<()> {
         )
         .await?;
 
-    println!("✅ inserted flake: {name} ({repo_url})");
+    info!("✅ inserted flake: {name} ({repo_url})");
     Ok(())
 }
 
@@ -105,7 +106,7 @@ pub async fn insert_commit(commit_hash: &str, repo_url: &str) -> Result<()> {
         )
         .await?;
 
-    println!("✅ inserted commit: {commit_hash} (flake_id={flake_id})");
+    info!("✅ inserted commit: {commit_hash} (flake_id={flake_id})");
     Ok(())
 }
 
@@ -152,7 +153,7 @@ pub async fn insert_system_state(
         )
         .await?;
 
-    println!("✅ inserted system state for {hostname} with hash {system_hash}");
+    info!("✅ inserted system state for {hostname} with hash {system_hash}");
     Ok(())
 }
 
