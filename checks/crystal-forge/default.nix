@@ -16,6 +16,14 @@
     mkdir -p $out
     cp ${keyPair}/agent.pub $out/
   '';
+
+  cf_flake =
+    pkgs.runCommand "cf-flake" {
+      src = ../../.;
+    } ''
+      mkdir -p $out
+      cp -r $src/* $out/
+    '';
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
@@ -33,6 +41,7 @@ in
 
         environment.etc."agent.key".source = "${key}/agent.key";
         environment.etc."agent.pub".source = "${pub}/agent.pub";
+        environment.etc."cf_flake".source = "${cf_flake}";
 
         services.postgresql = {
           enable = true;
@@ -136,7 +145,7 @@ in
       server.succeed(f"curl -s -X POST http://localhost:3000/webhook -H 'Content-Type: application/json' -d {curl_data}")
 
       # Wait until commit is processed
-      # server.wait_until_succeeds(f"journalctl -u crystal-forge-server.service | grep {commit_hash}")
+      server.wait_until_succeeds(f"journalctl -u crystal-forge-server.service | grep {commit_hash}")
 
       # Check tbl_flakes
       flake_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT repo_url FROM tbl_flakes WHERE repo_url = 'git+https://gitlab.com/usmcamp0811/dotfiles';\"")
