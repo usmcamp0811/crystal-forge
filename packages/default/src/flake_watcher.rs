@@ -243,6 +243,11 @@ pub async fn stream_derivations(
         Mutex<dyn FnMut(String, String) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>,
     >,
 ) -> Result<()> {
+    info!(
+        "🌀 starting stream_derivations for {} systems at commit {}",
+        systems.len(),
+        commit_hash
+    );
     let path = flake_path.to_string();
     let commit = commit_hash.to_string();
 
@@ -251,8 +256,17 @@ pub async fn stream_derivations(
             let path = path.clone();
             let commit = commit.clone();
             async move {
-                let hash = get_system_derivation(&system, &path, &commit).await?;
-                Ok::<(String, String), anyhow::Error>((system, hash))
+                debug!("🔧 fetching derivation for system: {}", system);
+                match get_system_derivation(&system, &path, &commit).await {
+                    Ok(hash) => {
+                        debug!("📦 got derivation: {} => {}", system, hash);
+                        Ok((system, hash))
+                    }
+                    Err(e) => {
+                        error!("❌ failed to get derivation for {}: {:?}", system, e);
+                        Err(e)
+                    }
+                }
             }
         })
         .buffer_unordered(8)
@@ -263,12 +277,15 @@ pub async fn stream_derivations(
                 async move {
                     match result {
                         Ok((system, hash)) => {
+                            debug!("📝 passing to handler: {} => {}", system, hash);
                             if let Err(e) = handle_result.lock().await(system, hash).await {
-                                eprintln!("Failed to handle result: {e}");
+                                error!("❌ handler failed for {}: {:?}", system, e);
+                            } else {
+                                debug!("✅ handler succeeded for {}", system);
                             }
                         }
                         Err(e) => {
-                            eprintln!("Error calculating derivation: {e}");
+                            error!("❌ error in derivation result: {:?}", e);
                         }
                     }
                 }
@@ -276,5 +293,6 @@ pub async fn stream_derivations(
         })
         .await;
 
+    info!("🎯 finished stream_derivations for commit {}", commit_hash);
     Ok(())
 }
