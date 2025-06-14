@@ -117,16 +117,21 @@ where
                         let repo_url = repo_url_for_closure.clone();
                         let commit_hash = commit_hash_outer.clone();
                         println!("📝 handling system: {system} => {hash}");
-                        Box::pin(async move {
-                            stream_fn(configs, &repo_url_outer, handle_result).await;
-                            println!("✅ finished streaming derivations");
-                            Ok(())
+                        Box::pin({
+                            let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
+                            async move {
+                                if let Err(e) =
+                                    insert_deriv_hash_fn(commit_hash, repo_url, system, hash).await
+                                {
+                                    eprintln!("❌ insert_deriv_hash_fn failed: {e:?}");
+                                }
+                                Ok(())
+                            }
                         })
                     })));
 
-                if let Err(e) = stream_fn(configs, &repo_url_outer, handle_result).await {
-                    eprintln!("❌ stream_fn failed: {e:?}");
-                }
+                stream_fn(configs, &repo_url_outer, handle_result).await;
+                println!("✅ finished streaming derivations");
             }
         }
     });
