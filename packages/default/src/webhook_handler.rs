@@ -6,12 +6,13 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tracing::{debug, error, info, trace, warn};
+
 /// This module handles incoming webhooks, triggering the fetching of NixOS
 /// configurations and streaming derivations to process them.
 ///
 /// It expects a webhook payload containing repository and commit information,
 /// and uses injected async functions for database and derivation operations.
-use tracing::{debug, error, info, trace, warn};
 
 /// Type alias for a boxed async handler function that inserts a derivation hash.
 /// The function takes two strings: the system name and the derivation hash.
