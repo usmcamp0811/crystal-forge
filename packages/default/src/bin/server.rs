@@ -62,7 +62,6 @@ async fn main() -> anyhow::Result<()> {
         .expect("missing [server] section in config");
     info!("Host: 0.0.0.0");
     info!("Port: {}", server_cfg.port);
-    tracing_subscriber::fmt::init();
 
     // Decode and parse all authorized public keys
     let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
