@@ -1,7 +1,8 @@
 use crate::db::insert_system_name;
 use anyhow::{Context, Result};
 use futures::future::join_all;
-use futures::{StreamExt, stream};
+use futures::stream::iter;
+use futures::stream::{self, StreamExt};
 use serde_json::Value;
 use std::future::Future;
 use std::path::Path;
@@ -278,39 +279,27 @@ pub async fn stream_derivations(
     .collect::<Result<Vec<_>>>()?;
 
     stream::iter(systems_with_insert)
-        .map(move |system: String| {
+        .for_each_concurrent(8, {
             let path = path.clone();
             let commit = commit.clone();
-            async move {
-                debug!("🔧 fetching derivation for system: {}", system);
-                match get_system_derivation(&system, &path, &commit).await {
-                    Ok(hash) => {
-                        debug!("📦 got derivation: {} => {}", system, hash);
-                        Ok((system, hash))
-                    }
-                    Err(e) => {
-                        error!("❌ failed to get derivation for {}: {:?}", system, e);
-                        Err(e)
-                    }
-                }
-            }
-        })
-        .buffer_unordered(8)
-        .for_each_concurrent(None, {
             let handle_result = handle_result.clone();
-            move |result| {
+
+            move |system: String| {
+                let path = path.clone();
+                let commit = commit.clone();
                 let handle_result = handle_result.clone();
+
                 async move {
-                    match result {
-                        Ok((system, hash)) => {
-                            debug!("📝 passing to handler: {} => {}", system, hash);
-                            let system_clone = system.clone();
-                            if let Err(e) = handle_result.lock().await(system, hash).await {
-                                error!("❌ handler failed for {}: {:?}", system_clone, e);
+                    debug!("🔧 fetching derivation for system: {}", system);
+                    match get_system_derivation(&system, &path, &commit).await {
+                        Ok(hash) => {
+                            debug!("📦 got derivation: {} => {}", system, hash);
+                            if let Err(e) = handle_result.lock().await(system.clone(), hash).await {
+                                error!("❌ handler failed for {}: {:?}", system, e);
                             }
                         }
                         Err(e) => {
-                            error!("❌ error in derivation result: {:?}", e);
+                            error!("❌ failed to get derivation for {}: {:?}", system, e);
                         }
                     }
                 }
