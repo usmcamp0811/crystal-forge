@@ -118,11 +118,8 @@ where
                         let commit_hash = commit_hash_outer.clone();
                         println!("📝 handling system: {system} => {hash}");
                         Box::pin(async move {
-                            if let Err(e) =
-                                insert_deriv_hash_fn(commit_hash, repo_url, system, hash).await
-                            {
-                                eprintln!("❌ insert_deriv_hash_fn failed: {e:?}");
-                            }
+                            stream_fn(configs, &repo_url_outer, handle_result).await;
+                            println!("✅ finished streaming derivations");
                             Ok(())
                         })
                     })));
