@@ -11,6 +11,7 @@ use tempfile::tempdir;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tracing::{debug, error, info, trace, warn};
 /// Parses a Nix flake and extracts the defined NixOS configuration names.
 ///
 /// # Arguments
@@ -39,7 +40,7 @@ pub async fn get_nixos_configurations(repo_url: String) -> anyhow::Result<Vec<St
         .cloned()
         .collect::<Vec<String>>();
 
-    println!("nixosConfigurations: {:?}", nixos_configs);
+    info!("nixosConfigurations: {:?}", nixos_configs);
     Ok(nixos_configs)
 }
 
@@ -64,6 +65,7 @@ pub async fn get_nixos_configurations_at_commit(
     repo_url: &str,
     commit: &str,
 ) -> Result<Vec<String>> {
+    debug!("🔍 get_nixos_configurations_at_commit called with repo_url={repo_url} commit={commit}");
     // Determine if the repo URL is a local path
     let is_path = Path::new(repo_url).exists();
 
@@ -117,7 +119,7 @@ pub async fn get_nixos_configurations_at_commit(
         .cloned()
         .collect::<Vec<String>>();
 
-    println!("nixosConfigurations: {:?}", nixos_configs);
+    debug!("nixosConfigurations: {:?}", nixos_configs);
     Ok(nixos_configs)
 }
 

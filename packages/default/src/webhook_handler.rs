@@ -1,8 +1,3 @@
-/// This module handles incoming webhooks, triggering the fetching of NixOS
-/// configurations and streaming derivations to process them.
-///
-/// It expects a webhook payload containing repository and commit information,
-/// and uses injected async functions for database and derivation operations.
 use crate::db::{insert_commit, insert_derivation_hash};
 use crate::flake_watcher::{get_nixos_configurations, stream_derivations};
 use axum::{Json, http::StatusCode};
@@ -11,6 +6,12 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+/// This module handles incoming webhooks, triggering the fetching of NixOS
+/// configurations and streaming derivations to process them.
+///
+/// It expects a webhook payload containing repository and commit information,
+/// and uses injected async functions for database and derivation operations.
+use tracing::{debug, error, info, trace, warn};
 
 /// Type alias for a boxed async handler function that inserts a derivation hash.
 /// The function takes two strings: the system name and the derivation hash.
@@ -64,7 +65,7 @@ where
         + Clone
         + 'static,
 {
-    println!("========== PROCESSING WEBHOOK ==========");
+    info!("========== PROCESSING WEBHOOK ==========");
 
     // Extract repo URL from payload
     let Some(repo_url) = payload
@@ -131,7 +132,7 @@ where
                     })));
 
                 stream_fn(configs, &repo_url_outer, handle_result).await;
-                println!("✅ finished streaming derivations");
+                debug!("✅ finished streaming derivations");
             }
         }
     });

@@ -23,6 +23,8 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::Value;
 use std::{collections::HashMap, ffi::OsStr, fs, future::Future, pin::Pin, sync::Arc};
 use tokio::{net::TcpListener, sync::Mutex};
+use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::EnvFilter;
 
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]
@@ -32,6 +34,9 @@ struct CFState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env()) // uses RUST_LOG
+        .init();
     // Load and validate config
     let cfg = config::load_config()?;
     let db_url = cfg
@@ -50,13 +55,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start logs and diagnostics
-    println!("Starting Crystal Forge Server...");
+    info!("Starting Crystal Forge Server...");
     let server_cfg = cfg
         .server
         .as_ref()
         .expect("missing [server] section in config");
-    println!("Host: 0.0.0.0");
-    println!("Port: {}", server_cfg.port);
+    info!("Host: 0.0.0.0");
+    info!("Port: {}", server_cfg.port);
     tracing_subscriber::fmt::init();
 
     // Decode and parse all authorized public keys
@@ -238,7 +243,7 @@ async fn handle_current_system(
         }
     };
 
-    println!(
+    info!(
         "✅ accepted from {key_id}: hostname={}, hash={}, context={}, fingerprint={:?}",
         payload.hostname, payload.system_hash, payload.context, payload.fingerprint
     );
