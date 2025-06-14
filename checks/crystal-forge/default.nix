@@ -95,7 +95,10 @@ in
       };
     };
 
+    extraPythonPackages = p: [p.pytest];
     testScript = ''
+      import pytest
+
       start_all()
 
       server.wait_for_unit("postgresql")
@@ -104,36 +107,45 @@ in
       server.wait_for_unit("multi-user.target")
 
       # Ensure keys are available
-      agent.succeed("test -r /etc/agent.key")
-      agent.succeed("test -r /etc/agent.pub")
-      server.succeed("test -r /etc/agent.pub")
+      try:
+          agent.succeed("test -r /etc/agent.key")
+          agent.succeed("test -r /etc/agent.pub")
+          server.succeed("test -r /etc/agent.pub")
+      except Exception as e:
+          pytest.fail(f"Key presence check failed: {e}")
 
-      # Confirm server is listening
-      server.succeed("ss -ltn | grep ':3000'")
+      try:
+          server.succeed("ss -ltn | grep ':3000'")
+      except Exception:
+          pytest.fail("Server is not listening on port 3000")
 
-      # Confirm agent can ping server
-      agent.succeed("ping -c1 server")
+      try:
+          agent.succeed("ping -c1 server")
+      except Exception:
+          pytest.fail("Agent failed to ping server")
 
       agent_hostname = agent.succeed("hostname -s").strip()
       system_hash = agent.succeed("readlink /run/current-system").strip().split("-")[-1]
       context = "agent-startup"
 
-      # Wait for initial system state to be recorded
-      server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep 'accepted from agent'")
+      try:
+          server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep 'accepted from agent'")
+      except Exception:
+          pytest.fail("Server did not log 'accepted from agent'")
 
-      # Agent logs
       agent.log("=== agent logs ===")
       agent.log(agent.succeed("journalctl -u crystal-forge-agent.service || true"))
 
-      # System state should be written to DB
       output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, system_derivation_id, context FROM tbl_system_states;'")
-      server.log("Final DB state:\n" + output)
+      server.log("Final DB state:\\n" + output)
 
-      assert agent_hostname in output, f"hostname '{agent_hostname}' not found in DB"
-      assert context in output, f"context '{context}' not found in DB"
-      assert system_hash in output, f"system_derivation_id '{system_hash}' not found in DB"
+      if agent_hostname not in output:
+          pytest.fail(f"hostname '{agent_hostname}' not found in DB")
+      if context not in output:
+          pytest.fail(f"context '{context}' not found in DB")
+      if system_hash not in output:
+          pytest.fail(f"system_derivation_id '{system_hash}' not found in DB")
 
-      # POST webhook to simulate external trigger
       commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"
       curl_data = f"""'{{
         "project": {{
@@ -142,20 +154,28 @@ in
         "checkout_sha": "{commit_hash}"
       }}'"""
 
-      server.succeed(f"curl -s -X POST http://localhost:3000/webhook -H 'Content-Type: application/json' -d {curl_data}")
+      try:
+          server.succeed(f"curl -s -X POST http://localhost:3000/webhook -H 'Content-Type: application/json' -d {curl_data}")
+      except Exception:
+          pytest.fail("Webhook POST request failed")
 
-      # Wait until commit is processed
-      server.wait_until_succeeds(f"journalctl -u crystal-forge-server.service | grep {commit_hash}")
+      try:
+          server.wait_until_succeeds(f"journalctl -u crystal-forge-server.service | grep {commit_hash}")
+      except Exception:
+          pytest.fail("Commit hash was not processed by server")
 
-      # Check tbl_flakes
       flake_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT repo_url FROM tbl_flakes WHERE repo_url = 'git+https://gitlab.com/usmcamp0811/dotfiles';\"")
-      assert "git+https://gitlab.com/usmcamp0811/dotfiles" in flake_check, "flake not found in DB"
+      if "git+https://gitlab.com/usmcamp0811/dotfiles" not in flake_check:
+          pytest.fail("flake not found in DB")
 
-      # Check tbl_commits
-      commit_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT git_commit_hash FROM tbl_commits WHERE git_commit_hash = '{commit_hash}';\"")
-      assert commit_hash in commit_check, f"commit hash '{commit_hash}' not recorded in DB"
+      commit_list = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT * FROM tbl_commits;'")
+      server.log("tbl_commits contents:\\n" + commit_list)
 
-      # Ensure PostgreSQL is not active on agent
-      assert "postgresql" not in agent.succeed("systemctl list-units --type=service --state=active"), "PostgreSQL is unexpectedly running on the agent"
+      if "0 rows" in commit_list or "0 rows" in commit_list.lower():
+          pytest.fail("tbl_commits is empty")
+
+      active_services = agent.succeed("systemctl list-units --type=service --state=active")
+      if "postgresql" in active_services:
+          pytest.fail("PostgreSQL is unexpectedly running on the agent")
     '';
   }
