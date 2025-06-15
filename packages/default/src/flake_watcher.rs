@@ -184,7 +184,7 @@ pub async fn get_system_derivation(
 
     debug!("🔨 Building flake target: {flake_target} (dry-run)");
 
-    let output = Command::new("nix")
+    let output = Command::new("/run/current-system/sw/bin/nix")
         .args(["build", &flake_target, "--dry-run", "--json"])
         .output()
         .await?;
