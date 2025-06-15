@@ -22,6 +22,73 @@ pub async fn get_db_client() -> Result<Client> {
     Ok(client)
 }
 
+// A function that gets all commits that do not have systems attached to them.
+// situation: maybe you got a webhook trigger and there was some problem accessing the flake
+// this could be a temporary thing like internet went out or something else shit the bed
+// so lets query for it and see if we can do something at startup
+pub async fn get_commits_without_systems() -> Result<Vec<(String, String, String)>> {
+    let client = get_db_client().await?;
+
+    let rows = client
+        .query(
+            "
+            SELECT c.git_commit_hash, f.repo_url, f.name
+            FROM tbl_commits c
+            LEFT JOIN tbl_system_builds b ON c.id = b.commit_id
+            LEFT JOIN tbl_flakes f ON c.flake_id = f.id
+            WHERE b.commit_id IS NULL
+            ",
+            &[],
+        )
+        .await?;
+
+    let results = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, String>(0), // c.git_commit_hash
+                row.get::<_, String>(1), // f.repo_url
+                row.get::<_, String>(2), // f.name
+            )
+        })
+        .collect();
+
+    Ok(results)
+}
+
+// A function that gets all the systems that we don't have derivation hashes for.
+// maybe because we crashed or restarted before they were eval'd or some other reason.
+pub async fn get_systems_to_eval() -> Result<Vec<(String, String, String, String)>> {
+    let client = get_db_client().await?;
+
+    let rows = client
+        .query(
+            "
+            SELECT f.name, f.repo_url, c.git_commit_hash, b.system_name
+            FROM tbl_system_builds b
+            INNER JOIN tbl_commits c ON b.commit_id = c.id
+            INNER JOIN tbl_flakes f ON c.flake_id = f.id
+            WHERE b.derivation_hash IS NULL
+            ",
+            &[],
+        )
+        .await?;
+
+    let results = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, String>(0), // f.name
+                row.get::<_, String>(1), // f.repo_url
+                row.get::<_, String>(2), // c.git_commit_hash
+                row.get::<_, String>(3), // b.system_name
+            )
+        })
+        .collect();
+
+    Ok(results)
+}
+
 pub async fn insert_system_name(
     commit_hash: &str,
     repo_url: &str,

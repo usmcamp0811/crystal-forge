@@ -1,7 +1,7 @@
 /// Main entry point for the Crystal Forge server.
 /// Sets up database, loads config, inserts watched flakes, initializes routes,
 /// and starts the Axum HTTP server.
-use anyhow::Context;
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::Bytes,
@@ -11,6 +11,7 @@ use axum::{
     routing::post,
 };
 use base64::{Engine as _, engine::general_purpose};
+use crystal_forge::flake_watcher::get_system_derivation;
 use crystal_forge::{
     config,
     db::{
@@ -55,6 +56,62 @@ async fn main() -> anyhow::Result<()> {
             insert_flake(name, repo_url).await?;
         }
     }
+
+    // maybe we got a webhook trigger and for some reason something shit the bed and we were unable
+    // to get the systems in the commit; we don't want to just go the rest of our lives never knowing
+    // so we should at startup always go see if we can do better.
+    tokio::spawn(async {
+        if let Ok(entries) = crystal_forge::db::get_commits_without_systems().await {
+            for (commit, flake_url, flake_name) in entries {
+                tracing::info!("📦 queued eval: {flake_name} {flake_url} {commit}");
+                let result: std::result::Result<Vec<String>, anyhow::Error> =
+                    get_nixos_configurations_at_commit(&flake_url, &commit).await;
+
+                match result {
+                    Ok(configs) => {
+                        for system_name in &configs {
+                            if let Err(e) =
+                                insert_system_name(&commit, &flake_url, system_name).await
+                            {
+                                tracing::error!(
+                                    "❌ Failed to insert system name {system_name}: {e:?}"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ get_nixos_configurations_at_commit failed: {e}");
+                    }
+                }
+            }
+        }
+    });
+
+    // Check if we have any systems that dont have derivation_hash values.
+    // This is meant to be a catch all in case we crash or otherwise restart
+    // during the processing of a webhook.
+    tokio::spawn(async {
+        if let Ok(entries) = crystal_forge::db::get_systems_to_eval().await {
+            for (flake_name, flake_url, commit, system_name) in entries {
+                tracing::info!("📦 queued eval: {flake_name} {flake_url} {commit} {system_name}");
+                let result: std::result::Result<String, anyhow::Error> =
+                    get_system_derivation(&system_name, &flake_url, &commit).await;
+                match result {
+                    Ok(hash) => {
+                        if let Err(e) =
+                            insert_derivation_hash(&system_name, &hash, &flake_url, &commit).await
+                        {
+                            tracing::error!("❌ insert_derivation_hash failed: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ get_system_derivation failed: {e}");
+                    }
+                }
+            }
+        }
+    });
 
     // Start logs and diagnostics
     info!("Starting Crystal Forge Server...");

@@ -144,7 +144,11 @@ pub async fn get_nixos_configurations_at_commit(
 ///
 /// # Returns
 /// * A string like `/nix/store/<hash>-toplevel`
-pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) -> Result<String> {
+pub async fn get_system_derivation(
+    system: &str,
+    flake_url: &str,
+    commit: &str,
+) -> std::result::Result<String, anyhow::Error> {
     debug!("🔍 Determining derivation for system: {system}, flake: {flake_url}, commit: {commit}");
 
     let is_path = Path::new(flake_url).exists();

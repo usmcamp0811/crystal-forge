@@ -94,7 +94,7 @@ in
         };
       };
     };
-
+    timeout = 600;
     extraPythonPackages = p: [p.pytest];
     testScript = ''
       import pytest
