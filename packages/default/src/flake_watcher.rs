@@ -1,4 +1,4 @@
-use crate::db::insert_system_name;
+use crate::db::{insert_derivation_hash, insert_system_name};
 
 use anyhow::{Context, Result};
 use futures::future::join_all;
@@ -308,8 +308,19 @@ pub async fn stream_derivations(
                     match get_system_derivation(&system, &path, &commit).await {
                         Ok(hash) => {
                             debug!("📦 got derivation: {} => {}", system, hash);
-                            if let Err(e) = handle_result.lock().await(system.clone(), hash).await {
+                            let hash_ref = &hash;
+                            if let Err(e) =
+                                handle_result.lock().await(system.clone(), hash.clone()).await
+                            {
                                 error!("❌ handler failed for {}: {:?}", system, e);
+                            }
+                            if let Err(e) =
+                                insert_derivation_hash(&commit, &path, &system, hash_ref).await
+                            {
+                                error!(
+                                    "❌ failed to insert derivation hash for {}: {:?}",
+                                    system, e
+                                );
                             }
                         }
                         Err(e) => {
