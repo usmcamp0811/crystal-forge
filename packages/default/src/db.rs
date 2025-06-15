@@ -75,8 +75,14 @@ pub async fn insert_derivation_hash(
     system_name: &str,
     derivation_hash: &str,
 ) -> Result<()> {
+    debug!(
+        "🔍 insert_derivation_hash called with: system={}, repo_url={}, commit_hash={}, derivation_hash={}",
+        system_name, repo_url, commit_hash, derivation_hash
+    );
+
     let client = get_db_client().await?;
 
+    debug!("🔗 querying flake_id from repo_url: {}", repo_url);
     let flake_row = client
         .query_opt(
             "SELECT id FROM tbl_flakes WHERE repo_url = $1",
@@ -84,9 +90,12 @@ pub async fn insert_derivation_hash(
         )
         .await?
         .context("No flake entry found for given repo_url")?;
-
     let flake_id: i32 = flake_row.get("id");
 
+    debug!(
+        "🔗 querying commit_id for flake_id={} and commit_hash={}",
+        flake_id, commit_hash
+    );
     let commit_row = client
         .query_opt(
             "SELECT id FROM tbl_commits WHERE flake_id = $1 AND git_commit_hash = $2",
@@ -94,10 +103,14 @@ pub async fn insert_derivation_hash(
         )
         .await?
         .context("No commit entry found for given commit_hash and flake_id")?;
-
     let commit_id: i32 = commit_row.get("id");
 
-    client
+    debug!(
+        "📝 updating derivation_hash for system={} with commit_id={} and hash={}",
+        system_name, commit_id, derivation_hash
+    );
+
+    let updated = client
         .execute(
             "UPDATE tbl_system_builds
              SET derivation_hash = $3
@@ -106,7 +119,15 @@ pub async fn insert_derivation_hash(
         )
         .await?;
 
-    info!("✅ updated derivation: {system_name} => {derivation_hash}");
+    if updated == 0 {
+        warn!(
+            "⚠️ no rows updated for system={} commit_id={}",
+            system_name, commit_id
+        );
+    } else {
+        info!("✅ updated derivation: {system_name} => {derivation_hash}");
+    }
+
     Ok(())
 }
 
