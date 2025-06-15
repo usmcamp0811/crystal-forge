@@ -2,7 +2,7 @@
 //! configurations and streaming derivations to process them. It uses injected
 //! async functions for persistence and derivation processing.
 
-use crate::db::{insert_commit, insert_derivation_hash};
+use crate::db::{insert_commit, insert_derivation_hash, insert_system_name};
 use crate::flake_watcher::{get_nixos_configurations, stream_derivations};
 use axum::{Json, http::StatusCode};
 use serde_json::Value;
@@ -74,7 +74,6 @@ where
 {
     info!("📩 Received webhook payload");
 
-    // Extract repo URL from payload
     let Some(repo_url) = payload
         .pointer("/repository/clone_url")
         .or_else(|| payload.pointer("/project/web_url"))
@@ -85,7 +84,6 @@ where
         return StatusCode::BAD_REQUEST;
     };
 
-    // Extract commit hash from payload
     let Some(commit_hash) = payload
         .pointer("/after")
         .or_else(|| payload.pointer("/checkout_sha"))
@@ -98,13 +96,11 @@ where
 
     info!("🔗 Repo: {repo_url} @ {commit_hash}");
 
-    // Insert the commit record
     if let Err(e) = insert_commit_fn(&commit_hash, &repo_url).await {
         error!("❌ Failed to insert commit: {e:?}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
-    // Fetch NixOS configurations
     let configs = match get_configs_fn(repo_url.clone()).await {
         Ok(c) => {
             debug!("📦 Retrieved configurations: {:?}", c);
@@ -116,7 +112,14 @@ where
         }
     };
 
-    // Spawn background task for derivation streaming
+    // Insert each config into tbl_systems
+    for system_name in &configs {
+        if let Err(e) = insert_system_name(&commit_hash, &repo_url, system_name).await {
+            error!("❌ Failed to insert system name {system_name}: {e:?}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    }
+
     tokio::spawn({
         let repo_url_outer = repo_url.clone();
         let commit_hash_outer = commit_hash.clone();
@@ -137,7 +140,6 @@ where
                 })));
 
             stream_fn(configs, &repo_url_outer, handle_result).await;
-
             info!("✅ Finished streaming derivations for {repo_url_outer}");
         }
     });
