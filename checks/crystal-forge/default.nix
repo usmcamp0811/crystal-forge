@@ -53,6 +53,7 @@ in
         services.crystal-forge = {
           enable = true;
           local-database = true;
+                        log_level = "debug";
           database = {
             user = "crystal_forge";
             dbname = "crystal_forge";

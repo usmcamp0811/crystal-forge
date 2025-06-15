@@ -36,6 +36,10 @@
 in {
   options.services.crystal-forge = {
     enable = lib.mkEnableOption "Enable the Crystal Forge service(s)";
+    log_level = lib.mkOption {
+      type = lib.types.enum ["off" "error" "warn" "info" "debug" "trace"];
+      default = "info";
+    };
     configPath = lib.mkOption {
       type = lib.types.path;
       default = generatedConfigPath;
@@ -131,6 +135,7 @@ in {
       wants = ["postgresql.service"];
       environment =
         {
+          RUST_LOG = cfg.log_level;
           CRYSTAL_FORGE__SERVER__HOST = cfg.server.host;
           CRYSTAL_FORGE__SERVER__PORT = toString cfg.server.port;
         }
@@ -164,6 +169,7 @@ in {
       wantedBy = ["multi-user.target"];
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
       environment = {
+        RUST_LOG = cfg.log_level;
         CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
         CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
         CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
