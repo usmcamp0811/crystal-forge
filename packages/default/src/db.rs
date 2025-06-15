@@ -23,8 +23,8 @@ pub async fn get_db_client() -> Result<Client> {
 }
 
 pub async fn insert_system_name(
-    repo_url: &str,
     commit_hash: &str,
+    repo_url: &str,
     system_name: &str,
 ) -> Result<()> {
     debug!(
