@@ -69,9 +69,13 @@ async fn main() -> anyhow::Result<()> {
     let state = CFState { authorized_keys };
 
     // Wrap database insert for derivation hash
-    let insert_derivation_hash_boxed = |a: String, b: String, c: String, d: String| {
-        Box::pin(async move { insert_derivation_hash(&a, &b, &c, &d).await }) as Pin<Box<_>>
-    };
+    let insert_derivation_hash_boxed =
+        |commit_hash: String, repo_url: String, system_name: String, derivation_hash: String| {
+            Box::pin(async move {
+                insert_derivation_hash(&commit_hash, &repo_url, &system_name, &derivation_hash)
+                    .await
+            }) as Pin<Box<_>>
+        };
 
     // Wrap commit insert
     let insert_commit_boxed = |commit: &str, repo: &str| {

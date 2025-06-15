@@ -68,7 +68,7 @@ where
 {
     info!("========== PROCESSING WEBHOOK ==========");
 
-    // Extract repo URL from payload
+    // Extract required fields
     let Some(repo_url) = payload
         .pointer("/repository/clone_url")
         .or_else(|| payload.pointer("/project/web_url"))
@@ -78,7 +78,6 @@ where
         return StatusCode::BAD_REQUEST;
     };
 
-    // Extract commit hash from payload
     let Some(commit_hash) = payload
         .pointer("/after")
         .or_else(|| payload.pointer("/checkout_sha"))
@@ -88,55 +87,81 @@ where
         return StatusCode::BAD_REQUEST;
     };
 
-    // Try to insert commit into DB
+    // Insert the commit
     if let Err(e) = insert_commit_fn(&commit_hash, &repo_url).await {
-        eprintln!("❌ insert_commit_fn failed: {e}");
+        error!("❌ Failed to insert commit: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
-    // Spawn async task to fetch and process configurations
-    tokio::spawn({
-        let repo_url_outer = repo_url.clone();
-        let commit_hash_outer = commit_hash.clone();
-
-        let get_configs_fn = get_configs_fn.clone();
-        let stream_fn = stream_fn.clone();
-        let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
-
-        async move {
-            println!("🔧 starting config fetch for {repo_url_outer}");
-            if let Ok(configs) = get_configs_fn(repo_url_outer.clone()).await {
-                println!("📦 fetched configs: {:?}", configs);
-
-                if configs.is_empty() {
-                    println!("⚠️ no configs found, exiting stream task");
-                    return;
-                }
-
-                let repo_url_for_closure = repo_url_outer.clone();
-                let handle_result: Arc<Mutex<BoxedHandler>> =
-                    Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
-                        let repo_url = repo_url_for_closure.clone();
-                        let commit_hash = commit_hash_outer.clone();
-                        println!("📝 handling system: {system} => {hash}");
-                        Box::pin({
-                            let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
-                            async move {
-                                if let Err(e) =
-                                    insert_deriv_hash_fn(commit_hash, repo_url, system, hash).await
-                                {
-                                    eprintln!("❌ insert_deriv_hash_fn failed: {e:?}");
-                                }
-                                Ok(())
-                            }
-                        })
-                    })));
-
-                stream_fn(configs, &repo_url_outer, handle_result).await;
-                debug!("✅ finished streaming derivations");
-            }
-        }
-    });
+    // Fire-and-forget task
+    tokio::spawn(run_config_streaming_task(
+        repo_url,
+        commit_hash,
+        get_configs_fn,
+        stream_fn,
+        insert_deriv_hash_fn,
+    ));
 
     StatusCode::ACCEPTED
+}
+
+async fn run_config_streaming_task<F2, F3, F4>(
+    repo_url: String,
+    commit_hash: String,
+    get_configs_fn: F2,
+    stream_fn: F3,
+    insert_deriv_hash_fn: F4,
+) where
+    F2: Fn(String) -> Pin<Box<dyn Future<Output = Result<Vec<String>, anyhow::Error>> + Send>>
+        + Clone
+        + Send
+        + 'static,
+    F3: Fn(Vec<String>, &str, Arc<Mutex<BoxedHandler>>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+        + Clone
+        + Send
+        + 'static,
+    F4: Fn(
+            String,
+            String,
+            String,
+            String,
+        ) -> Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    info!("🔧 Fetching configurations for {repo_url}");
+
+    let Ok(configs) = get_configs_fn(repo_url.clone()).await else {
+        error!("❌ Failed to fetch configs for {repo_url}");
+        return;
+    };
+
+    if configs.is_empty() {
+        warn!("⚠️ No NixOS configurations found in flake");
+        return;
+    }
+
+    let handler: Arc<Mutex<BoxedHandler>> = Arc::new(Mutex::new(Box::new({
+        let repo_url = repo_url.clone();
+        let commit_hash = commit_hash.clone();
+        let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
+
+        move |system, hash| {
+            let repo_url = repo_url.clone();
+            let commit_hash = commit_hash.clone();
+            let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
+
+            Box::pin(async move {
+                if let Err(e) = insert_deriv_hash_fn(commit_hash, repo_url, system, hash).await {
+                    error!("❌ Failed to insert derivation hash: {e:?}");
+                }
+                Ok(())
+            })
+        }
+    })));
+
+    stream_fn(configs, &repo_url, handler).await;
+    debug!("✅ Finished streaming derivations");
 }
