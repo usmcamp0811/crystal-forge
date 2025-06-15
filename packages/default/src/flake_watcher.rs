@@ -278,6 +278,8 @@ pub async fn stream_derivations(
     .into_iter()
     .collect::<Result<Vec<_>>>()?;
 
+    debug!("✅ systems_with_insert: {:?}", systems_with_insert);
+
     stream::iter(systems_with_insert)
         .for_each_concurrent(8, {
             let path = path.clone();
