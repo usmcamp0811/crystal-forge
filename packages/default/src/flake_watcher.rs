@@ -137,10 +137,13 @@ pub async fn get_nixos_configurations_at_commit(
 /// # Returns
 /// * A string like `/nix/store/<hash>-toplevel`
 pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) -> Result<String> {
-    let is_path = Path::new(flake_url).exists();
+    debug!("🔍 Determining derivation for system: {system}, flake: {flake_url}, commit: {commit}");
 
-    // If it's a local path, check out the commit in-place
+    let is_path = Path::new(flake_url).exists();
+    debug!("📁 Is local path: {is_path}");
+
     if is_path {
+        debug!("📌 Running 'git checkout {commit}' in {flake_url}");
         let status = Command::new("git")
             .args(["-C", flake_url, "checkout", commit])
             .status()
@@ -148,14 +151,13 @@ pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) 
 
         if !status.success() {
             anyhow::bail!(
-                "git checkout failed for path {} at rev {}",
+                "❌ git checkout failed for path {} at rev {}",
                 flake_url,
                 commit
             );
         }
     }
 
-    // Construct flake target
     let flake_target = if is_path {
         format!("{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel")
     } else if flake_url.starts_with("git+") {
@@ -168,7 +170,8 @@ pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) 
         )
     };
 
-    // Run dry build to get the output path
+    debug!("🔨 Building flake target: {flake_target} (dry-run)");
+
     let output = Command::new("nix")
         .args(["build", &flake_target, "--dry-run", "--json"])
         .output()
@@ -176,17 +179,18 @@ pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) 
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("❌ nix build failed: {}", stderr.trim());
         anyhow::bail!("nix build failed: {}", stderr.trim());
     }
 
-    // Parse output and extract .outputs.out
     let parsed: Value = serde_json::from_slice(&output.stdout)?;
     let hash = parsed
         .get(0)
         .and_then(|v| v["outputs"]["out"].as_str())
-        .context("Missing derivation output in nix build output")?
+        .context("❌ Missing derivation output in nix build output")?
         .to_string();
 
+    debug!("✅ Derivation path for {system}: {hash}");
     Ok(hash)
 }
 
