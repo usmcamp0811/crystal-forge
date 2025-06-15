@@ -144,7 +144,7 @@ where
             let commit_hash_outer = commit_hash.clone();
 
             let repo_url_for_closure = repo_url_outer.clone();
-            let repo_url_for_stream = repo_url_for_closure.clone(); // <== clone for outside use
+            let repo_url_for_stream = repo_url_for_closure.clone();
             let repo_url_for_log = repo_url_outer.clone();
 
             let handle_result: Arc<Mutex<BoxedHandler>> =
