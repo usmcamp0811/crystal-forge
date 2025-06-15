@@ -105,7 +105,7 @@ pub async fn get_nixos_configurations_at_commit(
     // Run `nix flake show` on the constructed flake URI
     let output = timeout(
         Duration::from_secs(30),
-        Command::new("nix")
+        Command::new("/run/current-system/sw/bin/nix")
             .args(["flake", "show", "--json", &flake_uri])
             .output(),
     )
