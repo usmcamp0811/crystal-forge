@@ -56,7 +56,11 @@ where
         + Sync
         + Clone
         + 'static,
-    F3: Fn(Vec<String>, &str, Arc<Mutex<BoxedHandler>>) -> Pin<Box<dyn Future<Output = ()> + Send>>
+    F3: Fn(
+            Vec<String>,
+            &str,
+            Arc<Mutex<BoxedHandler>>,
+        ) -> Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
         + Send
         + Sync
         + Clone
@@ -120,26 +124,26 @@ where
         }
     }
 
-    tokio::spawn({
+    tokio::spawn(async move {
         let repo_url_outer = repo_url.clone();
         let commit_hash_outer = commit_hash.clone();
         let stream_fn = stream_fn.clone();
         let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
         let configs = configs.clone();
+        info!("🔧 Starting derivation stream for: {repo_url_outer}");
 
-        async move {
-            info!("🔧 Starting derivation stream for: {repo_url_outer}");
+        let repo_url_for_closure = repo_url_outer.clone();
+        let handle_result: Arc<Mutex<BoxedHandler>> =
+            Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
+                let repo_url = repo_url_for_closure.clone();
+                let commit_hash = commit_hash_outer.clone();
+                debug!("📝 Handling derivation: system={system}, hash={hash}");
+                Box::pin(insert_deriv_hash_fn(commit_hash, repo_url, system, hash))
+            })));
 
-            let repo_url_for_closure = repo_url_outer.clone();
-            let handle_result: Arc<Mutex<BoxedHandler>> =
-                Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
-                    let repo_url = repo_url_for_closure.clone();
-                    let commit_hash = commit_hash_outer.clone();
-                    debug!("📝 Handling derivation: system={system}, hash={hash}");
-                    Box::pin(insert_deriv_hash_fn(commit_hash, repo_url, system, hash))
-                })));
-
-            stream_fn(configs, &repo_url_outer, handle_result).await;
+        if let Err(e) = stream_fn(configs, &repo_url_outer, handle_result).await {
+            error!("❌ stream_fn failed: {:?}", e);
+        } else {
             info!("✅ Finished streaming derivations for {repo_url_outer}");
         }
     });

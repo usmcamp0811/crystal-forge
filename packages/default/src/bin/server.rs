@@ -121,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
 
                 // ✅ define stream_derivations_boxed now that commit_hash is available
                 let insert_system_fn = Arc::new(insert_system_name_boxed.clone());
+
                 let stream_derivations_boxed = {
                     let commit = commit_hash.clone();
                     move |systems: Vec<String>,
@@ -130,15 +131,16 @@ async fn main() -> anyhow::Result<()> {
                         let commit = commit.clone();
                         let insert_system_fn = insert_system_fn.clone();
                         Box::pin(async move {
-                            let _ = stream_derivations(
+                            stream_derivations(
                                 systems,
                                 &flake_url,
                                 &commit,
                                 insert_system_fn,
                                 handler,
                             )
-                            .await;
-                        }) as Pin<Box<dyn Future<Output = ()> + Send>>
+                            .await
+                        })
+                            as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
                     }
                 };
 
