@@ -282,7 +282,7 @@ pub async fn stream_derivations(
         let repo_url = path.clone();
         let commit = commit.clone();
         async move {
-            insert_system_fn(repo_url.clone(), commit.clone(), system.clone()).await?;
+            insert_system_fn(commit.clone(), repo_url.clone(), system.clone()).await?;
             Ok(system)
         }
     }))
