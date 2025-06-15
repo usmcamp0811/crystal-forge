@@ -40,7 +40,7 @@ pub async fn insert_system_name(
             &[&repo_url],
         )
         .await?
-        .context("No flake entry found for given repo_url")?;
+        .with_context(|| format!("No flake entry found for given repo_url: {}", repo_url))?;
 
     let flake_id: i32 = flake_row.get("id");
 
