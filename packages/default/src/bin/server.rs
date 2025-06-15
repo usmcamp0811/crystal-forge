@@ -100,13 +100,20 @@ async fn main() -> anyhow::Result<()> {
                 match result {
                     Ok(hash) => {
                         if let Err(e) =
-                            insert_derivation_hash(&system_name, &hash, &flake_url, &commit).await
+                            insert_derivation_hash(&commit, &flake_url, &system_name, &hash).await
                         {
-                            tracing::error!("❌ insert_derivation_hash failed: {e}");
+                            tracing::error!(
+                                "❌ insert_derivation_hash failed: {} --> {}, {}, {}, {}",
+                                e,
+                                system_name,
+                                hash,
+                                flake_url,
+                                commit
+                            );
                         }
                     }
                     Err(e) => {
-                        tracing::error!("❌ get_system_derivation failed: {e}");
+                        tracing::error!("❌ get_system_derivation failed: {}", e);
                     }
                 }
             }
