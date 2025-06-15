@@ -142,13 +142,12 @@ async fn run_config_streaming_task<F2, F3, F4>(
         warn!("⚠️ No NixOS configurations found in flake");
         return;
     }
-
-    let handler: Arc<Mutex<BoxedHandler>> = Arc::new(Mutex::new(Box::new({
+    let handler: Arc<Mutex<BoxedHandler>> = {
         let repo_url = repo_url.clone();
         let commit_hash = commit_hash.clone();
         let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
 
-        move |system, hash| {
+        Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
             let repo_url = repo_url.clone();
             let commit_hash = commit_hash.clone();
             let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
@@ -159,8 +158,8 @@ async fn run_config_streaming_task<F2, F3, F4>(
                 }
                 Ok(())
             })
-        }
-    })));
+        })))
+    };
 
     stream_fn(configs, &repo_url, handler).await;
     debug!("✅ Finished streaming derivations");
