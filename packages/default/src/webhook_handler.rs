@@ -132,6 +132,7 @@ where
                 }
             };
 
+            // commit_hash and repo_url are swapped i need to find where they got swapped
             for system_name in &configs {
                 if let Err(e) = insert_system_name(&commit_hash, &repo_url, system_name).await {
                     error!("❌ Failed to insert system name {system_name}: {e:?}");
@@ -151,7 +152,7 @@ where
                     let repo_url = repo_url_for_closure.clone();
                     let commit_hash = commit_hash_outer.clone();
                     debug!("📝 Handling derivation: system={system}, hash={hash}");
-                    Box::pin(insert_deriv_hash_fn(commit_hash, repo_url, system, hash))
+                    Box::pin(insert_deriv_hash_fn(system, hash, repo_url, commit_hash))
                 })));
 
             if let Err(e) = stream_fn(configs, &repo_url_for_stream, handle_result).await {
