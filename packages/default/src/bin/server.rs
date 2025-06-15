@@ -2,27 +2,28 @@
 /// Sets up database, loads config, inserts watched flakes, initializes routes,
 /// and starts the Axum HTTP server.
 use anyhow::Context;
-
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Request, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
 };
 use base64::{Engine as _, engine::general_purpose};
-use crystal_forge::config;
-use crystal_forge::db::{
-    init_db, insert_commit, insert_derivation_hash, insert_flake, insert_system_name,
-    insert_system_state,
+use crystal_forge::{
+    config,
+    db::{
+        init_db, insert_commit, insert_derivation_hash, insert_flake, insert_system_name,
+        insert_system_state,
+    },
+    flake_watcher::{get_nixos_configurations_at_commit, stream_derivations},
+    system_watcher::SystemPayload,
+    webhook_handler::{BoxedHandler, webhook_handler},
 };
-use crystal_forge::flake_watcher::{get_nixos_configurations_at_commit, stream_derivations};
-use crystal_forge::system_watcher::SystemPayload;
-use crystal_forge::webhook_handler::{BoxedHandler, webhook_handler};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::Value;
-use std::{collections::HashMap, ffi::OsStr, fs, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::EnvFilter;
@@ -71,11 +72,9 @@ async fn main() -> anyhow::Result<()> {
     // Wrap database insert for derivation hash
 
     let insert_derivation_hash_boxed =
-        |repo_url: String, commit_hash: String, system_name: String, derivation_hash: String| {
-            Box::pin(async move {
-                insert_derivation_hash(&repo_url, &commit_hash, &system_name, &derivation_hash)
-                    .await
-            }) as Pin<Box<_>>
+        |_commit: String, _repo: String, _system: String, _hash: String| {
+            Box::pin(async move { Ok(()) })
+                as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
         };
 
     // Wrap commit insert
