@@ -1,5 +1,9 @@
+//! This module handles incoming webhooks, triggering the fetching of NixOS
+//! configurations and streaming derivations to process them. It uses injected
+//! async functions for persistence and derivation processing.
+
 use crate::db::{insert_commit, insert_derivation_hash};
-use crate::flake_watcher::{get_all_derivations, get_nixos_configurations, stream_derivations};
+use crate::flake_watcher::{get_nixos_configurations, stream_derivations};
 use axum::{Json, http::StatusCode};
 use serde_json::Value;
 use std::future::Future;
@@ -8,12 +12,33 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+/// A boxed async handler for inserting a derivation hash.
+///
+/// This closure is expected to take the system name and derivation hash,
+/// and insert them into persistent storage.
 pub type BoxedHandler = Box<
     dyn Fn(String, String) -> Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
         + Send
         + Sync,
 >;
 
+/// Handles an incoming webhook request for a Git push or merge event.
+///
+/// Extracts the repo URL and commit hash from the payload, stores the commit,
+/// fetches the NixOS system configurations for the repo, and begins async
+/// processing of derivation hashes for those configurations.
+///
+/// # Parameters
+/// - `payload`: The webhook body as parsed JSON.
+/// - `insert_commit_fn`: Async function that inserts a commit into the database.
+/// - `get_configs_fn`: Async function that retrieves a list of NixOS system configurations from the repo.
+/// - `stream_fn`: Async function that evaluates derivations and handles each result.
+/// - `insert_deriv_hash_fn`: Async function that stores derivation hashes.
+///
+/// # Returns
+/// - [`StatusCode::ACCEPTED`] if the webhook was valid and processing was started.
+/// - [`StatusCode::BAD_REQUEST`] if required fields were missing.
+/// - [`StatusCode::INTERNAL_SERVER_ERROR`] if a DB or config operation failed.
 pub async fn webhook_handler<F1, F2, F3, F4>(
     payload: Value,
     insert_commit_fn: F1,
@@ -47,114 +72,75 @@ where
         + Clone
         + 'static,
 {
-    info!("========== PROCESSING WEBHOOK ==========");
+    info!("📩 Received webhook payload");
 
+    // Extract repo URL from payload
     let Some(repo_url) = payload
         .pointer("/repository/clone_url")
         .or_else(|| payload.pointer("/project/web_url"))
         .and_then(|v| v.as_str())
         .map(String::from)
     else {
+        warn!("⚠️ Could not extract repository URL from payload");
         return StatusCode::BAD_REQUEST;
     };
 
+    // Extract commit hash from payload
     let Some(commit_hash) = payload
         .pointer("/after")
         .or_else(|| payload.pointer("/checkout_sha"))
         .and_then(|v| v.as_str())
         .map(String::from)
     else {
+        warn!("⚠️ Could not extract commit hash from payload");
         return StatusCode::BAD_REQUEST;
     };
 
+    info!("🔗 Repo: {repo_url} @ {commit_hash}");
+
+    // Insert the commit record
     if let Err(e) = insert_commit_fn(&commit_hash, &repo_url).await {
-        error!("❌ Failed to insert commit: {e}");
+        error!("❌ Failed to insert commit: {e:?}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
-    let get_configs = get_configs_fn.clone();
-    let Ok(systems) = get_configs(repo_url.clone()).await else {
-        error!("❌ Failed to get nixos configurations for: {repo_url}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
+    // Fetch NixOS configurations
+    let configs = match get_configs_fn(repo_url.clone()).await {
+        Ok(c) => {
+            debug!("📦 Retrieved configurations: {:?}", c);
+            c
+        }
+        Err(err) => {
+            error!("❌ Failed to get configurations: {err:?}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
     };
 
-    let stream = stream_fn.clone();
-    let insert = insert_deriv_hash_fn.clone();
-    let repo_for_spawn = repo_url.clone();
-    let commit_for_spawn = commit_hash.clone();
-    let systems_for_spawn = systems.clone();
+    // Spawn background task for derivation streaming
+    tokio::spawn({
+        let repo_url_outer = repo_url.clone();
+        let commit_hash_outer = commit_hash.clone();
+        let stream_fn = stream_fn.clone();
+        let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
+        let configs = configs.clone();
 
-    tokio::spawn(async move {
-        run_config_streaming_task(
-            systems_for_spawn,
-            repo_for_spawn,
-            commit_for_spawn,
-            stream,
-            insert,
-        )
-        .await;
-    });
+        async move {
+            info!("🔧 Starting derivation stream for: {repo_url_outer}");
 
-    tokio::spawn(async move {
-        match get_all_derivations(systems, &repo_url, &commit_hash).await {
-            Ok(results) => {
-                for (system, hash) in results {
-                    debug!("✅ {system} => {hash}");
-                }
-            }
-            Err(e) => error!("❌ get_all_derivations failed: {e:?}"),
+            let repo_url_for_closure = repo_url_outer.clone();
+            let handle_result: Arc<Mutex<BoxedHandler>> =
+                Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
+                    let repo_url = repo_url_for_closure.clone();
+                    let commit_hash = commit_hash_outer.clone();
+                    debug!("📝 Handling derivation: system={system}, hash={hash}");
+                    Box::pin(insert_deriv_hash_fn(commit_hash, repo_url, system, hash))
+                })));
+
+            stream_fn(configs, &repo_url_outer, handle_result).await;
+
+            info!("✅ Finished streaming derivations for {repo_url_outer}");
         }
     });
 
     StatusCode::ACCEPTED
-}
-
-async fn run_config_streaming_task<F3, F4>(
-    systems: Vec<String>,
-    repo_url: String,
-    commit_hash: String,
-    stream_fn: F3,
-    insert_deriv_hash_fn: F4,
-) where
-    F3: Fn(Vec<String>, &str, Arc<Mutex<BoxedHandler>>) -> Pin<Box<dyn Future<Output = ()> + Send>>
-        + Clone
-        + Send
-        + 'static,
-    F4: Fn(
-            String,
-            String,
-            String,
-            String,
-        ) -> Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    if systems.is_empty() {
-        warn!("⚠️ No NixOS configurations found in flake");
-        return;
-    }
-
-    let handler: Arc<Mutex<BoxedHandler>> = {
-        let repo_url = repo_url.clone();
-        let commit_hash = commit_hash.clone();
-        let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
-
-        Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
-            let repo_url = repo_url.clone();
-            let commit_hash = commit_hash.clone();
-            let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
-
-            Box::pin(async move {
-                if let Err(e) = insert_deriv_hash_fn(commit_hash, repo_url, system, hash).await {
-                    error!("❌ Failed to insert derivation hash: {e:?}");
-                }
-                Ok(())
-            })
-        })))
-    };
-
-    stream_fn(systems, &repo_url, handler).await;
-    debug!("✅ Finished streaming derivations");
 }
