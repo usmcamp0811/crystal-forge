@@ -53,6 +53,7 @@ in
         services.crystal-forge = {
           enable = true;
           local-database = true;
+                        log_level = "debug";
           database = {
             user = "crystal_forge";
             dbname = "crystal_forge";
@@ -94,7 +95,7 @@ in
         };
       };
     };
-
+    globalTimeout = 600;
     extraPythonPackages = p: [p.pytest];
     testScript = ''
       import pytest

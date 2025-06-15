@@ -1,6 +1,9 @@
+use crate::db::{insert_derivation_hash, insert_system_name};
+
 use anyhow::{Context, Result};
 use futures::future::join_all;
-use futures::{StreamExt, stream};
+use futures::stream::iter;
+use futures::stream::{self, StreamExt};
 use serde_json::Value;
 use std::future::Future;
 use std::path::Path;
@@ -11,6 +14,8 @@ use tempfile::tempdir;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::time::{Duration, timeout};
+use tracing::{debug, error, info, trace, warn};
 /// Parses a Nix flake and extracts the defined NixOS configuration names.
 ///
 /// # Arguments
@@ -39,7 +44,7 @@ pub async fn get_nixos_configurations(repo_url: String) -> anyhow::Result<Vec<St
         .cloned()
         .collect::<Vec<String>>();
 
-    println!("nixosConfigurations: {:?}", nixos_configs);
+    info!("nixosConfigurations: {:?}", nixos_configs);
     Ok(nixos_configs)
 }
 
@@ -64,6 +69,7 @@ pub async fn get_nixos_configurations_at_commit(
     repo_url: &str,
     commit: &str,
 ) -> Result<Vec<String>> {
+    debug!("🔍 get_nixos_configurations_at_commit called with repo_url={repo_url} commit={commit}");
     // Determine if the repo URL is a local path
     let is_path = Path::new(repo_url).exists();
 
@@ -95,17 +101,23 @@ pub async fn get_nixos_configurations_at_commit(
         }
     }
 
+    debug!("About to do `nix flake show --json`");
     // Run `nix flake show` on the constructed flake URI
-    let output = Command::new("nix")
-        .args(["flake", "show", "--json", &flake_uri])
-        .output()
-        .await?;
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new("nix")
+            .args(["flake", "show", "--json", &flake_uri])
+            .output(),
+    )
+    .await??; // unwrap timeout then result
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("❌ nix flake show failed for {flake_uri}: {stderr}");
         anyhow::bail!("nix flake show failed: {}", stderr.trim());
     }
 
+    debug!("✅ nix flake show completed");
     // Parse the output JSON
     let flake_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
@@ -117,7 +129,7 @@ pub async fn get_nixos_configurations_at_commit(
         .cloned()
         .collect::<Vec<String>>();
 
-    println!("nixosConfigurations: {:?}", nixos_configs);
+    debug!("nixosConfigurations: {:?}", nixos_configs);
     Ok(nixos_configs)
 }
 
@@ -132,11 +144,18 @@ pub async fn get_nixos_configurations_at_commit(
 ///
 /// # Returns
 /// * A string like `/nix/store/<hash>-toplevel`
-pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) -> Result<String> {
-    let is_path = Path::new(flake_url).exists();
+pub async fn get_system_derivation(
+    system: &str,
+    flake_url: &str,
+    commit: &str,
+) -> std::result::Result<String, anyhow::Error> {
+    debug!("🔍 Determining derivation for system: {system}, flake: {flake_url}, commit: {commit}");
 
-    // If it's a local path, check out the commit in-place
+    let is_path = Path::new(flake_url).exists();
+    debug!("📁 Is local path: {is_path}");
+
     if is_path {
+        debug!("📌 Running 'git checkout {commit}' in {flake_url}");
         let status = Command::new("git")
             .args(["-C", flake_url, "checkout", commit])
             .status()
@@ -144,14 +163,13 @@ pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) 
 
         if !status.success() {
             anyhow::bail!(
-                "git checkout failed for path {} at rev {}",
+                "❌ git checkout failed for path {} at rev {}",
                 flake_url,
                 commit
             );
         }
     }
 
-    // Construct flake target
     let flake_target = if is_path {
         format!("{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel")
     } else if flake_url.starts_with("git+") {
@@ -164,7 +182,8 @@ pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) 
         )
     };
 
-    // Run dry build to get the output path
+    debug!("🔨 Building flake target: {flake_target} (dry-run)");
+
     let output = Command::new("nix")
         .args(["build", &flake_target, "--dry-run", "--json"])
         .output()
@@ -172,17 +191,18 @@ pub async fn get_system_derivation(system: &str, flake_url: &str, commit: &str) 
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("❌ nix build failed: {}", stderr.trim());
         anyhow::bail!("nix build failed: {}", stderr.trim());
     }
 
-    // Parse output and extract .outputs.out
     let parsed: Value = serde_json::from_slice(&output.stdout)?;
     let hash = parsed
         .get(0)
         .and_then(|v| v["outputs"]["out"].as_str())
-        .context("Missing derivation output in nix build output")?
+        .context("❌ Missing derivation output in nix build output")?
         .to_string();
 
+    debug!("✅ Derivation path for {system}: {hash}");
     Ok(hash)
 }
 
@@ -237,36 +257,78 @@ pub async fn stream_derivations(
     systems: Vec<String>,
     flake_path: &str,
     commit_hash: &str,
+    insert_system_fn: Arc<
+        dyn Fn(String, String, String) -> Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            + Send
+            + Sync,
+    >,
     handle_result: Arc<
         Mutex<dyn FnMut(String, String) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send>,
     >,
 ) -> Result<()> {
+    info!(
+        "🌀 starting stream_derivations for {} systems at commit {}",
+        systems.len(),
+        commit_hash
+    );
+
+    // insert all systems into db
+    for system in &systems {
+        insert_system_name(commit_hash, flake_path, system).await?;
+    }
+
     let path = flake_path.to_string();
     let commit = commit_hash.to_string();
+    let insert_system_fn = insert_system_fn.clone();
 
-    stream::iter(systems)
-        .map(move |system: String| {
+    let systems_with_insert = futures::future::join_all(systems.into_iter().map(|system| {
+        let insert_system_fn = insert_system_fn.clone();
+        let repo_url = path.clone();
+        let commit = commit.clone();
+        async move {
+            insert_system_fn(commit.clone(), repo_url.clone(), system.clone()).await?;
+            Ok(system)
+        }
+    }))
+    .await
+    .into_iter()
+    .collect::<Result<Vec<_>>>()?;
+
+    debug!("✅ systems_with_insert: {:?}", systems_with_insert);
+
+    stream::iter(systems_with_insert)
+        .for_each_concurrent(8, {
             let path = path.clone();
             let commit = commit.clone();
-            async move {
-                let hash = get_system_derivation(&system, &path, &commit).await?;
-                Ok::<(String, String), anyhow::Error>((system, hash))
-            }
-        })
-        .buffer_unordered(8)
-        .for_each_concurrent(None, {
             let handle_result = handle_result.clone();
-            move |result| {
+
+            move |system: String| {
+                let path = path.clone();
+                let commit = commit.clone();
                 let handle_result = handle_result.clone();
+
                 async move {
-                    match result {
-                        Ok((system, hash)) => {
-                            if let Err(e) = handle_result.lock().await(system, hash).await {
-                                eprintln!("Failed to handle result: {e}");
+                    debug!("🔧 fetching derivation for system: {}", system);
+                    match get_system_derivation(&system, &path, &commit).await {
+                        Ok(hash) => {
+                            debug!("📦 got derivation: {} => {}", system, hash);
+                            let hash_ref = &hash;
+                            if let Err(e) =
+                                handle_result.lock().await(system.clone(), hash.clone()).await
+                            {
+                                error!("❌ handler failed for {}: {:?}", system, e);
+                            }
+                            if let Err(e) =
+                                insert_derivation_hash(&commit, &path, &system, hash_ref).await
+                            {
+                                error!(
+                                    "❌ failed to insert derivation hash for {}: {:?}",
+                                    system, e
+                                );
                             }
                         }
                         Err(e) => {
-                            eprintln!("Error calculating derivation: {e}");
+                            error!("❌ failed to get derivation for {}: {:?}", system, e);
                         }
                     }
                 }
@@ -274,5 +336,6 @@ pub async fn stream_derivations(
         })
         .await;
 
+    info!("🎯 finished stream_derivations for commit {}", commit_hash);
     Ok(())
 }

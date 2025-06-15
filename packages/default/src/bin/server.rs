@@ -1,28 +1,33 @@
 /// Main entry point for the Crystal Forge server.
 /// Sets up database, loads config, inserts watched flakes, initializes routes,
 /// and starts the Axum HTTP server.
-use anyhow::Context;
-
+use anyhow::{Context, Result};
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Request, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
 };
 use base64::{Engine as _, engine::general_purpose};
-use crystal_forge::config;
-use crystal_forge::db::{
-    init_db, insert_commit, insert_derivation_hash, insert_flake, insert_system_state,
+use crystal_forge::flake_watcher::get_system_derivation;
+use crystal_forge::{
+    config,
+    db::{
+        init_db, insert_commit, insert_derivation_hash, insert_flake, insert_system_name,
+        insert_system_state,
+    },
+    flake_watcher::{get_nixos_configurations_at_commit, stream_derivations},
+    system_watcher::SystemPayload,
+    webhook_handler::{BoxedHandler, webhook_handler},
 };
-use crystal_forge::flake_watcher::{get_nixos_configurations_at_commit, stream_derivations};
-use crystal_forge::system_watcher::SystemPayload;
-use crystal_forge::webhook_handler::{BoxedHandler, webhook_handler};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::Value;
-use std::{collections::HashMap, ffi::OsStr, fs, future::Future, pin::Pin, sync::Arc};
+use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::{net::TcpListener, sync::Mutex};
+use tracing::{debug, error, info, trace, warn};
+use tracing_subscriber::EnvFilter;
 
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]
@@ -32,6 +37,9 @@ struct CFState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env()) // uses RUST_LOG
+        .init();
     // Load and validate config
     let cfg = config::load_config()?;
     let db_url = cfg
@@ -49,24 +57,82 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // maybe we got a webhook trigger and for some reason something shit the bed and we were unable
+    // to get the systems in the commit; we don't want to just go the rest of our lives never knowing
+    // so we should at startup always go see if we can do better.
+    tokio::spawn(async {
+        if let Ok(entries) = crystal_forge::db::get_commits_without_systems().await {
+            for (commit, flake_url, flake_name) in entries {
+                tracing::info!("📦 queued eval: {flake_name} {flake_url} {commit}");
+                let result: std::result::Result<Vec<String>, anyhow::Error> =
+                    get_nixos_configurations_at_commit(&flake_url, &commit).await;
+
+                match result {
+                    Ok(configs) => {
+                        for system_name in &configs {
+                            if let Err(e) =
+                                insert_system_name(&commit, &flake_url, system_name).await
+                            {
+                                tracing::error!(
+                                    "❌ Failed to insert system name {system_name}: {e:?}"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ get_nixos_configurations_at_commit failed: {e}");
+                    }
+                }
+            }
+        }
+    });
+
+    // Check if we have any systems that dont have derivation_hash values.
+    // This is meant to be a catch all in case we crash or otherwise restart
+    // during the processing of a webhook.
+    tokio::spawn(async {
+        if let Ok(entries) = crystal_forge::db::get_systems_to_eval().await {
+            for (flake_name, flake_url, commit, system_name) in entries {
+                tracing::info!("📦 queued eval: {flake_name} {flake_url} {commit} {system_name}");
+                let result: std::result::Result<String, anyhow::Error> =
+                    get_system_derivation(&system_name, &flake_url, &commit).await;
+                match result {
+                    Ok(hash) => {
+                        if let Err(e) =
+                            insert_derivation_hash(&system_name, &hash, &flake_url, &commit).await
+                        {
+                            tracing::error!("❌ insert_derivation_hash failed: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("❌ get_system_derivation failed: {e}");
+                    }
+                }
+            }
+        }
+    });
+
     // Start logs and diagnostics
-    println!("Starting Crystal Forge Server...");
+    info!("Starting Crystal Forge Server...");
     let server_cfg = cfg
         .server
         .as_ref()
         .expect("missing [server] section in config");
-    println!("Host: 0.0.0.0");
-    println!("Port: {}", server_cfg.port);
-    tracing_subscriber::fmt::init();
+    info!("Host: 0.0.0.0");
+    info!("Port: {}", server_cfg.port);
 
     // Decode and parse all authorized public keys
     let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
     let state = CFState { authorized_keys };
 
     // Wrap database insert for derivation hash
-    let insert_derivation_hash_boxed = |a: String, b: String, c: String, d: String| {
-        Box::pin(async move { insert_derivation_hash(&a, &b, &c, &d).await }) as Pin<Box<_>>
-    };
+
+    let insert_derivation_hash_boxed =
+        |_commit: String, _repo: String, _system: String, _hash: String| {
+            Box::pin(async move { Ok(()) })
+                as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
+        };
 
     // Wrap commit insert
     let insert_commit_boxed = |commit: &str, repo: &str| {
@@ -76,6 +142,10 @@ async fn main() -> anyhow::Result<()> {
             as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
     };
 
+    let insert_system_name_boxed = |commit_hash: String, repo_url: String, system_name: String| {
+        Box::pin(async move { insert_system_name(&commit_hash, &repo_url, &system_name).await })
+            as Pin<Box<_>>
+    };
     /// Handler function for the `/webhook` route. Extracts payload,
     /// builds config lookup closure, and invokes main `webhook_handler`.
     let webhook_handler_wrap = {
@@ -107,6 +177,8 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 // ✅ define stream_derivations_boxed now that commit_hash is available
+                let insert_system_fn = Arc::new(insert_system_name_boxed.clone());
+
                 let stream_derivations_boxed = {
                     let commit = commit_hash.clone();
                     move |systems: Vec<String>,
@@ -114,9 +186,18 @@ async fn main() -> anyhow::Result<()> {
                           handler: Arc<Mutex<BoxedHandler>>| {
                         let flake_url = flake_url.to_string();
                         let commit = commit.clone();
+                        let insert_system_fn = insert_system_fn.clone();
                         Box::pin(async move {
-                            let _ = stream_derivations(systems, &flake_url, &commit, handler).await;
-                        }) as Pin<Box<dyn Future<Output = ()> + Send>>
+                            stream_derivations(
+                                systems,
+                                &flake_url,
+                                &commit,
+                                insert_system_fn,
+                                handler,
+                            )
+                            .await
+                        })
+                            as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
                     }
                 };
 
@@ -238,7 +319,7 @@ async fn handle_current_system(
         }
     };
 
-    println!(
+    info!(
         "✅ accepted from {key_id}: hostname={}, hash={}, context={}, fingerprint={:?}",
         payload.hostname, payload.system_hash, payload.context, payload.fingerprint
     );
