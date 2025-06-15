@@ -99,6 +99,7 @@ pub async fn get_nixos_configurations_at_commit(
         }
     }
 
+    debug!("About to do `nix flake show --json`");
     // Run `nix flake show` on the constructed flake URI
     let output = Command::new("nix")
         .args(["flake", "show", "--json", &flake_uri])
@@ -109,6 +110,7 @@ pub async fn get_nixos_configurations_at_commit(
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("nix flake show failed: {}", stderr.trim());
     }
+    debug!("`nix flake show` complete");
 
     // Parse the output JSON
     let flake_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
