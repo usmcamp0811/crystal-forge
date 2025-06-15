@@ -39,6 +39,7 @@ pub type BoxedHandler = Box<
 /// - [`StatusCode::ACCEPTED`] if the webhook was valid and processing was started.
 /// - [`StatusCode::BAD_REQUEST`] if required fields were missing.
 /// - [`StatusCode::INTERNAL_SERVER_ERROR`] if a DB or config operation failed.
+
 pub async fn webhook_handler<F1, F2, F3, F4>(
     payload: Value,
     insert_commit_fn: F1,
@@ -100,51 +101,64 @@ where
 
     info!("🔗 Repo: {repo_url} @ {commit_hash}");
 
-    if let Err(e) = insert_commit_fn(&commit_hash, &repo_url).await {
-        error!("❌ Failed to insert commit: {e:?}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
+    // Do lightweight validation up front, spawn the rest
+    let insert_commit_fn = Arc::new(insert_commit_fn);
+    let get_configs_fn = Arc::new(get_configs_fn);
+    let stream_fn = Arc::new(stream_fn);
+    let insert_deriv_hash_fn = Arc::new(insert_deriv_hash_fn);
 
-    let configs = match get_configs_fn(repo_url.clone()).await {
-        Ok(c) => {
-            debug!("📦 Retrieved configurations: {:?}", c);
-            c
-        }
-        Err(err) => {
-            error!("❌ Failed to get configurations: {err:?}");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    };
+    tokio::spawn({
+        let repo_url = repo_url.clone();
+        let commit_hash = commit_hash.clone();
+        let insert_commit_fn = Arc::clone(&insert_commit_fn);
+        let get_configs_fn = Arc::clone(&get_configs_fn);
+        let stream_fn = Arc::clone(&stream_fn);
+        let insert_deriv_hash_fn = Arc::clone(&insert_deriv_hash_fn);
 
-    // Insert each config into tbl_systems
-    for system_name in &configs {
-        if let Err(e) = insert_system_name(&commit_hash, &repo_url, system_name).await {
-            error!("❌ Failed to insert system name {system_name}: {e:?}");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    }
+        async move {
+            if let Err(e) = insert_commit_fn(&commit_hash, &repo_url).await {
+                error!("❌ Failed to insert commit: {e:?}");
+                return;
+            }
 
-    tokio::spawn(async move {
-        let repo_url_outer = repo_url.clone();
-        let commit_hash_outer = commit_hash.clone();
-        let stream_fn = stream_fn.clone();
-        let insert_deriv_hash_fn = insert_deriv_hash_fn.clone();
-        let configs = configs.clone();
-        info!("🔧 Starting derivation stream for: {repo_url_outer}");
+            let configs = match get_configs_fn(repo_url.clone()).await {
+                Ok(c) => {
+                    debug!("📦 Retrieved configurations: {:?}", c);
+                    c
+                }
+                Err(err) => {
+                    error!("❌ Failed to get configurations: {err:?}");
+                    return;
+                }
+            };
 
-        let repo_url_for_closure = repo_url_outer.clone();
-        let handle_result: Arc<Mutex<BoxedHandler>> =
-            Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
-                let repo_url = repo_url_for_closure.clone();
-                let commit_hash = commit_hash_outer.clone();
-                debug!("📝 Handling derivation: system={system}, hash={hash}");
-                Box::pin(insert_deriv_hash_fn(commit_hash, repo_url, system, hash))
-            })));
+            for system_name in &configs {
+                if let Err(e) = insert_system_name(&commit_hash, &repo_url, system_name).await {
+                    error!("❌ Failed to insert system name {system_name}: {e:?}");
+                    return;
+                }
+            }
 
-        if let Err(e) = stream_fn(configs, &repo_url_outer, handle_result).await {
-            error!("❌ stream_fn failed: {:?}", e);
-        } else {
-            info!("✅ Finished streaming derivations for {repo_url_outer}");
+            let repo_url_outer = repo_url.clone();
+            let commit_hash_outer = commit_hash.clone();
+
+            let repo_url_for_closure = repo_url_outer.clone();
+            let repo_url_for_stream = repo_url_for_closure.clone(); // <== clone for outside use
+            let repo_url_for_log = repo_url_outer.clone();
+
+            let handle_result: Arc<Mutex<BoxedHandler>> =
+                Arc::new(Mutex::new(Box::new(move |system: String, hash: String| {
+                    let repo_url = repo_url_for_closure.clone();
+                    let commit_hash = commit_hash_outer.clone();
+                    debug!("📝 Handling derivation: system={system}, hash={hash}");
+                    Box::pin(insert_deriv_hash_fn(commit_hash, repo_url, system, hash))
+                })));
+
+            if let Err(e) = stream_fn(configs, &repo_url_for_stream, handle_result).await {
+                error!("❌ stream_fn failed: {:?}", e);
+            } else {
+                info!("✅ Finished streaming derivations for {repo_url_for_log}");
+            }
         }
     });
 
