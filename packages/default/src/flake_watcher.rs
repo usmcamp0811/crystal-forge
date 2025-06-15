@@ -31,7 +31,7 @@ use tracing::{debug, error, info, trace, warn};
 /// Returns an error if the `nix flake show` command fails or if the output
 /// cannot be parsed as valid JSON.
 pub async fn get_nixos_configurations(repo_url: String) -> anyhow::Result<Vec<String>> {
-    let flake_show = Command::new("nix")
+    let flake_show = Command::new("/run/current-system/sw/bin/nix")
         .args(["flake", "show", "--json", &repo_url])
         .output()
         .await?;
