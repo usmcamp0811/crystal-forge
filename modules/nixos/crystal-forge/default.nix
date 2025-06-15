@@ -24,6 +24,14 @@
     };
   };
 
+  server = pkgs.writeShellApplication {
+    name = "server";
+    runtimeInputs = with pkgs; [nix git];
+    text = ''
+      ${pkgs.crystal-forge.server}/bin/server
+    '';
+  };
+
   generatedConfigPath = "/run/crystal-forge/config.toml";
 
   configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
@@ -155,7 +163,7 @@ in {
           (name: val: lib.nameValuePair "CRYSTAL_FORGE__FLAKES__WATCHED__${name}" val)
           cfg.flakes.watched);
       serviceConfig = {
-        ExecStart = "${pkgs.crystal-forge.server}/bin/server";
+        ExecStart = "${server}/bin/server";
         User = "root";
         Group = "root";
         RuntimeDirectory = "crystal-forge";
