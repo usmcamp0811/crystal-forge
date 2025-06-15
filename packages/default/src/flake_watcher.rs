@@ -1,4 +1,5 @@
 use crate::db::insert_system_name;
+
 use anyhow::{Context, Result};
 use futures::future::join_all;
 use futures::stream::iter;
@@ -13,6 +14,7 @@ use tempfile::tempdir;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::time::{Duration, timeout};
 use tracing::{debug, error, info, trace, warn};
 /// Parses a Nix flake and extracts the defined NixOS configuration names.
 ///
@@ -101,17 +103,21 @@ pub async fn get_nixos_configurations_at_commit(
 
     debug!("About to do `nix flake show --json`");
     // Run `nix flake show` on the constructed flake URI
-    let output = Command::new("nix")
-        .args(["flake", "show", "--json", &flake_uri])
-        .output()
-        .await?;
+    let output = timeout(
+        Duration::from_secs(30),
+        Command::new("nix")
+            .args(["flake", "show", "--json", &flake_uri])
+            .output(),
+    )
+    .await??; // unwrap timeout then result
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("❌ nix flake show failed for {flake_uri}: {stderr}");
         anyhow::bail!("nix flake show failed: {}", stderr.trim());
     }
-    debug!("`nix flake show` complete");
 
+    debug!("✅ nix flake show completed");
     // Parse the output JSON
     let flake_json: serde_json::Value = serde_json::from_slice(&output.stdout)?;
 
