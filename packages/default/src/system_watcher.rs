@@ -1,5 +1,5 @@
 use crate::config;
-use crate::sys_fingerprint::{FingerprintParts, get_fingerprint};
+use crate::models::systems::SystemState;
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -18,14 +18,6 @@ use std::{
 /// Reads a symlink and returns its target as a `PathBuf`.
 fn readlink_path(path: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(nix::fcntl::readlink(path)?))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SystemPayload {
-    pub hostname: String,
-    pub system_hash: String,
-    pub context: String,
-    pub fingerprint: FingerprintParts,
 }
 
 /// Posts the current Nix system derivation ID to a configured server.
@@ -63,13 +55,9 @@ pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
     let fingerprint = get_fingerprint()?;
 
     // construct payload to be sent to the server
-    let payload = SystemPayload {
-        hostname: hostname.clone(),
-        system_hash: system_hash,
-        context: context.to_string(),
-        fingerprint: fingerprint,
-    };
+    let payload = SystemState::gather(&hostname, context, &system_hash)?;
 
+    // Then serialize and send as before
     let payload_json = serde_json::to_string(&payload)?;
 
     // Load and decode private key from file

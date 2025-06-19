@@ -1,5 +1,6 @@
 use axum::{Json, http::StatusCode};
 use crystal_forge::flake_watcher::{get_nixos_configurations_at_commit, stream_derivations};
+use crystal_forge::models::systems::SystemState;
 use crystal_forge::webhook_handler::{BoxedHandler, webhook_handler};
 use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
@@ -48,7 +49,7 @@ async fn handle_current_system(
     }
 
     // Deserialize JSON payload
-    let payload: SystemPayload = match serde_json::from_slice(&body) {
+    let payload: SystemState = match serde_json::from_slice(&body) {
         Ok(p) => p,
         Err(e) => {
             eprintln!(
@@ -65,14 +66,8 @@ async fn handle_current_system(
     );
 
     // Insert system state into DB
-    if let Err(e) = insert_system_state(
-        &payload.hostname,
-        &payload.context,
-        &payload.system_hash,
-        &payload.fingerprint,
-    )
-    .await
-    {
+
+    if let Err(e) = insert_system_state(&payload).await {
         eprintln!("❌ failed to insert into DB: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
