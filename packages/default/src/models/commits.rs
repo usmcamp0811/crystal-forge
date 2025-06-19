@@ -9,3 +9,9 @@ pub struct Commit {
     pub git_commit_hash: String,
     pub commit_timestamp: DateTime<Utc>,
 }
+
+pub struct PendingCommit {
+    pub commit_hash: String,
+    pub repo_url: String,
+    pub flake_name: String,
+}
