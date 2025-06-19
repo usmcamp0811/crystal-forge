@@ -63,7 +63,7 @@ pub async fn get_all_derivations(
 /// # Returns
 ///
 /// * `Ok(())` if all derivations are handled successfully, or early logs on failure.
-pub async fn stream_derivations(
+pub async fn evaluate_derivations(
     systems: Vec<String>,
     flake_path: &str,
     commit_hash: &str,
