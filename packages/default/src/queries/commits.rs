@@ -1,5 +1,4 @@
-use crate::models::commit::Commit;
-use crate::models::pending_commits::PendingCommit;
+use crate::models::commit::{Commit, PendingCommit};
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 

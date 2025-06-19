@@ -11,6 +11,7 @@ pub struct PendingTarget {
     pub target: EvaluationTarget,
 }
 
+// Basically just derivations / outputs of a flake / aka System derivations
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct EvaluationTarget {
     pub id: i32,
