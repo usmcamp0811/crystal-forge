@@ -1,71 +1,74 @@
-pub async fn update_derivation_hash(
+use crate::pending_targets::PendingTarget;
+use futures::TryStreamExt;
+use futures::stream::Stream;
+
+pub async fn insert_evaluation_target(
     pool: &PgPool,
-    commit_hash: &str,
-    repo_url: &str,
+    commit: &Commit,
+    target_name: &str,
     target_type: &str,
-    hash: &str,
-) -> Result<()> {
-    let flake_id: (i32,) = sqlx::query_as("SELECT id FROM tbl_flakes WHERE repo_url = $1")
-        .bind(repo_url)
-        .fetch_optional(pool)
-        .await?
-        .context("No flake entry found")?;
-
-    let commit_id: (i32,) =
-        sqlx::query_as("SELECT id FROM tbl_commits WHERE flake_id = $1 AND git_commit_hash = $2")
-            .bind(flake_id.0)
-            .bind(commit_hash)
-            .fetch_optional(pool)
-            .await?
-            .context("No commit entry found")?;
-
-    let updated = sqlx::query(
-        r#"UPDATE tbl_evaluation_targets
-           SET hash = $3
-           WHERE commit_id = $1 AND type = $2 AND hash IS NULL"#,
+) -> Result<EvaluationTarget> {
+    let inserted = sqlx::query_as!(
+        EvaluationTarget,
+        r#"
+        INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (commit_id, target_type, target_name) DO UPDATE SET commit_id = EXCLUDED.commit_id
+        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp
+        "#,
+        commit.id,
+        target_type,
+        target_name
     )
-    .bind(commit_id.0)
-    .bind(target_type)
-    .bind(hash)
-    .execute(pool)
-    .await?
-    .rows_affected();
-
-    if updated == 0 {
-        warn!("no rows updated");
-    }
-
-    Ok(())
-}
-
-pub async fn insert_derivation(
-    pool: &PgPool,
-    commit_hash: &str,
-    repo_url: &str,
-    target_type: &str,
-) -> Result<()> {
-    let flake_id: (i32,) = sqlx::query_as("SELECT id FROM tbl_flakes WHERE repo_url = $1")
-        .bind(repo_url)
-        .fetch_optional(pool)
-        .await?
-        .context("No flake entry found")?;
-
-    let commit_id: (i32,) =
-        sqlx::query_as("SELECT id FROM tbl_commits WHERE flake_id = $1 AND git_commit_hash = $2")
-            .bind(flake_id.0)
-            .bind(commit_hash)
-            .fetch_optional(pool)
-            .await?
-            .context("No commit found")?;
-
-    sqlx::query(
-        r#"INSERT INTO tbl_evaluation_targets (commit_id, type)
-           VALUES ($1, $2) ON CONFLICT (commit_id, type) DO NOTHING"#,
-    )
-    .bind(commit_id.0)
-    .bind(target_type)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
 
-    Ok(())
+    Ok(inserted)
+}
+
+pub async fn update_evaluation_target_path(
+    pool: &PgPool,
+    target: &EvaluationTarget,
+    path: &str,
+) -> Result<EvaluationTarget> {
+    let updated = sqlx::query_as!(
+        EvaluationTarget,
+        r#"
+        UPDATE tbl_evaluation_targets
+        SET derivation_path = $1
+        WHERE commit_id = $2 AND target_type = $3 AND target_name = $4
+        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp
+        "#,
+        path,
+        target.commit_id,
+        target.target_type,
+        target.target_name
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(updated)
+}
+
+pub async fn list_pending_evaluation_targets(
+    pool: &PgPool,
+) -> Result<impl Stream<Item = Result<PendingTarget>>> {
+    let stream = sqlx::query!(
+        r#"
+        SELECT f.name, f.repo_url, c.git_commit_hash, d.target_type
+        FROM tbl_evaluation_targets d
+        JOIN tbl_commits c ON d.commit_id = c.id
+        JOIN tbl_flakes f ON c.flake_id = f.id
+        WHERE d.derivation_path IS NULL
+        "#
+    )
+    .fetch(pool)
+    .map_ok(|r| PendingTarget {
+        flake_name: r.name,
+        repo_url: r.repo_url,
+        commit_hash: r.git_commit_hash,
+        target_type: r.target_type,
+    });
+
+    Ok(stream)
 }
