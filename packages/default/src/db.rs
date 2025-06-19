@@ -1,15 +1,17 @@
 use crate::config;
+
 use crate::sys_fingerprint::FingerprintParts;
 use crate::system_watcher::SystemPayload;
 use anyhow::{Context, Result};
 use serde_json;
+use sqlx::{PgPool, Pool, Postgres};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::{env, fs};
 use tokio_postgres::{Client, NoTls};
 use tracing::{debug, error, info, trace, warn};
 
-pub async fn get_db_client() -> Result<Client> {
+pub async fn get_db_client() -> Result<PgPool> {
     let db_config = config::load_config()?;
     let db_url = db_config
         .database
@@ -17,9 +19,13 @@ pub async fn get_db_client() -> Result<Client> {
         .context("missing [database] section in config")?
         .to_url();
 
-    let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
-    tokio::spawn(connection);
-    Ok(client)
+    let pool = PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&db_url)
+        .await
+        .context("failed to connect to database")?;
+
+    Ok(pool)
 }
 
 // A function that gets all commits that do not have systems attached to them.
@@ -290,53 +296,5 @@ pub async fn insert_system_state(
 }
 
 pub async fn init_db() -> Result<()> {
-    let client = get_db_client().await?;
-    info!("======== INITIALIZING DATABASE ========");
-
-    client
-        .batch_execute(
-            "
-            CREATE TABLE IF NOT EXISTS tbl_flakes (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                repo_url TEXT NOT NULL UNIQUE
-            );
-
-            CREATE TABLE IF NOT EXISTS tbl_commits (
-                id SERIAL PRIMARY KEY,
-                flake_id INT NOT NULL REFERENCES tbl_flakes(id) ON DELETE CASCADE,
-                git_commit_hash TEXT NOT NULL,
-                commit_timestamp TIMESTAMPTZ NOT NULL,
-                UNIQUE(flake_id, git_commit_hash)
-            );
-
-            CREATE TABLE IF NOT EXISTS tbl_system_builds (
-                id SERIAL PRIMARY KEY,
-                commit_id INT NOT NULL REFERENCES tbl_commits(id) ON DELETE CASCADE,
-                system_name TEXT NOT NULL,
-                derivation_hash TEXT,
-                build_timestamp TIMESTAMPTZ DEFAULT now(),
-                UNIQUE(commit_id, system_name)
-            );
-
-            CREATE TABLE IF NOT EXISTS tbl_system_states (
-                id SERIAL PRIMARY KEY,
-                hostname TEXT NOT NULL,
-                system_derivation_id TEXT NOT NULL,
-                context TEXT NOT NULL,
-                os TEXT,
-                kernel TEXT,
-                memory_gb DOUBLE PRECISION,
-                uptime_secs BIGINT,
-                cpu_brand TEXT,
-                cpu_cores INT,
-                board_serial TEXT,
-                product_uuid TEXT,
-                rootfs_uuid TEXT
-            );
-            ",
-        )
-        .await?;
-
     Ok(())
 }

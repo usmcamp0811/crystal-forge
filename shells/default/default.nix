@@ -13,9 +13,9 @@ with lib.crystal-forge;
       rustc
       cargo
       pkg-config
-      openssl.dev
-      openssl.out
+      openssl
       fzf
+      sqlx-cli
     ];
 
     shellHook = ''

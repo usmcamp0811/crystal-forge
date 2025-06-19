@@ -15,7 +15,7 @@ use crystal_forge::flake_watcher::get_system_derivation;
 use crystal_forge::{
     config,
     db::{
-        init_db, insert_commit, insert_derivation_hash, insert_flake, insert_system_name,
+        get_db_client, insert_commit, insert_derivation_hash, insert_flake, insert_system_name,
         insert_system_state,
     },
     flake_watcher::{get_nixos_configurations_at_commit, stream_derivations},
@@ -24,6 +24,7 @@ use crystal_forge::{
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde_json::Value;
+use sqlx::postgres;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{debug, error, info, trace, warn};
@@ -48,7 +49,10 @@ async fn main() -> anyhow::Result<()> {
         .expect("missing [database] section in config")
         .to_url();
     config::validate_db_connection(&db_url).await?;
-    init_db().await?;
+
+    info!("======== INITIALIZING DATABASE ========");
+    let pool = get_db_client().await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
 
     // Insert any statically watched flakes into the database
     if let Some(watched) = &cfg.flakes {
