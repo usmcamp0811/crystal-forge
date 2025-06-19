@@ -9,22 +9,7 @@ pub struct Flake {
     pub repo_url: String,
 }
 
-#[derive(Debug, FromRow, Serialize, Deserialize)]
-pub struct Commit {
-    pub id: i32,
-    pub flake_id: i32,
-    pub git_commit_hash: String,
-    pub commit_timestamp: DateTime<Utc>,
-}
 
-#[derive(Debug, FromRow, Serialize, Deserialize)]
-pub struct SystemBuild {
-    pub id: i32,
-    pub commit_id: i32,
-    pub system_name: String,
-    pub derivation_hash: Option<String>,
-    pub build_timestamp: DateTime<Utc>,
-}
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct SystemState {

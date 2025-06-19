@@ -12,13 +12,14 @@ CREATE TABLE IF NOT EXISTS tbl_commits (
     UNIQUE (flake_id, git_commit_hash)
 );
 
-CREATE TABLE IF NOT EXISTS tbl_system_builds (
+CREATE TABLE IF NOT EXISTS tbl_evaluation_targets (
     id serial PRIMARY KEY,
     commit_id int NOT NULL REFERENCES tbl_commits (id) ON DELETE CASCADE,
-    system_name text NOT NULL,
+    target_type text NOT NULL,
+    target_name text NOT NULL,
     derivation_hash text,
     build_timestamp timestamptz DEFAULT now(),
-    UNIQUE (commit_id, system_name)
+    UNIQUE (commit_id, target_type, target_name)
 );
 
 CREATE TABLE IF NOT EXISTS tbl_system_states (
