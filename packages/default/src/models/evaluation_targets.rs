@@ -11,3 +11,20 @@ pub struct EvaluationTarget {
     pub derivation_hash: Option<String>,        // populated post-build
     pub build_timestamp: Option<DateTime<Utc>>, // nullable until built
 }
+
+enum TargetType {
+    NixOS,
+    HomeManager,
+}
+
+impl EvaluationTarget {
+    pub fn summary(&self) -> String {
+        commit_id = get_by_id
+        format!(
+            "{}@{} ({})",
+            flake_name,
+            commit,
+            self.target_name.as_deref().unwrap_or("unknown")
+        )
+    }
+}

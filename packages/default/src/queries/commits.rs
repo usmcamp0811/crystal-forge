@@ -16,3 +16,22 @@ pub async fn insert_commit(pool: &PgPool, commit_hash: &str, repo_url: &str) -> 
 
     Ok(())
 }
+
+pub async fn get_commit_by_hash(pool: &PgPool, commit_hash: &str) -> Result<Commit> {
+    let commit =
+        sqlx::query_as::<_, Commit>("SELECT * FROM tbl_commits WHERE git_commit_hash = $1")
+            .bind(commit_hash)
+            .fetch_one(pool)
+            .await?;
+
+    Ok(commit)
+}
+
+pub async fn get_commit_by_id(pool: &PgPool, id: &str) -> Result<Commit> {
+    let commit = sqlx::query_as::<_, Commit>("SELECT * FROM tbl_commits WHERE id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(commit)
+}

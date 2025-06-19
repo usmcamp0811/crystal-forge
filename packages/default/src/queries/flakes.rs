@@ -7,3 +7,4 @@ pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<(
 
     Ok(())
 }
+
