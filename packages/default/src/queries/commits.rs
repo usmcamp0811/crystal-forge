@@ -39,3 +39,26 @@ pub async fn get_commit_by_id(pool: &PgPool, id: &str) -> Result<Commit> {
 
     Ok(commit)
 }
+
+pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<PendingCommit>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT c.git_commit_hash, f.repo_url, f.name
+        FROM tbl_commits c
+        LEFT JOIN tbl_evaluation_targets t ON c.id = t.commit_id
+        INNER JOIN tbl_flakes f ON c.flake_id = f.id
+        WHERE t.commit_id IS NULL
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|r| PendingCommit {
+            commit_hash: r.git_commit_hash,
+            repo_url: r.repo_url,
+            flake_name: r.name,
+        })
+        .collect())
+}

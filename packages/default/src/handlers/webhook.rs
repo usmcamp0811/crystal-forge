@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
 
-pub fn handle_webhook(
+pub fn make_webhook_handler(
     insert_commit_boxed: impl Fn(&str, &str) -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send>>
     + Clone
     + Send

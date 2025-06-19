@@ -24,7 +24,7 @@ use handlers::current_system::handle_current_system;
 /// Main entry point for the Crystal Forge server.
 /// Sets up database, loads config, inserts watched flakes, initializes routes,
 /// and starts the Axum HTTP server.
-use handlers::webhook::handle_webhook;
+use handlers::webhook::make_webhook_handler;
 use serde_json::Value;
 use sqlx::postgres;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
@@ -138,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
     };
     /// Handler function for the `/webhook` route. Extracts payload,
     /// builds config lookup closure, and invokes main `webhook_handler`.
-    let webhook_handler_wrap = handle_webhook(
+    let handle_webhooks = make_webhook_handler(
         insert_commit_boxed,
         insert_derivation_hash_boxed,
         insert_system_name_boxed,
@@ -147,7 +147,7 @@ async fn main() -> anyhow::Result<()> {
     // Define application routes and state
     let app = Router::new()
         .route("/current-system", post(handle_current_system))
-        .route("/webhook", post(webhook_handler_wrap))
+        .route("/webhook", post(handle_webhooks))
         .with_state(state);
 
     // Bind TCP listener and start serving
