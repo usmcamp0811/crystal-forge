@@ -1,6 +1,3 @@
-/// Main entry point for the Crystal Forge server.
-/// Sets up database, loads config, inserts watched flakes, initializes routes,
-/// and starts the Axum HTTP server.
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -23,6 +20,11 @@ use crystal_forge::{
     webhook_handler::{BoxedHandler, webhook_handler},
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use handlers::current_system::handle_current_system;
+/// Main entry point for the Crystal Forge server.
+/// Sets up database, loads config, inserts watched flakes, initializes routes,
+/// and starts the Axum HTTP server.
+use handlers::webhook::handle_webhook;
 use serde_json::Value;
 use sqlx::postgres;
 use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
@@ -64,63 +66,40 @@ async fn main() -> anyhow::Result<()> {
     // maybe we got a webhook trigger and for some reason something shit the bed and we were unable
     // to get the systems in the commit; we don't want to just go the rest of our lives never knowing
     // so we should at startup always go see if we can do better.
-    tokio::spawn(async {
-        if let Ok(entries) = crystal_forge::db::get_commits_without_systems().await {
-            for (commit, flake_url, flake_name) in entries {
-                tracing::info!("📦 queued eval: {flake_name} {flake_url} {commit}");
-                let result: std::result::Result<Vec<String>, anyhow::Error> =
-                    get_nixos_configurations_at_commit(&flake_url, &commit).await;
-
-                match result {
-                    Ok(configs) => {
-                        for system_name in &configs {
-                            if let Err(e) =
-                                insert_system_name(&commit, &flake_url, system_name).await
-                            {
-                                tracing::error!(
-                                    "❌ Failed to insert system name {system_name}: {e:?}"
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ get_nixos_configurations_at_commit failed: {e}");
+    tokio::spawn(async move {
+        let pool = get_db_client().await.expect("db");
+        loop {
+            match get_pending_targets(&pool).await {
+                Ok(entries) => {
+                    for target in entries {
+                        // your async logic
                     }
                 }
+                Err(e) => {
+                    tracing::error!("❌ failed to get pending targets: {e}");
+                }
             }
+            tokio::time::sleep(Duration::from_secs(60)).await; // adjust as needed
         }
     });
 
     // Check if we have any systems that dont have derivation_hash values.
     // This is meant to be a catch all in case we crash or otherwise restart
     // during the processing of a webhook.
-    tokio::spawn(async {
-        if let Ok(entries) = crystal_forge::db::get_systems_to_eval().await {
-            for (flake_name, flake_url, commit, system_name) in entries {
-                tracing::info!("📦 queued eval: {flake_name} {flake_url} {commit} {system_name}");
-                let result: std::result::Result<String, anyhow::Error> =
-                    get_system_derivation(&system_name, &flake_url, &commit).await;
-                match result {
-                    Ok(hash) => {
-                        if let Err(e) =
-                            insert_derivation_hash(&commit, &flake_url, &system_name, &hash).await
-                        {
-                            tracing::error!(
-                                "❌ insert_derivation_hash failed: {} --> {}, {}, {}, {}",
-                                e,
-                                system_name,
-                                hash,
-                                flake_url,
-                                commit
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("❌ get_system_derivation failed: {}", e);
+    tokio::spawn(async move {
+        let pool = get_db_client().await.expect("db");
+        loop {
+            match get_pending_targets(&pool).await {
+                Ok(entries) => {
+                    for target in entries {
+                        // your async logic
                     }
                 }
+                Err(e) => {
+                    tracing::error!("❌ failed to get pending targets: {e}");
+                }
             }
+            tokio::time::sleep(Duration::from_secs(60)).await; // adjust as needed
         }
     });
 
@@ -159,84 +138,11 @@ async fn main() -> anyhow::Result<()> {
     };
     /// Handler function for the `/webhook` route. Extracts payload,
     /// builds config lookup closure, and invokes main `webhook_handler`.
-    let webhook_handler_wrap = {
-        let insert_commit_boxed = insert_commit_boxed.clone();
-        let insert_derivation_hash_boxed = insert_derivation_hash_boxed.clone();
-
-        move |Json(payload): Json<Value>| {
-            let insert_commit_boxed = insert_commit_boxed.clone();
-            let insert_derivation_hash_boxed = insert_derivation_hash_boxed.clone();
-
-            async move {
-                // Extract repo URL and commit hash
-                let Some(repo_url) = payload
-                    .pointer("/repository/clone_url")
-                    .or_else(|| payload.pointer("/project/web_url"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                else {
-                    return StatusCode::BAD_REQUEST;
-                };
-
-                let Some(commit_hash) = payload
-                    .pointer("/after")
-                    .or_else(|| payload.pointer("/checkout_sha"))
-                    .and_then(|v| v.as_str())
-                    .map(String::from)
-                else {
-                    return StatusCode::BAD_REQUEST;
-                };
-
-                // ✅ define stream_derivations_boxed now that commit_hash is available
-                let insert_system_fn = Arc::new(insert_system_name_boxed.clone());
-
-                let stream_derivations_boxed = {
-                    let commit = commit_hash.clone();
-                    move |systems: Vec<String>,
-                          flake_url: &str,
-                          handler: Arc<Mutex<BoxedHandler>>| {
-                        let flake_url = flake_url.to_string();
-                        let commit = commit.clone();
-                        let insert_system_fn = insert_system_fn.clone();
-                        Box::pin(async move {
-                            stream_derivations(
-                                systems,
-                                &flake_url,
-                                &commit,
-                                insert_system_fn,
-                                handler,
-                            )
-                            .await
-                        })
-                            as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
-                    }
-                };
-
-                let get_configs_boxed = {
-                    let commit_hash = commit_hash.clone();
-                    Box::new(move |repo_url: String| {
-                        let commit = commit_hash.clone();
-                        let repo = repo_url.clone();
-                        Box::pin(
-                            async move { get_nixos_configurations_at_commit(&repo, &commit).await },
-                        )
-                            as Pin<
-                                Box<dyn Future<Output = Result<Vec<String>, anyhow::Error>> + Send>,
-                            >
-                    })
-                };
-
-                webhook_handler(
-                    payload,
-                    insert_commit_boxed,
-                    get_configs_boxed,
-                    stream_derivations_boxed,
-                    insert_derivation_hash_boxed,
-                )
-                .await
-            }
-        }
-    };
+    let webhook_handler_wrap = handle_webhook(
+        insert_commit_boxed,
+        insert_derivation_hash_boxed,
+        insert_system_name_boxed,
+    );
 
     // Define application routes and state
     let app = Router::new()
@@ -274,79 +180,4 @@ fn parse_authorized_keys(
     }
 
     Ok(map)
-}
-
-/// Handles the `/current-system` POST route.
-/// Verifies the body signature using headers, parses the payload, and
-/// stores system state info in the database.
-async fn handle_current_system(
-    State(state): State<CFState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    // Extract and validate key ID and signature from headers
-    let key_id = match headers.get("X-Key-ID") {
-        Some(v) => v.to_str().unwrap_or(""),
-        None => return StatusCode::UNAUTHORIZED,
-    };
-
-    let sig = match headers.get("X-Signature") {
-        Some(v) => v.to_str().unwrap_or(""),
-        None => return StatusCode::UNAUTHORIZED,
-    };
-
-    // Decode and validate signature format
-    let signature_bytes = match general_purpose::STANDARD.decode(sig) {
-        Ok(bytes) => bytes,
-        Err(_) => return StatusCode::BAD_REQUEST,
-    };
-
-    let bytes: [u8; 64] = match signature_bytes.try_into() {
-        Ok(b) => b,
-        Err(_) => return StatusCode::BAD_REQUEST,
-    };
-
-    let signature = Signature::from_bytes(&bytes);
-
-    // Lookup key for signature verification
-    let key = match state.authorized_keys.get(key_id) {
-        Some(k) => k,
-        None => return StatusCode::UNAUTHORIZED,
-    };
-
-    if key.verify(&body, &signature).is_err() {
-        return StatusCode::UNAUTHORIZED;
-    }
-
-    // Deserialize JSON payload
-    let payload: SystemPayload = match serde_json::from_slice(&body) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "❌ JSON deserialization failed: {e}\nBody:\n{}",
-                String::from_utf8_lossy(&body)
-            );
-            return StatusCode::BAD_REQUEST;
-        }
-    };
-
-    info!(
-        "✅ accepted from {key_id}: hostname={}, hash={}, context={}, fingerprint={:?}",
-        payload.hostname, payload.system_hash, payload.context, payload.fingerprint
-    );
-
-    // Insert system state into DB
-    if let Err(e) = insert_system_state(
-        &payload.hostname,
-        &payload.context,
-        &payload.system_hash,
-        &payload.fingerprint,
-    )
-    .await
-    {
-        eprintln!("❌ failed to insert into DB: {e}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
-    }
-
-    StatusCode::OK
 }
