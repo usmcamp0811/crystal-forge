@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS tbl_evaluation_targets (
     commit_id int NOT NULL REFERENCES tbl_commits (id) ON DELETE CASCADE,
     target_type text NOT NULL,
     target_name text NOT NULL,
-    derivation_hash text,
+    derivation_path text,
     build_timestamp timestamptz DEFAULT now(),
     UNIQUE (commit_id, target_type, target_name)
 );
@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS tbl_evaluation_targets (
 CREATE TABLE IF NOT EXISTS tbl_system_states (
     id serial PRIMARY KEY,
     hostname text NOT NULL,
-    system_derivation_id text NOT NULL,
+    derivation_path text NOT NULL,
     context text NOT NULL,
     os text,
     kernel text,

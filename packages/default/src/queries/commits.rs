@@ -1,3 +1,7 @@
+use crate::models::commit::Commit;
+use anyhow::{Context, Result};
+use sqlx::{PgPool, Row};
+
 pub async fn insert_commit(pool: &PgPool, commit_hash: &str, repo_url: &str) -> Result<()> {
     let flake_id: (i32,) = sqlx::query_as("SELECT id FROM tbl_flakes WHERE repo_url = $1")
         .bind(repo_url)
