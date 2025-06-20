@@ -4,7 +4,7 @@ use crate::sys_fingerprint::FingerprintParts;
 use crate::system_watcher::SystemPayload;
 use anyhow::{Context, Result};
 use serde_json;
-use sqlx::{PgPool, Pool, Postgres};
+use sqlx::{PgPool, PgPoolOptions, Pool, Postgres};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::{env, fs};

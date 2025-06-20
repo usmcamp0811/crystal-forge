@@ -60,9 +60,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // maybe we got a webhook trigger and for some reason something shit the bed and we were unable
-    // to get the systems in the commit; we don't want to just go the rest of our lives never knowing
-    // so we should at startup always go see if we can do better.
+    // add systems to evaluation target table w/o eval
     tokio::spawn(async move {
         let pool = get_db_client().await.expect("db");
         loop {
@@ -107,9 +105,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Check if we have any systems that dont have derivation_hash values.
-    // This is meant to be a catch all in case we crash or otherwise restart
-    // during the processing of a webhook.
+    // add evaluation target derivation paths to table
     tokio::spawn(async move {
         let pool = get_db_client().await.expect("db");
         loop {
@@ -150,38 +146,10 @@ async fn main() -> anyhow::Result<()> {
     let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
     let state = CFState { authorized_keys };
 
-    // Wrap database insert for derivation hash
-
-    let insert_derivation_hash_boxed =
-        |_commit: String, _repo: String, _system: String, _hash: String| {
-            Box::pin(async move { Ok(()) })
-                as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
-        };
-
-    // Wrap commit insert
-    let insert_commit_boxed = |commit: &str, repo: &str| {
-        let commit = commit.to_owned();
-        let repo = repo.to_owned();
-        Box::pin(async move { insert_commit(&commit, &repo).await })
-            as Pin<Box<dyn Future<Output = Result<(), anyhow::Error>> + Send>>
-    };
-
-    let insert_system_name_boxed = |commit_hash: String, repo_url: String, system_name: String| {
-        Box::pin(async move { insert_system_name(&commit_hash, &repo_url, &system_name).await })
-            as Pin<Box<_>>
-    };
-    /// Handler function for the `/webhook` route. Extracts payload,
-    /// builds config lookup closure, and invokes main `webhook_handler`.
-    let handle_webhooks = make_webhook_handler(
-        insert_commit_boxed,
-        insert_derivation_hash_boxed,
-        insert_system_name_boxed,
-    );
-
     // Define application routes and state
     let app = Router::new()
         .route("/current-system", post(handle_current_system))
-        .route("/webhook", post(handle_webhooks))
+        .route("/webhook", post(webhook_handler))
         .with_state(state);
 
     // Bind TCP listener and start serving
