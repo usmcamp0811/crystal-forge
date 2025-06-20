@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS tbl_evaluation_targets (
     target_name text NOT NULL,
     derivation_path text,
     build_timestamp timestamptz DEFAULT now(),
+    queued boolean DEFAULT FALSE,
     UNIQUE (commit_id, target_type, target_name)
 );
 
