@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -7,9 +8,9 @@ use sqlx::FromRow;
 pub struct EvaluationTarget {
     pub id: i32,
     pub commit_id: i32,
-    pub target_type: String,                    // e.g. "nixos", "home", "app"
-    pub target_name: String,                    // e.g. system or profile name
-    pub derivation_path: Option<String>,        // populated post-build
+    pub target_type: TargetType,         // e.g. "nixos", "home", "app"
+    pub target_name: String,             // e.g. system or profile name
+    pub derivation_path: Option<String>, // populated post-build
     pub build_timestamp: Option<DateTime<Utc>>, // nullable until built
     pub queued: bool,
 }
@@ -21,16 +22,14 @@ enum TargetType {
 }
 
 impl EvaluationTarget {
-    pub fn summary(&self) -> String {
+    pub async fn summary(&self) -> Result<String> {
         pool = get_db_client();
         let commit = crate::queries::commits::get_commit_by_id(pool, self.commit_id).await?;
         let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
-        format!(
+        Ok(format!(
             "{}@{} ({})",
-            flake.name,
-            commit.git_commit_hash,
-            self.target_name.as_deref().unwrap_or("unknown")
-        )
+            flake.name, commit.git_commit_hash, self.target_name
+        ))
     }
     pub async fn resolve_derivation_path(&mut self) -> Result<()> {
         let hash = match self.target_type {

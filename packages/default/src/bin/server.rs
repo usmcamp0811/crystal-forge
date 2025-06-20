@@ -8,7 +8,6 @@ use axum::{
     routing::post,
 };
 use base64::{Engine as _, engine::general_purpose};
-use crystal_forge::flake_watcher::get_system_derivation;
 use crystal_forge::{
     config,
     db::get_db_client,

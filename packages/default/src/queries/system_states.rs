@@ -1,4 +1,6 @@
-pub async fn insert_host_snapshot(
+use anyhow::{Context, Result};
+
+pub async fn insert_system_state(
     pool: &PgPool,
     hostname: &str,
     context: &str,

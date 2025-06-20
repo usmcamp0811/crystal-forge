@@ -31,7 +31,7 @@ pub async fn get_commit_by_hash(pool: &PgPool, commit_hash: &str) -> Result<Comm
     Ok(commit)
 }
 
-pub async fn get_commit_by_id(pool: &PgPool, id: &str) -> Result<Commit> {
+pub async fn get_commit_by_id(pool: &PgPool, id: i32) -> Result<Commit> {
     let commit = sqlx::query_as::<_, Commit>("SELECT * FROM tbl_commits WHERE id = $1")
         .bind(id)
         .fetch_one(pool)

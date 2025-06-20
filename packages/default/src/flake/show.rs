@@ -31,20 +31,20 @@ use tracing::{debug, error, info, trace, warn};
 /// # Errors
 ///
 /// Returns an error if any derivation fails to resolve or if the Nix command fails.
-pub async fn get_all_derivations(
-    systems: Vec<String>,
-    flake_url: &str,
-    commit_hash: &str,
-) -> Result<Vec<(String, String)>> {
-    let tasks = systems.into_iter().map(|system| {
-        let path = flake_url.to_string();
-        let commit = commit_hash.to_string();
-        async move {
-            let hash = get_system_derivation(&system, &path, &commit).await?;
-            Ok((system, hash)) as Result<_>
-        }
-    });
-
-    let results = futures::future::join_all(tasks).await;
-    results.into_iter().collect()
-}
+// pub async fn get_all_derivations(
+//     systems: Vec<String>,
+//     flake_url: &str,
+//     commit_hash: &str,
+// ) -> Result<Vec<(String, String)>> {
+//     let tasks = systems.into_iter().map(|system| {
+//         let path = flake_url.to_string();
+//         let commit = commit_hash.to_string();
+//         async move {
+//             let hash = get_system_derivation(&system, &path, &commit).await?;
+//             Ok((system, hash)) as Result<_>
+//         }
+//     });
+//
+//     let results = futures::future::join_all(tasks).await;
+//     results.into_iter().collect()
+// }

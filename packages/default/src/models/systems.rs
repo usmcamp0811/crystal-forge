@@ -1,3 +1,4 @@
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -85,4 +86,54 @@ impl SystemState {
             rootfs_uuid,
         })
     }
+}
+
+fn get_rootfs_uuid() -> Option<String> {
+    // Get the real source of /
+    let dev = std::process::Command::new("findmnt")
+        .args(["-n", "-o", "SOURCE", "-T", "/"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })?;
+
+    // Strip Btrfs subvolume suffix like /dev/sda2[/@]
+    let dev_clean = dev.split('[').next().unwrap_or("").trim();
+
+    if dev_clean.is_empty() {
+        return None;
+    }
+
+    if !dev_clean.starts_with("/dev/") {
+        // Likely ZFS
+        return std::process::Command::new("zfs")
+            .args(["get", "-H", "-o", "value", "guid", &dev_clean])
+            .output()
+            .ok()
+            .and_then(|out| {
+                if out.status.success() {
+                    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+    }
+
+    // blkid for UUID
+    std::process::Command::new("blkid")
+        .args(["-s", "UUID", "-o", "value", dev_clean])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
 }
