@@ -1,7 +1,5 @@
 use crate::config;
 
-use crate::sys_fingerprint::FingerprintParts;
-use crate::system_watcher::SystemPayload;
 use anyhow::{Context, Result};
 use serde_json;
 use sqlx::{PgPool, PgPoolOptions, Pool, Postgres};
