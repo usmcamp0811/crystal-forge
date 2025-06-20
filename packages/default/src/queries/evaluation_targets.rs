@@ -1,3 +1,4 @@
+use crate::evaluation_targets::EvaluationTarget;
 use crate::pending_targets::PendingTarget;
 use anyhow::{Context, Result};
 use futures::TryStreamExt;
