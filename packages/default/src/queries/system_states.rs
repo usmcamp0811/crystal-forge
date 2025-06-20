@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use sqlx::{PgPool, Row};
 
 pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<()> {
     sqlx::query(

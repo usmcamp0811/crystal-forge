@@ -2,6 +2,7 @@ use crate::pending_targets::PendingTarget;
 use anyhow::{Context, Result};
 use futures::TryStreamExt;
 use futures::stream::Stream;
+use sqlx::{PgPool, Row};
 
 pub async fn insert_evaluation_target(
     pool: &PgPool,

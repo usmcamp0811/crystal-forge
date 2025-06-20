@@ -1,5 +1,7 @@
+use crate::models::commit::Commit;
 use crate::models::flakes::Flake;
 use anyhow::{Context, Result};
+use sqlx::{PgPool, Row};
 
 pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<Flake> {
     let flake = sqlx::query_as::<_, Flake>(
