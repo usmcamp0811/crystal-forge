@@ -1,3 +1,4 @@
+use crate::models::systems::SystemState;
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 
