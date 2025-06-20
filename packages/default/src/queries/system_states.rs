@@ -1,12 +1,6 @@
 use anyhow::{Context, Result};
 
-pub async fn insert_system_state(
-    pool: &PgPool,
-    hostname: &str,
-    context: &str,
-    system_hash: &str,
-    fp: &FingerprintParts,
-) -> Result<()> {
+pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<()> {
     sqlx::query(
         r#"INSERT INTO tbl_system_states (
             hostname, 
@@ -24,20 +18,21 @@ pub async fn insert_system_state(
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         ON CONFLICT DO NOTHING"#,
     )
-    .bind(hostname)
-    .bind(system_hash)
-    .bind(context)
-    .bind(&fp.os)
-    .bind(&fp.kernel)
-    .bind(fp.memory_gb)
-    .bind(fp.uptime_secs as i64)
-    .bind(&fp.cpu_brand)
-    .bind(fp.cpu_cores as i32)
-    .bind(&fp.board_serial)
-    .bind(&fp.product_uuid)
-    .bind(&fp.rootfs_uuid)
+    .bind(&state.hostname)
+    .bind(&state.system_derivation_id)
+    .bind(&state.context)
+    .bind(&state.os)
+    .bind(&state.kernel)
+    .bind(state.memory_gb)
+    .bind(state.uptime_secs)
+    .bind(&state.cpu_brand)
+    .bind(state.cpu_cores)
+    .bind(&state.board_serial)
+    .bind(&state.product_uuid)
+    .bind(&state.rootfs_uuid)
     .execute(pool)
-    .await?;
+    .await
+    .context("failed to insert system state")?;
 
     Ok(())
 }
