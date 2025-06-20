@@ -1,4 +1,4 @@
-use crate::models::flake::Flake;
+use crate::models::flakes::Flake;
 use anyhow::{Context, Result};
 
 pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<Flake> {
