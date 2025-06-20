@@ -37,7 +37,7 @@ pub async fn list_nixos_configurations_from_commit(
     pool: &PgPool,
     commit: &Commit,
 ) -> Result<Vec<String>> {
-    let flake = get_flake_by_id(pool, &commit.flake_id.to_string()).await?;
+    let flake = commit.get_flake(pool).await?;
     let repo_url = &flake.repo_url;
     let commit_hash = &commit.git_commit_hash;
 

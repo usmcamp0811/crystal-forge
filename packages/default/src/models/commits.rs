@@ -17,5 +17,7 @@ pub struct PendingCommit {
 }
 
 impl Commit {
-    pub fn get_targets
+    pub async fn get_flake<'a>(&self, pool: &'a PgPool) -> Result<Flake> {
+        crate::queries::flakes::get_flake_by_id(pool, self.flake_id).await
+    }
 }

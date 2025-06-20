@@ -69,18 +69,32 @@ async fn main() -> anyhow::Result<()> {
             match get_commits_pending_evaluation(&pool).await {
                 Ok(pending_commits) => {
                     for commit in pending_commits {
-                        let nixos_configs = list_nixos_configurations_at_commit() 
-                        let target =
-                            insert_evaluation_target(&pool, commit, target_name, target_type);
-                        match target.insert_evaluation_target().await {
-                            Ok(path) => {
-                                match update_evaluation_target_path(&pool, &target, &path).await {
-                                    Ok(updated) => tracing::info!("✅ Updated: {:?}", updated),
-                                    Err(e) => tracing::error!("❌ Failed to update path: {e}"),
+                        let target_type = "nixos";
+                        match list_nixos_configurations_from_commit(&pool, &commit).await {
+                            Ok(nixos_targets) => {
+                                for target_name in nixos_targets {
+                                    if let Err(e) = insert_evaluation_target(
+                                        &pool,
+                                        &commit,
+                                        &target_name,
+                                        target_type,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(
+                                            "❌ Failed to insert evaluation target for {}: {}",
+                                            target_name,
+                                            e
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("❌ Failed to resolve derivation path: {e}");
+                                tracing::error!(
+                                    "❌ Failed to list nixos configurations for commit {}: {}",
+                                    commit.git_commit_hash,
+                                    e
+                                );
                             }
                         }
                     }
