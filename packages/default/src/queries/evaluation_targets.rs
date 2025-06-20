@@ -72,3 +72,24 @@ pub async fn list_pending_evaluation_targets(
 
     Ok(stream)
 }
+
+pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>> {
+    let rows = sqlx::query_as!(
+        EvaluationTarget,
+        r#"
+        SELECT
+            id,
+            commit_id,
+            type AS target_type,
+            name AS target_name,
+            hash AS derivation_path,
+            build_timestamp
+        FROM tbl_evaluation_targets
+        WHERE hash IS NULL
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}

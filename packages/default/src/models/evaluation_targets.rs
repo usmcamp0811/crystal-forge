@@ -2,15 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
-// Evaluation Targets that have not been evaluated and thus we don't know the derivation path for
-#[derive(Debug)]
-pub struct PendingTarget {
-    pub flake_name: String,
-    pub repo_url: String,
-    pub commit_hash: String,
-    pub target: EvaluationTarget,
-}
-
 // Basically just derivations / outputs of a flake / aka System derivations
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct EvaluationTarget {

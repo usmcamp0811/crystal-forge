@@ -11,10 +11,7 @@ use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::flake_watcher::get_system_derivation;
 use crystal_forge::{
     config,
-    db::{
-        get_db_client, insert_commit, insert_derivation_hash, insert_flake, insert_system_name,
-        insert_system_state,
-    },
+    db::get_db_client,
     flake_watcher::{get_nixos_configurations_at_commit, stream_derivations},
     system_watcher::SystemPayload,
     webhook_handler::{BoxedHandler, webhook_handler},
@@ -54,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("======== INITIALIZING DATABASE ========");
     let pool = get_db_client().await?;
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    // sqlx::migrate!("./migrations").run(&pool).await?;
 
     // Insert any statically watched flakes into the database
     if let Some(watched) = &cfg.flakes {
@@ -69,17 +66,30 @@ async fn main() -> anyhow::Result<()> {
     tokio::spawn(async move {
         let pool = get_db_client().await.expect("db");
         loop {
-            match get_pending_targets(&pool).await {
-                Ok(entries) => {
-                    for target in entries {
-                        // your async logic
+            match get_commits_pending_evaluation(&pool).await {
+                Ok(pending_commits) => {
+                    for commit in pending_commits {
+                        let nixos_configs = list_nixos_configurations_at_commit() 
+                        let target =
+                            insert_evaluation_target(&pool, commit, target_name, target_type);
+                        match target.insert_evaluation_target().await {
+                            Ok(path) => {
+                                match update_evaluation_target_path(&pool, &target, &path).await {
+                                    Ok(updated) => tracing::info!("✅ Updated: {:?}", updated),
+                                    Err(e) => tracing::error!("❌ Failed to update path: {e}"),
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to resolve derivation path: {e}");
+                            }
+                        }
                     }
                 }
                 Err(e) => {
-                    tracing::error!("❌ failed to get pending targets: {e}");
+                    tracing::error!("❌ Failed to get pending targets: {e}");
                 }
             }
-            tokio::time::sleep(Duration::from_secs(60)).await; // adjust as needed
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 
@@ -90,16 +100,26 @@ async fn main() -> anyhow::Result<()> {
         let pool = get_db_client().await.expect("db");
         loop {
             match get_pending_targets(&pool).await {
-                Ok(entries) => {
-                    for target in entries {
-                        // your async logic
+                Ok(pending_targets) => {
+                    for mut target in pending_targets {
+                        match target.resolve_derivation_path().await {
+                            Ok(path) => {
+                                match update_evaluation_target_path(&pool, &target, &path).await {
+                                    Ok(updated) => tracing::info!("✅ Updated: {:?}", updated),
+                                    Err(e) => tracing::error!("❌ Failed to update path: {e}"),
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("❌ Failed to resolve derivation path: {e}");
+                            }
+                        }
                     }
                 }
                 Err(e) => {
-                    tracing::error!("❌ failed to get pending targets: {e}");
+                    tracing::error!("❌ Failed to get pending targets: {e}");
                 }
             }
-            tokio::time::sleep(Duration::from_secs(60)).await; // adjust as needed
+            tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
 

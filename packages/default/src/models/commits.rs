@@ -11,7 +11,11 @@ pub struct Commit {
 }
 
 pub struct PendingCommit {
-    pub commit_hash: String,
+    pub git_commit_hash: String,
     pub repo_url: String,
     pub flake_name: String,
+}
+
+impl Commit {
+    pub fn get_targets
 }
