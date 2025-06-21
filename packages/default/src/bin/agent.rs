@@ -6,8 +6,6 @@ use crystal_forge::models::systems::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::{
     ffi::OsStr,
     fs,
