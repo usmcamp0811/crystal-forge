@@ -6,7 +6,7 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
     sqlx::query(
         r#"INSERT INTO tbl_system_states (
             hostname, 
-            system_derivation_id,
+            derivation_path,
             context, 
             os, 
             kernel,
@@ -22,7 +22,7 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
         ON CONFLICT DO NOTHING"#,
     )
     .bind(&state.hostname)
-    .bind(&state.system_derivation_id)
+    .bind(&state.derivation_path)
     .bind(&state.context)
     .bind(&state.os)
     .bind(&state.kernel)
@@ -41,7 +41,7 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
             "failed to insert system state for host={} context={} hash={}",
             state.hostname,
             state.context,
-            state.system_derivation_id.as_deref().unwrap_or("none")
+            state.derivation_path.as_deref().unwrap_or("none")
         )
     })?;
 

@@ -13,7 +13,7 @@ use tracing::{debug, error, info, warn};
 pub struct SystemState {
     pub id: Option<i32>,
     pub hostname: String,
-    pub system_derivation_id: Option<String>,
+    pub derivation_path: Option<String>,
     pub context: String,
     pub os: Option<String>,
     pub kernel: Option<String>,
@@ -28,7 +28,7 @@ pub struct SystemState {
 }
 
 impl SystemState {
-    pub fn gather(hostname: &str, context: &str, system_derivation_id: &str) -> Result<Self> {
+    pub fn gather(hostname: &str, context: &str, derivation_path: &str) -> Result<Self> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -81,7 +81,7 @@ impl SystemState {
             id: None,
             timestamp: None,
             hostname: hostname.to_string(),
-            system_derivation_id: Some(system_derivation_id.to_string()),
+            derivation_path: Some(derivation_path.to_string()),
             context: context.to_string(),
             os: Some(os),
             kernel: Some(kernel),
