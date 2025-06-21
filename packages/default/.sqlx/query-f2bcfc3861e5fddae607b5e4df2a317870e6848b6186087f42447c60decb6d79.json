@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id, c.flake_id, c.git_commit_hash, c.commit_timestamp\n        FROM tbl_commits c\n        LEFT JOIN tbl_evaluation_targets t ON c.id = t.commit_id\n        WHERE t.commit_id IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "flake_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "git_commit_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "commit_timestamp",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "f2bcfc3861e5fddae607b5e4df2a317870e6848b6186087f42447c60decb6d79"
+}

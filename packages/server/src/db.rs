@@ -17,7 +17,7 @@ pub fn insert_system_state(current_system: &OsStr) -> Result<()> {
         .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
 
     client.execute(
-        "INSERT INTO system_state (hostname, system_derivation_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+        "INSERT INTO system_state (hostname, derivation_path) VALUES ($1, $2) ON CONFLICT DO NOTHING",
         &[&hostname, &system_hash],
     )?;
 

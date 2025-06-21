@@ -1,8 +1,4 @@
-{
-  lib,
-  pkgs,
-  ...
-}: let
+{pkgs, ...}: let
   pname = "server";
   crystal-forge-server = pkgs.stdenv.mkDerivation {
     inherit pname;

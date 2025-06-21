@@ -92,12 +92,10 @@ pub struct DbConfig {
 
 impl DbConfig {
     /// Returns a PostgreSQL connection string.
-    ///
-    /// Example: `"host=localhost user=app password=secret dbname=mydb"`
     pub fn to_url(&self) -> String {
         format!(
-            "host={} user={} password={} dbname={}",
-            self.host, self.user, self.password, self.dbname
+            "postgres://{}:{}@{}/{}",
+            self.user, self.password, self.host, self.dbname
         )
     }
 }
