@@ -58,15 +58,13 @@ impl EvaluationTarget {
             flake.name, commit.git_commit_hash, self.target_name
         ))
     }
-    pub async fn resolve_derivation_path(&mut self) -> Result<()> {
+    pub async fn resolve_derivation_path(&mut self) -> Result<String> {
         let hash = match self.target_type {
             TargetType::NixOS => self.evaluate_nixos_system().await?,
-            TargetType::HomeManager => {
-                anyhow::bail!("Home Manager evaluation not implemented yet");
-            }
+            TargetType::HomeManager => anyhow::bail!("Home Manager evaluation not implemented yet"),
         };
-        self.derivation_path = Some(hash);
-        Ok(())
+        self.derivation_path = Some(hash.clone());
+        Ok(hash)
     }
 
     /// Returns the derivation output path (hash) for a specific NixOS system from a given flake.

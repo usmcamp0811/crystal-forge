@@ -1,21 +1,16 @@
 //! This module handles incoming webhooks, triggering the fetching of NixOS
 //! configurations and streaming derivations to process them. It uses injected
 //! async functions for persistence and derivation processing.
-
-use anyhow::{Context, Result};
-use axum::{Json, http::StatusCode};
+use axum::{
+    extract::{Json, State},
+    http::StatusCode,
+};
 use serde_json::Value;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use sqlx::PgPool;
+use tracing::{error, info, warn};
 
 /// Handles an incoming webhook request for a Git push or merge event.
-pub async fn webhook_handler(
-    payload: serde_json::Value,
-    pool: &sqlx::PgPool,
-) -> axum::http::StatusCode {
+pub async fn webhook_handler(State(pool): State<PgPool>, Json(payload): Json<Value>) -> StatusCode {
     use axum::http::StatusCode;
     use tracing::{error, info, warn};
 

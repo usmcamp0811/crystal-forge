@@ -1,4 +1,5 @@
 use crate::db::get_db_client;
+use axum::extract::FromRef;
 
 use crate::handlers::webhook::webhook_handler;
 use crate::models::systems::SystemState;
@@ -26,14 +27,29 @@ use tracing::{debug, error, info, warn};
 
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]
-struct CFState {
+pub struct CFState {
+    pool: PgPool,
     authorized_keys: HashMap<String, VerifyingKey>,
 }
 
+impl CFState {
+    pub fn new(pool: PgPool, authorized_keys: HashMap<String, VerifyingKey>) -> Self {
+        Self {
+            pool,
+            authorized_keys,
+        }
+    }
+}
+
+impl FromRef<CFState> for PgPool {
+    fn from_ref(state: &CFState) -> PgPool {
+        state.pool.clone()
+    }
+}
 /// Handles the `/current-system` POST route.
 /// Verifies the body signature using headers, parses the payload, and
 /// stores system state info in the database.
-async fn handle_current_system(
+pub async fn handle_current_system(
     State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,

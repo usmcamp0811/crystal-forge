@@ -6,6 +6,7 @@ use base64::{Engine as _, engine::general_purpose};
 /// and starts the Axum HTTP server.
 use chrono::Duration;
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
+use crystal_forge::handlers::current_system::{CFState, handle_current_system};
 use crystal_forge::handlers::webhook::webhook_handler;
 use crystal_forge::queries::commits::get_commits_pending_evaluation;
 use crystal_forge::queries::evaluation_targets::{
@@ -85,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
                     tracing::error!("❌ Failed to get pending targets: {e}");
                 }
             }
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     });
 
@@ -113,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
                     tracing::error!("❌ Failed to get pending targets: {e}");
                 }
             }
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
     });
 
@@ -128,7 +129,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Decode and parse all authorized public keys
     let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
-    let state = CFState { authorized_keys };
+    let pool = get_db_client().await?;
+    let state = CFState::new(pool, authorized_keys);
 
     // Define application routes and state
     let app = Router::new()
