@@ -103,7 +103,10 @@ pub async fn handle_current_system(
 
     info!(
         "✅ accepted from {}: hostname={}, hash={}, context={}",
-        key_id, payload.hostname, payload.system_derivation_id, payload.context
+        key_id,
+        payload.hostname,
+        payload.system_derivation_id.as_deref().unwrap_or("unknown"),
+        payload.context
     );
 
     // Insert system state into DB

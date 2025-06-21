@@ -81,7 +81,7 @@ impl SystemState {
             id: None,
             timestamp: None,
             hostname: hostname.to_string(),
-            system_derivation_id: system_derivation_id.to_string(),
+            system_derivation_id: Some(system_derivation_id.to_string()),
             context: context.to_string(),
             os: Some(os),
             kernel: Some(kernel),
