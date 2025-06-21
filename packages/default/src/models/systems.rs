@@ -11,7 +11,7 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct SystemState {
-    pub id: i32,
+    pub id: Option<i32>,
     pub hostname: String,
     pub system_derivation_id: String,
     pub context: String,
@@ -24,6 +24,7 @@ pub struct SystemState {
     pub board_serial: Option<String>,
     pub product_uuid: Option<String>,
     pub rootfs_uuid: Option<String>,
+    pub timestamp: Option<DateTime<Utc>>,
 }
 
 impl SystemState {

@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS tbl_system_states (
     cpu_cores int,
     board_serial text,
     product_uuid text,
-    rootfs_uuid text
+    rootfs_uuid text,
+    timestamp timestamptz NOT NULL DEFAULT now()
 );
 
