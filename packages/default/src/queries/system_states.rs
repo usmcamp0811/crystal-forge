@@ -36,7 +36,14 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
     .bind(&state.timestamp)
     .execute(pool)
     .await
-    .context("failed to insert system state")?;
+    .with_context(|| {
+        format!(
+            "failed to insert system state for host={} context={} hash={}",
+            state.hostname,
+            state.context,
+            state.system_derivation_id.as_deref().unwrap_or("none")
+        )
+    })?;
 
     Ok(())
 }
