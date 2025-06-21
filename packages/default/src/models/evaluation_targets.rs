@@ -23,7 +23,7 @@ pub struct EvaluationTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]
 #[sqlx(type_name = "text")]
-enum TargetType {
+pub enum TargetType {
     NixOS,
     HomeManager,
 }

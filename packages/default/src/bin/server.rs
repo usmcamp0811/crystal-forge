@@ -1,3 +1,7 @@
+/// Main entry point for the Crystal Forge server.
+/// Sets up database, loads config, inserts watched flakes, initializes routes,
+/// and starts the Axum HTTP server.
+use crate::handlers::webhook::make_webhook_handler;
 use anyhow::{Context, Result};
 use axum::{
     Json, Router,
@@ -8,19 +12,8 @@ use axum::{
     routing::post,
 };
 use base64::{Engine as _, engine::general_purpose};
-use crystal_forge::{
-    config,
-    db::get_db_client,
-    flake_watcher::{get_nixos_configurations_at_commit, stream_derivations},
-    system_watcher::SystemPayload,
-    webhook_handler::{BoxedHandler, webhook_handler},
-};
+use crystal_forge::{config, db::get_db_client};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use handlers::current_system::{CFStae, handle_current_system};
-/// Main entry point for the Crystal Forge server.
-/// Sets up database, loads config, inserts watched flakes, initializes routes,
-/// and starts the Axum HTTP server.
-use handlers::webhook::make_webhook_handler;
 use serde_json::Value;
 use sqlx::postgres;
 use sqlx::postgres::{PgPool, PgPoolOptions};

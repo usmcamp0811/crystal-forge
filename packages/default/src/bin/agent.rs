@@ -1,12 +1,8 @@
-use crate::config;
-use crate::models::systems::SystemState;
-use anyhow::Result;
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use crystal_forge::config;
-use crystal_forge::db;
-use crystal_forge::system_watcher;
+use crystal_forge::models::systems::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
@@ -62,8 +58,6 @@ pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
-
-    let fingerprint = get_fingerprint()?;
 
     // construct payload to be sent to the server
     let payload = SystemState::gather(&hostname, context, &system_hash)?;
