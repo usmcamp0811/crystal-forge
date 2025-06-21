@@ -48,14 +48,17 @@ in
           authentication = lib.concatStringsSep "\n" [
             "local all root trust"
             "local all postgres peer"
+            "host all all 127.0.0.1/32 trust"
+            "host all all ::1/128 trust"
           ];
         };
         services.crystal-forge = {
           enable = true;
           local-database = true;
-                        log_level = "debug";
+          log_level = "debug";
           database = {
             user = "crystal_forge";
+            host = "localhost";
             dbname = "crystal_forge";
           };
           flakes.watched = {

@@ -14,7 +14,7 @@ reckless = "SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8="
 
 [client]
 server_host = "reckless"
-server_port = 3444
+server_port = 3000
 private_key = "/var/lib/crystal_forge/gray.key"
 
 [flakes.watched]
