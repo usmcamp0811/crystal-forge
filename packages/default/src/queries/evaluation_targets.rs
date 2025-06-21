@@ -53,28 +53,28 @@ pub async fn update_evaluation_target_path(
     Ok(updated)
 }
 
-pub async fn list_pending_evaluation_targets(
-    pool: &PgPool,
-) -> Result<impl Stream<Item = Result<EvaluationTarget>>> {
-    let stream = sqlx::query!(
-        r#"
-        SELECT f.name, f.repo_url, c.git_commit_hash, d.target_type
-        FROM tbl_evaluation_targets d
-        JOIN tbl_commits c ON d.commit_id = c.id
-        JOIN tbl_flakes f ON c.flake_id = f.id
-        WHERE d.derivation_path IS NULL
-        "#
-    )
-    .fetch(pool)
-    .map_ok(|r| EvaluationTarget {
-        flake_name: r.name,
-        repo_url: r.repo_url,
-        commit_hash: r.git_commit_hash,
-        target_type: r.target_type,
-    });
-
-    Ok(stream)
-}
+// pub async fn list_pending_evaluation_targets(
+//     pool: &PgPool,
+// ) -> Result<impl Stream<Item = Result<EvaluationTarget>>> {
+//     let stream = sqlx::query!(
+//         r#"
+//         SELECT f.name, f.repo_url, c.git_commit_hash, d.target_type
+//         FROM tbl_evaluation_targets d
+//         JOIN tbl_commits c ON d.commit_id = c.id
+//         JOIN tbl_flakes f ON c.flake_id = f.id
+//         WHERE d.derivation_path IS NULL
+//         "#
+//     )
+//     .fetch(pool)
+//     .map_ok(|r| EvaluationTarget {
+//         flake_name: r.name,
+//         repo_url: r.repo_url,
+//         commit_hash: r.git_commit_hash,
+//         target_type: r.target_type,
+//     });
+//
+//     Ok(stream)
+// }
 
 pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>> {
     let rows = sqlx::query_as!(

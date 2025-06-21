@@ -86,8 +86,8 @@ async fn handle_current_system(
     };
 
     info!(
-        "✅ accepted from {key_id}: hostname={}, hash={}, context={}, fingerprint={:?}",
-        payload.hostname, payload.system_hash, payload.context, payload.fingerprint
+        "✅ accepted from {}: hostname={}, hash={}, context={}",
+        key_id, payload.hostname, payload.system_derivation_id, payload.context
     );
 
     // Insert system state into DB
