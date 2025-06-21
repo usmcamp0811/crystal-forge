@@ -43,6 +43,17 @@ with lib.crystal-forge;
       export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
       export CRYSTAL_FORGE__SERVER__PORT=3444
 
+      sqlx-refresh() {
+        echo "🔄 Resetting and preparing sqlx..."
+        sqlx database reset -y
+        cargo sqlx prepare
+      }
+
+      sqlx-prepare() {
+        echo "🛠  Running cargo sqlx prepare..."
+        cargo sqlx prepare
+      }
+
       if [ -n "$BASH_VERSION" ]; then
         . ${pkgs.fzf}/share/fzf/key-bindings.bash
         . ${pkgs.fzf}/share/fzf/completion.bash
