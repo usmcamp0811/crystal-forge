@@ -1,10 +1,6 @@
 use anyhow::Context;
 use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
-/// Main entry point for the Crystal Forge server.
-/// Sets up database, loads config, inserts watched flakes, initializes routes,
-/// and starts the Axum HTTP server.
-use chrono::Duration;
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
 use crystal_forge::handlers::current_system::{CFState, handle_current_system};
 use crystal_forge::handlers::webhook::webhook_handler;
