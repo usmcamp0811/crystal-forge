@@ -16,8 +16,9 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
             cpu_cores,
             board_serial, 
             product_uuid, 
-            rootfs_uuid
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+            rootfs_uuid, 
+            timestamp
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         ON CONFLICT DO NOTHING"#,
     )
     .bind(&state.hostname)
@@ -32,6 +33,7 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
     .bind(&state.board_serial)
     .bind(&state.product_uuid)
     .bind(&state.rootfs_uuid)
+    .bind(&state.timestamp)
     .execute(pool)
     .await
     .context("failed to insert system state")?;
