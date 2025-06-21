@@ -51,6 +51,11 @@ in
             "host all all 127.0.0.1/32 trust"
             "host all all ::1/128 trust"
           ];
+          initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+            CREATE USER crystal_forge LOGIN;
+            CREATE DATABASE crystal_forge OWNER crystal_forge;
+            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+          '';
         };
         services.crystal-forge = {
           enable = true;
@@ -140,7 +145,7 @@ in
       agent.log("=== agent logs ===")
       agent.log(agent.succeed("journalctl -u crystal-forge-agent.service || true"))
 
-      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, system_derivation_id, context FROM tbl_system_states;'")
+      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, derivation_path, context FROM tbl_system_states;'")
       server.log("Final DB state:\\n" + output)
 
       if agent_hostname not in output:
@@ -148,7 +153,7 @@ in
       if context not in output:
           pytest.fail(f"context '{context}' not found in DB")
       if system_hash not in output:
-          pytest.fail(f"system_derivation_id '{system_hash}' not found in DB")
+          pytest.fail(f"derivation_path '{system_hash}' not found in DB")
 
       commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"
       curl_data = f"""'{{
