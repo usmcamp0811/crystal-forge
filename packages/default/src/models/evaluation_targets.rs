@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::FromRow;
+use sqlx::{FromRow, Type};
 use std::path::Path;
 use sysinfo::System;
 use tokio::process::Command;
@@ -22,7 +22,10 @@ pub struct EvaluationTarget {
     pub queued: bool,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(
+    Debug, Serialize, Deserialize, Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq,
+)]
+#[sqlx(type_name = "text")]
 enum TargetType {
     NixOS,
     HomeManager,
