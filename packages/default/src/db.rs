@@ -2,7 +2,8 @@ use crate::config;
 
 use anyhow::{Context, Result};
 use serde_json;
-use sqlx::{PgPool, PgPoolOptions, Pool, Postgres};
+use sqlx::postgres::PgPoolOptions;
+use sqlx::{PgPool, Pool, Postgres};
 use std::ffi::OsStr;
 use std::path::Path;
 use std::{env, fs};
