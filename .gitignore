@@ -152,3 +152,5 @@ packages/websites/nix-slide-deck/themes
 resume.pdf
 packages/nix-rmf-slides/.vite/deps
 nix/packages/nix-rmf-slides/.vite/deps
+packages/default/.nixos-test-history
+.nixos-test-history
