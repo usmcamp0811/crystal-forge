@@ -55,7 +55,7 @@ pub async fn update_evaluation_target_path(
 
 pub async fn list_pending_evaluation_targets(
     pool: &PgPool,
-) -> Result<impl Stream<Item = Result<PendingTarget>>> {
+) -> Result<impl Stream<Item = Result<EvaluationTarget>>> {
     let stream = sqlx::query!(
         r#"
         SELECT f.name, f.repo_url, c.git_commit_hash, d.target_type
@@ -66,7 +66,7 @@ pub async fn list_pending_evaluation_targets(
         "#
     )
     .fetch(pool)
-    .map_ok(|r| PendingTarget {
+    .map_ok(|r| EvaluationTarget {
         flake_name: r.name,
         repo_url: r.repo_url,
         commit_hash: r.git_commit_hash,

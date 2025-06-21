@@ -1,18 +1,41 @@
-use anyhow::{Context, Result};
-use axum::{Json, http::StatusCode};
+use crate::db::get_db_client;
 
 use crate::handlers::webhook::webhook_handler;
 use crate::models::systems::SystemState;
 use crate::queries::system_states::insert_system_state;
+use anyhow::Result;
+use base64::engine::Engine;
+use base64::engine::general_purpose;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use sqlx::PgPool;
+use std::collections::HashMap;
+
+use axum::{
+    Json, Router,
+    body::Bytes,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+    routing::post,
+};
+use serde::de;
 use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
+use tracing::{debug, error, info, warn};
+
+/// Shared server state containing authorized signing keys for current-system auth
+#[derive(Clone)]
+struct CFState {
+    authorized_keys: HashMap<String, VerifyingKey>,
+}
 
 /// Handles the `/current-system` POST route.
 /// Verifies the body signature using headers, parses the payload, and
 /// stores system state info in the database.
 async fn handle_current_system(
     State(state): State<CFState>,
+    State(pool): State<PgPool>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -69,7 +92,7 @@ async fn handle_current_system(
 
     // Insert system state into DB
 
-    if let Err(e) = insert_system_state(&payload).await {
+    if let Err(e) = insert_system_state(&pool, &payload).await {
         eprintln!("❌ failed to insert into DB: {e}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }

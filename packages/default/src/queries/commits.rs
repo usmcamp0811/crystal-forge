@@ -1,4 +1,4 @@
-use crate::models::commit::{Commit, PendingCommit};
+use crate::models::commits::{Commit, PendingCommit};
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 
@@ -56,7 +56,7 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Pending
     Ok(rows
         .into_iter()
         .map(|r| PendingCommit {
-            commit_hash: r.git_commit_hash,
+            git_commit_hash: r.git_commit_hash,
             repo_url: r.repo_url,
             flake_name: r.name,
         })

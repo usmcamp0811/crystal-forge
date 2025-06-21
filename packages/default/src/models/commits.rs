@@ -3,6 +3,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use sqlx::PgPool;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Commit {

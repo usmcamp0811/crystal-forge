@@ -1,8 +1,13 @@
-use anyhow::{Context, Result};
-use sqlx::error::ErrorKind
+use anyhow::Result;
 use chrono::{DateTime, Utc};
+
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::fs;
+use sysinfo::{Disks, Networks, System};
+
+use std::io::ErrorKind;
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct SystemState {
@@ -76,12 +81,12 @@ impl SystemState {
             hostname: hostname.to_string(),
             system_derivation_id: system_derivation_id.to_string(),
             context: context.to_string(),
-            os,
-            kernel,
-            memory_gb,
-            uptime_secs,
-            cpu_brand,
-            cpu_cores,
+            os: Some(os),
+            kernel: Some(kernel),
+            memory_gb: Some(memory_gb),
+            uptime_secs: Some(uptime_secs as i64),
+            cpu_brand: Some(cpu_brand),
+            cpu_cores: Some(cpu_cores as i32),
             board_serial,
             product_uuid,
             rootfs_uuid,

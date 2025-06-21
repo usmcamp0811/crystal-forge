@@ -1,4 +1,4 @@
-use crate::models::commit::Commit;
+use crate::models::commits::Commit;
 use crate::models::flakes::Flake;
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
@@ -21,7 +21,7 @@ pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<F
 }
 
 pub async fn get_flake_by_name(pool: &PgPool, name: &str) -> Result<Flake> {
-    let commit = sqlx::query_as::<_, Commit>("SELECT * FROM tbl_flakes WHERE name = $1")
+    let commit = sqlx::query_as::<_, Flake>("SELECT * FROM tbl_flakes WHERE name = $1")
         .bind(name)
         .fetch_one(pool)
         .await?;
@@ -30,7 +30,7 @@ pub async fn get_flake_by_name(pool: &PgPool, name: &str) -> Result<Flake> {
 }
 
 pub async fn get_flake_by_id(pool: &PgPool, id: i32) -> Result<Flake> {
-    let commit = sqlx::query_as::<_, Commit>("SELECT * FROM tbl_flakes WHERE id = $1")
+    let commit = sqlx::query_as::<_, Flake>("SELECT * FROM tbl_flakes WHERE id = $1")
         .bind(id)
         .fetch_one(pool)
         .await?;

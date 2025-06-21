@@ -1,5 +1,4 @@
 use anyhow::{Context, Result};
-
 use axum::{
     Json, Router,
     body::Bytes,
@@ -17,7 +16,7 @@ use crystal_forge::{
     webhook_handler::{BoxedHandler, webhook_handler},
 };
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use handlers::current_system::handle_current_system;
+use handlers::current_system::{CFStae, handle_current_system};
 /// Main entry point for the Crystal Forge server.
 /// Sets up database, loads config, inserts watched flakes, initializes routes,
 /// and starts the Axum HTTP server.
@@ -29,12 +28,6 @@ use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
 use tokio::{net::TcpListener, sync::Mutex};
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::EnvFilter;
-
-/// Shared server state containing authorized signing keys for current-system auth
-#[derive(Clone)]
-struct CFState {
-    authorized_keys: HashMap<String, VerifyingKey>,
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
