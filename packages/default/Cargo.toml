@@ -47,3 +47,5 @@ path = "src/bin/server.rs"
 name = "cf-keygen"
 path = "src/bin/cf-keygen.rs"
 
+[package.metadata.sqlx]
+offline = true
