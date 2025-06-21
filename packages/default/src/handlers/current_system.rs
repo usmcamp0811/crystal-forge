@@ -112,7 +112,7 @@ pub async fn handle_current_system(
     // Insert system state into DB
 
     if let Err(e) = insert_system_state(&pool, &payload).await {
-        eprintln!("❌ failed to insert into DB: {e}");
+        debug!("❌ failed to insert into DB: {e:?}\nPayload: {payload:#?}");
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
 
