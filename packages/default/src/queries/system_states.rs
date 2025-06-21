@@ -17,8 +17,7 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
             board_serial, 
             product_uuid, 
             rootfs_uuid, 
-            timestamp
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         ON CONFLICT DO NOTHING"#,
     )
     .bind(&state.hostname)
@@ -33,7 +32,6 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
     .bind(&state.board_serial) // Option<String>
     .bind(&state.product_uuid) // Option<String>
     .bind(&state.rootfs_uuid) // Option<String>
-    .bind(&state.timestamp) // chrono::DateTime<Utc>
     .execute(pool)
     .await
     .map_err(|e| anyhow::anyhow!("SQL error: {e:?}"))
