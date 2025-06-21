@@ -42,8 +42,8 @@ impl From<String> for TargetType {
 impl ToString for TargetType {
     fn to_string(&self) -> String {
         match self {
-            TargetType::NixOS => "NixOS".into(),
-            TargetType::HomeManager => "HomeManager".into(),
+            TargetType::NixOS => "nixos".into(),
+            TargetType::HomeManager => "homemanager".into(),
         }
     }
 }
