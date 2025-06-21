@@ -22,20 +22,21 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
         ON CONFLICT DO NOTHING"#,
     )
     .bind(&state.hostname)
-    .bind(&state.derivation_path)
+    .bind(&state.derivation_path) // required
     .bind(&state.context)
-    .bind(&state.os)
-    .bind(&state.kernel)
-    .bind(state.memory_gb)
-    .bind(state.uptime_secs)
-    .bind(&state.cpu_brand)
-    .bind(state.cpu_cores)
-    .bind(&state.board_serial)
-    .bind(&state.product_uuid)
-    .bind(&state.rootfs_uuid)
-    .bind(&state.timestamp)
+    .bind(&state.os) // Option<String>
+    .bind(&state.kernel) // Option<String>
+    .bind(state.memory_gb) // Option<f64>
+    .bind(state.uptime_secs) // Option<i64>
+    .bind(&state.cpu_brand) // Option<String>
+    .bind(state.cpu_cores) // Option<i32>
+    .bind(&state.board_serial) // Option<String>
+    .bind(&state.product_uuid) // Option<String>
+    .bind(&state.rootfs_uuid) // Option<String>
+    .bind(&state.timestamp) // chrono::DateTime<Utc>
     .execute(pool)
     .await
+    .map_err(|e| anyhow::anyhow!("SQL error: {e:?}"))
     .with_context(|| {
         format!(
             "failed to insert system state for host={} context={} hash={}",
