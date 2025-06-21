@@ -16,7 +16,7 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
             cpu_cores,
             board_serial, 
             product_uuid, 
-            rootfs_uuid, 
+            rootfs_uuid
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         ON CONFLICT DO NOTHING"#,
     )
