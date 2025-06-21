@@ -1,25 +1,22 @@
+use anyhow::Context;
+use axum::{Router, routing::post};
+use base64::{Engine as _, engine::general_purpose};
 /// Main entry point for the Crystal Forge server.
 /// Sets up database, loads config, inserts watched flakes, initializes routes,
 /// and starts the Axum HTTP server.
-use crate::handlers::webhook::make_webhook_handler;
-use anyhow::{Context, Result};
-use axum::{
-    Json, Router,
-    body::Bytes,
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::post,
+use chrono::Duration;
+use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
+use crystal_forge::handlers::webhook::webhook_handler;
+use crystal_forge::queries::commits::get_commits_pending_evaluation;
+use crystal_forge::queries::evaluation_targets::{
+    get_pending_targets, insert_evaluation_target, update_evaluation_target_path,
 };
-use base64::{Engine as _, engine::general_purpose};
+use crystal_forge::queries::flakes::insert_flake;
 use crystal_forge::{config, db::get_db_client};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use serde_json::Value;
-use sqlx::postgres;
-use sqlx::postgres::{PgPool, PgPoolOptions};
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
-use tokio::{net::TcpListener, sync::Mutex};
-use tracing::{debug, error, info, trace, warn};
+use ed25519_dalek::VerifyingKey;
+use std::collections::HashMap;
+use tokio::net::TcpListener;
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -43,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
     // Insert any statically watched flakes into the database
     if let Some(watched) = &cfg.flakes {
         for (name, repo_url) in &watched.watched {
-            insert_flake(name, repo_url).await?;
+            insert_flake(&pool, name, repo_url).await?;
         }
     }
 
