@@ -78,7 +78,8 @@ impl SystemState {
         let rootfs_uuid = get_rootfs_uuid();
 
         Ok(SystemState {
-            id: 0,
+            id: None,
+            timestamp: None,
             hostname: hostname.to_string(),
             system_derivation_id: system_derivation_id.to_string(),
             context: context.to_string(),
