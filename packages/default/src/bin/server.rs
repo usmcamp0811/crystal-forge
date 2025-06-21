@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
 
     info!("======== INITIALIZING DATABASE ========");
     let pool = get_db_client().await?;
-    // sqlx::migrate!("./migrations").run(&pool).await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
 
     // Insert any statically watched flakes into the database
     if let Some(watched) = &cfg.flakes {
