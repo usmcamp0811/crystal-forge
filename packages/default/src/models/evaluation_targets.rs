@@ -4,11 +4,10 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::{FromRow, Type};
+use sqlx::FromRow;
 use std::path::Path;
-use sysinfo::System;
 use tokio::process::Command;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 // Basically just derivations / outputs of a flake / aka System derivations
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -22,13 +21,30 @@ pub struct EvaluationTarget {
     pub queued: bool,
 }
 
-#[derive(
-    Debug, Serialize, Deserialize, Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq,
-)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]
 #[sqlx(type_name = "text")]
 enum TargetType {
     NixOS,
     HomeManager,
+}
+
+impl From<String> for TargetType {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "NixOS" => TargetType::NixOS,
+            "HomeManager" => TargetType::HomeManager,
+            _ => panic!("Invalid TargetType: {}", s),
+        }
+    }
+}
+
+impl ToString for TargetType {
+    fn to_string(&self) -> String {
+        match self {
+            TargetType::NixOS => "NixOS".into(),
+            TargetType::HomeManager => "HomeManager".into(),
+        }
+    }
 }
 
 impl EvaluationTarget {

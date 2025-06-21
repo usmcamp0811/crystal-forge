@@ -1,9 +1,7 @@
 use crate::models::commits::Commit;
 use crate::models::evaluation_targets::EvaluationTarget;
-use anyhow::{Context, Result};
-use futures::TryStreamExt;
-use futures::stream::Stream;
-use sqlx::{PgPool, Row};
+use anyhow::Result;
+use sqlx::PgPool;
 
 pub async fn insert_evaluation_target(
     pool: &PgPool,
@@ -14,14 +12,15 @@ pub async fn insert_evaluation_target(
     let inserted = sqlx::query_as!(
         EvaluationTarget,
         r#"
-        INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name)
-        VALUES ($1, $2, $3)
+        INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name, queued)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (commit_id, target_type, target_name) DO UPDATE SET commit_id = EXCLUDED.commit_id
-        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp
+        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued as "queued!: bool"
         "#,
         commit.id,
         target_type,
-        target_name
+        target_name,
+        false
     )
     .fetch_one(pool)
     .await?;
@@ -40,11 +39,11 @@ pub async fn update_evaluation_target_path(
         UPDATE tbl_evaluation_targets
         SET derivation_path = $1
         WHERE commit_id = $2 AND target_type = $3 AND target_name = $4
-        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp
+        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued as "queued!: bool"
         "#,
         path,
         target.commit_id,
-        target.target_type,
+        target.target_type.to_string(),
         target.target_name
     )
     .fetch_one(pool)
