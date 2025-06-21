@@ -1,20 +1,10 @@
-use crate::db::{insert_derivation_hash, insert_system_name};
+use crate::models::commits::Commit;
 use anyhow::{Context, Result};
-use futures::future::join_all;
-use futures::stream::{self, StreamExt, iter};
-use serde_json::Value;
-use std::future::Future;
+use sqlx::PgPool;
 use std::path::Path;
-use std::pin::Pin;
-use std::process::Stdio;
-use std::sync::Arc;
-use std::time::Duration;
-use tempfile::tempdir;
-use tokio::io::AsyncWriteExt;
-use tokio::process::Command as TokioCommand;
-use tokio::sync::Mutex;
+use tokio::process::Command;
 use tokio::time::{Duration, timeout};
-use tracing::{debug, error, info, trace, warn};
+use tracing::{debug, error};
 
 /// Returns the list of NixOS configurations defined in a flake at a given Git commit.
 ///
@@ -97,19 +87,6 @@ pub async fn list_nixos_configurations_from_commit(
     Ok(nixos_configs)
 }
 
-/// Streams derivation output hashes for each NixOS system configuration in parallel,
-/// calling `handle_result` as each one completes.
-///
-/// # Arguments
-///
-/// * `systems` - List of NixOS system names to evaluate.
-/// * `flake_path` - Path or URL of the flake.
-/// * `commit_hash` - Git commit to use for evaluation.
-/// * `handle_result` - Async callback invoked with each `(system, hash)` pair.
-///
-/// # Returns
-///
-/// * `Ok(())` if all derivations are handled successfully, or early logs on failure.
 // pub async fn evaluate_derivations(
 //     systems: Vec<String>,
 //     flake_path: &str,
