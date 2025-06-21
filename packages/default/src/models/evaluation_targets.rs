@@ -23,6 +23,7 @@ pub struct EvaluationTarget {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]
 #[sqlx(type_name = "text")]
+#[sqlx(rename_all = "lowercase")]
 pub enum TargetType {
     NixOS,
     HomeManager,
@@ -31,8 +32,8 @@ pub enum TargetType {
 impl From<String> for TargetType {
     fn from(s: String) -> Self {
         match s.as_str() {
-            "NixOS" => TargetType::NixOS,
-            "HomeManager" => TargetType::HomeManager,
+            "nixos" => TargetType::NixOS,
+            "homemanager" => TargetType::HomeManager,
             _ => panic!("Invalid TargetType: {}", s),
         }
     }
