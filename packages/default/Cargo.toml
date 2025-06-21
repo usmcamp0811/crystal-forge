@@ -29,6 +29,8 @@ reqwest = { version = "0.11", features = ["json","blocking", "rustls-tls"] }
 sha2 = "0.10.9"
 systemstat = "0.2.4"
 futures = "0.3.31"
+sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "chrono", "macros"] }
+chrono = { version = "0.4.41", features = ["serde"] }
 
 [lib]
 path = "src/lib.rs"
@@ -45,3 +47,5 @@ path = "src/bin/server.rs"
 name = "cf-keygen"
 path = "src/bin/cf-keygen.rs"
 
+[package.metadata.sqlx]
+offline = true

@@ -13,9 +13,9 @@ with lib.crystal-forge;
       rustc
       cargo
       pkg-config
-      openssl.dev
-      openssl.out
+      openssl
       fzf
+      sqlx-cli
     ];
 
     shellHook = ''
@@ -31,6 +31,7 @@ with lib.crystal-forge;
       export CRYSTAL_FORGE__DATABASE__HOST=localhost
       export CRYSTAL_FORGE__DATABASE__PASSWORD=password
       export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
+      export DATABASE_URL=postgres://crystal_forge:password@127.0.0.1/crystal_forge
       export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__chesty=Asu0Fl8SsM9Pd/woHt5qkvBdCbye6j2Q2M/qDmnFUjc=
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__daly=JhjP4LK72nuTQJ6y7pcYjoTtfrY86BpJBi9WeolcpKY=
@@ -41,6 +42,17 @@ with lib.crystal-forge;
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__webb=ZJBA2GS03P+Q2mhUAbjfjFILQ57yGChjXmRdL6Xfang=
       export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
       export CRYSTAL_FORGE__SERVER__PORT=3444
+
+      sqlx-refresh() {
+        echo "🔄 Resetting and preparing sqlx..."
+        sqlx database reset -y
+        cargo sqlx prepare
+      }
+
+      sqlx-prepare() {
+        echo "🛠  Running cargo sqlx prepare..."
+        cargo sqlx prepare
+      }
 
       if [ -n "$BASH_VERSION" ]; then
         . ${pkgs.fzf}/share/fzf/key-bindings.bash
