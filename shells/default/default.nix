@@ -8,15 +8,45 @@
 }:
 with lib;
 with lib.crystal-forge; let
+  db_port = 3042;
+  db_password = "password";
+  cf_port = 3445;
   myServicesMod = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
       {
+        settings.processes.server = {
+          command = pkgs.writeShellApplication {
+            runtimeInputs = [pkgs.nix pkgs.crystal-forge.server];
+            text = ''
+              export RUST_LOG=debug
+              export CRYSTAL_FORGE__DATABASE__HOST=127.0.0.1
+              export CRYSTAL_FORGE__DATABASE__PORT=${db_port}
+              export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
+              export CRYSTAL_FORGE__DATABASE__PASSWORD=${db_password}
+              export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
+              export DATABASE_URL=postgres://crystal_forge:${db_password}@127.0.0.1:${db_port}/crystal_forge
+              export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
+              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__chesty=Asu0Fl8SsM9Pd/woHt5qkvBdCbye6j2Q2M/qDmnFUjc=
+              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__daly=JhjP4LK72nuTQJ6y7pcYjoTtfrY86BpJBi9WeolcpKY=
+              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__ermy=z9FINYnz2IPPaECHZbTae5prPFUE/ubAT+4HHLPSq7I=
+              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__gray=hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY=
+              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__lucas=OMxvf/rZmi8PZJOpVxjbPHDaX+BmJqp8FUOoosWJ7qY=
+              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__reckless=SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8=
+              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__webb=ZJBA2GS03P+Q2mhUAbjfjFILQ57yGChjXmRdL6Xfang=
+              export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
+              export CRYSTAL_FORGE__SERVER__PORT=${cf_port}
+              ${pkgs.crystal-forge.server}/bin/server
+            '';
+            name = "crystal-forge-server";
+          };
+          depends_on."crystal-forge-db".condition = "process_healthy";
+        };
         services.postgres."crystal-forge-db" = {
           enable = true;
-          port = 3042;
+          port = db_port;
           initialScript.before = ''
-            CREATE USER crystal_forge WITH password 'mypasswd';
+            CREATE USER crystal_forge WITH password '${db_password}';
           '';
           initialDatabases = [
             {
@@ -51,9 +81,11 @@ in
       export FZF_DEFAULT_OPTS="--height 40% --reverse --border"
       export RUST_LOG=debug
       export CRYSTAL_FORGE__DATABASE__HOST=localhost
-      export CRYSTAL_FORGE__DATABASE__PASSWORD=password
+      export CRYSTAL_FORGE__DATABASE__PORT=3042
       export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
-      export DATABASE_URL=postgres://crystal_forge:password@127.0.0.1/crystal_forge
+      export CRYSTAL_FORGE__DATABASE__PASSWORD=mypasswd
+      export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
+      export DATABASE_URL=postgres://crystal_forge:mypasswd@127.0.0.1:3042/crystal_forge
       export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__chesty=Asu0Fl8SsM9Pd/woHt5qkvBdCbye6j2Q2M/qDmnFUjc=
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__daly=JhjP4LK72nuTQJ6y7pcYjoTtfrY86BpJBi9WeolcpKY=
