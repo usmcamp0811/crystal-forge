@@ -16,6 +16,7 @@ with lib.crystal-forge;
       openssl
       fzf
       sqlx-cli
+      process-compose
     ];
 
     shellHook = ''
