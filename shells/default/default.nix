@@ -23,8 +23,22 @@ with lib.crystal-forge; let
     export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
     export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
     export CRYSTAL_FORGE__SERVER__PORT=${toString cf_port}
-    export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__dev=J0G4WrmEeaHUicIWzQcLUrRbZWgPf2w1T7VIHKmoGVQ=
+    export CRYSTAL_FORGE__CLIENT__SERVER_HOST=127.0.0.1
+    export CRYSTAL_FORGE__CLIENT__SERVER_PORT=${toString cf_port}
   '';
+
+  runAgent = pkgs.writeShellApplication {
+    name = "run-agent";
+    runtimeInputs = [pkgs.nix];
+    text = ''
+      ${envExports}
+      if [[ "''${1:-}" == "--dev" ]]; then
+        exec sudo -E nix run .#agent
+      else
+        exec sudo -E ${pkgs.crystal-forge.agent}/bin/agent
+      fi
+    '';
+  };
 
   runServer = pkgs.writeShellApplication {
     name = "run-server";
@@ -80,6 +94,7 @@ in
       postgresql
       sqlx-cli
       runServer
+      runAgent
       cf-dev.config.outputs.package
     ];
 
@@ -95,7 +110,10 @@ in
       fi
 
       export CRYSTAL_FORGE__CLIENT__PRIVATE_KEY="$CF_KEY_DIR/agent.key"
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__dev=$(cat "$CF_KEY_DIR/agent.pub")
+      hostname="$(hostname)"
+      pubkey="$(cat "$CF_KEY_DIR/agent.pub")"
+      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__"''${hostname}"="$pubkey"
+
 
       ${envExports}
 
