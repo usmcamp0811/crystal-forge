@@ -11,6 +11,19 @@ with lib.crystal-forge; let
   db_port = 3042;
   db_password = "password";
   cf_port = 3445;
+
+  keyPair = pkgs.runCommand "agent-keypair" {} ''
+    mkdir -p $out
+    ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/agent.key
+  '';
+  key = pkgs.runCommand "agent.key" {} ''
+    mkdir -p $out
+    cp ${keyPair}/agent.key $out/
+  '';
+  pub = pkgs.runCommand "agent.pub" {} ''
+    mkdir -p $out
+    cp ${keyPair}/agent.pub $out/
+  '';
   myServicesMod = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -27,18 +40,10 @@ with lib.crystal-forge; let
               export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
               export DATABASE_URL=postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge
               export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
-              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__chesty=Asu0Fl8SsM9Pd/woHt5qkvBdCbye6j2Q2M/qDmnFUjc=
-              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__daly=JhjP4LK72nuTQJ6y7pcYjoTtfrY86BpJBi9WeolcpKY=
-              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__ermy=z9FINYnz2IPPaECHZbTae5prPFUE/ubAT+4HHLPSq7I=
-              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__gray=hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY=
-              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__lucas=OMxvf/rZmi8PZJOpVxjbPHDaX+BmJqp8FUOoosWJ7qY=
-              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__reckless=SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8=
-              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__webb=ZJBA2GS03P+Q2mhUAbjfjFILQ57yGChjXmRdL6Xfang=
+              export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__dev=
               export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
               export CRYSTAL_FORGE__SERVER__PORT=${toString cf_port}
 
-              echo "🔍 Checking if DB is up..."
-              ${pkgs.postgresql}/bin/pg_isready -h 127.0.0.1 -p ${toString db_port} -U crystal_forge -d crystal_forge || echo "❌ DB not ready"
               ${pkgs.crystal-forge.server}/bin/server
             '';
             name = "crystal-forge-server";
@@ -63,34 +68,7 @@ with lib.crystal-forge; let
             CREATE DATABASE crystal_forge OWNER crystal_forge;
             GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
           '';
-          # hbaConf = [
-          #   {
-          #     type = "host";
-          #     database = "all";
-          #     user = "all";
-          #     address = "127.0.0.1/32";
-          #     method = "md5";
-          #   }
-          #   {
-          #     type = "host";
-          #     database = "crystal_forge";
-          #     user = "all";
-          #     address = "127.0.0.1/32";
-          #     method = "trust";
-          #   }
-          #   {
-          #     type = "host";
-          #     database = "crystal_forge";
-          #     user = "all";
-          #     address = "::1/128";
-          #     method = "trust";
-          #   }
-          # ];
           initialDatabases = [
-            # {
-            #   name = "crystal_forge";
-            #   schemas = [];
-            # }
           ];
         };
       }
