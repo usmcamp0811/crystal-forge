@@ -21,11 +21,11 @@ with lib.crystal-forge; let
             text = ''
               export RUST_LOG=debug
               export CRYSTAL_FORGE__DATABASE__HOST=127.0.0.1
-              export CRYSTAL_FORGE__DATABASE__PORT=${db_port}
+              export CRYSTAL_FORGE__DATABASE__PORT=${toString db_port}
               export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
-              export CRYSTAL_FORGE__DATABASE__PASSWORD=${db_password}
+              export CRYSTAL_FORGE__DATABASE__PASSWORD=${toString db_password}
               export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
-              export DATABASE_URL=postgres://crystal_forge:${db_password}@127.0.0.1:${db_port}/crystal_forge
+              export DATABASE_URL=postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge
               export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
               export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__chesty=Asu0Fl8SsM9Pd/woHt5qkvBdCbye6j2Q2M/qDmnFUjc=
               export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__daly=JhjP4LK72nuTQJ6y7pcYjoTtfrY86BpJBi9WeolcpKY=
@@ -35,7 +35,7 @@ with lib.crystal-forge; let
               export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__reckless=SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8=
               export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__webb=ZJBA2GS03P+Q2mhUAbjfjFILQ57yGChjXmRdL6Xfang=
               export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
-              export CRYSTAL_FORGE__SERVER__PORT=${cf_port}
+              export CRYSTAL_FORGE__SERVER__PORT=${toString cf_port}
               ${pkgs.crystal-forge.server}/bin/server
             '';
             name = "crystal-forge-server";
