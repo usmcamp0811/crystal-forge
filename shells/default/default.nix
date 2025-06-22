@@ -12,8 +12,9 @@ with lib.crystal-forge; let
     modules = [
       inputs.services-flake.processComposeModules.default
       {
-        services.postgres."pg1" = {
+        services.postgres."crystal-forge-db" = {
           enable = true;
+          port = 3042;
           initialScript.before = ''
             CREATE USER crystal_forge WITH password 'mypasswd';
           '';
