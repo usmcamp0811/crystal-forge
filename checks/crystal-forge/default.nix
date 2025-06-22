@@ -64,7 +64,7 @@ in
           database = {
             user = "crystal_forge";
             host = "localhost";
-            dbname = "crystal_forge";
+            name = "crystal_forge";
           };
           flakes.watched = {
             dotfiles = "git+https://gitlab.com/usmcamp0811/dotfiles";

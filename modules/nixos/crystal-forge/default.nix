@@ -10,7 +10,7 @@
 
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" {
     database = {
-      inherit (cfg.database) host user dbname;
+      inherit (cfg.database) host user name;
       password =
         if cfg.database.passwordFile != null
         then "__USE_EXTERNAL_PASSWORD__"
@@ -77,7 +77,7 @@ in {
         default = null;
         description = "Optional path to a file containing the DB password.";
       };
-      dbname = lib.mkOption {
+      name = lib.mkOption {
         type = lib.types.str;
         default = "crystal_forge";
       };
@@ -122,7 +122,7 @@ in {
   config = lib.mkIf cfg.enable {
     services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
       enable = true;
-      ensureDatabases = [cfg.database.dbname];
+      ensureDatabases = [cfg.database.name];
       ensureUsers = [
         {
           name = cfg.database.user;
@@ -153,7 +153,7 @@ in {
         // {
           CRYSTAL_FORGE__DATABASE__HOST = cfg.database.host;
           CRYSTAL_FORGE__DATABASE__USER = cfg.database.user;
-          CRYSTAL_FORGE__DATABASE__DBNAME = cfg.database.dbname;
+          CRYSTAL_FORGE__DATABASE__NAME = cfg.database.name;
           CRYSTAL_FORGE__DATABASE__PASSWORD =
             if cfg.database.passwordFile != null
             then builtins.readFile cfg.database.passwordFile
