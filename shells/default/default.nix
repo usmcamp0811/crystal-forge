@@ -36,32 +36,61 @@ with lib.crystal-forge; let
               export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__webb=ZJBA2GS03P+Q2mhUAbjfjFILQ57yGChjXmRdL6Xfang=
               export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
               export CRYSTAL_FORGE__SERVER__PORT=${toString cf_port}
+
+              echo "🔍 Checking if DB is up..."
+              ${pkgs.postgresql}/bin/pg_isready -h 127.0.0.1 -p ${toString db_port} -U crystal_forge -d crystal_forge || echo "❌ DB not ready"
               ${pkgs.crystal-forge.server}/bin/server
             '';
             name = "crystal-forge-server";
           };
           depends_on."crystal-forge-db".condition = "process_healthy";
+          readiness_probe = {
+            exec.command = "${pkgs.postgresql}/bin/pg_isready -h 127.0.0.1 -p ${toString db_port} -U crystal_forge -d crystal_forge";
+            initial_delay_seconds = 2;
+            period_seconds = 5;
+            timeout_seconds = 3;
+            success_threshold = 1;
+            failure_threshold = 5;
+          };
         };
         services.postgres."crystal-forge-db" = {
           enable = true;
+          listen_addresses = "0.0.0.0";
+
           port = db_port;
           initialScript.before = ''
-            CREATE USER crystal_forge WITH password '${db_password}';
+            CREATE USER crystal_forge LOGIN;
+            CREATE DATABASE crystal_forge OWNER crystal_forge;
+            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
           '';
-          hbaConf = [
-            {
-              type = "host";
-              database = "all";
-              user = "crystal_forge";
-              address = "127.0.0.1/32";
-              method = "md5";
-            }
-          ];
+          # hbaConf = [
+          #   {
+          #     type = "host";
+          #     database = "all";
+          #     user = "all";
+          #     address = "127.0.0.1/32";
+          #     method = "md5";
+          #   }
+          #   {
+          #     type = "host";
+          #     database = "crystal_forge";
+          #     user = "all";
+          #     address = "127.0.0.1/32";
+          #     method = "trust";
+          #   }
+          #   {
+          #     type = "host";
+          #     database = "crystal_forge";
+          #     user = "all";
+          #     address = "::1/128";
+          #     method = "trust";
+          #   }
+          # ];
           initialDatabases = [
-            {
-              name = "crystal_forge";
-              schemas = [];
-            }
+            # {
+            #   name = "crystal_forge";
+            #   schemas = [];
+            # }
           ];
         };
       }
@@ -75,6 +104,7 @@ in
       pkg-config
       openssl
       fzf
+      postgresql
       sqlx-cli
       myServicesMod.config.outputs.package
     ];

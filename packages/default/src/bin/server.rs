@@ -21,8 +21,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env()) // uses RUST_LOG
         .init();
+    println!("Crystal Forge: Starting...");
     // Load and validate config
     let cfg = config::load_config()?;
+    config::debug_print_config(&cfg);
     let db_url = cfg
         .database
         .as_ref()
