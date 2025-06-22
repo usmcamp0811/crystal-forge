@@ -134,3 +134,49 @@ CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal_forge/host.key
 ```
 
 The module will automatically generate the correct environment variables, systemd services, and config paths based on your input.
+
+## 🧑‍💻 Development
+
+Crystal Forge includes a full development environment using Nix. To get started:
+
+### 🚀 Quickstart
+
+```bash
+nix develop
+```
+
+Then, in one terminal:
+
+```bash
+process-compose up
+```
+
+This will start the PostgreSQL database and the Crystal Forge server with environment variables preloaded.
+
+In another terminal:
+
+```bash
+run-agent
+```
+
+This launches the agent and sends reports to the local server.
+
+### 🔁 Live Development
+
+To run the server or agent from source instead of the latest build:
+
+```bash
+run-server --dev
+run-agent --dev
+```
+
+This ensures you're running against your latest code changes.
+
+### 🛠 Utilities
+
+From inside the dev shell:
+
+- `sqlx-refresh` — Resets the database and prepares SQLx.
+- `sqlx-prepare` — Runs `cargo sqlx prepare` without resetting.
+
+The dev shell auto-generates an Ed25519 keypair if missing and sets all required `CRYSTAL_FORGE__*` env vars.
