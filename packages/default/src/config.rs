@@ -9,11 +9,12 @@ use tracing::debug;
 pub fn debug_print_config(cfg: &CrystalForgeConfig) {
     debug!("🔧 Loaded Configuration:");
 
+    let masked: String = "*".repeat(password.chars().count());
     if let Some(db) = &cfg.database {
         debug!("  [database]");
         debug!("    host = {}", db.host);
         debug!("    user = {}", db.user);
-        debug!("    password = {}", db.password);
+        debug!("    password = {}", masked);
         debug!("    dbname = {}", db.dbname);
     }
 
@@ -21,8 +22,8 @@ pub fn debug_print_config(cfg: &CrystalForgeConfig) {
         debug!("  [server]");
         debug!("    host = {}", server.host);
         debug!("    port = {}", server.port);
-        for k in server.authorized_keys.keys() {
-            debug!("    authorized_keys[{k}] = ***");
+        for (k, v) in &server.authorized_keys {
+            debug!("    authorized_keys[{k}] = {v}");
         }
     }
 
