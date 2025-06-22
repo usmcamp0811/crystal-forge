@@ -5,5 +5,5 @@
   ...
 }: final: prev: {
   inherit (campground.packages.${final.system}) slidev;
-  services-flake = import process-compose-flake.lib {pkgs = final;};
+  process-compose = import process-compose-flake.lib {pkgs = final;};
 }

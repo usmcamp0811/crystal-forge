@@ -8,7 +8,7 @@
 }:
 with lib;
 with lib.crystal-forge; let
-  myServicesMod = pkgs.services-flake.evalModules {
+  myServicesMod = pkgs.process-compose.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
       {
