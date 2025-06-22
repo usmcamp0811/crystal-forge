@@ -9,8 +9,8 @@ use tracing::debug;
 pub fn debug_print_config(cfg: &CrystalForgeConfig) {
     debug!("🔧 Loaded Configuration:");
 
-    let masked: String = "*".repeat(db.password.chars().count());
     if let Some(db) = &cfg.database {
+        let masked: String = "*".repeat(db.password.chars().count());
         debug!("  [database]");
         debug!("    host = {}", db.host);
         debug!("    user = {}", db.user);
