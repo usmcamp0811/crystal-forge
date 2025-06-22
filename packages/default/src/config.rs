@@ -15,7 +15,7 @@ pub fn debug_print_config(cfg: &CrystalForgeConfig) {
         debug!("    host = {}", db.host);
         debug!("    user = {}", db.user);
         debug!("    password = {}", masked);
-        debug!("    dbname = {}", db.dbname);
+        debug!("    name = {}", db.name);
     }
 
     if let Some(server) = &cfg.server {
@@ -23,7 +23,7 @@ pub fn debug_print_config(cfg: &CrystalForgeConfig) {
         debug!("    host = {}", server.host);
         debug!("    port = {}", server.port);
         for (k, v) in &server.authorized_keys {
-            debug!("    authorized_keys[{k}] = {v}");
+            debug!("    authorized_keys[{}] = {}", k, v);
         }
     }
 
@@ -37,7 +37,7 @@ pub fn debug_print_config(cfg: &CrystalForgeConfig) {
     if let Some(flakes) = &cfg.flakes {
         debug!("  [flakes]");
         for (name, url) in &flakes.watched {
-            debug!("    {name} = {url}");
+            debug!("    {} = {}", name, url);
         }
     }
 }
@@ -128,7 +128,7 @@ pub struct DbConfig {
     pub password: String,
 
     /// Name of the database.
-    pub dbname: String,
+    pub name: String,
 }
 
 fn default_pg_port() -> u16 {
@@ -140,7 +140,7 @@ impl DbConfig {
     pub fn to_url(&self) -> String {
         format!(
             "postgres://{}:{}@{}:{}/{}",
-            self.user, self.password, self.host, self.port, self.dbname
+            self.user, self.password, self.host, self.port, self.name
         )
     }
 }
