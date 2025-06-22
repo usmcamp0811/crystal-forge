@@ -98,7 +98,7 @@ in
       export FZF_DEFAULT_OPTS="--height 40% --reverse --border"
       export RUST_LOG=debug
       export CRYSTAL_FORGE__DATABASE__HOST=localhost
-      export CRYSTAL_FORGE__DATABASE__PORT=3042
+      export CRYSTAL_FORGE__DATABASE__PORT=${toString db_port}
       export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
       export CRYSTAL_FORGE__DATABASE__PASSWORD=${db_password}
       export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
@@ -112,7 +112,7 @@ in
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__reckless=SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8=
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__webb=ZJBA2GS03P+Q2mhUAbjfjFILQ57yGChjXmRdL6Xfang=
       export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
-      export CRYSTAL_FORGE__SERVER__PORT=3444
+      export CRYSTAL_FORGE__SERVER__PORT=${toString cf_port}
 
       sqlx-refresh() {
         echo "🔄 Resetting and preparing sqlx..."

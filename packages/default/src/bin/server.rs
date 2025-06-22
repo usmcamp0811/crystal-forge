@@ -154,10 +154,14 @@ fn parse_authorized_keys(
             .decode(b64.trim())
             .with_context(|| format!("Invalid base64 key for ID '{}'", key_id))?;
 
+        if bytes.len() != 32 {
+            anyhow::bail!("Key ID '{}' is not 32 bytes (got {})", key_id, bytes.len());
+        }
+
         let key_bytes: [u8; 32] = bytes
             .as_slice()
             .try_into()
-            .context("Failed to convert to [u8; 32]")?;
+            .expect("already checked length == 32");
 
         let key = VerifyingKey::from_bytes(&key_bytes)
             .context(format!("Invalid public key for ID '{}'", key_id))?;
