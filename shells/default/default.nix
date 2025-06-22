@@ -1,13 +1,33 @@
 {
   mkShell,
-  inputs,
   system,
+  inputs,
   pkgs,
   lib,
   ...
 }:
 with lib;
-with lib.crystal-forge;
+with lib.crystal-forge; let
+  myServicesMod = pkgs.services-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      {
+        services.postgres."pg1" = {
+          enable = true;
+          initialScript.before = ''
+            CREATE USER crystal_forge WITH password 'mypasswd';
+          '';
+          initialDatabases = [
+            {
+              name = "crystal_forge";
+              schemas = [];
+            }
+          ];
+        };
+      }
+    ];
+  };
+in
   mkShell {
     buildInputs = with pkgs; [
       rustc
@@ -16,7 +36,7 @@ with lib.crystal-forge;
       openssl
       fzf
       sqlx-cli
-      process-compose
+      myServicesMod.config.outputs.package
     ];
 
     shellHook = ''
