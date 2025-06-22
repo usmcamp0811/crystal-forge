@@ -48,6 +48,15 @@ with lib.crystal-forge; let
           initialScript.before = ''
             CREATE USER crystal_forge WITH password '${db_password}';
           '';
+          hbaConf = [
+            {
+              type = "host";
+              database = "all";
+              user = "crystal_forge";
+              address = "127.0.0.1/32";
+              method = "md5";
+            }
+          ];
           initialDatabases = [
             {
               name = "crystal_forge";
@@ -83,9 +92,9 @@ in
       export CRYSTAL_FORGE__DATABASE__HOST=localhost
       export CRYSTAL_FORGE__DATABASE__PORT=3042
       export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
-      export CRYSTAL_FORGE__DATABASE__PASSWORD=mypasswd
+      export CRYSTAL_FORGE__DATABASE__PASSWORD=${db_password}
       export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
-      export DATABASE_URL=postgres://crystal_forge:mypasswd@127.0.0.1:3042/crystal_forge
+      export DATABASE_URL=postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge
       export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__chesty=Asu0Fl8SsM9Pd/woHt5qkvBdCbye6j2Q2M/qDmnFUjc=
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__daly=JhjP4LK72nuTQJ6y7pcYjoTtfrY86BpJBi9WeolcpKY=
