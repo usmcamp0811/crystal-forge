@@ -18,7 +18,7 @@ pub struct EvaluationTarget {
     pub target_name: String,             // e.g. system or profile name
     pub derivation_path: Option<String>, // populated post-build
     pub build_timestamp: Option<DateTime<Utc>>, // nullable until built
-    pub queued: bool,
+    pub queued_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]

@@ -12,15 +12,15 @@ pub async fn insert_evaluation_target(
     let inserted = sqlx::query_as!(
         EvaluationTarget,
         r#"
-        INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name, queued)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (commit_id, target_type, target_name) DO UPDATE SET commit_id = EXCLUDED.commit_id
-        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued as "queued!: bool"
-        "#,
+    INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (commit_id, target_type, target_name)
+    DO UPDATE SET commit_id = EXCLUDED.commit_id
+    RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued_at
+    "#,
         commit.id,
         target_type,
         target_name,
-        false
     )
     .fetch_one(pool)
     .await?;
