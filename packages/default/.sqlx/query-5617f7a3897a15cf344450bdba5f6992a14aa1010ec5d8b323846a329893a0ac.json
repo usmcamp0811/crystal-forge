@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n    SELECT\n        id,\n        commit_id,\n        target_type as \"target_type: TargetType\",\n        target_name,\n        derivation_path,\n        build_timestamp,\n        queued as \"queued!: bool\"\n    FROM tbl_evaluation_targets\n    WHERE derivation_path IS NULL\n    ",
+  "query": "\n    INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name)\n    VALUES ($1, $2, $3)\n    ON CONFLICT (commit_id, target_type, target_name)\n    DO UPDATE SET commit_id = EXCLUDED.commit_id\n    RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued_at\n    ",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "target_type: TargetType",
+        "name": "target_type",
         "type_info": "Text"
       },
       {
@@ -35,12 +35,16 @@
       },
       {
         "ordinal": 6,
-        "name": "queued!: bool",
-        "type_info": "Bool"
+        "name": "queued_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Int4",
+        "Text",
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -52,5 +56,5 @@
       true
     ]
   },
-  "hash": "f1a446f90e792725f3bd5a5b1c44d058c03b15ee35cabb358c405351b0904653"
+  "hash": "5617f7a3897a15cf344450bdba5f6992a14aa1010ec5d8b323846a329893a0ac"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE tbl_evaluation_targets\n        SET derivation_path = $1\n        WHERE commit_id = $2 AND target_type = $3 AND target_name = $4\n        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued as \"queued!: bool\"\n        ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            build_timestamp,\n            queued_at\n        FROM tbl_evaluation_targets\n        WHERE derivation_path IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "target_type",
+        "name": "target_type: TargetType",
         "type_info": "Text"
       },
       {
@@ -35,17 +35,12 @@
       },
       {
         "ordinal": 6,
-        "name": "queued!: bool",
-        "type_info": "Bool"
+        "name": "queued_at",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
-      "Left": [
-        "Text",
-        "Int4",
-        "Text",
-        "Text"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -57,5 +52,5 @@
       true
     ]
   },
-  "hash": "74ea178d7b1b0a5ad2f4c854b276bcee29d895b1fcd86004f2eec1eb7690e023"
+  "hash": "ba9a7b80916f097bbc8a2327a37bef15d2118333643dadf995d6a565578973d9"
 }

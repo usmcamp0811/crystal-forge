@@ -39,7 +39,14 @@ pub async fn update_evaluation_target_path(
         UPDATE tbl_evaluation_targets
         SET derivation_path = $1
         WHERE commit_id = $2 AND target_type = $3 AND target_name = $4
-        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued as "queued!: bool"
+        RETURNING
+            id,
+            commit_id,
+            target_type as "target_type: TargetType",
+            target_name,
+            derivation_path,
+            build_timestamp,
+            queued_at
         "#,
         path,
         target.commit_id,
@@ -56,17 +63,17 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
     let rows = sqlx::query_as!(
         EvaluationTarget,
         r#"
-    SELECT
-        id,
-        commit_id,
-        target_type as "target_type: TargetType",
-        target_name,
-        derivation_path,
-        build_timestamp,
-        queued as "queued!: bool"
-    FROM tbl_evaluation_targets
-    WHERE derivation_path IS NULL
-    "#
+        SELECT
+            id,
+            commit_id,
+            target_type as "target_type: TargetType",
+            target_name,
+            derivation_path,
+            build_timestamp,
+            queued_at
+        FROM tbl_evaluation_targets
+        WHERE derivation_path IS NULL
+        "#
     )
     .fetch_all(pool)
     .await?;
