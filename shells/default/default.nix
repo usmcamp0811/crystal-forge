@@ -8,12 +8,14 @@
 }:
 with lib;
 with lib.crystal-forge; let
+  namespace = "crystal-forge";
   db_port = 3042;
   db_password = "password";
   cf_port = 3445;
+  pgweb_port = 8081;
 
   envExports = ''
-    export RUST_LOG=debug
+    export RUST_LOG=info
     export CRYSTAL_FORGE__DATABASE__HOST=127.0.0.1
     export CRYSTAL_FORGE__DATABASE__PORT=${toString db_port}
     export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
@@ -58,8 +60,9 @@ with lib.crystal-forge; let
       inputs.services-flake.processComposeModules.default
       {
         settings.processes.server = {
+          inherit namespace;
           command = runServer;
-          depends_on."crystal-forge-db".condition = "process_healthy";
+          depends_on."db".condition = "process_healthy";
           readiness_probe = {
             exec.command = "${pkgs.postgresql}/bin/pg_isready -h 127.0.0.1 -p ${toString db_port} -U crystal_forge -d crystal_forge";
             initial_delay_seconds = 2;
@@ -69,11 +72,20 @@ with lib.crystal-forge; let
             failure_threshold = 5;
           };
         };
+        settings.processes.pgweb = {
+          inherit namespace;
+          command = pkgs.pgweb;
+          port = pgweb_port;
+          depends_on."db".condition = "process_healthy";
+          environment.PGWEB_DATABASE_URL = "postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge";
+        };
         settings.processes.agent = {
+          inherit namespace;
           command = runAgent;
           depends_on."server".condition = "process_healthy";
         };
-        services.postgres."crystal-forge-db" = {
+        services.postgres."db" = {
+          inherit namespace;
           enable = true;
           listen_addresses = "0.0.0.0";
           port = db_port;
