@@ -103,6 +103,8 @@ in
     ];
 
     shellHook = ''
+      export CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+
       echo "🔮 Welcome to the Crystal Forge Dev Environment"
       echo ""
       echo "🧰 Dev Workflow:"
@@ -129,7 +131,6 @@ in
       echo ""
       echo "💡 Tip: View all env vars with: env | grep CRYSTAL_FORGE"
 
-      export CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
       mkdir -p "$CF_KEY_DIR"
 
       if [ ! -f "$CF_KEY_DIR/agent.key" ]; then
