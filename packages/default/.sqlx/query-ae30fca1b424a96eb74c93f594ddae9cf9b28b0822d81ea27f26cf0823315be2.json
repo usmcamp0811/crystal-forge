@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            build_timestamp,\n            queued_at\n        FROM tbl_evaluation_targets\n        WHERE derivation_path IS NULL\n        ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            build_timestamp,\n            scheduled_at,\n            completed_at\n        FROM tbl_evaluation_targets\n        WHERE derivation_path IS NULL\n        ",
   "describe": {
     "columns": [
       {
@@ -35,7 +35,12 @@
       },
       {
         "ordinal": 6,
-        "name": "queued_at",
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "completed_at",
         "type_info": "Timestamptz"
       }
     ],
@@ -49,8 +54,9 @@
       false,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "ba9a7b80916f097bbc8a2327a37bef15d2118333643dadf995d6a565578973d9"
+  "hash": "ae30fca1b424a96eb74c93f594ddae9cf9b28b0822d81ea27f26cf0823315be2"
 }
