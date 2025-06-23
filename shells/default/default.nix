@@ -69,6 +69,10 @@ with lib.crystal-forge; let
             failure_threshold = 5;
           };
         };
+        settings.processes.agent = {
+          command = runAgent;
+          depends_on."server".condition = "process_healthy";
+        };
         services.postgres."crystal-forge-db" = {
           enable = true;
           listen_addresses = "0.0.0.0";
@@ -99,7 +103,31 @@ in
     ];
 
     shellHook = ''
-      echo 🔮 Welcome to the Crystal Forge
+      echo "🔮 Welcome to the Crystal Forge Dev Environment"
+      echo ""
+      echo "🧰 Dev Workflow:"
+      echo ""
+      echo "  1️⃣  Start core services:"
+      echo "      process-compose up"
+      echo "      - Launches PostgreSQL and the Crystal Forge server"
+      echo ""
+      echo "  2️⃣  Run the agent:"
+      echo "      run-agent"
+      echo "      - Automatically runs with sudo"
+      echo "      - Requires the server to be running first"
+      echo ""
+      echo "  3️⃣  Run agent with local code (for development):"
+      echo "      run-agent --dev"
+      echo ""
+      echo "🛠  Helpful Commands:"
+      echo ""
+      echo "  run-server         → Run server directly (uses packaged binary unless --dev)"
+      echo "  sqlx-refresh       → Drop DB and re-run sqlx prepare"
+      echo "  sqlx-prepare       → Just re-run sqlx prepare"
+      echo ""
+      echo "🔑 Dev keys in: \$CF_KEY_DIR ($CF_KEY_DIR)"
+      echo ""
+      echo "💡 Tip: View all env vars with: env | grep CRYSTAL_FORGE"
 
       export CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
       mkdir -p "$CF_KEY_DIR"
