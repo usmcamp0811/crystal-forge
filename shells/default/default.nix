@@ -12,22 +12,57 @@ with lib.crystal-forge; let
   db_port = 3042;
   db_password = "password";
   cf_port = 3445;
-  pgweb_port = 8081;
+  pgweb_port = 8082;
 
   envExports = ''
-    export RUST_LOG=info
     export CRYSTAL_FORGE__DATABASE__HOST=127.0.0.1
     export CRYSTAL_FORGE__DATABASE__PORT=${toString db_port}
     export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
     export CRYSTAL_FORGE__DATABASE__PASSWORD=${db_password}
     export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
     export DATABASE_URL=postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge
-    export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
+    export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=git+https://gitlab.com/usmcamp0811/dotfiles
     export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
     export CRYSTAL_FORGE__SERVER__PORT=${toString cf_port}
     export CRYSTAL_FORGE__CLIENT__SERVER_HOST=127.0.0.1
     export CRYSTAL_FORGE__CLIENT__SERVER_PORT=${toString cf_port}
   '';
+
+  simulatePush = pkgs.writeShellApplication {
+    name = "simulate-push";
+    runtimeInputs = with pkgs; [git curl jq];
+    text = ''
+      set -euo pipefail
+
+      REPO_URL="''${1:-https://gitlab.com/usmcamp0811/dotfiles}"
+      SERVER_URL="''${2:-http://localhost:${toString cf_port}/webhook}"
+
+      if [[ -z "$REPO_URL" ]]; then
+        echo "Usage: simulate-push <repo-url> [server-url]"
+        exit 1
+      fi
+
+      TMP_DIR="$(mktemp -d)"
+      trap 'rm -rf "$TMP_DIR"' EXIT
+
+      git clone --quiet --depth=1 "$REPO_URL" "$TMP_DIR"
+      cd "$TMP_DIR"
+      COMMIT_HASH="$(git rev-parse HEAD)"
+      REPO_URL_WITH_PREFIX="git+''${REPO_URL}"
+
+      PAYLOAD="$(jq -n \
+        --arg url "$REPO_URL_WITH_PREFIX" \
+        --arg sha "$COMMIT_HASH" \
+        '{ project: { web_url: $url }, checkout_sha: $sha }')"
+
+      echo "=== PAYLOAD ==="
+      echo "$PAYLOAD" | jq
+
+      curl -v -X POST "$SERVER_URL" \
+        -H "Content-Type: application/json" \
+        -d "$PAYLOAD"
+    '';
+  };
 
   runAgent = pkgs.writeShellApplication {
     name = "run-agent";
@@ -74,8 +109,7 @@ with lib.crystal-forge; let
         };
         settings.processes.pgweb = {
           inherit namespace;
-          command = pkgs.pgweb;
-          port = pgweb_port;
+          command = "${pkgs.pgweb}/bin/pgweb --listen=${toString pgweb_port} --bind=0.0.0.0";
           depends_on."db".condition = "process_healthy";
           environment.PGWEB_DATABASE_URL = "postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge";
         };
@@ -111,6 +145,7 @@ in
       sqlx-cli
       runServer
       runAgent
+      simulatePush
       cf-dev.config.outputs.package
     ];
 
@@ -150,6 +185,7 @@ in
         ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f "$CF_KEY_DIR/agent.key"
       fi
 
+      export RUST_LOG=info
       export CRYSTAL_FORGE__CLIENT__PRIVATE_KEY="$CF_KEY_DIR/agent.key"
       hostname="$(hostname)"
       pubkey="$(cat "$CF_KEY_DIR/agent.pub")"
