@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
         .to_url();
     config::validate_db_connection(&db_url).await?;
 
-    info!("======== INITIALIZING DATABASE ========");
+    debug!("======== INITIALIZING DATABASE ========");
     let pool = get_db_client().await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
 
