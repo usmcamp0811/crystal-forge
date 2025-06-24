@@ -7,6 +7,10 @@ use serde_json::Value;
 use sqlx::FromRow;
 use std::path::Path;
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio::sync::watch;
+use tokio::task;
+use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
 
 // Basically just derivations / outputs of a flake / aka System derivations
@@ -60,12 +64,47 @@ impl EvaluationTarget {
             flake.name, commit.git_commit_hash, self.target_name
         ))
     }
+
     pub async fn resolve_derivation_path(&mut self) -> Result<String> {
+        let name = self.target_name.clone();
+        let kind = self.target_type.clone();
+
+        println!(
+            "🔍 Starting evaluation of {} target '{}'",
+            kind.to_string().to_lowercase(),
+            name
+        );
+
+        let (tx, mut rx) = watch::channel(false);
+
+        let ticker = tokio::spawn({
+            let name = name.clone();
+            let kind = kind.clone();
+            async move {
+                loop {
+                    sleep(Duration::from_secs(5)).await;
+                    if *rx.borrow_and_update() {
+                        break;
+                    }
+                    println!(
+                        "⏳ Still evaluating {} '{}'",
+                        kind.to_string().to_lowercase(),
+                        name
+                    );
+                }
+            }
+        });
+
         let hash = match self.target_type {
             TargetType::NixOS => self.evaluate_nixos_system().await?,
             TargetType::HomeManager => anyhow::bail!("Home Manager evaluation not implemented yet"),
         };
+
         self.derivation_path = Some(hash.clone());
+
+        let _ = tx.send(true);
+        let _ = ticker.await;
+
         Ok(hash)
     }
 

@@ -29,7 +29,7 @@ in
     shellHook = ''
       export CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
       export PROJECT_ROOT="$PWD"
-      alias process-compose='nix run $PROJECT_ROOT#devScripts --'
+      alias process-compose='sudo echo && nix run $PROJECT_ROOT#devScripts --'
       alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
       alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
       alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'

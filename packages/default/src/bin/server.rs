@@ -13,7 +13,7 @@ use crystal_forge::{config, db::get_db_client};
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
