@@ -46,15 +46,23 @@ async fn main() -> anyhow::Result<()> {
     // add systems to evaluation target table w/o eval
     tokio::spawn(async move {
         let pool = get_db_client().await.expect("db");
+        tracing::info!("🔁 Starting periodic commit evaluation check loop (every 60s)...");
         loop {
+            tracing::info!("🔎 Checking for commits pending evaluation...");
             match get_commits_pending_evaluation(&pool).await {
                 Ok(pending_commits) => {
+                    tracing::info!("📌 Found {} pending commits", pending_commits.len());
                     for commit in pending_commits {
                         let target_type = "nixos";
                         match list_nixos_configurations_from_commit(&pool, &commit).await {
                             Ok(nixos_targets) => {
+                                tracing::info!(
+                                    "📂 Commit {} has {} nixos targets",
+                                    commit.git_commit_hash,
+                                    nixos_targets.len()
+                                );
                                 for target_name in nixos_targets {
-                                    if let Err(e) = insert_evaluation_target(
+                                    match insert_evaluation_target(
                                         &pool,
                                         &commit,
                                         &target_name,
@@ -62,17 +70,22 @@ async fn main() -> anyhow::Result<()> {
                                     )
                                     .await
                                     {
-                                        tracing::error!(
-                                            "❌ Failed to insert evaluation target for {}: {}",
+                                        Ok(_) => tracing::info!(
+                                            "✅ Inserted evaluation target: {} (commit {})",
+                                            target_name,
+                                            commit.git_commit_hash
+                                        ),
+                                        Err(e) => tracing::error!(
+                                            "❌ Failed to insert target for {}: {}",
                                             target_name,
                                             e
-                                        );
+                                        ),
                                     }
                                 }
                             }
                             Err(e) => {
                                 tracing::error!(
-                                    "❌ Failed to list nixos configurations for commit {}: {}",
+                                    "❌ Failed to list nixos configs for commit {}: {}",
                                     commit.git_commit_hash,
                                     e
                                 );
@@ -81,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("❌ Failed to get pending targets: {e}");
+                    tracing::error!("❌ Failed to get pending commits: {e}");
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -91,9 +104,12 @@ async fn main() -> anyhow::Result<()> {
     // add evaluation target derivation paths to table
     tokio::spawn(async move {
         let pool = get_db_client().await.expect("db");
+        tracing::info!("🔍 Starting periodic evaluation target check loop (every 60s)...");
         loop {
+            tracing::info!("⏳ Checking for pending evaluation targets...");
             match get_pending_targets(&pool).await {
                 Ok(pending_targets) => {
+                    tracing::info!("📦 Found {} pending targets", pending_targets.len());
                     for mut target in pending_targets {
                         match target.resolve_derivation_path().await {
                             Ok(path) => {
