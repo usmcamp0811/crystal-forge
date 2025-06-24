@@ -24,10 +24,10 @@ in
       fzf
       postgresql
       sqlx-cli
-      pkgs.crystal-forge.devScripts.runServer
-      pkgs.crystal-forge.devScripts.runAgent
-      pkgs.crystal-forge.sdevScripts.imulatePush
-      pkgs.crystal-forge.devScripts
+      crystal-forge.devScripts.runServer
+      crystal-forge.devScripts.runAgent
+      crystal-forge.devScripts.simulatePush
+      crystal-forge.devScripts
     ];
 
     shellHook = ''
