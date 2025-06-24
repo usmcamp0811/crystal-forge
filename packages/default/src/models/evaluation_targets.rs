@@ -82,7 +82,7 @@ impl EvaluationTarget {
             let kind = kind.clone();
             async move {
                 loop {
-                    sleep(Duration::from_secs(5)).await;
+                    sleep(Duration::from_secs(60)).await;
                     if *rx.borrow_and_update() {
                         break;
                     }
