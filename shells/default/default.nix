@@ -24,14 +24,15 @@ in
       fzf
       postgresql
       sqlx-cli
-      crystal-forge.devScripts.runServer
-      crystal-forge.devScripts.runAgent
-      crystal-forge.devScripts.simulatePush
-      crystal-forge.devScripts
     ];
 
     shellHook = ''
       export CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+
+      alias process-compose='nix run .#devScripts --'
+      alias run-server='nix run .#devScripts.runServer --'
+      alias run-agent='nix run .#devScripts.runAgent --'
+      alias simulate-push='nix run .#devScripts.simulatePush --'
 
       echo "🔮 Welcome to the Crystal Forge Dev Environment"
       echo ""
@@ -64,7 +65,7 @@ in
 
       if [ ! -f "$CF_KEY_DIR/agent.key" ]; then
         echo "🔑 Generating dev agent keypair..."
-        ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f "$CF_KEY_DIR/agent.key"
+        nix run .#agent.cf-keygen -- -f "$CF_KEY_DIR/agent.key"
       fi
 
       export RUST_LOG=info
@@ -74,7 +75,7 @@ in
       export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__"''${hostname}"="$pubkey"
 
 
-      ${envExports}
+      ${pkgs.crystal-forge.devScripts.envExports}
 
       sqlx-refresh() {
         echo "🔄 Resetting and preparing sqlx..."

@@ -136,5 +136,5 @@ with lib.crystal-forge; let
 in
   cf-dev.config.outputs.package
   // {
-    inherit runServer runAgent simulatePush;
+    inherit runServer runAgent simulatePush envExports;
   }
