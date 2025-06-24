@@ -28,11 +28,11 @@ in
 
     shellHook = ''
       export CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
-
-      alias process-compose='nix run .#devScripts --'
-      alias run-server='nix run .#devScripts.runServer --'
-      alias run-agent='nix run .#devScripts.runAgent --'
-      alias simulate-push='nix run .#devScripts.simulatePush --'
+      export PROJECT_ROOT="$PWD"
+      alias process-compose='nix run $PROJECT_ROOT#devScripts --'
+      alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
+      alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
+      alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'
 
       echo "🔮 Welcome to the Crystal Forge Dev Environment"
       echo ""
