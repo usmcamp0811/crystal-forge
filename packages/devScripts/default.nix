@@ -134,7 +134,7 @@ with lib.crystal-forge; let
     ];
   };
 in
-  cf-dev
+  cf-dev.config.outputs.package
   // {
     inherit runServer runAgent simulatePush;
   }
