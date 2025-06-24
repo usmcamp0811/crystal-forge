@@ -138,7 +138,7 @@ in
       context = "agent-startup"
 
       try:
-          server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep 'accepted from agent'")
+          server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep '✅ accepted agent'");
       except Exception:
           pytest.fail("Server did not log 'accepted from agent'")
 
