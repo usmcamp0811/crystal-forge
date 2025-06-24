@@ -69,7 +69,7 @@ impl EvaluationTarget {
         let name = self.target_name.clone();
         let kind = self.target_type.clone();
 
-        println!(
+        info!(
             "🔍 Starting evaluation of {} target '{}'",
             kind.to_string().to_lowercase(),
             name
@@ -86,7 +86,7 @@ impl EvaluationTarget {
                     if *rx.borrow_and_update() {
                         break;
                     }
-                    println!(
+                    info!(
                         "⏳ Still evaluating {} '{}'",
                         kind.to_string().to_lowercase(),
                         name
