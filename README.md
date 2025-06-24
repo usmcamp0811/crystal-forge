@@ -39,7 +39,7 @@ Crystal Forge is a lightweight monitoring and compliance system for NixOS machin
 
 ## 🛠️ Running
 
-Crystal Forge supports configuration via a `config.toml` file **or** via structured environment variables. 
+Crystal Forge supports configuration via a `config.toml` file **or** via structured environment variables.
 A first-party NixOS module is provided to make setup seamless and reproducible.
 
 ---
@@ -53,7 +53,7 @@ You can configure Crystal Forge using a simple TOML file:
 host = "localhost"
 user = "crystal_forge"
 password = "password"
-dbname = "crystal_forge"
+name = "crystal_forge"
 
 [server]
 host = "0.0.0.0"
@@ -85,7 +85,7 @@ CRYSTAL_FORGE__SERVER__PORT=3000
 CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__host1=<base64-pubkey>
 CRYSTAL_FORGE__DATABASE__HOST=localhost
 CRYSTAL_FORGE__DATABASE__USER=crystal_forge
-CRYSTAL_FORGE__DATABASE__DBNAME=crystal_forge
+CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
 CRYSTAL_FORGE__DATABASE__PASSWORD=password
 ```
 
@@ -109,7 +109,7 @@ CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal_forge/host.key
     database = {
       host = "localhost";
       user = "crystal_forge";
-      dbname = "crystal_forge";
+      name = "crystal_forge";
       passwordFile = "/run/secrets/crystal_forge_db_password";
     };
 
@@ -134,3 +134,49 @@ CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal_forge/host.key
 ```
 
 The module will automatically generate the correct environment variables, systemd services, and config paths based on your input.
+
+## 🧑‍💻 Development
+
+Crystal Forge includes a full development environment using Nix. To get started:
+
+### 🚀 Quickstart
+
+```bash
+nix develop
+```
+
+Then, in one terminal:
+
+```bash
+process-compose up
+```
+
+This will start the PostgreSQL database and the Crystal Forge server with environment variables preloaded.
+
+In another terminal:
+
+```bash
+run-agent
+```
+
+This launches the agent and sends reports to the local server.
+
+### 🔁 Live Development
+
+To run the server or agent from source instead of the latest build:
+
+```bash
+run-server --dev
+run-agent --dev
+```
+
+This ensures you're running against your latest code changes.
+
+### 🛠 Utilities
+
+From inside the dev shell:
+
+- `sqlx-refresh` — Resets the database and prepares SQLx.
+- `sqlx-prepare` — Runs `cargo sqlx prepare` without resetting.
+
+The dev shell auto-generates an Ed25519 keypair if missing and sets all required `CRYSTAL_FORGE__*` env vars.

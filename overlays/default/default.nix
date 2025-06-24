@@ -1,9 +1,9 @@
 {
   channels,
   campground,
-  naersk,
+  process-compose-flake,
   ...
 }: final: prev: {
   inherit (campground.packages.${final.system}) slidev;
-  naersk-lib = naersk.lib.${final.system};
+  process-compose-flake = import process-compose-flake.lib {pkgs = final;};
 }

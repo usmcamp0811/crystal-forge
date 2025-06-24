@@ -1,8 +1,8 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use std::fmt;
 use std::fs;
 use sysinfo::{Disks, Networks, System};
 
@@ -93,6 +93,31 @@ impl SystemState {
             product_uuid,
             rootfs_uuid,
         })
+    }
+}
+
+impl fmt::Display for SystemState {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let uptime_days = self.uptime_secs.unwrap_or(0) / 86400; // days
+        let uptime_hours = (self.uptime_secs.unwrap_or(0) % 86400) / 3600; // hours
+
+        write!(
+            f,
+            "✅ accepted agent: {}\n   • context:      {}\n   • hostname:     {}\n   • hash:         {}\n   • os:           {}\n   • kernel:       {}\n   • memory:       {} GB\n   • uptime:       {}d {}h\n   • cpu:          {} ({})\n   • board_serial: {}\n   • uuid:         {}",
+            self.hostname,
+            self.context,
+            self.hostname,
+            self.derivation_path.as_deref().unwrap_or("unknown"),
+            self.os.as_deref().unwrap_or("unknown"),
+            self.kernel.as_deref().unwrap_or("unknown"),
+            self.memory_gb.unwrap_or(0.0),
+            uptime_days,
+            uptime_hours,
+            self.cpu_brand.as_deref().unwrap_or("unknown"),
+            self.cpu_cores.unwrap_or(0),
+            self.board_serial.as_deref().unwrap_or("unknown"),
+            self.product_uuid.as_deref().unwrap_or("unknown")
+        )
     }
 }
 

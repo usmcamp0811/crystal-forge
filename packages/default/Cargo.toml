@@ -31,6 +31,7 @@ systemstat = "0.2.4"
 futures = "0.3.31"
 sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio", "chrono", "macros"] }
 chrono = { version = "0.4.41", features = ["serde"] }
+watch = "0.2.3"
 
 [lib]
 path = "src/lib.rs"

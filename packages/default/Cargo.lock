@@ -428,6 +428,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "watch",
 ]
 
 [[package]]
@@ -3154,6 +3155,12 @@ checksum = "1a05d73b933a847d6cccdda8f838a22ff101ad9bf93e33684f39c1f5f0eece3d"
 dependencies = [
  "unicode-ident",
 ]
+
+[[package]]
+name = "watch"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ed390fa2f6c6036b4dad0a2695711971998ac185f629e4b5d3d5cb3e4ff5c65"
 
 [[package]]
 name = "web-sys"
