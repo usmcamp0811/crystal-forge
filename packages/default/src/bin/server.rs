@@ -1,4 +1,5 @@
 use anyhow::Context;
+
 use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
@@ -12,6 +13,7 @@ use crystal_forge::queries::flakes::insert_flake;
 use crystal_forge::{config, db::get_db_client};
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
+use std::fmt;
 use tokio::net::TcpListener;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;

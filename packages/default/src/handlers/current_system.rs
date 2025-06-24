@@ -1,10 +1,9 @@
 use crate::db::get_db_client;
-use axum::extract::FromRef;
-
 use crate::handlers::webhook::webhook_handler;
 use crate::models::systems::SystemState;
 use crate::queries::system_states::insert_system_state;
 use anyhow::Result;
+use axum::extract::FromRef;
 use base64::engine::Engine;
 use base64::engine::general_purpose;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
