@@ -4,10 +4,10 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt;
 use std::fs;
-use sysinfo::{Disks, Networks, System};
+use sysinfo::System;
 
 use std::io::ErrorKind;
-use tracing::{debug, error, info, warn};
+use tracing::debug;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct SystemState {
