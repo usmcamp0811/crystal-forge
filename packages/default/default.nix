@@ -1,6 +1,7 @@
 {
   lib,
   pkgs,
+  inputs,
   ...
 }: let
   crystal-forge = pkgs.rustPlatform.buildRustPackage {

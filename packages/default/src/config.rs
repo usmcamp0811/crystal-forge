@@ -4,6 +4,43 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::env;
 use tokio_postgres::NoTls;
+use tracing::debug;
+
+pub fn debug_print_config(cfg: &CrystalForgeConfig) {
+    debug!("🔧 Loaded Configuration:");
+
+    if let Some(db) = &cfg.database {
+        let masked: String = "*".repeat(db.password.chars().count());
+        debug!("  [database]");
+        debug!("    host = {}", db.host);
+        debug!("    user = {}", db.user);
+        debug!("    password = {}", masked);
+        debug!("    name = {}", db.name);
+    }
+
+    if let Some(server) = &cfg.server {
+        debug!("  [server]");
+        debug!("    host = {}", server.host);
+        debug!("    port = {}", server.port);
+        for (k, v) in &server.authorized_keys {
+            debug!("    authorized_keys[{}] = {}", k, v);
+        }
+    }
+
+    if let Some(client) = &cfg.client {
+        debug!("  [client]");
+        debug!("    server_host = {}", client.server_host);
+        debug!("    server_port = {}", client.server_port);
+        debug!("    private_key = ***");
+    }
+
+    if let Some(flakes) = &cfg.flakes {
+        debug!("  [flakes]");
+        for (name, url) in &flakes.watched {
+            debug!("    {} = {}", name, url);
+        }
+    }
+}
 
 /// Top-level application configuration structure.
 ///
@@ -80,6 +117,10 @@ pub struct DbConfig {
     /// Hostname of the database server.
     pub host: String,
 
+    /// Port the database listens on
+    #[serde(default = "default_pg_port")]
+    pub port: u16,
+
     /// Database user.
     pub user: String,
 
@@ -87,15 +128,19 @@ pub struct DbConfig {
     pub password: String,
 
     /// Name of the database.
-    pub dbname: String,
+    pub name: String,
+}
+
+fn default_pg_port() -> u16 {
+    5432
 }
 
 impl DbConfig {
     /// Returns a PostgreSQL connection string.
     pub fn to_url(&self) -> String {
         format!(
-            "postgres://{}:{}@{}/{}",
-            self.user, self.password, self.host, self.dbname
+            "postgres://{}:{}@{}:{}/{}",
+            self.user, self.password, self.host, self.port, self.name
         )
     }
 }

@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            build_timestamp,\n            scheduled_at,\n            completed_at\n        FROM tbl_evaluation_targets\n        WHERE derivation_path IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "target_type: TargetType",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "target_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "derivation_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "build_timestamp",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "ae30fca1b424a96eb74c93f594ddae9cf9b28b0822d81ea27f26cf0823315be2"
+}

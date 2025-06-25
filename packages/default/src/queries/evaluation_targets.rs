@@ -12,15 +12,15 @@ pub async fn insert_evaluation_target(
     let inserted = sqlx::query_as!(
         EvaluationTarget,
         r#"
-        INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name, queued)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT (commit_id, target_type, target_name) DO UPDATE SET commit_id = EXCLUDED.commit_id
-        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued as "queued!: bool"
-        "#,
+    INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (commit_id, target_type, target_name)
+    DO UPDATE SET commit_id = EXCLUDED.commit_id
+    RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, scheduled_at, completed_at
+    "#,
         commit.id,
         target_type,
         target_name,
-        false
     )
     .fetch_one(pool)
     .await?;
@@ -36,11 +36,20 @@ pub async fn update_evaluation_target_path(
     let updated = sqlx::query_as!(
         EvaluationTarget,
         r#"
-        UPDATE tbl_evaluation_targets
-        SET derivation_path = $1
-        WHERE commit_id = $2 AND target_type = $3 AND target_name = $4
-        RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, queued as "queued!: bool"
-        "#,
+    UPDATE tbl_evaluation_targets
+    SET derivation_path = $1,
+        completed_at = now()
+    WHERE commit_id = $2 AND target_type = $3 AND target_name = $4
+    RETURNING
+        id,
+        commit_id,
+        target_type as "target_type: TargetType",
+        target_name,
+        derivation_path,
+        build_timestamp,
+        scheduled_at,
+        completed_at
+    "#,
         path,
         target.commit_id,
         target.target_type.to_string(),
@@ -56,17 +65,18 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
     let rows = sqlx::query_as!(
         EvaluationTarget,
         r#"
-    SELECT
-        id,
-        commit_id,
-        target_type as "target_type: TargetType",
-        target_name,
-        derivation_path,
-        build_timestamp,
-        queued as "queued!: bool"
-    FROM tbl_evaluation_targets
-    WHERE derivation_path IS NULL
-    "#
+        SELECT
+            id,
+            commit_id,
+            target_type as "target_type: TargetType",
+            target_name,
+            derivation_path,
+            build_timestamp,
+            scheduled_at,
+            completed_at
+        FROM tbl_evaluation_targets
+        WHERE derivation_path IS NULL
+        "#
     )
     .fetch_all(pool)
     .await?;
