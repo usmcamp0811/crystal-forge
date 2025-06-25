@@ -76,10 +76,29 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
             completed_at
         FROM tbl_evaluation_targets
         WHERE derivation_path IS NULL
+        AND attempt_count <= 5
         "#
     )
     .fetch_all(pool)
     .await?;
 
     Ok(rows)
+}
+
+pub async fn increment_evaluation_target_attempt_count(
+    pool: &PgPool,
+    target: &EvaluationTarget,
+) -> Result<()> {
+    let updated = sqlx::query!(
+        r#"
+    UPDATE tbl_evaluation_targets
+    SET attempt_count = attempt_count + 1
+    WHERE id = $1
+    "#,
+        target.id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
