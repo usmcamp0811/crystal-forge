@@ -1,5 +1,6 @@
 use crate::models::commits::Commit;
-use crate::models::evaluation_targets::{EvaluationTarget, TargetType};
+use crate::models::evaluation_targets::EvaluationTarget;
+use crate::models::evaluation_targets::TargetType;
 use anyhow::Result;
 use sqlx::PgPool;
 
