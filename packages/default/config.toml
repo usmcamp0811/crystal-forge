@@ -2,7 +2,7 @@
 host = "reckless"
 user = "crystal_forge"
 password = "password"
-dbname = "crystal_forge"
+name = "crystal_forge"
 
 [server]
 host = "0.0.0.0"

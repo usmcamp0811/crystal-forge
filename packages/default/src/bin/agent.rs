@@ -16,6 +16,7 @@ use std::{
 async fn main() -> Result<()> {
     let config = config::load_config()?;
 
+    config::debug_print_config(&config);
     // TODO: Update watch_system to take in the private key path
     watch_system()
 }

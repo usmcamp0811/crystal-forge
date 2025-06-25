@@ -1,13 +1,20 @@
 {
   mkShell,
-  inputs,
   system,
+  inputs,
   pkgs,
   lib,
   ...
 }:
 with lib;
-with lib.crystal-forge;
+with lib.crystal-forge; let
+  # TODO: do something to configure these from here.. for now they are in `packages/devScripts/default.nix`
+  # namespace = "crystal-forge";
+  # db_port = 3042;
+  # db_password = "password";
+  # cf_port = 3445;
+  # pgweb_port = 12084;
+in
   mkShell {
     buildInputs = with pkgs; [
       rustc
@@ -15,33 +22,60 @@ with lib.crystal-forge;
       pkg-config
       openssl
       fzf
+      postgresql
       sqlx-cli
     ];
 
     shellHook = ''
-      echo 🔮 Welcome to the Crystal Forge
+      export CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      export PROJECT_ROOT="$PWD"
+      alias process-compose='sudo echo && nix run $PROJECT_ROOT#devScripts --'
+      alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
+      alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
+      alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'
 
-      export OPENSSL_DIR=${pkgs.openssl.out}
-      export OPENSSL_LIB_DIR=${pkgs.openssl.out}/lib
-      export OPENSSL_INCLUDE_DIR=${pkgs.openssl.dev}/include
-      export PKG_CONFIG_PATH=${pkgs.openssl.dev}/lib/pkgconfig
+      echo "🔮 Welcome to the Crystal Forge Dev Environment"
+      echo ""
+      echo "🧰 Dev Workflow:"
+      echo ""
+      echo "  1️⃣  Start core services:"
+      echo "      process-compose up"
+      echo "      - Launches PostgreSQL and the Crystal Forge server"
+      echo ""
+      echo "  2️⃣  Run the agent:"
+      echo "      run-agent"
+      echo "      - Automatically runs with sudo"
+      echo "      - Requires the server to be running first"
+      echo ""
+      echo "  3️⃣  Run agent with local code (for development):"
+      echo "      run-agent --dev"
+      echo ""
+      echo "🛠  Helpful Commands:"
+      echo ""
+      echo "  run-server         → Run server directly (uses packaged binary unless --dev)"
+      echo "  simulate-push      → Simulate a webook push event"
+      echo "  sqlx-refresh       → Drop DB and re-run sqlx prepare"
+      echo "  sqlx-prepare       → Just re-run sqlx prepare"
+      echo ""
+      echo "🔑 Dev keys in: \$CF_KEY_DIR ($CF_KEY_DIR)"
+      echo ""
+      echo "💡 Tip: View all env vars with: env | grep CRYSTAL_FORGE"
 
-      export FZF_DEFAULT_OPTS="--height 40% --reverse --border"
-      export RUST_LOG=debug
-      export CRYSTAL_FORGE__DATABASE__HOST=localhost
-      export CRYSTAL_FORGE__DATABASE__PASSWORD=password
-      export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
-      export DATABASE_URL=postgres://crystal_forge:password@127.0.0.1/crystal_forge
-      export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=https://gitlab.com/usmcamp0811/dotfiles
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__chesty=Asu0Fl8SsM9Pd/woHt5qkvBdCbye6j2Q2M/qDmnFUjc=
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__daly=JhjP4LK72nuTQJ6y7pcYjoTtfrY86BpJBi9WeolcpKY=
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__ermy=z9FINYnz2IPPaECHZbTae5prPFUE/ubAT+4HHLPSq7I=
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__gray=hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY=
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__lucas=OMxvf/rZmi8PZJOpVxjbPHDaX+BmJqp8FUOoosWJ7qY=
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__reckless=SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8=
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__webb=ZJBA2GS03P+Q2mhUAbjfjFILQ57yGChjXmRdL6Xfang=
-      export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
-      export CRYSTAL_FORGE__SERVER__PORT=3444
+      mkdir -p "$CF_KEY_DIR"
+
+      if [ ! -f "$CF_KEY_DIR/agent.key" ]; then
+        echo "🔑 Generating dev agent keypair..."
+        nix run .#agent.cf-keygen -- -f "$CF_KEY_DIR/agent.key"
+      fi
+
+      export RUST_LOG=info
+      export CRYSTAL_FORGE__CLIENT__PRIVATE_KEY="$CF_KEY_DIR/agent.key"
+      hostname="$(hostname)"
+      pubkey="$(cat "$CF_KEY_DIR/agent.pub")"
+      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__"''${hostname}"="$pubkey"
+
+
+      ${pkgs.crystal-forge.devScripts.envExports}
 
       sqlx-refresh() {
         echo "🔄 Resetting and preparing sqlx..."

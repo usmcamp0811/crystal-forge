@@ -1,4 +1,5 @@
 use anyhow::Context;
+
 use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
@@ -12,8 +13,9 @@ use crystal_forge::queries::flakes::insert_flake;
 use crystal_forge::{config, db::get_db_client};
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
+use std::fmt;
 use tokio::net::TcpListener;
-use tracing::info;
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -21,8 +23,10 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env()) // uses RUST_LOG
         .init();
+    println!("Crystal Forge: Starting...");
     // Load and validate config
     let cfg = config::load_config()?;
+    config::debug_print_config(&cfg);
     let db_url = cfg
         .database
         .as_ref()
@@ -30,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         .to_url();
     config::validate_db_connection(&db_url).await?;
 
-    info!("======== INITIALIZING DATABASE ========");
+    debug!("======== INITIALIZING DATABASE ========");
     let pool = get_db_client().await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
 
@@ -44,15 +48,23 @@ async fn main() -> anyhow::Result<()> {
     // add systems to evaluation target table w/o eval
     tokio::spawn(async move {
         let pool = get_db_client().await.expect("db");
+        tracing::info!("🔁 Starting periodic commit evaluation check loop (every 60s)...");
         loop {
+            tracing::info!("🔎 Checking for commits pending evaluation...");
             match get_commits_pending_evaluation(&pool).await {
                 Ok(pending_commits) => {
+                    tracing::info!("📌 Found {} pending commits", pending_commits.len());
                     for commit in pending_commits {
                         let target_type = "nixos";
                         match list_nixos_configurations_from_commit(&pool, &commit).await {
                             Ok(nixos_targets) => {
+                                tracing::info!(
+                                    "📂 Commit {} has {} nixos targets",
+                                    commit.git_commit_hash,
+                                    nixos_targets.len()
+                                );
                                 for target_name in nixos_targets {
-                                    if let Err(e) = insert_evaluation_target(
+                                    match insert_evaluation_target(
                                         &pool,
                                         &commit,
                                         &target_name,
@@ -60,17 +72,22 @@ async fn main() -> anyhow::Result<()> {
                                     )
                                     .await
                                     {
-                                        tracing::error!(
-                                            "❌ Failed to insert evaluation target for {}: {}",
+                                        Ok(_) => tracing::info!(
+                                            "✅ Inserted evaluation target: {} (commit {})",
+                                            target_name,
+                                            commit.git_commit_hash
+                                        ),
+                                        Err(e) => tracing::error!(
+                                            "❌ Failed to insert target for {}: {}",
                                             target_name,
                                             e
-                                        );
+                                        ),
                                     }
                                 }
                             }
                             Err(e) => {
                                 tracing::error!(
-                                    "❌ Failed to list nixos configurations for commit {}: {}",
+                                    "❌ Failed to list nixos configs for commit {}: {}",
                                     commit.git_commit_hash,
                                     e
                                 );
@@ -79,7 +96,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("❌ Failed to get pending targets: {e}");
+                    tracing::error!("❌ Failed to get pending commits: {e}");
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
@@ -89,9 +106,12 @@ async fn main() -> anyhow::Result<()> {
     // add evaluation target derivation paths to table
     tokio::spawn(async move {
         let pool = get_db_client().await.expect("db");
+        tracing::info!("🔍 Starting periodic evaluation target check loop (every 60s)...");
         loop {
+            tracing::info!("⏳ Checking for pending evaluation targets...");
             match get_pending_targets(&pool).await {
                 Ok(pending_targets) => {
+                    tracing::info!("📦 Found {} pending targets", pending_targets.len());
                     for mut target in pending_targets {
                         match target.resolve_derivation_path().await {
                             Ok(path) => {
@@ -152,10 +172,14 @@ fn parse_authorized_keys(
             .decode(b64.trim())
             .with_context(|| format!("Invalid base64 key for ID '{}'", key_id))?;
 
+        if bytes.len() != 32 {
+            anyhow::bail!("Key ID '{}' is not 32 bytes (got {})", key_id, bytes.len());
+        }
+
         let key_bytes: [u8; 32] = bytes
             .as_slice()
             .try_into()
-            .context("Failed to convert to [u8; 32]")?;
+            .expect("already checked length == 32");
 
         let key = VerifyingKey::from_bytes(&key_bytes)
             .context(format!("Invalid public key for ID '{}'", key_id))?;
