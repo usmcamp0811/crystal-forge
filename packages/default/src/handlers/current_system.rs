@@ -1,5 +1,3 @@
-use crate::db::get_db_client;
-use crate::handlers::webhook::webhook_handler;
 use crate::models::systems::SystemState;
 use crate::queries::system_states::insert_system_state;
 use anyhow::Result;
@@ -9,21 +7,14 @@ use base64::engine::general_purpose;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use std::fmt;
 
 use axum::{
-    Json, Router,
     body::Bytes,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::post,
 };
-use serde::de;
-use serde_json::Value;
-use std::{future::Future, pin::Pin, sync::Arc};
-use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info};
 
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]

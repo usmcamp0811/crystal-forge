@@ -7,9 +7,7 @@ use serde_json::Value;
 use sqlx::FromRow;
 use std::path::Path;
 use tokio::process::Command;
-use tokio::sync::mpsc;
 use tokio::sync::watch;
-use tokio::task;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
 
