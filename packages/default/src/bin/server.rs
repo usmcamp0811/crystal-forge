@@ -7,7 +7,8 @@ use crystal_forge::handlers::current_system::{CFState, handle_current_system};
 use crystal_forge::handlers::webhook::webhook_handler;
 use crystal_forge::queries::commits::get_commits_pending_evaluation;
 use crystal_forge::queries::evaluation_targets::{
-    get_pending_targets, insert_evaluation_target, update_evaluation_target_path,
+    get_pending_targets, increment_evaluation_target_attempt_count, insert_evaluation_target,
+    update_evaluation_target_path,
 };
 use crystal_forge::queries::flakes::insert_flake;
 use crystal_forge::{config, db::get_db_client};
