@@ -3,13 +3,17 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt;
-use std::fs;
+use std::option::Option;
+use std::{fs, io::ErrorKind, path::Path, process::Command};
 use sysinfo::System;
-
-use std::io::ErrorKind;
 use tracing::debug;
 
-#[derive(Debug, FromRow, Serialize, Deserialize, Debug, FromRow, Serialize, Deserialize)]
+// Import these from your network_interfaces.rs
+use crate::models::network_interfaces::{
+    get_gateway_ip, get_network_interfaces, get_primary_ip, get_primary_mac, get_selinux_status,
+};
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct SystemState {
     // ───── Identification ─────
     pub id: Option<i32>,
@@ -84,7 +88,7 @@ impl SystemState {
         debug!("🔍 reading bios_version");
         let bios_version = read_trimmed("/sys/class/dmi/id/bios_version")?;
         debug!("🔍 reading cpu_microcode");
-        let cpu_microcode = read_trimmed("/proc/cpuinfo").ok().and_then(|c| {
+        let cpu_microcode = read_trimmed("/proc/cpuinfo").ok().flatten().and_then(|c| {
             c.lines()
                 .find(|l| l.contains("microcode"))
                 .map(|l| l.to_string())
@@ -108,17 +112,17 @@ impl SystemState {
             "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c",
         )
         .ok()
-        .map(|v| v.contains("1"));
+        .map(|v| v == Some("1".to_string()));
         debug!("🔍 reading fips_mode");
         let fips_mode = read_trimmed("/proc/sys/crypto/fips_enabled")
             .ok()
-            .map(|v| v == "1");
+            .map(|v| v == Some("1".to_string()));
 
         debug!("🔍 reading software versions");
         let agent_version = Some(env!("CARGO_PKG_VERSION").to_string());
         let agent_build_hash = option_env!("GIT_HASH").map(|s| s.to_string());
         let nixos_version = read_trimmed("/etc/os-release").ok().and_then(|c| {
-            c.lines()
+            c?.lines()
                 .find(|l| l.starts_with("VERSION="))
                 .map(|l| l.trim_start_matches("VERSION=").replace('"', ""))
         });
@@ -248,22 +252,4 @@ fn read_trimmed<P: AsRef<Path>>(path: P) -> std::io::Result<Option<String>> {
                 Err(e)
             }
         })
-}
-
-fn get_network_interfaces() -> Result<String> {
-    /* serialize Vec<NetworkInterface> to JSON */
-    Ok("[]".to_string())
-}
-fn get_primary_mac() -> Result<String> {
-    /* extract via ip/ifconfig */
-    Ok("00:00:00:00:00:00".to_string())
-}
-fn get_primary_ip() -> Result<String> {
-    Ok("192.168.1.100".to_string())
-}
-fn get_gateway_ip() -> Result<String> {
-    Ok("192.168.1.1".to_string())
-}
-fn get_selinux_status() -> Result<String> {
-    Ok("disabled".to_string())
 }

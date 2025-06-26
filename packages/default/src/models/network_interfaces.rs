@@ -16,8 +16,7 @@ fn get_network_interfaces() -> Result<String> {
         .arg("address")
         .output()
         .map_err(|e| anyhow!("Failed to run ip: {:?}", e))?;
-
-    let interfaces: Vec<NetworkInterface> = serde_json::from_slice(&output.stdout)?
+    let interfaces: Vec<NetworkInterface> = serde_json::from_slice::<T>(&output.stdout)?
         .into_iter()
         .map(|iface: serde_json::Value| {
             let name = iface["ifname"].as_str().unwrap_or("").to_string();
@@ -51,7 +50,7 @@ fn get_primary_mac() -> Result<String> {
         .lines()
         .find(|l| l.contains("default"))
         .and_then(|l| {
-            l.split_whitespace().find(|w| *w == &"dev").and_then(|_| {
+            l.split_whitespace().find(|w| *w == "dev").and_then(|_| {
                 let parts: Vec<&str> = l.split_whitespace().collect();
                 parts
                     .get(parts.iter().position(|&w| w == "dev")? + 1)
@@ -79,7 +78,7 @@ fn get_primary_ip() -> Result<String> {
         .lines()
         .find(|l| l.contains("default"))
         .and_then(|l| {
-            l.split_whitespace().find(|w| *w == &"dev").and_then(|_| {
+            l.split_whitespace().find(|w| *w == "dev").and_then(|_| {
                 let parts: Vec<&str> = l.split_whitespace().collect();
                 parts
                     .get(parts.iter().position(|&w| w == "dev")? + 1)
