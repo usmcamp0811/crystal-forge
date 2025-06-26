@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
                                 {
                                     Ok(_) => tracing::info!(
                                         "✅ Incremented attempt count for target: {}",
-                                        target.name
+                                        target.target_name
                                     ),
                                     Err(inc_err) => tracing::error!(
                                         "❌ Failed to increment attempt count: {inc_err}"
