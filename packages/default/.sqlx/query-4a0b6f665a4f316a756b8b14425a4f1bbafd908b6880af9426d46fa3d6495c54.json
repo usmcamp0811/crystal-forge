@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            build_timestamp,\n            scheduled_at,\n            completed_at\n        FROM tbl_evaluation_targets\n        WHERE derivation_path IS NULL\n        AND attempt_count <= 5\n        ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            build_timestamp,\n            scheduled_at,\n            completed_at\n        FROM tbl_evaluation_targets\n        WHERE derivation_path IS NULL\n        AND attempt_count <= 5\n        ORDER BY scheduled_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -58,5 +58,5 @@
       true
     ]
   },
-  "hash": "0dc31aedf35e9d38ee4ca46a7df7576c197935489e1f973977e19306eee66b0d"
+  "hash": "4a0b6f665a4f316a756b8b14425a4f1bbafd908b6880af9426d46fa3d6495c54"
 }

@@ -53,10 +53,7 @@ pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
 
     // TODO: Add MAC Address & Hardware fingerprint along with hostname
     let hostname = hostname::get()?.to_string_lossy().into_owned();
-    let system_hash = Path::new(current_system)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| current_system.to_string_lossy().into_owned());
+    let system_hash = current_system.to_string_lossy().into_owned();
 
     // construct payload to be sent to the server
     let payload = SystemState::gather(&hostname, context, &system_hash)?;
