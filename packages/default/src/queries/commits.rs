@@ -48,10 +48,26 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
         FROM tbl_commits c
         LEFT JOIN tbl_evaluation_targets t ON c.id = t.commit_id
         WHERE t.commit_id IS NULL
+        AND c.attempt_count <= 5
         "#
     )
     .fetch_all(pool)
     .await?;
 
     Ok(rows)
+}
+
+pub async fn increment_commit_list_attempt_count(pool: &PgPool, target: &Commit) -> Result<()> {
+    let updated = sqlx::query!(
+        r#"
+    UPDATE tbl_commits
+    SET attempt_count = attempt_count + 1
+    WHERE id = $1
+    "#,
+        target.id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }

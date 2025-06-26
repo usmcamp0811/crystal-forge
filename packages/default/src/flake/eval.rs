@@ -1,4 +1,5 @@
 use crate::models::commits::Commit;
+use crate::queries::commits::increment_commit_list_attempt_count;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::path::Path;
@@ -71,6 +72,13 @@ pub async fn list_nixos_configurations_from_commit(
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         error!("❌ nix flake show failed for {flake_uri}: {stderr}");
+        match increment_commit_list_attempt_count(&pool, &commit).await {
+            Ok(_) => tracing::debug!(
+                "✅ Incremented attempt count for commit: {}",
+                commit.git_commit_hash
+            ),
+            Err(inc_err) => tracing::error!("❌ Failed to increment attempt count: {inc_err}"),
+        }
         anyhow::bail!("nix flake show failed: {}", stderr.trim());
     }
 
