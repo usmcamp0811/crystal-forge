@@ -123,7 +123,17 @@ async fn main() -> anyhow::Result<()> {
                             }
                             Err(e) => {
                                 tracing::error!("❌ Failed to resolve derivation path: {e}");
-                                increment_evaluation_target_attempt_count(&pool, &target);
+                                match increment_evaluation_target_attempt_count(&pool, &target)
+                                    .await
+                                {
+                                    Ok(_) => tracing::info!(
+                                        "✅ Incremented attempt count for target: {}",
+                                        target.name
+                                    ),
+                                    Err(inc_err) => tracing::error!(
+                                        "❌ Failed to increment attempt count: {inc_err}"
+                                    ),
+                                }
                             }
                         }
                     }
