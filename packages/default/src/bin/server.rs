@@ -126,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
                                 match increment_evaluation_target_attempt_count(&pool, &target)
                                     .await
                                 {
-                                    Ok(_) => tracing::info!(
+                                    Ok(_) => tracing::debug!(
                                         "✅ Incremented attempt count for target: {}",
                                         target.target_name
                                     ),
