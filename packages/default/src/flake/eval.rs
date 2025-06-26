@@ -1,4 +1,5 @@
 use crate::models::commits::Commit;
+use crate::queries::commits::increment_commit_list_attempt_count;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::path::Path;

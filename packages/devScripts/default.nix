@@ -133,8 +133,35 @@ with lib.crystal-forge; let
       }
     ];
   };
+
+  dbOnly = pkgs.process-compose-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      {
+        settings.processes.pgweb = {
+          inherit namespace;
+          command = "${pkgs.pgweb}/bin/pgweb --listen=${toString pgweb_port} --bind=0.0.0.0";
+          depends_on."db".condition = "process_healthy";
+          environment.PGWEB_DATABASE_URL = "postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge";
+        };
+        services.postgres."db" = {
+          inherit namespace;
+          enable = true;
+          listen_addresses = "0.0.0.0";
+          port = db_port;
+          initialScript.before = ''
+            CREATE USER crystal_forge LOGIN;
+            CREATE DATABASE crystal_forge OWNER crystal_forge;
+            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+          '';
+          initialDatabases = [];
+        };
+      }
+    ];
+  };
 in
   cf-dev.config.outputs.package
   // {
     inherit runServer runAgent simulatePush envExports;
+    dbOnly = dbOnly.config.outputs.package;
   }
