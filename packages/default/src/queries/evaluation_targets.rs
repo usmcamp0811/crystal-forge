@@ -78,7 +78,7 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
         FROM tbl_evaluation_targets
         WHERE derivation_path IS NULL
         AND attempt_count <= 5
-        ORDER BY scheduled_at ASC
+        ORDER BY scheduled_at DESC
         "#
     )
     .fetch_all(pool)
