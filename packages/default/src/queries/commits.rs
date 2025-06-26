@@ -48,6 +48,7 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
         FROM tbl_commits c
         LEFT JOIN tbl_evaluation_targets t ON c.id = t.commit_id
         WHERE t.commit_id IS NULL
+        AND c.attempt_count <= 5
         "#
     )
     .fetch_all(pool)
