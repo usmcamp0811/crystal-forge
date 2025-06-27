@@ -2,6 +2,8 @@
 
 Crystal Forge is a lightweight monitoring and compliance system for NixOS machines—designed to be a self-hosted alternative to tools like Microsoft Intune, but purpose-built for reproducibility-focused environments.
 
+Crystal Forge builds secure, verifiable software ecosystems by embedding compliance, integrity, and trust into the entire lifecycle—from development to deployment. We empower organizations to evolve DevSecOps into a system of continuous assurance, where every component is provable, auditable, aligned with policy, and mapped directly to required security frameworks.
+
 > ⚠️ **Early days:** This project is under active development and not yet production-ready. I’m working to get the minimal set of features running first.
 
 ---
