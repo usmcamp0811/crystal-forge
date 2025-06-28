@@ -121,7 +121,7 @@ impl SystemState {
 
         debug!("🔍 reading software versions");
         let agent_version = Some(env!("CARGO_PKG_VERSION").to_string());
-        let agent_build_hash = option_env!("GIT_HASH").map(|s| s.to_string());
+        let agent_build_hash = option_env!("SRC_HASH").map(|s| s.to_string());
         let nixos_version = read_trimmed("/etc/os-release").ok().and_then(|c| {
             c?.lines()
                 .find(|l| l.starts_with("VERSION="))
