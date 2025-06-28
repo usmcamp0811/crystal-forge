@@ -35,4 +35,4 @@
     };
   };
 in
-  crystal-forge {inherit srcHash;}
+  crystal-forge // {inherit srcHash;}
