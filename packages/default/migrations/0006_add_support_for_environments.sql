@@ -3,6 +3,10 @@ CREATE TABLE IF NOT EXISTS tbl_environment (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
     name varchar(50) NOT NULL UNIQUE, -- dev, test, stage, prod, etc.
     description text,
+    type varchar(50), -- tier/type like 'sandbox', 'regulated', etc.
+    is_active boolean DEFAULT TRUE, -- allow enabling/disabling environments
+    created_by varchar(100), -- who created the environment
+    updated_by varchar(100), -- who last updated the environment
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );

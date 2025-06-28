@@ -9,10 +9,14 @@ use sysinfo::System;
 use tracing::debug;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
-pub struct System {
+pub struct Environment {
     pub id: Uuid,
-    pub hostname: String,
-    pub environment_id: Option<Uuid>,
+    pub name: String,
+    pub description: Option<String>,
+    pub r#type: Option<String>, // tier/type like 'sandbox', 'regulated'
+    pub is_active: bool,
+    pub created_by: Option<String>,
+    pub updated_by: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

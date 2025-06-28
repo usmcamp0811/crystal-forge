@@ -1,4 +1,4 @@
-use crate::models::systems::{SystemState, SystemStateV1};
+use crate::models::system_states::{SystemState, SystemStateV1};
 use crate::queries::system_states::insert_system_state;
 use anyhow::Result;
 use axum::extract::FromRef;
