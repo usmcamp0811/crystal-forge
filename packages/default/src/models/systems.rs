@@ -13,6 +13,25 @@ use crate::models::network_interfaces::{
     get_gateway_ip, get_network_interfaces, get_primary_ip, get_primary_mac, get_selinux_status,
 };
 
+// This is the previous SystemState structure (now V1)
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct SystemStateV1 {
+    pub id: Option<i32>,
+    pub hostname: String,
+    pub derivation_path: Option<String>,
+    pub context: String,
+    pub os: Option<String>,
+    pub kernel: Option<String>,
+    pub memory_gb: Option<f64>,
+    pub uptime_secs: Option<i64>,
+    pub cpu_brand: Option<String>,
+    pub cpu_cores: Option<i32>,
+    pub board_serial: Option<String>,
+    pub product_uuid: Option<String>,
+    pub rootfs_uuid: Option<String>,
+    pub timestamp: Option<DateTime<Utc>>,
+}
+
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct SystemState {
     // ───── Identification ─────
@@ -57,6 +76,42 @@ pub struct SystemState {
 }
 
 impl SystemState {
+    pub fn from_v1(v1: SystemStateV1) -> Self {
+        Self {
+            // Fields that exist in both V1 and current
+            id: v1.id,
+            hostname: v1.hostname,
+            derivation_path: v1.derivation_path,
+            context: v1.context,
+            os: v1.os,
+            kernel: v1.kernel,
+            memory_gb: v1.memory_gb,
+            uptime_secs: v1.uptime_secs,
+            cpu_brand: v1.cpu_brand,
+            cpu_cores: v1.cpu_cores,
+            board_serial: v1.board_serial,
+            product_uuid: v1.product_uuid,
+            rootfs_uuid: v1.rootfs_uuid,
+            timestamp: v1.timestamp,
+
+            // New fields that didn't exist in V1 - default to None
+            chassis_serial: None,
+            bios_version: None,
+            cpu_microcode: None,
+            network_interfaces: None,
+            primary_mac_address: None,
+            primary_ip_address: None,
+            gateway_ip: None,
+            selinux_status: None,
+            tpm_present: None,
+            secure_boot_enabled: None,
+            fips_mode: None,
+            agent_version: None,
+            agent_build_hash: None,
+            nixos_version: None,
+        }
+    }
+
     pub fn gather(hostname: &str, context: &str, derivation_path: &str) -> Result<Self> {
         let mut sys = System::new_all();
         sys.refresh_all();

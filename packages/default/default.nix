@@ -6,11 +6,12 @@
 }: let
   src = ./.;
   srcHash = builtins.hashString "sha256" (toString src);
-
+  # Read and parse Cargo.toml to extract version
+  cargoToml = builtins.fromTOML (builtins.readFile (src + "/Cargo.toml"));
+  version = cargoToml.package.version;
   crystal-forge = pkgs.rustPlatform.buildRustPackage rec {
-    inherit src;
+    inherit src version;
     pname = "crystal-forge";
-    version = "0.1.0";
     cargoLock = {
       lockFile = ./Cargo.lock;
     };
