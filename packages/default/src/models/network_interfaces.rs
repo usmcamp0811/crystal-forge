@@ -1,7 +1,21 @@
 use anyhow::{Result, anyhow};
+use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
 use std::process::Command;
 use std::str;
+
+#[derive(Deserialize)]
+struct IpInterface {
+    ifname: String,
+    address: Option<String>,
+    addr_info: Vec<IpAddr>,
+}
+
+#[derive(Deserialize)]
+struct IpAddr {
+    local: String,
+}
 
 #[derive(Debug, Serialize)]
 struct NetworkInterface {
@@ -10,36 +24,27 @@ struct NetworkInterface {
     ip_addresses: Vec<String>,
 }
 
-fn get_network_interfaces() -> Result<String> {
+pub fn get_network_interfaces() -> Result<String> {
     let output = Command::new("ip")
         .arg("-j")
         .arg("address")
         .output()
         .map_err(|e| anyhow!("Failed to run ip: {:?}", e))?;
-    let interfaces: Vec<NetworkInterface> = serde_json::from_slice::<T>(&output.stdout)?
-        .into_iter()
-        .map(|iface: serde_json::Value| {
-            let name = iface["ifname"].as_str().unwrap_or("").to_string();
-            let mac_address = iface["address"].as_str().map(String::from);
-            let ip_addresses = iface["addr_info"]
-                .as_array()
-                .unwrap_or(&vec![])
-                .iter()
-                .filter_map(|a| a["local"].as_str().map(String::from))
-                .collect();
 
-            NetworkInterface {
-                name,
-                mac_address,
-                ip_addresses,
-            }
+    let ip_interfaces: Vec<IpInterface> = serde_json::from_slice(&output.stdout)?;
+    let interfaces: Vec<NetworkInterface> = ip_interfaces
+        .into_iter()
+        .map(|iface| NetworkInterface {
+            name: iface.ifname,
+            mac_address: iface.address,
+            ip_addresses: iface.addr_info.into_iter().map(|addr| addr.local).collect(),
         })
         .collect();
 
     Ok(serde_json::to_string(&interfaces)?)
 }
 
-fn get_primary_mac() -> Result<String> {
+pub fn get_primary_mac() -> Result<String> {
     let output = Command::new("ip")
         .arg("route")
         .output()
@@ -67,7 +72,7 @@ fn get_primary_mac() -> Result<String> {
     Ok(str::from_utf8(&output.stdout)?.trim().to_string())
 }
 
-fn get_primary_ip() -> Result<String> {
+pub fn get_primary_ip() -> Result<String> {
     let output = Command::new("ip")
         .arg("route")
         .output()
@@ -107,7 +112,7 @@ fn get_primary_ip() -> Result<String> {
     Ok(ip.to_string())
 }
 
-fn get_gateway_ip() -> Result<String> {
+pub fn get_gateway_ip() -> Result<String> {
     let output = Command::new("ip")
         .arg("route")
         .output()
@@ -123,7 +128,7 @@ fn get_gateway_ip() -> Result<String> {
     Ok(ip.to_string())
 }
 
-fn get_selinux_status() -> Result<String> {
+pub fn get_selinux_status() -> Result<String> {
     let output = Command::new("getenforce")
         .output()
         .map_err(|e| anyhow!("Failed to run getenforce: {:?}", e))?;
