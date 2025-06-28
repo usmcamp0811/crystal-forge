@@ -39,7 +39,7 @@ pub struct SystemState {
     pub cpu_microcode: Option<String>,
 
     // ───── Network Identity ─────
-    pub network_interfaces: Option<String>, // JSON serialized Vec<NetworkInterface>
+    pub network_interfaces: Option<serde_json::Value>,
     pub primary_mac_address: Option<String>,
     pub primary_ip_address: Option<String>,
     pub gateway_ip: Option<String>,
@@ -54,7 +54,6 @@ pub struct SystemState {
     pub agent_version: Option<String>,
     pub agent_build_hash: Option<String>,
     pub nixos_version: Option<String>,
-    pub systemd_version: Option<String>,
 }
 
 impl SystemState {
@@ -95,7 +94,9 @@ impl SystemState {
         });
 
         debug!("🔍 reading network interfaces");
-        let network_interfaces = get_network_interfaces().ok();
+        let network_interfaces = get_network_interfaces()
+            .ok()
+            .map(|interfaces| serde_json::to_value(interfaces).unwrap_or(serde_json::Value::Null));
         debug!("🔍 reading primary_mac_address");
         let primary_mac_address = get_primary_mac().ok();
         debug!("🔍 reading primary_ip_address");
@@ -126,12 +127,6 @@ impl SystemState {
                 .find(|l| l.starts_with("VERSION="))
                 .map(|l| l.trim_start_matches("VERSION=").replace('"', ""))
         });
-        let systemd_version = Command::new("systemd")
-            .arg("--version")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .and_then(|s| s.lines().next().map(|l| l.to_string()));
 
         Ok(SystemState {
             id: None,
@@ -162,7 +157,6 @@ impl SystemState {
             agent_version,
             agent_build_hash,
             nixos_version,
-            systemd_version,
         })
     }
 }

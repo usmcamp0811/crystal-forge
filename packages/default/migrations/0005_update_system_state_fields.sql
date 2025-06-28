@@ -12,6 +12,5 @@ ALTER TABLE tbl_system_states
     ADD COLUMN IF NOT EXISTS fips_mode boolean,
     ADD COLUMN IF NOT EXISTS agent_version text,
     ADD COLUMN IF NOT EXISTS agent_build_hash text,
-    ADD COLUMN IF NOT EXISTS nixos_version text,
-    ADD COLUMN IF NOT EXISTS systemd_version text;
+    ADD COLUMN IF NOT EXISTS nixos_version text;
 

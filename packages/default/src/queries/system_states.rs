@@ -30,9 +30,8 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
             fips_mode,
             agent_version,
             agent_build_hash,
-            nixos_version,
-            systemd_version
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+            nixos_version
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
         ON CONFLICT DO NOTHING"#,
     )
     .bind(&state.hostname)
@@ -61,7 +60,6 @@ pub async fn insert_system_state(pool: &PgPool, state: &SystemState) -> Result<(
     .bind(&state.agent_version)
     .bind(&state.agent_build_hash)
     .bind(&state.nixos_version)
-    .bind(&state.systemd_version)
     .execute(pool)
     .await
     .map_err(|e| anyhow::anyhow!("SQL error: {e:?}"))
