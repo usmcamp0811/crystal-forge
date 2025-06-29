@@ -1,8 +1,4 @@
-use anyhow::Result;
-use base64::Engine;
-use base64::engine::general_purpose;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::option::Option;

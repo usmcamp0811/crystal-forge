@@ -9,7 +9,7 @@ use reqwest::blocking::Client;
 use std::{
     ffi::OsStr,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 #[tokio::main]

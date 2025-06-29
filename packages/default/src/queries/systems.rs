@@ -1,4 +1,3 @@
-use crate::models::system_states::SystemState;
 use crate::models::systems::System;
 use anyhow::Result;
 use sqlx::PgPool;

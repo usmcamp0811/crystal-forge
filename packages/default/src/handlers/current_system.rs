@@ -5,9 +5,8 @@ use anyhow::Result;
 use axum::extract::FromRef;
 use base64::engine::Engine;
 use base64::engine::general_purpose;
-use ed25519_dalek::{Signature, Verifier};
+use ed25519_dalek::Signature;
 use sqlx::PgPool;
-use winnow::Parser;
 
 use axum::{
     body::Bytes,
