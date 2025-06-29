@@ -7,6 +7,7 @@ use std::option::Option;
 use std::{fs, io::ErrorKind, path::Path, process::Command};
 use sysinfo::System;
 use tracing::debug;
+use uuid::Uuid;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Environment {

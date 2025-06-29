@@ -1,7 +1,8 @@
-use crate::handlers::current_system::try_deserialize_system_state;
-use crate::models::system_states::SystemState;
-use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use crate::{
+    handlers::current_system::try_deserialize_system_state, models::system_states::SystemState,
+};
+use anyhow::Result;
+use sqlx::PgPool;
 
 pub async fn insert_system_state(
     pool: &PgPool,

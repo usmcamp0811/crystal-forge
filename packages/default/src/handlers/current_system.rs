@@ -1,10 +1,11 @@
 use crate::models::system_states::{SystemState, SystemStateV1};
 use crate::queries::system_states::insert_system_state;
+use crate::queries::systems::get_by_hostname;
 use anyhow::Result;
 use axum::extract::FromRef;
 use base64::engine::Engine;
 use base64::engine::general_purpose;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier};
 use sqlx::PgPool;
 use std::collections::HashMap;
 

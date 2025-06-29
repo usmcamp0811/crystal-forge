@@ -1,6 +1,6 @@
 use crate::models::users::User;
-use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use anyhow::Result;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 pub async fn create_user(pool: &PgPool, user: User) -> Result<Uuid> {

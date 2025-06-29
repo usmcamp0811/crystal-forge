@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt;
 use std::option::Option;
-use std::{fs, io::ErrorKind, path::Path, process::Command};
 use sysinfo::System;
 use tracing::debug;
+use uuid::Uuid;
 
 // Assuming your UserType enum looks like this
 #[derive(Debug, sqlx::Type)]
@@ -19,7 +19,7 @@ pub enum UserType {
 }
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
-pub struct Users {
+pub struct User {
     pub id: Uuid,
     pub username: String,
     pub first_name: String,
