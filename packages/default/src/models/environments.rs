@@ -15,9 +15,23 @@ pub struct Environment {
     pub description: Option<String>,
     pub is_active: bool,
     pub compliance_level_id: Option<i32>,
-    pub risk_profile: Option<String>, // tier/type like 'sandbox', 'regulated'
+    pub risk_profile_id: Option<i32>, // tier/type like 'sandbox', 'regulated'
     pub created_by: Option<String>,
     pub updated_by: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct RiskProfile {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct ComplianceLevel {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
 }
