@@ -13,6 +13,7 @@ pub struct System {
     pub id: Uuid,
     pub hostname: String,
     pub environment_id: Option<Uuid>,
+    pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

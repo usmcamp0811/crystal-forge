@@ -1,5 +1,5 @@
 -- Create environment table to map systems to deployment environments
-CREATE TABLE IF NOT EXISTS tbl_environment (
+CREATE TABLE IF NOT EXISTS tbl_environments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
     name varchar(50) NOT NULL UNIQUE, -- dev, test, stage, prod, etc.
     description text,
@@ -16,15 +16,16 @@ CREATE TABLE IF NOT EXISTS tbl_systems (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
     hostname text NOT NULL UNIQUE,
     environment_id uuid REFERENCES tbl_environment (id),
+    is_active boolean DEFAULT TRUE, -- allow enabling/disabling system
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Create index on name for faster lookups
-CREATE INDEX idx_tbl_environment_name ON tbl_environment (name);
+CREATE INDEX idx_tbl_environment_name ON tbl_environments (name);
 
 -- Insert default environments
-INSERT INTO tbl_environment (name, description)
+INSERT INTO tbl_environments (name, description)
     VALUES ('dev', 'Development environment'),
     ('test', 'Testing environment'),
     ('preprod', 'Pre-production environment'),
@@ -47,7 +48,7 @@ $
 LANGUAGE plpgsql;
 
 CREATE TRIGGER trigger_tbl_environment_updated_at
-    BEFORE UPDATE ON tbl_environment
+    BEFORE UPDATE ON tbl_environments
     FOR EACH ROW
     EXECUTE FUNCTION update_tbl_environment_updated_at ();
 
@@ -58,7 +59,7 @@ SET
         SELECT
             id
         FROM
-            tbl_environment
+            tbl_environments
         WHERE
             name = 'dev'
         LIMIT 1)

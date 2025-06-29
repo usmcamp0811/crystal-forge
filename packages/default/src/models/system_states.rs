@@ -13,15 +13,6 @@ use crate::models::network_interfaces::{
     get_gateway_ip, get_network_interfaces, get_primary_ip, get_primary_mac, get_selinux_status,
 };
 
-#[derive(Debug, FromRow, Serialize, Deserialize)]
-pub struct System {
-    pub id: Uuid,
-    pub hostname: String,
-    pub environment_id: Option<Uuid>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
 // This is the previous SystemState structure (now V1)
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct SystemStateV1 {
