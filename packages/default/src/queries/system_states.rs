@@ -86,7 +86,8 @@ pub async fn insert_system_state(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::systems::{SystemState, SystemStateV1};
+    use crate::handlers::current_system::try_deserialize_system_state;
+    use crate::models::system_states::{SystemState, SystemStateV1};
     use anyhow::Result;
 
     #[test]
