@@ -1,5 +1,5 @@
-use crate::models::System;
 use crate::models::system_states::SystemState;
+use crate::models::systems::System;
 use anyhow::{Context, Result};
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
