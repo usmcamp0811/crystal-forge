@@ -72,10 +72,8 @@ pub struct FlakeConfig {
 pub struct AgentConfig {
     /// Hostname or IP address of the server to connect to.
     pub server_host: String,
-
     /// Port the server is listening on.
     pub server_port: u16,
-
     /// Path to the Ed25519 private key file used for signing.
     pub private_key: String,
 }
@@ -94,10 +92,8 @@ impl AgentConfig {
 pub struct ServerConfig {
     /// Address to bind to (e.g., `0.0.0.0` or `127.0.0.1`).
     pub host: String,
-
     /// Port to bind the HTTP server to.
     pub port: u16,
-
     /// List of base64-encoded Ed25519 public keys authorized to post.
     pub authorized_keys: HashMap<String, String>,
 }
@@ -116,17 +112,13 @@ impl ServerConfig {
 pub struct DbConfig {
     /// Hostname of the database server.
     pub host: String,
-
     /// Port the database listens on
     #[serde(default = "default_pg_port")]
     pub port: u16,
-
     /// Database user.
     pub user: String,
-
     /// Password for the user.
     pub password: String,
-
     /// Name of the database.
     pub name: String,
 }
