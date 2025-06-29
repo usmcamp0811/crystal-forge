@@ -1,4 +1,4 @@
-use crate::models::users::User;
+use crate::models::users::{User, UserType};
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -8,9 +8,9 @@ pub async fn create_user(pool: &PgPool, user: User) -> Result<Uuid> {
         r#"
         INSERT INTO users (
             id, username, first_name, last_name, email, 
-            user_type, is_active, created_by
+            user_type, is_active
         ) 
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         RETURNING id
         "#,
         user.id,
@@ -18,9 +18,8 @@ pub async fn create_user(pool: &PgPool, user: User) -> Result<Uuid> {
         user.first_name,
         user.last_name,
         user.email,
-        user.user_type,
+        user.user_type as UserType,
         user.is_active,
-        user.created_by
     )
     .fetch_one(pool)
     .await?;

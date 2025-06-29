@@ -98,7 +98,6 @@ CREATE TABLE IF NOT EXISTS users (
     email varchar(255) UNIQUE NOT NULL,
     user_type user_type NOT NULL DEFAULT 'human',
     is_active boolean NOT NULL DEFAULT TRUE,
-    created_by varchar(50),
     created_at timestamptz NOT NULL DEFAULT NOW(),
     updated_at timestamptz NOT NULL DEFAULT NOW()
 );

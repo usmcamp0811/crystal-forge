@@ -4,14 +4,21 @@ use sqlx::FromRow;
 use std::option::Option;
 use uuid::Uuid;
 
-// Assuming your UserType enum looks like this
-#[derive(Debug, sqlx::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "user_type", rename_all = "lowercase")]
 pub enum UserType {
     Human,
     Service,
-    Bot,
     System,
+}
+impl UserType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UserType::Human => "human",
+            UserType::Service => "service",
+            UserType::System => "system",
+        }
+    }
 }
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -21,9 +28,8 @@ pub struct User {
     pub first_name: String,
     pub last_name: String,
     pub email: String,
-    pub user_type: String,
+    pub user_type: UserType,
     pub is_active: bool,
-    pub created_by: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
