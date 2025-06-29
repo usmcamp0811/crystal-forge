@@ -29,6 +29,12 @@
       pkgs.libressl # Ensure OpenSSL-related libraries are available
     ];
 
+    # Runtime dependencies that need to be in PATH
+    runtimeDeps = with pkgs; [
+      util-linux # findmnt, blkid
+      zfs # zfs command (optional)
+    ];
+
     # Set the GIT_HASH environment variable during build
     preBuild = ''
       export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
