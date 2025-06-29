@@ -30,7 +30,7 @@ impl PublicKey {
             )
         })?;
 
-        let key_array: [u8; 32] = key_bytes.try_into().map_err(|_| {
+        let key_array: [u8; 32] = key_bytes.as_slice().try_into().map_err(|_| {
             anyhow::anyhow!(
                 "Public key for system {} must be exactly 32 bytes, got {}",
                 hostname,
@@ -103,10 +103,9 @@ where
 {
     fn decode(
         value: <DB as Database>::ValueRef<'r>,
-    ) -> Result<PublicKey, Box<(dyn StdError + Send + Sync + 'static)>> {
+    ) -> Result<PublicKey, Box<dyn StdError + Send + Sync>> {
         let base64_str = <String as Decode<'r, DB>>::decode(value)?;
-        PublicKey::from_base64(&base64_str, "database")
-            .map_err(|e| sqlx::Error::Decode(Box::new(e)))
+        PublicKey::from_base64(&base64_str, "database").map_err(|e| e.into())
     }
 }
 
@@ -117,8 +116,8 @@ where
     fn encode_by_ref(
         &self,
         buf: &mut <DB as Database>::ArgumentBuffer<'q>,
-    ) -> Result<_, sqlx::Error> {
-        self.to_base64().encode_by_ref(buf)
+    ) -> Result<sqlx::encode::IsNull, Box<(dyn StdError + Send + Sync + 'static)>> {
+        Ok(self.to_base64().encode_by_ref(buf)?)
     }
 }
 
