@@ -20,15 +20,11 @@ use tracing::{debug, info};
 #[derive(Clone)]
 pub struct CFState {
     pool: PgPool,
-    authorized_keys: HashMap<String, VerifyingKey>,
 }
 
 impl CFState {
-    pub fn new(pool: PgPool, authorized_keys: HashMap<String, VerifyingKey>) -> Self {
-        Self {
-            pool,
-            authorized_keys,
-        }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 }
 
@@ -71,10 +67,13 @@ pub async fn handle_current_system(
     let signature = Signature::from_bytes(&bytes);
 
     // Lookup key for signature verification
-    let key = match state.authorized_keys.get(key_id) {
-        Some(k) => k,
-        None => return StatusCode::UNAUTHORIZED,
+    let system = match get_by_hostname(&pool, key_id).await {
+        Ok(Some(k)) => k,
+        Ok(None) => return StatusCode::UNAUTHORIZED,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
     };
+
+    let key = system.public_key;
 
     if key.verify(&body, &signature).is_err() {
         return StatusCode::UNAUTHORIZED;

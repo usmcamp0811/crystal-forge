@@ -19,21 +19,3 @@ pub struct System {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
-
-impl System {
-    pub async fn get_by_hostname(pool: &PgPool, hostname: &str) -> Result<Option<System>> {
-        let system = sqlx::query_as::<_, System>("SELECT * FROM tbl_systems WHERE hostname = $1")
-            .bind(hostname)
-            .fetch_optional(pool)
-            .await?;
-        Ok(system)
-    }
-
-    pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<System>> {
-        let system = sqlx::query_as::<_, System>("SELECT * FROM tbl_systems WHERE id = $1")
-            .bind(id)
-            .fetch_optional(pool)
-            .await?;
-        Ok(system)
-    }
-}
