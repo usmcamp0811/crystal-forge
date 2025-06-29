@@ -15,8 +15,11 @@ CREATE TABLE IF NOT EXISTS tbl_environments (
 CREATE TABLE IF NOT EXISTS tbl_systems (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
     hostname text NOT NULL UNIQUE,
-    environment_id uuid REFERENCES tbl_environment (id),
+    environment_id uuid REFERENCES tbl_environments (id),
     is_active boolean DEFAULT TRUE, -- allow enabling/disabling system
+    public_key text NOT NULL,
+    flake_id uuid REFERENCES tbl_flakes (id),
+    derivation text NOT NULL, -- name of the derivation
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP
 );

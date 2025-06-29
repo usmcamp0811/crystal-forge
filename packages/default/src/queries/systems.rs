@@ -12,21 +12,3 @@ pub async fn update_hostname(&self, pool: &PgPool, new_hostname: &str) -> Result
         .await?;
     Ok(())
 }
-
-/// Delete this system record
-pub async fn delete(&self, pool: &PgPool) -> Result<()> {
-    sqlx::query("DELETE FROM tbl_systems WHERE id = $1")
-        .bind(self.id)
-        .execute(pool)
-        .await?;
-    Ok(())
-}
-
-/// Refresh this system from the database
-pub async fn refresh(&self, pool: &PgPool) -> Result<Option<System>> {
-    let system = sqlx::query_as::<_, System>("SELECT * FROM tbl_systems WHERE id = $1")
-        .bind(self.id)
-        .fetch_optional(pool)
-        .await?;
-    Ok(system)
-}
