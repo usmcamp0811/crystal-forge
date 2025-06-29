@@ -5,7 +5,6 @@ use sqlx::FromRow;
 use std::fmt;
 use std::option::Option;
 use std::{fs, io::ErrorKind, path::Path, process::Command};
-use sysinfo::System;
 use tracing::debug;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -21,7 +20,7 @@ pub struct System {
     pub updated_at: DateTime<Utc>,
 }
 
-pub impl System {
+impl System {
     pub async fn get_by_hostname(pool: &PgPool, hostname: &str) -> Result<Option<System>> {
         let system = sqlx::query_as::<_, System>("SELECT * FROM tbl_systems WHERE hostname = $1")
             .bind(hostname)
