@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt;
 use std::option::Option;
-use std::{fs, io::ErrorKind, path::Path, process::Command};
+use std::{fs, io::ErrorKind, path::Path};
 use sysinfo::System;
 use tracing::debug;
 

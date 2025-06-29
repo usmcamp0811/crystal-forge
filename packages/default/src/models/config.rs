@@ -1,10 +1,5 @@
-use anyhow::{Context, Result};
-use config::Config;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::env;
-use tokio_postgres::NoTls;
-use tracing::debug;
 
 #[derive(Debug, Deserialize)]
 pub struct CrystalForgeConfig {

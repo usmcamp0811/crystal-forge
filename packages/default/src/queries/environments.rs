@@ -1,6 +1,6 @@
 use crate::models::environments::Environment;
-use anyhow::{Context, Result};
-use sqlx::{PgPool, Row};
+use anyhow::Result;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Fetch the environment record associated with this system

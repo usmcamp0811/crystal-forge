@@ -1,8 +1,6 @@
 use crate::models::config::CrystalForgeConfig;
 use anyhow::{Context, Result};
 use config::Config;
-use serde::Deserialize;
-use std::collections::HashMap;
 use std::env;
 use tokio_postgres::NoTls;
 use tracing::debug;

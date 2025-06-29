@@ -1,14 +1,6 @@
 use crate::config;
-
 use anyhow::{Context, Result};
-use serde_json;
-use sqlx::postgres::PgPoolOptions;
-use sqlx::{PgPool, Pool, Postgres};
-use std::ffi::OsStr;
-use std::path::Path;
-use std::{env, fs};
-use tokio_postgres::{Client, NoTls};
-use tracing::{debug, error, info, trace, warn};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 
 pub async fn get_db_client() -> Result<PgPool> {
     let db_config = config::load_config()?;

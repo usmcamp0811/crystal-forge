@@ -7,7 +7,6 @@ use base64::engine::Engine;
 use base64::engine::general_purpose;
 use ed25519_dalek::{Signature, Verifier};
 use sqlx::PgPool;
-use std::collections::HashMap;
 
 use axum::{
     body::Bytes,
