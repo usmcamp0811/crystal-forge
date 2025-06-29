@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
     // Decode and parse all authorized public keys
     let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
     let pool = get_db_client().await?;
-    let state = CFState::new(pool, authorized_keys);
+    let state = CFState::new(pool);
 
     // Define application routes and state
     let app = Router::new()

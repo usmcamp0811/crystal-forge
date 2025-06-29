@@ -45,97 +45,9 @@ pub fn debug_print_config(cfg: &CrystalForgeConfig) {
 /// Top-level application configuration structure.
 ///
 /// This groups all config sections from the TOML file:
-/// - `[database]` → `DbConfig`
+/// - `[database]` → `DatabaseConfig`
 /// - `[server]`   → `ServerConfig`
 /// - `[client]`   → `AgentConfig`
-#[derive(Debug, Deserialize)]
-pub struct CrystalForgeConfig {
-    pub database: Option<DbConfig>,
-    pub server: Option<ServerConfig>,
-    pub client: Option<AgentConfig>,
-    pub flakes: Option<FlakeConfig>,
-}
-
-/// Configuration for watched flakes.
-///
-/// This section is loaded from `[flakes]` in `config.toml`.
-#[derive(Debug, Deserialize)]
-pub struct FlakeConfig {
-    /// Map of flake name → flake URI.
-    pub watched: HashMap<String, String>,
-}
-
-/// Configuration for the agent/client.
-///
-/// This section is loaded from `[client]` in `config.toml`.
-#[derive(Debug, Deserialize)]
-pub struct AgentConfig {
-    /// Hostname or IP address of the server to connect to.
-    pub server_host: String,
-    /// Port the server is listening on.
-    pub server_port: u16,
-    /// Path to the Ed25519 private key file used for signing.
-    pub private_key: String,
-}
-
-impl AgentConfig {
-    /// Returns the full HTTP URL to the configured server.
-    pub fn endpoint(&self) -> String {
-        format!("http://{}:{}", self.server_host, self.server_port)
-    }
-}
-
-/// Configuration for the server itself.
-///
-/// This section is loaded from `[server]` in `config.toml`.
-#[derive(Debug, Deserialize)]
-pub struct ServerConfig {
-    /// Address to bind to (e.g., `0.0.0.0` or `127.0.0.1`).
-    pub host: String,
-    /// Port to bind the HTTP server to.
-    pub port: u16,
-    /// List of base64-encoded Ed25519 public keys authorized to post.
-    pub authorized_keys: HashMap<String, String>,
-}
-
-impl ServerConfig {
-    /// Returns the full socket address to bind to.
-    pub fn bind_address(&self) -> String {
-        format!("{}:{}", self.host, self.port)
-    }
-}
-
-/// PostgreSQL database connection configuration.
-///
-/// This section is loaded from `[database]` in `config.toml`.
-#[derive(Debug, Deserialize)]
-pub struct DbConfig {
-    /// Hostname of the database server.
-    pub host: String,
-    /// Port the database listens on
-    #[serde(default = "default_pg_port")]
-    pub port: u16,
-    /// Database user.
-    pub user: String,
-    /// Password for the user.
-    pub password: String,
-    /// Name of the database.
-    pub name: String,
-}
-
-fn default_pg_port() -> u16 {
-    5432
-}
-
-impl DbConfig {
-    /// Returns a PostgreSQL connection string.
-    pub fn to_url(&self) -> String {
-        format!(
-            "postgres://{}:{}@{}:{}/{}",
-            self.user, self.password, self.host, self.port, self.name
-        )
-    }
-}
 
 /// Loads the full application configuration from `config.toml`
 /// and optionally from `CRYSTAL_FORGE_*` environment variables.

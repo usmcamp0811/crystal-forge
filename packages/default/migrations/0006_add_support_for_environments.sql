@@ -1,3 +1,9 @@
+CREATE TABLE IF NOT EXISTS tbl_compliance_levels (
+    id serial PRIMARY KEY,
+    name varchar(50) UNIQUE NOT NULL, -- e.g., PCI, HIPAA, FISMA, NONE
+    description text
+);
+
 -- Create environment table to map systems to deployment environments
 CREATE TABLE IF NOT EXISTS tbl_environments (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
@@ -5,6 +11,8 @@ CREATE TABLE IF NOT EXISTS tbl_environments (
     description text,
     type varchar(50), -- tier/type like 'sandbox', 'regulated', etc.
     is_active boolean DEFAULT TRUE, -- allow enabling/disabling environments
+    compliance_level_id int REFERENCES tbl_compliance_levels (id),
+    risk_profile varchar(50), -- e.g., 'low', 'medium', 'high'
     created_by varchar(100), -- who created the environment
     updated_by varchar(100), -- who last updated the environment
     created_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
