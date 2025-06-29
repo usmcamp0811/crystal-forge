@@ -7,6 +7,7 @@ use base64::engine::Engine;
 use base64::engine::general_purpose;
 use ed25519_dalek::{Signature, Verifier};
 use sqlx::PgPool;
+use winnow::parser::Parser;
 
 use axum::{
     body::Bytes,
@@ -134,6 +135,7 @@ mod integration_tests {
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json;
     use std::collections::HashMap;
+    use winnow::parser::Parser;
 
     #[tokio::test]
     async fn test_current_system_endpoint_success() {

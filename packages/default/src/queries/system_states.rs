@@ -1,6 +1,4 @@
-use crate::{
-    handlers::current_system::try_deserialize_system_state, models::system_states::SystemState,
-};
+use crate::models::system_states::SystemState;
 use anyhow::Result;
 use sqlx::PgPool;
 
