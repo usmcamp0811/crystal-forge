@@ -1,6 +1,5 @@
 use anyhow::Result;
 use base64::Engine;
-use base64::engine::Engine;
 use base64::engine::general_purpose;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::VerifyingKey;

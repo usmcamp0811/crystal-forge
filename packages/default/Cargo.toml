@@ -34,6 +34,7 @@ chrono = { version = "0.4.41", features = ["serde"] }
 watch = "0.2.3"
 tokio-test = "0.4.4"
 axum-test = "17.3.0"
+winnow = "0.7.11"
 
 [lib]
 path = "src/lib.rs"
