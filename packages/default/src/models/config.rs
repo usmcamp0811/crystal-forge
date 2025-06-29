@@ -16,7 +16,7 @@ pub struct CrystalForgeConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct FlakeConfig {
+struct FlakeConfig {
     pub watched: HashMap<String, String>,
 }
 
@@ -24,7 +24,7 @@ pub struct FlakeConfig {
 ///
 /// This section is loaded from `[database]` in `config.toml`.
 #[derive(Debug, Deserialize)]
-pub struct DatabaseConfig {
+struct DatabaseConfig {
     pub host: String,
     #[serde(default = "default_pg_port")]
     pub port: u16,
@@ -51,7 +51,7 @@ impl DatabaseConfig {
 ///
 /// This section is loaded from `[server]` in `config.toml`.
 #[derive(Debug, Deserialize)]
-pub struct ServerConfig {
+struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub authorized_keys: HashMap<String, String>,
@@ -65,7 +65,7 @@ impl ServerConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AgentConfig {
+struct AgentConfig {
     pub server_host: String,
     pub server_port: u16,
     pub private_key: String,
@@ -79,7 +79,7 @@ impl AgentConfig {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct EnvironmentConfig {
+struct EnvironmentConfig {
     pub name: String,
     pub description: String,
     pub is_active: bool,

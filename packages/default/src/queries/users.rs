@@ -29,7 +29,7 @@ pub async fn create_user(pool: &PgPool, user: User) -> Result<Uuid> {
 }
 
 pub async fn get_by_username(pool: &PgPool, username: &str) -> Result<Option<User>> {
-    let user = sqlx::query_as::<_, System>("SELECT * FROM users WHERE username = $1")
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
         .bind(username)
         .fetch_optional(pool)
         .await?;
@@ -39,6 +39,14 @@ pub async fn get_by_username(pool: &PgPool, username: &str) -> Result<Option<Use
 pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
         .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(user)
+}
+
+pub async fn get_by_email(pool: &PgPool, email: &str) -> Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
+        .bind(email)
         .fetch_optional(pool)
         .await?;
     Ok(user)
