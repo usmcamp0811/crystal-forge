@@ -1,3 +1,4 @@
+use crate::models::config::CrystalForgeConfig;
 use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
