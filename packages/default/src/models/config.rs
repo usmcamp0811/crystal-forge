@@ -10,6 +10,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::collections::HashMap;
 use std::env;
 use tokio_postgres::NoTls;
+use tracing::{debug, error, info};
 
 #[derive(Debug, Deserialize)]
 pub struct CrystalForgeConfig {
@@ -25,6 +26,8 @@ impl CrystalForgeConfig {
     pub fn load() -> Result<Self> {
         let config_path = env::var("CRYSTAL_FORGE_CONFIG")
             .unwrap_or_else(|_| "/var/lib/crystal_forge/config.toml".to_string());
+
+        debug!("CRYSTAL_FORGE_CONFIG => {}", config_path);
 
         let settings = Config::builder()
             .add_source(config::File::with_name(&config_path).required(false))
@@ -93,10 +96,16 @@ impl CrystalForgeConfig {
         let systems = match &self.systems {
             Some(s) => s,
             None => {
-                tracing::info!("No systems defined in config; skipping system sync.");
+                let config_path = env::var("CRYSTAL_FORGE_CONFIG")
+                    .unwrap_or_else(|_| "/var/lib/crystal_forge/config.toml".to_string());
+                tracing::info!(
+                    "No systems defined in {}; skipping system sync.",
+                    config_path
+                );
                 return Ok(());
             }
         };
+        debug!("💡 Syncing Systems in Config to Database.");
 
         for config in systems {
             tracing::info!("📥 Syncing system {}...", config.hostname);
@@ -115,7 +124,7 @@ impl CrystalForgeConfig {
             // Fetch flake ID by repo URL if provided in your config (optional)
             let flake_id = if let Some(flake_name) = &config.flake_name {
                 // Find watched flake in config by name
-                let watched_flake = cfg
+                let watched_flake = self
                     .flakes
                     .as_ref()
                     .and_then(|f| f.watched.iter().find(|wf| &wf.name == flake_name))

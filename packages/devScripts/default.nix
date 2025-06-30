@@ -13,19 +13,44 @@ with lib.crystal-forge; let
   db_password = "password";
   cf_port = 3445;
   pgweb_port = 12084;
+  tomlFormat = pkgs.formats.toml {};
+  configToml = tomlFormat.generate "crystal-forge-config.toml" {
+    database = {
+      host = "127.0.0.1";
+      port = db_port;
+      user = "crystal_forge";
+      password = db_password;
+      name = "crystal_forge";
+    };
+    server = {
+      host = "0.0.0.0";
+      port = cf_port;
+    };
+    client = {
+      server_host = "127.0.0.1";
+      server_port = cf_port;
+      private_key = "$CF_KEY_DIR/agent.key"; # or use absolute path if needed
+    };
+    systems = [
+      {
+        hostname = "gray";
+        public_key = "AgJuIy4AGeP/AmErzvdbDW3n/przOHO3Id1r05y7P1M=";
+        environment = "dev";
+        flake_name = "dotfiles";
+      }
+    ];
+    flakes = {
+      watched = [
+        {
+          name = "dotfiles";
+          repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+        }
+      ];
+    };
+  };
 
   envExports = ''
-    export CRYSTAL_FORGE__DATABASE__HOST=127.0.0.1
-    export CRYSTAL_FORGE__DATABASE__PORT=${toString db_port}
-    export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
-    export CRYSTAL_FORGE__DATABASE__PASSWORD=${db_password}
-    export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
-    export DATABASE_URL=postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge
-    export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=git+https://gitlab.com/usmcamp0811/dotfiles
-    export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
-    export CRYSTAL_FORGE__SERVER__PORT=${toString cf_port}
-    export CRYSTAL_FORGE__CLIENT__SERVER_HOST=127.0.0.1
-    export CRYSTAL_FORGE__CLIENT__SERVER_PORT=${toString cf_port}
+    export CRYSTAL_FORGE_CONFIG=${configToml}
   '';
 
   simulatePush = pkgs.writeShellApplication {

@@ -17,11 +17,15 @@
         else cfg.database.password;
     };
     server = {
-      inherit (cfg.server) host port authorized_keys;
+      inherit (cfg.server) host port;
     };
     client = {
       inherit (cfg.client) server_host server_port private_key;
     };
+    flakes = {
+      watched = cfg.flakes.watched;
+    };
+    systems = cfg.systems;
   };
 
   server = pkgs.writeShellApplication {
@@ -33,6 +37,43 @@
   };
 
   generatedConfigPath = "/run/crystal-forge/config.toml";
+
+  flakesEnv = lib.listToAttrs (
+    lib.flatten (lib.imap0 (i: f: [
+        {
+          name = "CRYSTAL_FORGE__FLAKES__WATCHED__${toString i}__NAME";
+          value = f.name;
+        }
+        {
+          name = "CRYSTAL_FORGE__FLAKES__WATCHED__${toString i}__REPO_URL";
+          value = f.repo_url;
+        }
+      ])
+      cfg.flakes.watched)
+  );
+
+  systemsEnv = lib.listToAttrs (
+    lib.flatten (lib.imap0 (i: s:
+      [
+        {
+          name = "CRYSTAL_FORGE__SYSTEMS__${toString i}__HOSTNAME";
+          value = s.hostname;
+        }
+        {
+          name = "CRYSTAL_FORGE__SYSTEMS__${toString i}__PUBLIC_KEY";
+          value = s.public_key;
+        }
+        {
+          name = "CRYSTAL_FORGE__SYSTEMS__${toString i}__ENVIRONMENT";
+          value = s.environment;
+        }
+      ]
+      ++ lib.optional (s.flake_name != null) {
+        name = "CRYSTAL_FORGE__SYSTEMS__${toString i}__FLAKE_NAME";
+        value = s.flake_name;
+      })
+    cfg.systems)
+  );
 
   configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
     mkdir -p /run/crsystal-forge
@@ -84,10 +125,47 @@ in {
     };
     flakes = {
       watched = lib.mkOption {
-        type = lib.types.attrsOf lib.types.str;
-        default = {};
-        description = "Flakes to watch and auto-track (name → repo_url).";
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            name = lib.mkOption {
+              type = lib.types.str;
+              description = "Name of the flake.";
+            };
+            repo_url = lib.mkOption {
+              type = lib.types.str;
+              description = "Repository URL of the flake.";
+            };
+          };
+        });
+        default = [];
+        description = "List of watched flakes as array of name/repo_url entries.";
       };
+    };
+
+    systems = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          hostname = lib.mkOption {
+            type = lib.types.str;
+            description = "Hostname of the system.";
+          };
+          public_key = lib.mkOption {
+            type = lib.types.str;
+            description = "Base64-encoded Ed25519 public key.";
+          };
+          environment = lib.mkOption {
+            type = lib.types.str;
+            description = "Name of the environment this system belongs to.";
+          };
+          flake_name = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Optional flake name referenced from flakes.watched.";
+          };
+        };
+      });
+      default = [];
+      description = "Systems to register with Crystal Forge.";
     };
     server = {
       enable = lib.mkEnableOption "Enable the Crystal Forge Server";
@@ -147,9 +225,6 @@ in {
           CRYSTAL_FORGE__SERVER__HOST = cfg.server.host;
           CRYSTAL_FORGE__SERVER__PORT = toString cfg.server.port;
         }
-        // (lib.mapAttrs'
-          (name: val: lib.nameValuePair "CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__${name}" val)
-          cfg.server.authorized_keys)
         // {
           CRYSTAL_FORGE__DATABASE__HOST = cfg.database.host;
           CRYSTAL_FORGE__DATABASE__USER = cfg.database.user;
@@ -159,9 +234,8 @@ in {
             then builtins.readFile cfg.database.passwordFile
             else cfg.database.password;
         }
-        // (lib.mapAttrs'
-          (name: val: lib.nameValuePair "CRYSTAL_FORGE__FLAKES__WATCHED__${name}" val)
-          cfg.flakes.watched);
+        // flakesEnv
+        // systemsEnv;
       serviceConfig = {
         ExecStart = "${server}/bin/server";
         User = "root";

@@ -66,16 +66,25 @@ in
             host = "localhost";
             name = "crystal_forge";
           };
-          flakes.watched = {
-            dotfiles = "git+https://gitlab.com/usmcamp0811/dotfiles";
-          };
+          flakes.watched = [
+            {
+              name = "dotfiles";
+              repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+            }
+          ];
+
+          systems = [
+            {
+              hostname = "agent";
+              public_key = builtins.readFile "${pub}/agent.pub";
+              environment = "dev";
+              flake_name = "dotfiles";
+            }
+          ];
           server = {
             enable = true;
             host = "0.0.0.0";
             port = 3000;
-            authorized_keys = {
-              agent = builtins.readFile "${pub}/agent.pub";
-            };
           };
         };
       };
