@@ -352,6 +352,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Port: {}", server_cfg.port);
 
     // Decode and parse all authorized public keys
+    let cfg = CrystalForgeConfig::load();
     let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
     let pool = CrystalForgeConfig::db_pool().await?;
     let state = CFState::new(pool);

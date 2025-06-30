@@ -1,3 +1,4 @@
+use crate::queries::environments::get_environment_id_by_name;
 use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
@@ -8,7 +9,7 @@ use tokio_postgres::NoTls;
 
 #[derive(Debug, Deserialize)]
 pub struct CrystalForgeConfig {
-    pub flakes: Option<FlakeConfig>,
+    pub flakes: Option<Vec<FlakeConfig>>,
     pub database: Option<DatabaseConfig>,
     pub server: Option<ServerConfig>,
     pub client: Option<AgentConfig>,
@@ -83,11 +84,83 @@ impl CrystalForgeConfig {
         tokio::spawn(connection);
         Ok(())
     }
+    pub async fn sync_systems_to_db(&self, pool: &PgPool) -> anyhow::Result<()> {
+        let systems = match &self.systems {
+            Some(s) => s,
+            None => {
+                tracing::info!("No systems defined in config; skipping system sync.");
+                return Ok(());
+            }
+        };
+
+        for config in systems {
+            tracing::info!("📥 Syncing system {}...", config.hostname);
+
+            // Fetch environment ID
+            let environment_id = get_environment_id_by_name(pool, &config.environment)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Environment '{}' not found in database for system '{}'",
+                        config.environment,
+                        config.hostname
+                    )
+                })?;
+
+            // Fetch flake ID by repo URL if provided in your config (optional)
+            // Here you could extend your SystemConfig with an optional repo_url field
+            let flake_id = if let Some(flake_name) = &config.flake_name {
+                // Find watched flake in config by name
+                let watched_flake = cfg
+                    .flakes
+                    .as_ref()
+                    .and_then(|f| f.watched.iter().find(|wf| &wf.name == flake_name))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Flake '{}' referenced by system '{}' not found in flakes.watched",
+                            flake_name,
+                            config.hostname
+                        )
+                    })?;
+
+                // Lookup or insert in DB
+                match get_flake_id_by_repo_url(pool, &watched_flake.repo_url).await? {
+                    Some(id) => id,
+                    None => {
+                        insert_flake(pool, &watched_flake.name, &watched_flake.repo_url)
+                            .await?
+                            .id
+                    }
+                }
+            } else {
+                None
+            };
+
+            let system = System::new(
+                config.hostname.clone(),
+                Some(environment_id),
+                true,
+                config.public_key.clone(),
+                flake_id,
+                None,
+            )?;
+
+            insert_system(pool, &system).await?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct FlakeConfig {
-    pub watched: HashMap<String, String>,
+    pub watched: Vec<WatchedFlake>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WatchedFlake {
+    pub name: String,
+    pub repo_url: String,
 }
 
 /// PostgreSQL database connection configuration.
@@ -161,4 +234,5 @@ pub struct SystemConfig {
     pub hostname: String,
     pub public_key: String,
     pub environment: String,
+    pub flake_name: Option<String>, // just the flake name reference
 }

@@ -36,3 +36,11 @@ pub async fn get_flake_by_id(pool: &PgPool, id: i32) -> Result<Flake> {
 
     Ok(commit)
 }
+
+pub async fn get_flake_id_by_repo_url(pool: &PgPool, repo_url: &str) -> Result<Option<i32>> {
+    let flake_id = sqlx::query_scalar!("SELECT id FROM tbl_flakes WHERE repo_url = $1", repo_url)
+        .fetch_optional(pool)
+        .await?;
+
+    Ok(flake_id)
+}

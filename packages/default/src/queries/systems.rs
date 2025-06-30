@@ -26,3 +26,38 @@ pub async fn get_by_id(pool: &PgPool, id: i32) -> Result<Option<System>> {
         .await?;
     Ok(system)
 }
+
+pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
+    let inserted = sqlx::query_as::<_, System>(
+        r#"
+    INSERT INTO systems (
+        hostname,
+        environment_id,
+        is_active,
+        public_key,
+        flake_id,
+        derivation,
+        created_at,
+        updated_at
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+    ON CONFLICT (hostname) DO UPDATE SET
+        environment_id = EXCLUDED.environment_id,
+        is_active = EXCLUDED.is_active,
+        public_key = EXCLUDED.public_key,
+        flake_id = EXCLUDED.flake_id,
+        derivation = EXCLUDED.derivation,
+        updated_at = NOW()
+    RETURNING *
+    "#,
+    )
+    .bind(&system.hostname)
+    .bind(system.environment_id)
+    .bind(system.is_active)
+    .bind(&system.public_key.to_base64())
+    .bind(system.flake_id)
+    .bind(&system.derivation)
+    .fetch_one(pool)
+    .await?;
+    Ok(inserted)
+}

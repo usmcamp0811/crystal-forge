@@ -119,6 +119,9 @@ where
     ) -> Result<sqlx::encode::IsNull, Box<(dyn StdError + Send + Sync + 'static)>> {
         Ok(self.to_base64().encode_by_ref(buf)?)
     }
+    fn size_hint(&self) -> usize {
+        self.to_base64().size_hint()
+    }
 }
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -212,6 +215,12 @@ impl System {
     /// Get the public key as base64 string (for compatibility)
     pub fn public_key_base64(&self) -> String {
         self.public_key.to_base64()
+    }
+}
+
+impl fmt::Display for PublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_base64())
     }
 }
 

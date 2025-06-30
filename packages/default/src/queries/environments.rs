@@ -11,3 +11,10 @@ pub async fn get_environment(pool: &PgPool, id: Uuid) -> Result<Option<Environme
         .await?;
     Ok(env)
 }
+
+pub async fn get_environment_id_by_name(pool: &PgPool, name: &str) -> Result<Option<Uuid>> {
+    let env_id = sqlx::query_scalar!("SELECT id FROM environments WHERE name = $1", name)
+        .fetch_optional(pool)
+        .await?;
+    Ok(env_id)
+}
