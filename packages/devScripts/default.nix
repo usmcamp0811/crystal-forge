@@ -117,7 +117,8 @@ with lib.crystal-forge; let
     name = "run-agent";
     runtimeInputs = [pkgs.nix];
     text = ''
-      ${envExports}
+      CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
+      export CRYSTAL_FORGE_CONFIG
       if [[ "''${1:-}" == "--dev" ]]; then
         exec sudo -E nix run .#agent
       else
@@ -130,7 +131,8 @@ with lib.crystal-forge; let
     name = "run-server";
     runtimeInputs = [pkgs.nix];
     text = ''
-      ${envExports}
+      CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
+      export CRYSTAL_FORGE_CONFIG
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#server
       else
