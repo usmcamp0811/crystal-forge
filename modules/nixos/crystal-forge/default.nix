@@ -8,25 +8,45 @@
 
   tomlFormat = pkgs.formats.toml {};
 
-  rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" {
-    database = {
-      inherit (cfg.database) host user name;
-      password =
-        if cfg.database.passwordFile != null
-        then "__USE_EXTERNAL_PASSWORD__"
-        else cfg.database.password;
-    };
-    server = {
-      inherit (cfg.server) host port;
-    };
-    client = {
-      inherit (cfg.client) server_host server_port private_key;
-    };
-    flakes = {
-      watched = cfg.flakes.watched;
-    };
-    systems = cfg.systems;
-  };
+  rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" (
+    lib.mkMerge [
+      {
+        database = {
+          inherit (cfg.database) host user name;
+          password =
+            if cfg.database.passwordFile != null
+            then "__USE_EXTERNAL_PASSWORD__"
+            else cfg.database.password;
+        };
+      }
+
+      # Add server section only if enabled
+      (lib.optionalAttrs cfg.server.enable {
+        server = {
+          inherit (cfg.server) host port;
+        };
+      })
+
+      # Add client section only if enabled
+      (lib.optionalAttrs cfg.client.enable {
+        client = {
+          inherit (cfg.client) server_host server_port private_key;
+        };
+      })
+
+      # Always include flakes when present
+      (lib.optionalAttrs (cfg.flakes.watched != []) {
+        flakes = {
+          watched = cfg.flakes.watched;
+        };
+      })
+
+      # Always include systems when present
+      (lib.optionalAttrs (cfg.systems != []) {
+        systems = cfg.systems;
+      })
+    ]
+  );
 
   server = pkgs.writeShellApplication {
     name = "server";
@@ -38,45 +58,8 @@
 
   generatedConfigPath = "/run/crystal-forge/config.toml";
 
-  flakesEnv = lib.listToAttrs (
-    lib.flatten (lib.imap0 (i: f: [
-        {
-          name = "CRYSTAL_FORGE__FLAKES__WATCHED__${toString i}__NAME";
-          value = f.name;
-        }
-        {
-          name = "CRYSTAL_FORGE__FLAKES__WATCHED__${toString i}__REPO_URL";
-          value = f.repo_url;
-        }
-      ])
-      cfg.flakes.watched)
-  );
-
-  systemsEnv = lib.listToAttrs (
-    lib.flatten (lib.imap0 (i: s:
-      [
-        {
-          name = "CRYSTAL_FORGE__SYSTEMS__${toString i}__HOSTNAME";
-          value = s.hostname;
-        }
-        {
-          name = "CRYSTAL_FORGE__SYSTEMS__${toString i}__PUBLIC_KEY";
-          value = s.public_key;
-        }
-        {
-          name = "CRYSTAL_FORGE__SYSTEMS__${toString i}__ENVIRONMENT";
-          value = s.environment;
-        }
-      ]
-      ++ lib.optional (s.flake_name != null) {
-        name = "CRYSTAL_FORGE__SYSTEMS__${toString i}__FLAKE_NAME";
-        value = s.flake_name;
-      })
-    cfg.systems)
-  );
-
   configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
-    mkdir -p /run/crsystal-forge
+    mkdir -p /run/crystal-forge
     cp ${rawConfigFile} ${generatedConfigPath}
     ${lib.optionalString (cfg.database.passwordFile != null) ''
       sed -i "s|__USE_EXTERNAL_PASSWORD__|$(<${cfg.database.passwordFile})|" ${generatedConfigPath}
@@ -224,6 +207,7 @@ in {
           RUST_LOG = cfg.log_level;
           CRYSTAL_FORGE__SERVER__HOST = cfg.server.host;
           CRYSTAL_FORGE__SERVER__PORT = toString cfg.server.port;
+          CRYSTAL_FORGE_CONFIG = generatedConfigPath;
         }
         // {
           CRYSTAL_FORGE__DATABASE__HOST = cfg.database.host;
@@ -233,9 +217,7 @@ in {
             if cfg.database.passwordFile != null
             then builtins.readFile cfg.database.passwordFile
             else cfg.database.password;
-        }
-        // flakesEnv
-        // systemsEnv;
+        };
       serviceConfig = {
         ExecStart = "${server}/bin/server";
         User = "root";
