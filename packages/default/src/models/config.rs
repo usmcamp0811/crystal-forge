@@ -13,6 +13,7 @@ pub struct CrystalForgeConfig {
     pub server: Option<ServerConfig>,
     pub client: Option<AgentConfig>,
     pub environments: Option<EnvironmentConfig>,
+    pub systems: Option<Vec<SystemConfig>>,
 }
 
 impl CrystalForgeConfig {
@@ -123,7 +124,6 @@ impl DatabaseConfig {
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
-    pub authorized_keys: HashMap<String, String>,
 }
 
 impl ServerConfig {
@@ -154,4 +154,11 @@ pub struct EnvironmentConfig {
     pub is_active: bool,
     pub risk_profile: String,
     pub compliance_level: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SystemConfig {
+    pub hostname: String,
+    pub public_key: String,
+    pub environment: String,
 }
