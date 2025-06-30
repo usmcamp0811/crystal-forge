@@ -13,8 +13,32 @@ with lib.crystal-forge; let
   db_password = "password";
   cf_port = 3445;
   pgweb_port = 12084;
+
   tomlFormat = pkgs.formats.toml {};
-  configToml = tomlFormat.generate "crystal-forge-config.toml" {
+  generateConfig = pkgs.writeShellApplication {
+    name = "generate-config";
+    runtimeInputs = with pkgs; [hostname coreutils];
+    text = ''
+      set -euo pipefail
+
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      ACTUAL_HOSTNAME="$(hostname -s)"
+      ACTUAL_PUBKEY="$(cat "$CF_KEY_DIR/agent.pub")"
+
+      CONFIG_DIR="''${XDG_RUNTIME_DIR:-/tmp}/crystal-forge"
+      mkdir -p "$CONFIG_DIR"
+      CONFIG_FILE="$CONFIG_DIR/crystal-forge-config.toml"
+
+      sed \
+        -e "s/HOSTNAME_PLACEHOLDER/$ACTUAL_HOSTNAME/g" \
+        -e "s|PUBLIC_KEY_PLACEHOLDER|$ACTUAL_PUBKEY|g" \
+        ${configTemplate} > "$CONFIG_FILE"
+
+      echo "$CONFIG_FILE"
+    '';
+  };
+  # Create a template config that will be filled at runtime
+  configTemplate = tomlFormat.generate "crystal-forge-config-template.toml" {
     database = {
       host = "127.0.0.1";
       port = db_port;
@@ -29,12 +53,12 @@ with lib.crystal-forge; let
     client = {
       server_host = "127.0.0.1";
       server_port = cf_port;
-      private_key = "$CF_KEY_DIR/agent.key"; # or use absolute path if needed
+      private_key = "$CF_KEY_DIR/agent.key";
     };
     systems = [
       {
-        hostname = "gray";
-        public_key = "AgJuIy4AGeP/AmErzvdbDW3n/przOHO3Id1r05y7P1M=";
+        hostname = "HOSTNAME_PLACEHOLDER";
+        public_key = "PUBLIC_KEY_PLACEHOLDER";
         environment = "dev";
         flake_name = "dotfiles";
       }
@@ -50,7 +74,7 @@ with lib.crystal-forge; let
   };
 
   envExports = ''
-    export CRYSTAL_FORGE_CONFIG=${configToml}
+    export CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
   '';
 
   simulatePush = pkgs.writeShellApplication {
