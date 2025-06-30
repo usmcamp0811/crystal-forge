@@ -1,4 +1,8 @@
+use crate::models::systems::System;
 use crate::queries::environments::get_environment_id_by_name;
+use crate::queries::flakes::get_flake_id_by_repo_url;
+use crate::queries::flakes::insert_flake;
+use crate::queries::systems::insert_system;
 use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
@@ -9,7 +13,7 @@ use tokio_postgres::NoTls;
 
 #[derive(Debug, Deserialize)]
 pub struct CrystalForgeConfig {
-    pub flakes: Option<Vec<FlakeConfig>>,
+    pub flakes: Option<FlakeConfig>,
     pub database: Option<DatabaseConfig>,
     pub server: Option<ServerConfig>,
     pub client: Option<AgentConfig>,
@@ -85,6 +89,7 @@ impl CrystalForgeConfig {
         Ok(())
     }
     pub async fn sync_systems_to_db(&self, pool: &PgPool) -> anyhow::Result<()> {
+        let cfg = Self::load()?;
         let systems = match &self.systems {
             Some(s) => s,
             None => {
@@ -108,7 +113,6 @@ impl CrystalForgeConfig {
                 })?;
 
             // Fetch flake ID by repo URL if provided in your config (optional)
-            // Here you could extend your SystemConfig with an optional repo_url field
             let flake_id = if let Some(flake_name) = &config.flake_name {
                 // Find watched flake in config by name
                 let watched_flake = cfg
@@ -124,28 +128,28 @@ impl CrystalForgeConfig {
                     })?;
 
                 // Lookup or insert in DB
-                match get_flake_id_by_repo_url(pool, &watched_flake.repo_url).await? {
+                let id = match get_flake_id_by_repo_url(pool, &watched_flake.repo_url).await? {
                     Some(id) => id,
                     None => {
                         insert_flake(pool, &watched_flake.name, &watched_flake.repo_url)
                             .await?
                             .id
                     }
-                }
+                };
+                Some(id) // wrap in Some() to match Option<i32>
             } else {
                 None
             };
 
             let system = System::new(
+                pool,
                 config.hostname.clone(),
                 Some(environment_id),
                 true,
                 config.public_key.clone(),
                 flake_id,
-                None,
-            )?;
-
-            insert_system(pool, &system).await?;
+            )
+            .await?;
         }
 
         Ok(())

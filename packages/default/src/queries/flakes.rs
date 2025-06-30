@@ -1,6 +1,7 @@
 use crate::models::flakes::Flake;
 use anyhow::Result;
 use sqlx::PgPool;
+use std::fmt;
 
 pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<Flake> {
     let flake = sqlx::query_as::<_, Flake>(

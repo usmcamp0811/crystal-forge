@@ -62,13 +62,6 @@ async fn main() -> anyhow::Result<()> {
         let eval_pool2 = pool.clone();
         sqlx::migrate!("./migrations").run(&pool).await?;
 
-        // Insert any statically watched flakes into the database
-        if let Some(watched) = &cfg.flakes {
-            for (name, repo_url) in &watched.watched {
-                insert_flake(&pool, name, repo_url).await?;
-            }
-        }
-
         // add systems to evaluation target table w/o eval
         tokio::spawn(async move {
             tracing::info!("🔁 Starting periodic commit evaluation check loop (every 60s)...");
@@ -182,7 +175,6 @@ async fn main() -> anyhow::Result<()> {
         info!("Port: {}", server_cfg.port);
 
         // Decode and parse all authorized public keys
-        let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
         let pool = CrystalForgeConfig::db_pool().await?;
         let state = CFState::new(pool);
 
@@ -199,45 +191,10 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     }
 
-    /// Parses base64-encoded public keys from config and converts them to `VerifyingKey`s.
-    fn parse_authorized_keys(
-        b64_keys: &HashMap<String, String>,
-    ) -> anyhow::Result<HashMap<String, VerifyingKey>> {
-        let mut map = HashMap::new();
-
-        for (key_id, b64) in b64_keys {
-            let bytes = general_purpose::STANDARD
-                .decode(b64.trim())
-                .with_context(|| format!("Invalid base64 key for ID '{}'", key_id))?;
-
-            if bytes.len() != 32 {
-                anyhow::bail!("Key ID '{}' is not 32 bytes (got {})", key_id, bytes.len());
-            }
-
-            let key_bytes: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .expect("already checked length == 32");
-
-            let key = VerifyingKey::from_bytes(&key_bytes)
-                .context(format!("Invalid public key for ID '{}'", key_id))?;
-
-            map.insert(key_id.clone(), key);
-        }
-
-        Ok(map)
-    }
     let pool = CrystalForgeConfig::db_pool().await?;
     let eval_pool = pool.clone();
     let eval_pool2 = pool.clone();
     sqlx::migrate!("./migrations").run(&pool).await?;
-
-    // Insert any statically watched flakes into the database
-    if let Some(watched) = &cfg.flakes {
-        for (name, repo_url) in &watched.watched {
-            insert_flake(&pool, name, repo_url).await?;
-        }
-    }
 
     // add systems to evaluation target table w/o eval
     tokio::spawn(async move {
@@ -353,7 +310,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Decode and parse all authorized public keys
     let cfg = CrystalForgeConfig::load();
-    let authorized_keys = parse_authorized_keys(&server_cfg.authorized_keys)?;
     let pool = CrystalForgeConfig::db_pool().await?;
     let state = CFState::new(pool);
 

@@ -6,6 +6,7 @@ use ed25519_dalek::VerifyingKey;
 use serde::ser::StdError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sqlx::{Database, Decode, Encode, FromRow, Type};
+use std::fmt;
 use std::option::Option;
 use uuid::Uuid;
 
