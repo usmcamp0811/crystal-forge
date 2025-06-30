@@ -13,8 +13,11 @@ server_host = "reckless"
 server_port = 3000
 private_key = "/var/lib/crystal_forge/gray.key"
 
-[flakes.watched]
-dotfiles = "git+https://gitlab.com/usmcamp0811/dotfiles"
+[flakes]
+
+[[flakes.watched]]
+name = "dotfiles"
+repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles"
 
 [environments]
 name = "dev"
@@ -27,13 +30,16 @@ compliance_level = "NONE"
 hostname = "gray"
 public_key = "hUwxCZUFydwDjf8BMyXLyMiI33PrKvhfDRj60OkisdY="
 environment = "dev"
+flake_name = "dotfiles" # references flakes.watched
 
 [[systems]]
 hostname = "reckless"
 public_key = "SKYgYiwK0vMwK3sJP6R53z0gbtOVSWOmJ33WT4AbCQ8="
 environment = "dev"
+flake_name = "dotfiles"
 
 [[systems]]
 hostname = "butler"
 public_key = "AbCDEfGhIJklMNOpQRstUvWxYZ0123456789abcdefg="
 environment = "test"
+flake_name = "dotfiles" 
