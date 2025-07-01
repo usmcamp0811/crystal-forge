@@ -119,6 +119,14 @@ in
 
       start_all()
 
+      # Debug: Check if the service is even trying to start
+      server.succeed("systemctl status crystal-forge-server.service || true")
+      server.log("=== crystal-forge-server service logs ===")
+      server.succeed("journalctl -u crystal-forge-server.service --no-pager || true")
+
+      # Original test continues...
+      server.succeed("test -s /var/lib/crystal_forge/config.toml || { echo 'Config file missing or empty!'; exit 1; }")
+
       server.wait_for_unit("postgresql")
       server.wait_for_unit("crystal-forge-server.service")
       agent.wait_for_unit("crystal-forge-agent.service")

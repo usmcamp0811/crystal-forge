@@ -56,15 +56,49 @@
     '';
   };
 
-  generatedConfigPath = "/run/crystal-forge/config.toml";
+  generatedConfigPath = "/var/lib/crystal_forge/config.toml";
 
-  configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
-    mkdir -p /run/crystal-forge
-    cp ${rawConfigFile} ${generatedConfigPath}
-    ${lib.optionalString (cfg.database.passwordFile != null) ''
-      sed -i "s|__USE_EXTERNAL_PASSWORD__|$(<${cfg.database.passwordFile})|" ${generatedConfigPath}
-    ''}
-  '';
+  configScript = pkgs.writeShellApplication {
+    name = "generate-crystal-forge-config";
+    runtimeInputs = with pkgs; [coreutils gnused];
+    text = ''
+      set -euo pipefail
+
+      echo "Starting config generation..."
+      echo "Source config: ${rawConfigFile}"
+      echo "Target config: ${generatedConfigPath}"
+
+      # Ensure target directory exists
+      mkdir -p "$(dirname "${generatedConfigPath}")"
+
+      # Copy the base config
+      if [ -f "${rawConfigFile}" ]; then
+        echo "Copying base config..."
+        cp "${rawConfigFile}" "${generatedConfigPath}"
+        echo "Base config copied successfully"
+      else
+        echo "ERROR: Source config file not found: ${rawConfigFile}"
+        exit 1
+      fi
+
+      # Handle password substitution if needed
+      ${lib.optionalString (cfg.database.passwordFile != null) ''
+        if [ -f "${cfg.database.passwordFile}" ]; then
+          echo "Substituting password from file..."
+          PASSWORD=$(cat "${cfg.database.passwordFile}" | sed 's/[&/\]/\\&/g')
+          sed -i "s|__USE_EXTERNAL_PASSWORD__|$PASSWORD|" "${generatedConfigPath}"
+          echo "Password substitution completed"
+        else
+          echo "ERROR: Password file not found: ${cfg.database.passwordFile}"
+          exit 1
+        fi
+      ''}
+
+      echo "Config generation completed successfully"
+      echo "Final config file:"
+      cat "${generatedConfigPath}"
+    '';
+  };
 in {
   options.services.crystal-forge = {
     enable = lib.mkEnableOption "Enable the Crystal Forge service(s)";
@@ -202,22 +236,16 @@ in {
       wantedBy = ["multi-user.target"];
       after = ["postgresql.service"];
       wants = ["postgresql.service"];
-      environment =
-        {
-          RUST_LOG = cfg.log_level;
-          CRYSTAL_FORGE__SERVER__HOST = cfg.server.host;
-          CRYSTAL_FORGE__SERVER__PORT = toString cfg.server.port;
-          CRYSTAL_FORGE_CONFIG = generatedConfigPath;
-        }
-        // {
-          CRYSTAL_FORGE__DATABASE__HOST = cfg.database.host;
-          CRYSTAL_FORGE__DATABASE__USER = cfg.database.user;
-          CRYSTAL_FORGE__DATABASE__NAME = cfg.database.name;
-          CRYSTAL_FORGE__DATABASE__PASSWORD =
-            if cfg.database.passwordFile != null
-            then builtins.readFile cfg.database.passwordFile
-            else cfg.database.password;
-        };
+      environment = {
+        RUST_LOG = cfg.log_level;
+        CRYSTAL_FORGE_CONFIG = generatedConfigPath;
+      };
+      preStart = ''
+        echo "Crystal Forge Server preStart beginning..."
+        echo "Config script: ${configScript}/bin/generate-crystal-forge-config"
+        ${configScript}/bin/generate-crystal-forge-config
+        echo "Crystal Forge Server preStart completed"
+      '';
       serviceConfig = {
         ExecStart = "${server}/bin/server";
         User = "root";
