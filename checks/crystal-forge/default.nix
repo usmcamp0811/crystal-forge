@@ -72,12 +72,20 @@ in
               repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
             }
           ];
-
+          environments = [
+            {
+              name = "test";
+              description = "Test environment for Crystal Forge agents and evaluation";
+              is_active = true;
+              risk_profile = "LOW";
+              compliance_level = "NONE";
+            }
+          ];
           systems = [
             {
               hostname = "agent";
               public_key = lib.strings.trim (builtins.readFile "${pub}/agent.pub");
-              environment = "dev";
+              environment = "test";
               flake_name = "dotfiles";
             }
           ];
