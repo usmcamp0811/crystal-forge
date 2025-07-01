@@ -34,8 +34,8 @@ async fn main() -> anyhow::Result<()> {
     let pool = CrystalForgeConfig::db_pool().await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
-
-    spawn_background_tasks(pool);
+    let background_pool = pool.clone();
+    spawn_server_background_tasks(background_pool);
 
     // Start HTTP server
     info!("Starting Crystal Forge Server...");
