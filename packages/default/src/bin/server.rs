@@ -2,6 +2,7 @@ use anyhow::Context;
 
 use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
+use crystal_forge::background::spawn_server_background_tasks;
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
 use crystal_forge::handlers::current_system::{CFState, handle_current_system};
 use crystal_forge::handlers::webhook::webhook_handler;
@@ -33,107 +34,8 @@ async fn main() -> anyhow::Result<()> {
     let pool = CrystalForgeConfig::db_pool().await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
-
-    // Clone pools for tasks
-    let eval_pool1 = pool.clone();
-    let eval_pool2 = pool.clone();
-
-    // Periodic commit evaluation loop
-    tokio::spawn(async move {
-        tracing::info!("🔁 Starting periodic commit evaluation check loop (every 60s)...");
-        loop {
-            tracing::info!("🔎 Checking for commits pending evaluation...");
-            match get_commits_pending_evaluation(&eval_pool1).await {
-                Ok(pending_commits) => {
-                    tracing::info!("📌 Found {} pending commits", pending_commits.len());
-                    for commit in pending_commits {
-                        let target_type = "nixos";
-                        match list_nixos_configurations_from_commit(&eval_pool1, &commit).await {
-                            Ok(nixos_targets) => {
-                                tracing::info!(
-                                    "📂 Commit {} has {} nixos targets",
-                                    commit.git_commit_hash,
-                                    nixos_targets.len()
-                                );
-                                for target_name in nixos_targets {
-                                    match insert_evaluation_target(
-                                        &eval_pool1,
-                                        &commit,
-                                        &target_name,
-                                        target_type,
-                                    )
-                                    .await
-                                    {
-                                        Ok(_) => tracing::info!(
-                                            "✅ Inserted evaluation target: {} (commit {})",
-                                            target_name,
-                                            commit.git_commit_hash
-                                        ),
-                                        Err(e) => tracing::error!(
-                                            "❌ Failed to insert target for {}: {}",
-                                            target_name,
-                                            e
-                                        ),
-                                    }
-                                }
-                            }
-                            Err(e) => tracing::error!(
-                                "❌ Failed to list nixos configs for commit {}: {}",
-                                commit.git_commit_hash,
-                                e
-                            ),
-                        }
-                    }
-                }
-                Err(e) => tracing::error!("❌ Failed to get pending commits: {e}"),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        }
-    });
-
-    // Periodic evaluation target resolution loop
-    tokio::spawn(async move {
-        tracing::info!("🔍 Starting periodic evaluation target check loop (every 60s)...");
-        loop {
-            tracing::info!("⏳ Checking for pending evaluation targets...");
-            match get_pending_targets(&eval_pool2).await {
-                Ok(pending_targets) => {
-                    tracing::info!("📦 Found {} pending targets", pending_targets.len());
-                    for mut target in pending_targets {
-                        match target.resolve_derivation_path().await {
-                            Ok(path) => {
-                                match update_evaluation_target_path(&eval_pool2, &target, &path)
-                                    .await
-                                {
-                                    Ok(updated) => tracing::info!("✅ Updated: {:?}", updated),
-                                    Err(e) => tracing::error!("❌ Failed to update path: {e}"),
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("❌ Failed to resolve derivation path: {e}");
-                                match increment_evaluation_target_attempt_count(
-                                    &eval_pool2,
-                                    &target,
-                                )
-                                .await
-                                {
-                                    Ok(_) => tracing::debug!(
-                                        "✅ Incremented attempt count for target: {}",
-                                        target.target_name
-                                    ),
-                                    Err(inc_err) => tracing::error!(
-                                        "❌ Failed to increment attempt count: {inc_err}"
-                                    ),
-                                }
-                            }
-                        }
-                    }
-                }
-                Err(e) => tracing::error!("❌ Failed to get pending targets: {e}"),
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        }
-    });
+    let background_pool = pool.clone();
+    spawn_server_background_tasks(background_pool);
 
     // Start HTTP server
     info!("Starting Crystal Forge Server...");
