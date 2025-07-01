@@ -1,22 +1,19 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use crystal_forge::config;
-use crystal_forge::models::systems::SystemState;
+use crystal_forge::models::config::CrystalForgeConfig;
+use crystal_forge::models::system_states::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
 use std::{
     ffi::OsStr,
     fs,
-    path::{Path, PathBuf},
+    path::PathBuf,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = config::load_config()?;
-
-    config::debug_print_config(&config);
     // TODO: Update watch_system to take in the private key path
     watch_system()
 }
@@ -48,7 +45,7 @@ fn readlink_path(path: &str) -> Result<PathBuf> {
 /// Returns an error if configuration cannot be loaded, the key cannot be read,
 /// signing fails, or the HTTP request fails.
 pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
-    let cfg = config::load_config()?;
+    let cfg = CrystalForgeConfig::load()?;
     let client_cfg = cfg.client.expect("client config is required for agent");
 
     // TODO: Add MAC Address & Hardware fingerprint along with hostname

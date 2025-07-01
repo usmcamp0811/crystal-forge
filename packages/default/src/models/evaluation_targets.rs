@@ -1,4 +1,4 @@
-use crate::db::get_db_client;
+use crate::models::config::CrystalForgeConfig;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -53,7 +53,7 @@ impl ToString for TargetType {
 
 impl EvaluationTarget {
     pub async fn summary(&self) -> Result<String> {
-        let pool = get_db_client().await?;
+        let pool = CrystalForgeConfig::db_pool().await?;
         let commit = crate::queries::commits::get_commit_by_id(&pool, self.commit_id).await?;
 
         let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
@@ -113,7 +113,7 @@ impl EvaluationTarget {
         let summary = self.summary().await?;
         info!("🔍 Determining derivation for {summary}");
 
-        let pool = get_db_client().await?;
+        let pool = CrystalForgeConfig::db_pool().await?;
         let commit = crate::queries::commits::get_commit_by_id(&pool, self.commit_id).await?;
         let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
 
