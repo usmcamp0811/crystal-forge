@@ -55,6 +55,15 @@ with lib.crystal-forge; let
       server_port = cf_port;
       private_key = "$CF_KEY_DIR/agent.key";
     };
+    environments = [
+      {
+        name = "dev";
+        description = "Development environment for Crystal Forge agents and evaluation";
+        is_active = true;
+        risk_profile = "LOW";
+        compliance_level = "NONE";
+      }
+    ];
     systems = [
       {
         hostname = "HOSTNAME_PLACEHOLDER";
