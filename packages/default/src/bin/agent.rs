@@ -6,16 +6,14 @@ use crystal_forge::models::system_states::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
-use std::{
-    ffi::OsStr,
-    fs,
-    path::PathBuf,
-};
+use std::{ffi::OsStr, fs, path::PathBuf};
+use tokio::time::{Duration, sleep};
+use tracing::{debug, error, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     // TODO: Update watch_system to take in the private key path
-    watch_system()
+    watch_system().await
 }
 
 /// Reads a symlink and returns its target as a `PathBuf`.
@@ -120,7 +118,7 @@ where
 
 /// Runs a loop that watches for inotify events and handles "current-system" changes using
 /// provided readlink and insertion callbacks. Designed for testing and flexibility.
-fn watch_system_loop<F, R>(inotify: &mut Inotify, readlink_fn: F, insert_fn: R) -> Result<()>
+async fn watch_system_loop<F, R>(inotify: &mut Inotify, readlink_fn: F, insert_fn: R) -> Result<()>
 where
     F: Fn(&str) -> Result<PathBuf>,
     R: Fn(&OsStr, &str) -> Result<()>,
@@ -143,18 +141,35 @@ where
     }
 }
 
+async fn run_agent_health_check_loop() -> Result<()> {
+    sleep(Duration::from_secs(600)).await;
+    info!("💓 Starting heartbeat loop (every 10m)...");
+    loop {
+        if let Err(e) = handle_event(
+            OsStr::new("current-system"),
+            "agent-heartbeat",
+            readlink_path,
+            post_system_state,
+        ) {
+            error!("❌ Heartbeat failed: {e}");
+        }
+        sleep(Duration::from_secs(600)).await;
+    }
+}
+
 // TODO: Update watch_system to take in the private key path
 /// Initializes an inotify watcher on `/run` for "current-system" and records updates
 /// to the system state in the database.
-pub fn watch_system() -> Result<()> {
+pub async fn watch_system() -> Result<()> {
     let mut inotify = Inotify::init(InitFlags::empty())?;
     inotify.add_watch(
         "/run",
         AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO,
     )?;
 
+    tokio::spawn(run_agent_health_check_loop());
     // TODO: add watch for home-manager too
-    watch_system_loop(&mut inotify, readlink_path, post_system_state)
+    watch_system_loop(&mut inotify, readlink_path, post_system_state).await
 }
 
 #[cfg(test)]
