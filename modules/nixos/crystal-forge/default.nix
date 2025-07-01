@@ -41,8 +41,10 @@
       flakes = {
         watched = cfg.flakes.watched;
       };
+    }
+    // lib.optionalAttrs (cfg.environments != []) {
+      environments = cfg.environments;
     };
-
   # Generate the raw config file
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
 
@@ -207,6 +209,44 @@ in {
           public_key = "base64encodedkey";
           environment = "production";
           flake_name = "dotfiles";
+        }
+      ];
+    };
+
+    environments = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          name = lib.mkOption {
+            type = lib.types.str;
+            description = "Environment name (e.g., dev, prod, staging)";
+          };
+          description = lib.mkOption {
+            type = lib.types.str;
+            description = "Description of the environment";
+          };
+          is_active = lib.mkOption {
+            type = lib.types.bool;
+            description = "Whether the environment is currently active";
+          };
+          risk_profile = lib.mkOption {
+            type = lib.types.str;
+            description = "Risk profile for this environment";
+          };
+          compliance_level = lib.mkOption {
+            type = lib.types.str;
+            description = "Compliance level for this environment";
+          };
+        };
+      });
+      default = [];
+      description = "List of environments for agents and evaluation";
+      example = [
+        {
+          name = "dev";
+          description = "Development environment for Crystal Forge agents and evaluation";
+          is_active = true;
+          risk_profile = "LOW";
+          compliance_level = "NONE";
         }
       ];
     };
