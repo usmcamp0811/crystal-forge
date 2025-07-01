@@ -18,7 +18,7 @@ pub struct CrystalForgeConfig {
     pub database: Option<DatabaseConfig>,
     pub server: Option<ServerConfig>,
     pub client: Option<AgentConfig>,
-    pub environments: Option<EnvironmentConfig>,
+    pub environments: Option<Vec<EnvironmentConfig>>,
     pub systems: Option<Vec<SystemConfig>>,
 }
 
@@ -75,8 +75,11 @@ impl CrystalForgeConfig {
         self
     }
 
-    pub fn with_environments(mut self, environments: EnvironmentConfig) -> Self {
-        self.environments = Some(environments);
+    pub fn with_environments<T>(mut self, environments: T) -> Self
+    where
+        T: Into<Vec<EnvironmentConfig>>,
+    {
+        self.environments = Some(environments.into());
         self
     }
 
