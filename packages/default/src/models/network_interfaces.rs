@@ -1,9 +1,6 @@
 use anyhow::{Result, anyhow};
-use serde::Deserialize;
-use serde::Serialize;
-use serde_json::Value;
-use std::process::Command;
-use std::str;
+use serde::{Deserialize, Serialize};
+use std::{process::Command, str};
 
 #[derive(Deserialize)]
 struct IpInterface {

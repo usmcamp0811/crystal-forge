@@ -66,16 +66,25 @@ in
             host = "localhost";
             name = "crystal_forge";
           };
-          flakes.watched = {
-            dotfiles = "git+https://gitlab.com/usmcamp0811/dotfiles";
-          };
+          flakes.watched = [
+            {
+              name = "dotfiles";
+              repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+            }
+          ];
+
+          systems = [
+            {
+              hostname = "agent";
+              public_key = lib.strings.trim (builtins.readFile "${pub}/agent.pub");
+              environment = "dev";
+              flake_name = "dotfiles";
+            }
+          ];
           server = {
             enable = true;
             host = "0.0.0.0";
             port = 3000;
-            authorized_keys = {
-              agent = builtins.readFile "${pub}/agent.pub";
-            };
           };
         };
       };
@@ -109,6 +118,12 @@ in
       import pytest
 
       start_all()
+
+      # Debug: Check if the service is even trying to start
+      server.succeed("systemctl status crystal-forge-server.service || true")
+      server.log("=== crystal-forge-server service logs ===")
+      server.succeed("journalctl -u crystal-forge-server.service --no-pager || true")
+
 
       server.wait_for_unit("postgresql")
       server.wait_for_unit("crystal-forge-server.service")

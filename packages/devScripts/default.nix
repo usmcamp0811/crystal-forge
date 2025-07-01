@@ -14,18 +14,67 @@ with lib.crystal-forge; let
   cf_port = 3445;
   pgweb_port = 12084;
 
+  tomlFormat = pkgs.formats.toml {};
+  generateConfig = pkgs.writeShellApplication {
+    name = "generate-config";
+    runtimeInputs = with pkgs; [hostname coreutils];
+    text = ''
+      set -euo pipefail
+
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      ACTUAL_HOSTNAME="$(hostname -s)"
+      ACTUAL_PUBKEY="$(cat "$CF_KEY_DIR/agent.pub")"
+
+      CONFIG_DIR="''${XDG_RUNTIME_DIR:-/tmp}/crystal-forge"
+      mkdir -p "$CONFIG_DIR"
+      CONFIG_FILE="$CONFIG_DIR/crystal-forge-config.toml"
+
+      sed \
+        -e "s/HOSTNAME_PLACEHOLDER/$ACTUAL_HOSTNAME/g" \
+        -e "s|PUBLIC_KEY_PLACEHOLDER|$ACTUAL_PUBKEY|g" \
+        ${configTemplate} > "$CONFIG_FILE"
+
+      echo "$CONFIG_FILE"
+    '';
+  };
+  # Create a template config that will be filled at runtime
+  configTemplate = tomlFormat.generate "crystal-forge-config-template.toml" {
+    database = {
+      host = "127.0.0.1";
+      port = db_port;
+      user = "crystal_forge";
+      password = db_password;
+      name = "crystal_forge";
+    };
+    server = {
+      host = "0.0.0.0";
+      port = cf_port;
+    };
+    client = {
+      server_host = "127.0.0.1";
+      server_port = cf_port;
+      private_key = "$CF_KEY_DIR/agent.key";
+    };
+    systems = [
+      {
+        hostname = "HOSTNAME_PLACEHOLDER";
+        public_key = "PUBLIC_KEY_PLACEHOLDER";
+        environment = "dev";
+        flake_name = "dotfiles";
+      }
+    ];
+    flakes = {
+      watched = [
+        {
+          name = "dotfiles";
+          repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+        }
+      ];
+    };
+  };
+
   envExports = ''
-    export CRYSTAL_FORGE__DATABASE__HOST=127.0.0.1
-    export CRYSTAL_FORGE__DATABASE__PORT=${toString db_port}
-    export CRYSTAL_FORGE__DATABASE__USER=crystal_forge
-    export CRYSTAL_FORGE__DATABASE__PASSWORD=${db_password}
-    export CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
-    export DATABASE_URL=postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge
-    export CRYSTAL_FORGE__FLAKES__WATCHED__dotfiles=git+https://gitlab.com/usmcamp0811/dotfiles
-    export CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
-    export CRYSTAL_FORGE__SERVER__PORT=${toString cf_port}
-    export CRYSTAL_FORGE__CLIENT__SERVER_HOST=127.0.0.1
-    export CRYSTAL_FORGE__CLIENT__SERVER_PORT=${toString cf_port}
+    export CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
   '';
 
   simulatePush = pkgs.writeShellApplication {
@@ -68,7 +117,8 @@ with lib.crystal-forge; let
     name = "run-agent";
     runtimeInputs = [pkgs.nix];
     text = ''
-      ${envExports}
+      CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
+      export CRYSTAL_FORGE_CONFIG
       if [[ "''${1:-}" == "--dev" ]]; then
         exec sudo -E nix run .#agent
       else
@@ -81,7 +131,8 @@ with lib.crystal-forge; let
     name = "run-server";
     runtimeInputs = [pkgs.nix];
     text = ''
-      ${envExports}
+      CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
+      export CRYSTAL_FORGE_CONFIG
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#server
       else
