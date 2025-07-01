@@ -1,0 +1,52 @@
+use crate::models::users::{User, UserType};
+use anyhow::Result;
+use sqlx::PgPool;
+use uuid::Uuid;
+
+pub async fn create_user(pool: &PgPool, user: User) -> Result<Uuid> {
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO users (
+            id, username, first_name, last_name, email, 
+            user_type, is_active
+        ) 
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        "#,
+        user.id,
+        user.username,
+        user.first_name,
+        user.last_name,
+        user.email,
+        user.user_type as UserType,
+        user.is_active,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result.id)
+}
+
+pub async fn get_by_username(pool: &PgPool, username: &str) -> Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = $1")
+        .bind(username)
+        .fetch_optional(pool)
+        .await?;
+    Ok(user)
+}
+
+pub async fn get_by_id(pool: &PgPool, id: Uuid) -> Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(user)
+}
+
+pub async fn get_by_email(pool: &PgPool, email: &str) -> Result<Option<User>> {
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
+        .bind(email)
+        .fetch_optional(pool)
+        .await?;
+    Ok(user)
+}

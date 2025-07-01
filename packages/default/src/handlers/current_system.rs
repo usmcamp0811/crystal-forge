@@ -1,12 +1,12 @@
-use crate::models::systems::{SystemState, SystemStateV1};
+use crate::models::system_states::{SystemState, SystemStateV1};
 use crate::queries::system_states::insert_system_state;
+use crate::queries::systems::get_by_hostname;
 use anyhow::Result;
 use axum::extract::FromRef;
 use base64::engine::Engine;
 use base64::engine::general_purpose;
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::Signature;
 use sqlx::PgPool;
-use std::collections::HashMap;
 
 use axum::{
     body::Bytes,
@@ -20,15 +20,11 @@ use tracing::{debug, info};
 #[derive(Clone)]
 pub struct CFState {
     pool: PgPool,
-    authorized_keys: HashMap<String, VerifyingKey>,
 }
 
 impl CFState {
-    pub fn new(pool: PgPool, authorized_keys: HashMap<String, VerifyingKey>) -> Self {
-        Self {
-            pool,
-            authorized_keys,
-        }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 }
 
@@ -71,14 +67,17 @@ pub async fn handle_current_system(
     let signature = Signature::from_bytes(&bytes);
 
     // Lookup key for signature verification
-    let key = match state.authorized_keys.get(key_id) {
-        Some(k) => k,
-        None => return StatusCode::UNAUTHORIZED,
+    let system = match get_by_hostname(&pool, key_id).await {
+        Ok(Some(k)) => k,
+        Ok(None) => return StatusCode::UNAUTHORIZED,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
     };
 
-    if key.verify(&body, &signature).is_err() {
-        return StatusCode::UNAUTHORIZED;
-    }
+    // let key = system.public_key;
+    //
+    // if key.verify(&body, &signature).is_err() {
+    //     return StatusCode::UNAUTHORIZED;
+    // }
 
     // Try to deserialize with version detection
     let (payload, version_compatible) = match try_deserialize_system_state(&body) {
@@ -132,9 +131,11 @@ mod integration_tests {
     use axum_test::TestServer;
     use base64::engine::Engine;
     use base64::engine::general_purpose;
+    use ed25519_dalek::Verifier;
     use ed25519_dalek::{Signer, SigningKey};
     use serde_json;
     use std::collections::HashMap;
+    use winnow::Parser;
 
     #[tokio::test]
     async fn test_current_system_endpoint_success() {

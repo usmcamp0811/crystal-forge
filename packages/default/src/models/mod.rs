@@ -1,5 +1,10 @@
 pub mod commits;
+pub mod config;
+pub mod environments;
 pub mod evaluation_targets;
 pub mod flakes;
 pub mod network_interfaces;
+pub mod public_key;
+pub mod system_states;
 pub mod systems;
+pub mod users;
