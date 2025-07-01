@@ -359,6 +359,7 @@ in {
       wantedBy = ["multi-user.target"];
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
+      path = with pkgs; [coreutils zfs];
       environment = {
         RUST_LOG = cfg.log_level;
         CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;

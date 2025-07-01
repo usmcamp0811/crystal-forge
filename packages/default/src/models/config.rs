@@ -1,5 +1,7 @@
 use crate::models::systems::System;
-use crate::queries::environments::get_environment_id_by_name;
+use crate::queries::environments::{
+    get_environment_id_by_name, get_or_insert_environment_id_by_config,
+};
 use crate::queries::flakes::get_flake_id_by_repo_url;
 use crate::queries::flakes::insert_flake;
 use crate::queries::systems::insert_system;
@@ -109,10 +111,14 @@ impl CrystalForgeConfig {
             }
         };
         debug!("💡 Syncing Systems in Config to Database.");
+        if let Some(environments) = &cfg.environments {
+            for environment in environments {
+                let _ = get_or_insert_environment_id_by_config(pool, environment).await?;
+            }
+        }
 
         for config in systems {
             tracing::info!("📥 Syncing system {}...", config.hostname);
-
             // Fetch environment ID
             let environment_id = get_environment_id_by_name(pool, &config.environment)
                 .await?

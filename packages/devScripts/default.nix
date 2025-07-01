@@ -57,7 +57,7 @@ with lib.crystal-forge; let
     };
     environments = [
       {
-        name = "dev";
+        name = "devshell";
         description = "Development environment for Crystal Forge agents and evaluation";
         is_active = true;
         risk_profile = "LOW";
@@ -68,7 +68,7 @@ with lib.crystal-forge; let
       {
         hostname = "HOSTNAME_PLACEHOLDER";
         public_key = "PUBLIC_KEY_PLACEHOLDER";
-        environment = "dev";
+        environment = "devshell";
         flake_name = "dotfiles";
       }
     ];
