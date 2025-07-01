@@ -11,7 +11,10 @@ use crate::queries::evaluation_targets::{
 };
 
 /// Spawns both background evaluation loops
-pub fn spawn_background_tasks(commit_pool: PgPool, target_pool: PgPool) {
+pub fn spawn_server_background_tasks(pool: PgPool) {
+    let commit_pool = pool.clone();
+    let target_pool = pool.clone();
+
     tokio::spawn(run_commit_evaluation_loop(commit_pool));
     tokio::spawn(run_target_evaluation_loop(target_pool));
 }

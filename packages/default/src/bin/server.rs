@@ -2,6 +2,7 @@ use anyhow::Context;
 
 use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
+use crystal_forge::background::spawn_server_background_tasks;
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
 use crystal_forge::handlers::current_system::{CFState, handle_current_system};
 use crystal_forge::handlers::webhook::webhook_handler;
@@ -34,18 +35,7 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
 
-    // Clone pools for tasks
-    let eval_pool1 = pool.clone();
-    let eval_pool2 = pool.clone();
-
-    // Periodic evaluation target resolution loop
-    tokio::spawn(async move {
-        tracing::info!("🔍 Starting periodic evaluation target check loop (every 60s)...");
-        loop {
-            tracing::info!("⏳ Checking for pending evaluation targets...");
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        }
-    });
+    spawn_background_tasks(pool);
 
     // Start HTTP server
     info!("Starting Crystal Forge Server...");
