@@ -5,157 +5,175 @@
   ...
 }: let
   cfg = config.services.crystal-forge;
-
   tomlFormat = pkgs.formats.toml {};
 
-  rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" (
-    lib.mkMerge [
-      {
-        database = {
-          inherit (cfg.database) host user name;
-          password =
-            if cfg.database.passwordFile != null
-            then "__USE_EXTERNAL_PASSWORD__"
-            else cfg.database.password;
-        };
-      }
+  # Generate the base TOML config structure
+  baseConfig =
+    {
+      database = {
+        host = cfg.database.host;
+        port = cfg.database.port;
+        user = cfg.database.user;
+        password =
+          if cfg.database.passwordFile != null
+          then "__PLACEHOLDER_PASSWORD__"
+          else cfg.database.password;
+        name = cfg.database.name;
+      };
+    }
+    // lib.optionalAttrs cfg.server.enable {
+      server = {
+        host = cfg.server.host;
+        port = cfg.server.port;
+      };
+    }
+    // lib.optionalAttrs cfg.client.enable {
+      client = {
+        server_host = cfg.client.server_host;
+        server_port = cfg.client.server_port;
+        private_key = toString cfg.client.private_key;
+      };
+    }
+    // lib.optionalAttrs (cfg.systems != []) {
+      systems = cfg.systems;
+    }
+    // lib.optionalAttrs (cfg.flakes.watched != []) {
+      flakes = {
+        watched = cfg.flakes.watched;
+      };
+    };
 
-      # Add server section only if enabled
-      (lib.optionalAttrs cfg.server.enable {
-        server = {
-          inherit (cfg.server) host port;
-        };
-      })
+  # Generate the raw config file
+  rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
 
-      # Add client section only if enabled
-      (lib.optionalAttrs cfg.client.enable {
-        client = {
-          inherit (cfg.client) server_host server_port private_key;
-        };
-      })
+  # Final config path
+  generatedConfigPath = "/var/lib/crystal-forge/config.toml";
 
-      # Always include flakes when present
-      (lib.optionalAttrs (cfg.flakes.watched != []) {
-        flakes = {
-          watched = cfg.flakes.watched;
-        };
-      })
+  # Script to handle password substitution and config generation
+  configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
+    set -euo pipefail
 
-      # Always include systems when present
-      (lib.optionalAttrs (cfg.systems != []) {
-        systems = cfg.systems;
-      })
-    ]
-  );
+    echo "Generating Crystal Forge configuration..."
 
-  server = pkgs.writeShellApplication {
-    name = "server";
-    runtimeInputs = with pkgs; [nix git];
-    text = ''
-      ${pkgs.crystal-forge.server}/bin/server
-    '';
-  };
+    # Ensure target directory exists with proper permissions
+    mkdir -p "$(dirname "${generatedConfigPath}")"
 
-  generatedConfigPath = "/var/lib/crystal_forge/config.toml";
+    # Copy the base config
+    cp "${rawConfigFile}" "${generatedConfigPath}"
 
-  configScript = pkgs.writeShellApplication {
-    name = "generate-crystal-forge-config";
-    runtimeInputs = with pkgs; [coreutils gnused];
-    text = ''
-      set -euo pipefail
-
-      echo "Starting config generation..."
-      echo "Source config: ${rawConfigFile}"
-      echo "Target config: ${generatedConfigPath}"
-
-      # Ensure target directory exists
-      mkdir -p "$(dirname "${generatedConfigPath}")"
-
-      # Copy the base config
-      if [ -f "${rawConfigFile}" ]; then
-        echo "Copying base config..."
-        cp "${rawConfigFile}" "${generatedConfigPath}"
-        echo "Base config copied successfully"
+    ${lib.optionalString (cfg.database.passwordFile != null) ''
+      # Replace password placeholder with actual password from file
+      if [ -f "${cfg.database.passwordFile}" ]; then
+        PASSWORD=$(cat "${cfg.database.passwordFile}")
+        # Use a more robust sed replacement that handles special characters
+        ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|''${PASSWORD}|" "${generatedConfigPath}"
+        echo "Password substituted from ${cfg.database.passwordFile}"
       else
-        echo "ERROR: Source config file not found: ${rawConfigFile}"
+        echo "ERROR: Password file not found: ${cfg.database.passwordFile}"
         exit 1
       fi
+    ''}
 
-      # Handle password substitution if needed
-      ${lib.optionalString (cfg.database.passwordFile != null) ''
-        if [ -f "${cfg.database.passwordFile}" ]; then
-          echo "Substituting password from file..."
-          PASSWORD=$(cat "${cfg.database.passwordFile}" | sed 's/[&/\]/\\&/g')
-          sed -i "s|__USE_EXTERNAL_PASSWORD__|$PASSWORD|" "${generatedConfigPath}"
-          echo "Password substitution completed"
-        else
-          echo "ERROR: Password file not found: ${cfg.database.passwordFile}"
-          exit 1
-        fi
-      ''}
+    # Set appropriate permissions
+    chmod 600 "${generatedConfigPath}"
 
-      echo "Config generation completed successfully"
-      echo "Final config file:"
-      cat "${generatedConfigPath}"
-    '';
-  };
+    echo "Configuration generated at ${generatedConfigPath}"
+  '';
+
+  # Server wrapper script
+  serverScript = pkgs.writeShellScript "crystal-forge-server" ''
+    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    exec ${pkgs.crystal-forge.server}/bin/server "$@"
+  '';
+
+  # Agent wrapper script
+  agentScript = pkgs.writeShellScript "crystal-forge-agent" ''
+    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    exec ${pkgs.crystal-forge.agent}/bin/agent "$@"
+  '';
 in {
   options.services.crystal-forge = {
-    enable = lib.mkEnableOption "Enable the Crystal Forge service(s)";
+    enable = lib.mkEnableOption "Crystal Forge service(s)";
+
     log_level = lib.mkOption {
       type = lib.types.enum ["off" "error" "warn" "info" "debug" "trace"];
       default = "info";
+      description = "Log level for Crystal Forge services";
     };
+
     configPath = lib.mkOption {
       type = lib.types.path;
       default = generatedConfigPath;
-      description = "Path to the final config.toml file.";
+      readOnly = true;
+      description = "Path to the generated config.toml file";
     };
 
     local-database = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Enable PostgreSQL setup for Crystal Forge";
+      description = "Enable local PostgreSQL setup for Crystal Forge";
     };
+
     database = {
       host = lib.mkOption {
         type = lib.types.str;
         default = "/run/postgresql";
+        description = "Database host (use socket path for local connections)";
       };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 5432;
+        description = "Database port";
+      };
+
       user = lib.mkOption {
         type = lib.types.str;
         default = "crystal_forge";
+        description = "Database user";
       };
+
       password = lib.mkOption {
         type = lib.types.str;
         default = "password";
+        description = "Database password (only used if passwordFile is null)";
       };
+
       passwordFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "Optional path to a file containing the DB password.";
+        description = "Path to file containing database password";
       };
+
       name = lib.mkOption {
         type = lib.types.str;
         default = "crystal_forge";
+        description = "Database name";
       };
     };
+
     flakes = {
       watched = lib.mkOption {
         type = lib.types.listOf (lib.types.submodule {
           options = {
             name = lib.mkOption {
               type = lib.types.str;
-              description = "Name of the flake.";
+              description = "Name identifier for the flake";
             };
             repo_url = lib.mkOption {
               type = lib.types.str;
-              description = "Repository URL of the flake.";
+              description = "Repository URL of the flake";
             };
           };
         });
         default = [];
-        description = "List of watched flakes as array of name/repo_url entries.";
+        description = "List of flakes to watch for changes";
+        example = [
+          {
+            name = "dotfiles";
+            repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+          }
+        ];
       };
     };
 
@@ -164,57 +182,75 @@ in {
         options = {
           hostname = lib.mkOption {
             type = lib.types.str;
-            description = "Hostname of the system.";
+            description = "System hostname";
           };
           public_key = lib.mkOption {
             type = lib.types.str;
-            description = "Base64-encoded Ed25519 public key.";
+            description = "Base64-encoded Ed25519 public key";
           };
           environment = lib.mkOption {
             type = lib.types.str;
-            description = "Name of the environment this system belongs to.";
+            description = "Environment name (e.g., dev, prod, staging)";
           };
           flake_name = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
             default = null;
-            description = "Optional flake name referenced from flakes.watched.";
+            description = "Reference to a flake name from flakes.watched";
           };
         };
       });
       default = [];
-      description = "Systems to register with Crystal Forge.";
+      description = "Systems to register with Crystal Forge";
+      example = [
+        {
+          hostname = "myhost";
+          public_key = "base64encodedkey";
+          environment = "production";
+          flake_name = "dotfiles";
+        }
+      ];
     };
+
     server = {
-      enable = lib.mkEnableOption "Enable the Crystal Forge Server";
+      enable = lib.mkEnableOption "Crystal Forge Server";
+
       host = lib.mkOption {
         type = lib.types.str;
-        default = "0.0.0.0";
+        default = "127.0.0.1";
+        description = "Server bind address";
       };
+
       port = lib.mkOption {
         type = lib.types.port;
         default = 3000;
-      };
-      authorized_keys = lib.mkOption {
-        type = lib.types.attrsOf lib.types.str;
-        default = {};
+        description = "Server port";
       };
     };
 
     client = {
-      enable = lib.mkEnableOption "Enable the Crystal Forge Agent";
+      enable = lib.mkEnableOption "Crystal Forge Agent";
+
       server_host = lib.mkOption {
         type = lib.types.str;
-        default = "reckless";
+        default = "127.0.0.1";
+        description = "Crystal Forge server hostname";
       };
+
       server_port = lib.mkOption {
         type = lib.types.port;
         default = 3000;
+        description = "Crystal Forge server port";
       };
-      private_key = lib.mkOption {type = lib.types.path;};
+
+      private_key = lib.mkOption {
+        type = lib.types.path;
+        description = "Path to Ed25519 private key file";
+      };
     };
   };
 
   config = lib.mkIf cfg.enable {
+    # PostgreSQL setup when using local database
     services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
       enable = true;
       ensureDatabases = [cfg.database.name];
@@ -222,58 +258,122 @@ in {
         {
           name = cfg.database.user;
           ensureDBOwnership = true;
-          ensureClauses = {login = true;};
+          ensureClauses = {
+            login = true;
+          };
         }
       ];
-      authentication = lib.concatStringsSep "\n" [
-        "host  crystal_forge  crystal_forge  127.0.0.1/32  trust"
-        "local  crystal_forge  crystal_forge  trust"
-      ];
+      authentication = lib.mkAfter ''
+        local  ${cfg.database.name}  ${cfg.database.user}  trust
+        host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
+        host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
+      '';
     };
 
+    # Server service
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
-      after = ["postgresql.service"];
-      wants = ["postgresql.service"];
+      after = lib.optional cfg.local-database "postgresql.service";
+      wants = lib.optional cfg.local-database "postgresql.service";
+
       environment = {
         RUST_LOG = cfg.log_level;
-        CRYSTAL_FORGE_CONFIG = generatedConfigPath;
       };
+
       preStart = ''
-        echo "Crystal Forge Server preStart beginning..."
-        echo "Config script: ${configScript}/bin/generate-crystal-forge-config"
-        ${configScript}/bin/generate-crystal-forge-config
-        echo "Crystal Forge Server preStart completed"
+        echo "Starting Crystal Forge Server configuration generation..."
+        ${configScript}
+        echo "Configuration generation complete"
       '';
+
       serviceConfig = {
-        ExecStart = "${server}/bin/server";
-        User = "root";
-        Group = "root";
-        RuntimeDirectory = "crystal-forge";
+        Type = "exec";
+        ExecStart = serverScript;
+        User = "crystal-forge";
+        Group = "crystal-forge";
+
+        # Security settings
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = ["/var/lib/crystal-forge"];
+        PrivateTmp = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+
+        # Restart settings
         Restart = "always";
         RestartSec = 5;
+
+        # State directory
+        StateDirectory = "crystal-forge";
+        StateDirectoryMode = "0750";
       };
     };
 
+    # Agent service
     systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
       description = "Crystal Forge Agent";
       wantedBy = ["multi-user.target"];
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
+
       environment = {
         RUST_LOG = cfg.log_level;
         CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
         CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
         CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
       };
+
       serviceConfig = {
-        ExecStart = "${pkgs.crystal-forge.agent}/bin/agent";
+        Type = "exec";
+        ExecStart = agentScript;
         User = "root";
         Group = "root";
-        RuntimeDirectory = "crystal-forge";
+
+        # Security settings
+        NoNewPrivileges = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = ["/var/lib/crystal-forge"];
+        PrivateTmp = true;
+
+        # Restart settings
         Restart = "always";
         RestartSec = 5;
+
+        # State directory
+        StateDirectory = "crystal-forge";
+        StateDirectoryMode = "0750";
       };
     };
+
+    # Create system user and group
+    users.users.crystal-forge = lib.mkIf (cfg.server.enable || cfg.client.enable) {
+      description = "Crystal Forge service user";
+      isSystemUser = true;
+      group = "crystal-forge";
+      home = "/var/lib/crystal-forge";
+      createHome = true;
+    };
+
+    users.groups.crystal-forge = lib.mkIf (cfg.server.enable || cfg.client.enable) {};
+
+    # Assertions for validation
+    assertions = [
+      {
+        assertion = cfg.client.enable -> (cfg.client.private_key != null);
+        message = "Crystal Forge client requires a private key file";
+      }
+      {
+        assertion = cfg.database.passwordFile != null -> cfg.database.password == "";
+        message = "Cannot specify both database.password and database.passwordFile";
+      }
+      {
+        assertion = cfg.server.enable || cfg.client.enable;
+        message = "At least one of server or client must be enabled";
+      }
+    ];
   };
 }

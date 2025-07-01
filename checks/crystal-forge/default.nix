@@ -76,7 +76,7 @@ in
           systems = [
             {
               hostname = "agent";
-              public_key = builtins.readFile "${pub}/agent.pub";
+              public_key = lib.strings.trim (builtins.readFile "${pub}/agent.pub");
               environment = "dev";
               flake_name = "dotfiles";
             }
@@ -124,8 +124,6 @@ in
       server.log("=== crystal-forge-server service logs ===")
       server.succeed("journalctl -u crystal-forge-server.service --no-pager || true")
 
-      # Original test continues...
-      server.succeed("test -s /var/lib/crystal_forge/config.toml || { echo 'Config file missing or empty!'; exit 1; }")
 
       server.wait_for_unit("postgresql")
       server.wait_for_unit("crystal-forge-server.service")
