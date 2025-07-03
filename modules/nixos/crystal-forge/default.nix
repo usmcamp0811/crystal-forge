@@ -310,6 +310,8 @@ in {
       '';
     };
 
+    nix.settings.allowed-users = ["root" "crystal-forge"];
+
     # Server service
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
@@ -317,8 +319,13 @@ in {
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
+      path = with pkgs; [
+        nix
+        git
+      ];
       environment = {
         RUST_LOG = cfg.log_level;
+        NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
       };
 
       preStart = ''
@@ -335,7 +342,8 @@ in {
 
         # Security settings
         NoNewPrivileges = true;
-        ProtectSystem = "strict";
+        # TODO: test if we can do strict
+        ProtectSystem = "no";
         ProtectHome = true;
         ReadWritePaths = ["/var/lib/crystal-forge"];
         PrivateTmp = true;
@@ -359,7 +367,36 @@ in {
       wantedBy = ["multi-user.target"];
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
-      path = with pkgs; [coreutils zfs];
+      path = with pkgs; [
+        # Existing
+        coreutils
+        zfs
+
+        # For filesystem data (df, mount, findmnt, lsblk)
+        util-linux
+
+        # For network interface data (ip, ifconfig)
+        iproute2
+        nettools
+
+        # For system info (lscpu, lsmem, dmidecode)
+        pciutils
+        usbutils
+        dmidecode
+
+        # For process/memory info (ps, top, free)
+        procps
+
+        # For disk info (fdisk, parted)
+        parted
+
+        # General system utilities
+        systemd
+        gawk
+        gnused
+        gnugrep
+        findutils
+      ];
       environment = {
         RUST_LOG = cfg.log_level;
         CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
@@ -391,7 +428,7 @@ in {
     };
 
     # Create system user and group
-    users.users.crystal-forge = lib.mkIf (cfg.server.enable || cfg.client.enable) {
+    users.users.crystal-forge = lib.mkIf cfg.server.enable {
       description = "Crystal Forge service user";
       isSystemUser = true;
       group = "crystal-forge";
@@ -399,7 +436,7 @@ in {
       createHome = true;
     };
 
-    users.groups.crystal-forge = lib.mkIf (cfg.server.enable || cfg.client.enable) {};
+    users.groups.crystal-forge = lib.mkIf cfg.server.enable {};
 
     # Assertions for validation
     assertions = [

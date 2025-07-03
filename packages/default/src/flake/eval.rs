@@ -43,7 +43,12 @@ pub async fn list_nixos_configurations_from_commit(
     } else if repo_url.starts_with("git+") {
         format!("{}?rev={}", repo_url, commit_hash)
     } else {
-        format!("git+{}?rev={}", repo_url, commit_hash)
+        format!(
+            "git+{}{}.git?rev={}",
+            repo_url,
+            if repo_url.ends_with('/') { "" } else { "" },
+            commit_hash
+        )
     };
 
     if is_path {
@@ -62,7 +67,7 @@ pub async fn list_nixos_configurations_from_commit(
     }
 
     let output = timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(300),
         Command::new("nix")
             .args(["flake", "show", "--json", &flake_uri])
             .output(),
