@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n    UPDATE tbl_evaluation_targets\n    SET derivation_path = $1,\n        completed_at = now()\n    WHERE commit_id = $2 AND target_type = $3 AND target_name = $4\n    RETURNING\n        id,\n        commit_id,\n        target_type as \"target_type: TargetType\",\n        target_name,\n        derivation_path,\n        build_timestamp,\n        scheduled_at,\n        completed_at\n    ",
+  "query": "\n    INSERT INTO evaluation_targets (commit_id, target_type, target_name)\n    VALUES ($1, $2, $3)\n    ON CONFLICT (commit_id, target_type, target_name)\n    DO UPDATE SET commit_id = EXCLUDED.commit_id\n    RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, scheduled_at, completed_at, status\n    ",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "target_type: TargetType",
+        "name": "target_type",
         "type_info": "Text"
       },
       {
@@ -42,11 +42,15 @@
         "ordinal": 7,
         "name": "completed_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "status",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Text",
         "Int4",
         "Text",
         "Text"
@@ -60,8 +64,9 @@
       true,
       true,
       true,
-      true
+      true,
+      false
     ]
   },
-  "hash": "89c51af99ed154622111dce33474cf4be5d906230f7a7821404fc98b4828c404"
+  "hash": "34701a4b9f7c5a61751f90896358a285eff83e9bbe2154a462c64cf04c5705b0"
 }

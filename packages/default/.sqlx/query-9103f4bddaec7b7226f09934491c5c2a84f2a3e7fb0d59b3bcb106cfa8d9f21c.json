@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE evaluation_targets SET status = 'queued' WHERE status = 'in-progress'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9103f4bddaec7b7226f09934491c5c2a84f2a3e7fb0d59b3bcb106cfa8d9f21c"
+}

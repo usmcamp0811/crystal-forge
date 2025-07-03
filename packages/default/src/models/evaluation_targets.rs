@@ -1,10 +1,10 @@
 use crate::models::config::CrystalForgeConfig;
-
+use crate::queries::evaluation_targets::{mark_target_in_progress, reset_in_progress_targets};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sqlx::FromRow;
+use sqlx::{FromRow, PgPool};
 use std::path::Path;
 use tokio::process::Command;
 use tokio::sync::watch;
@@ -22,6 +22,7 @@ pub struct EvaluationTarget {
     pub build_timestamp: Option<DateTime<Utc>>, // nullable until built
     pub scheduled_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub status: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]
@@ -63,7 +64,7 @@ impl EvaluationTarget {
         ))
     }
 
-    pub async fn resolve_derivation_path(&mut self) -> Result<String> {
+    pub async fn resolve_derivation_path(&mut self, pool: &PgPool) -> Result<String> {
         let name = self.target_name.clone();
         let kind = self.target_type.clone();
 
@@ -84,7 +85,6 @@ impl EvaluationTarget {
                     if *rx.borrow_and_update() {
                         break;
                     }
-                    // TODO: Add insert query to update table so we know that we are still evaluating this target
                     info!(
                         "⏳ Still evaluating {} '{}'",
                         kind.to_string().to_lowercase(),

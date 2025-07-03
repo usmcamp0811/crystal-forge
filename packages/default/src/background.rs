@@ -90,7 +90,7 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
             for mut target in pending_targets {
-                match target.resolve_derivation_path().await {
+                match target.resolve_derivation_path(&pool).await {
                     Ok(path) => match update_evaluation_target_path(&pool, &target, &path).await {
                         Ok(updated) => info!("✅ Updated: {:?}", updated),
                         Err(e) => error!("❌ Failed to update path: {e}"),
