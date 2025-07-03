@@ -84,6 +84,7 @@ impl EvaluationTarget {
                     if *rx.borrow_and_update() {
                         break;
                     }
+                    // TODO: Add insert query to update table so we know that we are still evaluating this target
                     info!(
                         "⏳ Still evaluating {} '{}'",
                         kind.to_string().to_lowercase(),
