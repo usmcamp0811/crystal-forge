@@ -7,6 +7,12 @@ pub async fn insert_system_state(
     state: &SystemState,
     version_compatible: bool,
 ) -> Result<()> {
+    if !matches!(
+        state.change_reason.as_str(),
+        "startup" | "config_change" | "state_delta"
+    ) {
+        anyhow::bail!("Invalid change_reason: {}", state.change_reason);
+    }
     sqlx::query(
         r#"INSERT INTO system_states (
             hostname, 
@@ -40,7 +46,7 @@ pub async fn insert_system_state(
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)"#,
     )
     .bind(&state.hostname)
-    .bind(&state.context)
+    .bind(&state.change_reason)
     .bind(&state.derivation_path)
     .bind(&state.os)
     .bind(&state.kernel)
