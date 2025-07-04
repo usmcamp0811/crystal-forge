@@ -124,3 +124,19 @@ pub async fn reset_non_complete_targets(pool: &PgPool) -> Result<()> {
         .await?;
     Ok(())
 }
+
+pub async fn mark_target_failed(pool: &PgPool, target_id: i32, error_message: &str) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE evaluation_targets 
+        SET status = 'failed', 
+            completed_at = NOW(),
+            evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000
+        WHERE id = $1
+        "#,
+        target_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}

@@ -1,3 +1,4 @@
+use crate::queries::evaluation_targets::mark_target_failed;
 use crate::queries::evaluation_targets::mark_target_in_progress;
 use anyhow::Result;
 use futures::stream;
@@ -93,9 +94,7 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
     match get_pending_targets(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
-
             let concurrency_limit = 4; // adjust as needed
-
             stream::iter(pending_targets.into_iter().map(|mut target| {
                 let pool = pool.clone();
                 async move {
@@ -103,7 +102,6 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
                         error!("❌ Failed to mark target in-progress: {e}");
                         return;
                     }
-
                     match target.resolve_derivation_path(&pool).await {
                         Ok(path) => {
                             match update_evaluation_target_path(&pool, &target, &path).await {
@@ -113,14 +111,13 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
                         }
                         Err(e) => {
                             error!("❌ Failed to resolve derivation path: {e}");
-                            match increment_evaluation_target_attempt_count(&pool, &target).await {
-                                Ok(_) => debug!(
-                                    "✅ Incremented attempt count for target: {}",
-                                    target.target_name
-                                ),
-                                Err(inc_err) => {
-                                    error!("❌ Failed to increment attempt count: {inc_err}")
-                                }
+                            // Mark as failed instead of just incrementing attempts
+                            if let Err(mark_err) =
+                                mark_target_failed(&pool, target.id, &e.to_string()).await
+                            {
+                                error!("❌ Failed to mark target as failed: {mark_err}");
+                            } else {
+                                info!("💥 Marked target {} as failed", target.target_name);
                             }
                         }
                     }
@@ -131,6 +128,5 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
         }
         Err(e) => error!("❌ Failed to get pending targets: {e}"),
     }
-
     Ok(())
 }
