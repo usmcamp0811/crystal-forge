@@ -1,5 +1,5 @@
-use crate::queries::evaluation_targets::mark_target_failed;
-use crate::queries::evaluation_targets::mark_target_in_progress;
+use crate::queries::evaluation_targets::update_scheduled_at;
+use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
 use anyhow::Result;
 use futures::stream;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -91,6 +91,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
 }
 
 async fn process_pending_targets(pool: &PgPool) -> Result<()> {
+    update_scheduled_at(pool).await?;
     match get_pending_targets(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());

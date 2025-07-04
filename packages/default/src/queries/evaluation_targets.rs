@@ -79,7 +79,7 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
             status
         FROM evaluation_targets
         WHERE derivation_path IS NULL
-        AND attempt_count <= 5
+        AND attempt_count < 5
         ORDER BY scheduled_at DESC
         "#
     )
@@ -87,6 +87,18 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
     .await?;
 
     Ok(rows)
+}
+
+pub async fn update_scheduled_at(pool: &PgPool) -> Result<()> {
+    sqlx::query!(
+        r#"
+    UPDATE evaludation_targets
+    SET scheduled_at = NOW() WHERE status != 'complete';
+    "#
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 pub async fn increment_evaluation_target_attempt_count(
