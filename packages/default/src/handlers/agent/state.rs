@@ -19,7 +19,7 @@ use tracing::{debug, info};
 /// Handles the `/current-system` POST route.
 /// Verifies the body signature using headers, parses the payload, and
 /// stores system state info in the database.
-pub async fn handle_current_system(
+pub async fn update_system_state(
     State(state): State<CFState>,
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -59,4 +59,3 @@ pub async fn handle_current_system(
         StatusCode::ACCEPTED // 202 - accepted but agent should upgrade
     }
 }
-
