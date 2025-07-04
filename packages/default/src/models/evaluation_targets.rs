@@ -1,5 +1,5 @@
 use crate::models::config::CrystalForgeConfig;
-use crate::queries::evaluation_targets::{mark_target_in_progress, reset_in_progress_targets};
+use crate::queries::evaluation_targets::{mark_target_in_progress, reset_non_complete_targets};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

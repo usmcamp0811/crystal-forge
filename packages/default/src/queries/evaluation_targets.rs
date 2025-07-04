@@ -117,8 +117,8 @@ pub async fn mark_target_in_progress(pool: &PgPool, target_id: i32) -> Result<()
     Ok(())
 }
 
-pub async fn reset_in_progress_targets(pool: &PgPool) -> Result<()> {
-    sqlx::query!("UPDATE evaluation_targets SET status = 'queued' WHERE status = 'in-progress'")
+pub async fn reset_non_complete_targets(pool: &PgPool) -> Result<()> {
+    sqlx::query!("UPDATE evaluation_targets SET status = 'pending' WHERE status != 'complete'")
         .execute(pool)
         .await?;
     Ok(())

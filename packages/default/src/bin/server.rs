@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
     let background_pool = pool.clone();
+    reset_non_complete_targets(&pool);
     spawn_server_background_tasks(background_pool);
 
     // Start HTTP server
