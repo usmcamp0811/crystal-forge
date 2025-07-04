@@ -73,6 +73,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                                     target_name, commit.git_commit_hash
                                 ),
                                 Err(e) => {
+                                    increment_evaluation_target_attempt_count(&pool, target_name);
                                     error!("❌ Failed to insert target for {}: {}", target_name, e)
                                 }
                             }

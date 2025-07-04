@@ -7,6 +7,9 @@ ALTER TABLE tbl_flakes RENAME TO flakes;
 
 ALTER TABLE tbl_system_states RENAME TO system_states;
 
+ALTER TABLE evaluation_targets
+    DROP COLUMN build_timestamp;
+
 -- Add the new columns
 ALTER TABLE evaluation_targets
     ADD COLUMN status text NOT NULL DEFAULT 'pending';

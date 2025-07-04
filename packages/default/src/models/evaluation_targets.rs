@@ -19,7 +19,6 @@ pub struct EvaluationTarget {
     pub target_type: TargetType,         // e.g. "nixos", "home", "app"
     pub target_name: String,             // e.g. system or profile name
     pub derivation_path: Option<String>, // populated post-build
-    pub build_timestamp: Option<DateTime<Utc>>, // nullable until built
     pub scheduled_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub status: Option<String>,

@@ -16,7 +16,7 @@ pub async fn insert_evaluation_target(
     VALUES ($1, $2, $3)
     ON CONFLICT (commit_id, target_type, target_name)
     DO UPDATE SET commit_id = EXCLUDED.commit_id
-    RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, scheduled_at, completed_at, status
+    RETURNING id, commit_id, target_type, target_name, derivation_path, scheduled_at, completed_at, status
     "#,
         commit.id,
         target_type,
@@ -48,7 +48,6 @@ pub async fn update_evaluation_target_path(
         target_type as "target_type: TargetType",
         target_name,
         derivation_path,
-        build_timestamp,
         scheduled_at,
         completed_at,
         status
@@ -74,7 +73,6 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
             target_type as "target_type: TargetType",
             target_name,
             derivation_path,
-            build_timestamp,
             scheduled_at,
             completed_at,
             status
