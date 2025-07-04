@@ -51,8 +51,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/system_state", post(handle_current_system))
         .route("/agent/heartbeat", post(handle_current_system))
-        .route("/agent/state-delta", post(handle_current_system))
-        .route("/agent/config-change", post(handle_current_system))
+        .route("/agent/state-change", post(handle_current_system))
         .route("/webhook", post(webhook_handler))
         .with_state(state);
 
