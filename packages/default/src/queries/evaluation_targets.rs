@@ -39,7 +39,8 @@ pub async fn update_evaluation_target_path(
     UPDATE evaluation_targets
     SET derivation_path = $1,
         completed_at = now(),
-        status = 'completed'
+        status = 'completed',
+        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000
     WHERE commit_id = $2 AND target_type = $3 AND target_name = $4
     RETURNING
         id,
@@ -109,7 +110,7 @@ pub async fn increment_evaluation_target_attempt_count(
 
 pub async fn mark_target_in_progress(pool: &PgPool, target_id: i32) -> Result<()> {
     sqlx::query!(
-        "UPDATE evaluation_targets SET status = 'in-progress' WHERE id = $1",
+        "UPDATE evaluation_targets SET status = 'in-progress', started_at = NOW() WHERE id = $1",
         target_id
     )
     .execute(pool)
@@ -121,5 +122,21 @@ pub async fn reset_non_complete_targets(pool: &PgPool) -> Result<()> {
     sqlx::query!("UPDATE evaluation_targets SET status = 'pending' WHERE status != 'complete'")
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+pub async fn mark_target_complete(pool: &PgPool, target_id: i32) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE evaluation_targets 
+        SET status = 'complete', 
+            completed_at = NOW(),
+            evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000
+        WHERE id = $1
+        "#,
+        target_id
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }

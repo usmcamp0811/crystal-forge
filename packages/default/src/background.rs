@@ -1,6 +1,6 @@
 use crate::queries::evaluation_targets::mark_target_in_progress;
-use futures::stream;
 use anyhow::Result;
+use futures::stream;
 use futures::stream::{FuturesUnordered, StreamExt};
 use sqlx::PgPool;
 use tokio::time::{Duration, sleep};
@@ -48,6 +48,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
     match get_commits_pending_evaluation(&pool).await {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
+            let q = 1;
             for commit in pending_commits {
                 let target_type = "nixos";
                 match list_nixos_configurations_from_commit(&pool, &commit).await {

@@ -7,24 +7,23 @@ ALTER TABLE tbl_flakes RENAME TO flakes;
 
 ALTER TABLE tbl_system_states RENAME TO system_states;
 
--- Add status column to evaluation_targets table
+-- Add the new columns
 ALTER TABLE evaluation_targets
-    ADD COLUMN status text NOT NULL DEFAULT 'queued';
+    ADD COLUMN status text NOT NULL DEFAULT 'pending';
 
+ALTER TABLE evaluation_targets
+    ADD COLUMN queued_at timestamp with time zone;
 
-CREATE OR REPLACE VIEW evaluation_targets_with_status AS
-SELECT
-    et.id,
-    et.commit_id,
-    et.target_type,
-    et.target_name,
-    et.derivation_path,
-    et.build_timestamp,
-    et.scheduled_at,
-    et.completed_at,
-    et.attempt_count,
-    et.status
-FROM
-    evaluation_targets et
-ORDER BY
-    et.scheduled_at DESC;
+ALTER TABLE evaluation_targets
+    ADD COLUMN started_at timestamp with time zone;
+
+ALTER TABLE evaluation_targets
+    ADD COLUMN evaluation_duration_ms integer;
+
+-- Add constraint for valid status values
+ALTER TABLE evaluation_targets
+    ADD CONSTRAINT valid_status CHECK (status IN ('pending', 'queued', 'in-progress', 'complete', 'failed'));
+
+-- Add indexes for performance
+CREATE INDEX idx_evaluation_targets_status ON evaluation_targets (status);
+
