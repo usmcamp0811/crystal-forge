@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id, c.flake_id, c.git_commit_hash, c.commit_timestamp\n        FROM commits c\n        LEFT JOIN evaluation_targets t ON c.id = t.commit_id\n        WHERE t.commit_id IS NULL\n        AND c.attempt_count <= 5\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "flake_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "git_commit_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "commit_timestamp",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "c6f2f3122ca443fa2e6583c44f6f4c0b63d61453906ae72e802d6f5fcfffda7e"
+}
