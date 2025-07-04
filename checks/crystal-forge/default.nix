@@ -168,7 +168,7 @@ in
       agent.log("=== agent logs ===")
       agent.log(agent.succeed("journalctl -u crystal-forge-agent.service || true"))
 
-      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, derivation_path, context FROM tbl_system_states;'")
+      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, derivation_path, context FROM system_states;'")
       server.log("Final DB state:\\n" + output)
 
       if agent_hostname not in output:
@@ -196,15 +196,15 @@ in
       except Exception:
           pytest.fail("Commit hash was not processed by server")
 
-      flake_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT repo_url FROM tbl_flakes WHERE repo_url = 'git+https://gitlab.com/usmcamp0811/dotfiles';\"")
+      flake_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT repo_url FROM flakes WHERE repo_url = 'git+https://gitlab.com/usmcamp0811/dotfiles';\"")
       if "git+https://gitlab.com/usmcamp0811/dotfiles" not in flake_check:
           pytest.fail("flake not found in DB")
 
-      commit_list = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT * FROM tbl_commits;'")
-      server.log("tbl_commits contents:\\n" + commit_list)
+      commit_list = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT * FROM commits;'")
+      server.log("commits contents:\\n" + commit_list)
 
       if "0 rows" in commit_list or "0 rows" in commit_list.lower():
-          pytest.fail("tbl_commits is empty")
+          pytest.fail("commits is empty")
 
       active_services = agent.succeed("systemctl list-units --type=service --state=active")
       if "postgresql" in active_services:

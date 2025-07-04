@@ -8,7 +8,7 @@ pub async fn insert_system_state(
     version_compatible: bool,
 ) -> Result<()> {
     sqlx::query(
-        r#"INSERT INTO tbl_system_states (
+        r#"INSERT INTO system_states (
             hostname, 
             context,
             derivation_path,
