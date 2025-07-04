@@ -2,6 +2,7 @@ use crate::models::commits::Commit;
 use crate::models::evaluation_targets::{EvaluationTarget, TargetType};
 use anyhow::Result;
 use sqlx::PgPool;
+use tracing::error;
 
 pub async fn insert_evaluation_target(
     pool: &PgPool,
@@ -12,11 +13,11 @@ pub async fn insert_evaluation_target(
     let inserted = sqlx::query_as!(
         EvaluationTarget,
         r#"
-    INSERT INTO tbl_evaluation_targets (commit_id, target_type, target_name)
+    INSERT INTO evaluation_targets (commit_id, target_type, target_name)
     VALUES ($1, $2, $3)
     ON CONFLICT (commit_id, target_type, target_name)
     DO UPDATE SET commit_id = EXCLUDED.commit_id
-    RETURNING id, commit_id, target_type, target_name, derivation_path, build_timestamp, scheduled_at, completed_at
+    RETURNING id, commit_id, target_type, target_name, derivation_path, scheduled_at, completed_at, status
     "#,
         commit.id,
         target_type,
@@ -36,9 +37,11 @@ pub async fn update_evaluation_target_path(
     let updated = sqlx::query_as!(
         EvaluationTarget,
         r#"
-    UPDATE tbl_evaluation_targets
+    UPDATE evaluation_targets
     SET derivation_path = $1,
-        completed_at = now()
+        completed_at = now(),
+        status = 'complete',
+        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000
     WHERE commit_id = $2 AND target_type = $3 AND target_name = $4
     RETURNING
         id,
@@ -46,9 +49,9 @@ pub async fn update_evaluation_target_path(
         target_type as "target_type: TargetType",
         target_name,
         derivation_path,
-        build_timestamp,
         scheduled_at,
-        completed_at
+        completed_at,
+        status
     "#,
         path,
         target.commit_id,
@@ -71,12 +74,12 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
             target_type as "target_type: TargetType",
             target_name,
             derivation_path,
-            build_timestamp,
             scheduled_at,
-            completed_at
-        FROM tbl_evaluation_targets
+            completed_at,
+            status
+        FROM evaluation_targets
         WHERE derivation_path IS NULL
-        AND attempt_count <= 5
+        AND attempt_count < 5
         ORDER BY scheduled_at DESC
         "#
     )
@@ -86,13 +89,27 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
     Ok(rows)
 }
 
+pub async fn update_scheduled_at(pool: &PgPool) -> Result<()> {
+    sqlx::query!(
+        r#"
+    UPDATE evaluation_targets
+    SET scheduled_at = NOW() WHERE status != 'complete';
+    "#
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 pub async fn increment_evaluation_target_attempt_count(
     pool: &PgPool,
     target: &EvaluationTarget,
+    error: &anyhow::Error,
 ) -> Result<()> {
-    let updated = sqlx::query!(
+    error!("❌ Failed to resolve derivation path: {}", error);
+    sqlx::query!(
         r#"
-    UPDATE tbl_evaluation_targets
+    UPDATE evaluation_targets
     SET attempt_count = attempt_count + 1
     WHERE id = $1
     "#,
@@ -100,6 +117,38 @@ pub async fn increment_evaluation_target_attempt_count(
     )
     .execute(pool)
     .await?;
+    Ok(())
+}
 
+pub async fn mark_target_in_progress(pool: &PgPool, target_id: i32) -> Result<()> {
+    sqlx::query!(
+        "UPDATE evaluation_targets SET status = 'in-progress', started_at = NOW() WHERE id = $1",
+        target_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn reset_non_complete_targets(pool: &PgPool) -> Result<()> {
+    sqlx::query!("UPDATE evaluation_targets SET status = 'pending' WHERE status != 'complete'")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn mark_target_failed(pool: &PgPool, target_id: i32, error_message: &str) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE evaluation_targets 
+        SET status = 'failed', 
+            completed_at = NOW(),
+            evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000
+        WHERE id = $1
+        "#,
+        target_id
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }

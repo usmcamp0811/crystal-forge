@@ -332,6 +332,10 @@ in {
         echo "Starting Crystal Forge Server configuration generation..."
         ${configScript}
         echo "Configuration generation complete"
+
+        echo "Ensuring .cache/nix directory exists with correct ownership..."
+        mkdir -p /var/lib/crystal-forge/.cache/nix
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
       '';
 
       serviceConfig = {
