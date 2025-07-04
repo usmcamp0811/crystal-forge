@@ -11,3 +11,7 @@ pub struct AgentHeartbeat {
     pub agent_version: Option<String>,
     pub agent_build_hash: Option<String>,
 }
+
+impl AgentHeartbeat {
+    pub fn handle_heartbeat(system_state: SystemState)
+}
