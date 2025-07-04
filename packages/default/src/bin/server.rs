@@ -49,7 +49,10 @@ async fn main() -> anyhow::Result<()> {
 
     let state = CFState::new(pool);
     let app = Router::new()
-        .route("/current-system", post(handle_current_system))
+        .route("/system_state", post(handle_current_system))
+        .route("/agent/heartbeat", post(handle_current_system))
+        .route("/agent/state-delta", post(handle_current_system))
+        .route("/agent/config-change", post(handle_current_system))
         .route("/webhook", post(webhook_handler))
         .with_state(state);
 

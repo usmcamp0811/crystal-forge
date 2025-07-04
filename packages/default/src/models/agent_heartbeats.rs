@@ -13,5 +13,5 @@ pub struct AgentHeartbeat {
 }
 
 impl AgentHeartbeat {
-    pub fn handle_heartbeat(system_state: SystemState)
+    pub fn handle_heartbeat(system_state: SystemState) -> Result<()> {}
 }

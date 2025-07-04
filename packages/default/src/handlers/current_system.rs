@@ -1,38 +1,23 @@
+use crate::handlers::agent_request::{
+    CFState, authenticate_agent_request, try_deserialize_system_state,
+};
 use crate::models::system_states::{SystemState, SystemStateV1};
 use crate::queries::system_states::insert_system_state;
 use crate::queries::systems::get_by_hostname;
 use anyhow::Result;
-use axum::extract::FromRef;
-use base64::engine::Engine;
-use base64::engine::general_purpose;
-use ed25519_dalek::Signature;
-use sqlx::PgPool;
-
 use axum::{
     body::Bytes,
+    extract::FromRef,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use base64::engine::Engine;
+use base64::engine::general_purpose;
+use ed25519_dalek::Signature;
+use sqlx::PgPool;
 use tracing::{debug, info};
 
-/// Shared server state containing authorized signing keys for current-system auth
-#[derive(Clone)]
-pub struct CFState {
-    pool: PgPool,
-}
-
-impl CFState {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
-    }
-}
-
-impl FromRef<CFState> for PgPool {
-    fn from_ref(state: &CFState) -> PgPool {
-        state.pool.clone()
-    }
-}
 /// Handles the `/current-system` POST route.
 /// Verifies the body signature using headers, parses the payload, and
 /// stores system state info in the database.
@@ -42,53 +27,27 @@ pub async fn handle_current_system(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // Extract and validate key ID and signature from headers
-    let key_id = match headers.get("X-Key-ID") {
-        Some(v) => v.to_str().unwrap_or(""),
-        None => return StatusCode::UNAUTHORIZED,
+    // Get verified agent request
+    let agent_request = match authenticate_agent_request(&headers, body, &pool).await {
+        Ok(req) => req,
+        Err(status) => return status,
     };
-
-    let sig = match headers.get("X-Signature") {
-        Some(v) => v.to_str().unwrap_or(""),
-        None => return StatusCode::UNAUTHORIZED,
-    };
-
-    // Decode and validate signature format
-    let signature_bytes = match general_purpose::STANDARD.decode(sig) {
-        Ok(bytes) => bytes,
-        Err(_) => return StatusCode::BAD_REQUEST,
-    };
-
-    let bytes: [u8; 64] = match signature_bytes.try_into() {
-        Ok(b) => b,
-        Err(_) => return StatusCode::BAD_REQUEST,
-    };
-
-    let signature = Signature::from_bytes(&bytes);
-
-    // Lookup key for signature verification
-    let system = match get_by_hostname(&pool, key_id).await {
-        Ok(Some(k)) => k,
-        Ok(None) => return StatusCode::UNAUTHORIZED,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
-    };
-
-    // let key = system.public_key;
-    //
-    // if key.verify(&body, &signature).is_err() {
-    //     return StatusCode::UNAUTHORIZED;
-    // }
 
     // Try to deserialize with version detection
-    let (payload, version_compatible) = match try_deserialize_system_state(&body) {
+    let (payload, version_compatible) = match try_deserialize_system_state(&agent_request) {
         Ok((state, compatible)) => (state, compatible),
         Err(e) => {
-            eprintln!("❌ All deserialization attempts failed: {e}");
+            debug!("❌ All deserialization attempts failed: {e}");
             return StatusCode::BAD_REQUEST;
         }
     };
 
-    info!("{}", payload);
+    // TODO: Might want to just do payload need to see what it looks like
+    info!(
+        "System state received from {}: {}",
+        agent_request.system.hostname, payload
+    );
+
     // Insert with compatibility flag
     if let Err(e) = insert_system_state(&pool, &payload, version_compatible).await {
         debug!("❌ failed to insert into DB: {e:?}");
@@ -101,23 +60,6 @@ pub async fn handle_current_system(
     } else {
         StatusCode::ACCEPTED // 202 - accepted but agent should upgrade
     }
-}
-
-pub fn try_deserialize_system_state(body: &[u8]) -> Result<(SystemState, bool)> {
-    // Try current version first
-    if let Ok(state) = serde_json::from_slice::<SystemState>(body) {
-        return Ok((state, true));
-    }
-
-    // Try previous versions with fallback
-    if let Ok(old_state) = serde_json::from_slice::<SystemStateV1>(body) {
-        let converted = SystemState::from_v1(old_state);
-        return Ok((converted, false));
-    }
-
-    Err(anyhow::anyhow!(
-        "Unable to deserialize any known SystemState version"
-    ))
 }
 
 #[cfg(test)]
