@@ -12,9 +12,6 @@ ALTER TABLE evaluation_targets
     ADD COLUMN status text NOT NULL DEFAULT 'pending';
 
 ALTER TABLE evaluation_targets
-    ADD COLUMN queued_at timestamp with time zone;
-
-ALTER TABLE evaluation_targets
     ADD COLUMN started_at timestamp with time zone;
 
 ALTER TABLE evaluation_targets
