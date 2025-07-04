@@ -10,7 +10,7 @@ pub async fn insert_system_state(
     sqlx::query(
         r#"INSERT INTO system_states (
             hostname, 
-            context,
+            change_reason,
             derivation_path,
             os, 
             kernel,

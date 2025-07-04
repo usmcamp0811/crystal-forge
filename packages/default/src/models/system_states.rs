@@ -19,7 +19,7 @@ pub struct SystemStateV1 {
     pub id: Option<i32>,
     pub hostname: String,
     pub derivation_path: Option<String>,
-    pub context: String,
+    pub change_reason: String,
     pub os: Option<String>,
     pub kernel: Option<String>,
     pub memory_gb: Option<f64>,
@@ -37,7 +37,7 @@ pub struct SystemState {
     // ───── Identification ─────
     pub id: Option<i32>,
     pub hostname: String,
-    pub context: String,
+    pub change_reason: String,
     pub timestamp: Option<DateTime<Utc>>,
 
     // ───── System Info ─────
@@ -82,7 +82,7 @@ impl SystemState {
             id: v1.id,
             hostname: v1.hostname,
             derivation_path: v1.derivation_path,
-            context: v1.context,
+            change_reason: v1.change_reason,
             os: v1.os,
             kernel: v1.kernel,
             memory_gb: v1.memory_gb,
@@ -112,7 +112,7 @@ impl SystemState {
         }
     }
 
-    pub fn gather(hostname: &str, context: &str, derivation_path: &str) -> Result<Self> {
+    pub fn gather(hostname: &str, change_reason: &str, derivation_path: &str) -> Result<Self> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -188,7 +188,7 @@ impl SystemState {
             timestamp: Some(Utc::now()),
             hostname: hostname.to_string(),
             derivation_path: Some(derivation_path.to_string()),
-            context: context.to_string(),
+            change_reason: change_reason.to_string(),
             os,
             kernel,
             memory_gb,
@@ -223,9 +223,9 @@ impl fmt::Display for SystemState {
 
         write!(
             f,
-            "✅ accepted agent: {}\n   • context:      {}\n   • hostname:     {}\n   • hash:         {}\n   • os:           {}\n   • kernel:       {}\n   • memory:       {} GB\n   • uptime:       {}d {}h\n   • cpu:          {} ({})\n   • board_serial: {}\n   • uuid:         {}",
+            "✅ accepted agent: {}\n   • change_reason:      {}\n   • hostname:     {}\n   • hash:         {}\n   • os:           {}\n   • kernel:       {}\n   • memory:       {} GB\n   • uptime:       {}d {}h\n   • cpu:          {} ({})\n   • board_serial: {}\n   • uuid:         {}",
             self.hostname,
-            self.context,
+            self.change_reason,
             self.hostname,
             self.derivation_path.as_deref().unwrap_or("unknown"),
             self.os.as_deref().unwrap_or("unknown"),
