@@ -1,5 +1,4 @@
 use anyhow::Context;
-
 use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::background::spawn_server_background_tasks;
@@ -8,6 +7,7 @@ use crystal_forge::handlers::current_system::{CFState, handle_current_system};
 use crystal_forge::handlers::webhook::webhook_handler;
 use crystal_forge::models::config::CrystalForgeConfig;
 use crystal_forge::queries::commits::get_commits_pending_evaluation;
+use crystal_forge::queries::evaluation_targets::reset_non_complete_targets;
 use crystal_forge::queries::evaluation_targets::{
     get_pending_targets, increment_evaluation_target_attempt_count, insert_evaluation_target,
     update_evaluation_target_path,
@@ -35,6 +35,7 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
     let background_pool = pool.clone();
+    reset_non_complete_targets(&pool);
     spawn_server_background_tasks(background_pool);
 
     // Start HTTP server

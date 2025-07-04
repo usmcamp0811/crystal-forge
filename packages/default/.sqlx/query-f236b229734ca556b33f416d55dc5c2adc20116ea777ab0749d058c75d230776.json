@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            build_timestamp,\n            scheduled_at,\n            completed_at\n        FROM tbl_evaluation_targets\n        WHERE derivation_path IS NULL\n        AND attempt_count <= 5\n        ORDER BY scheduled_at DESC\n        ",
+  "query": "\n    INSERT INTO evaluation_targets (commit_id, target_type, target_name)\n    VALUES ($1, $2, $3)\n    ON CONFLICT (commit_id, target_type, target_name)\n    DO UPDATE SET commit_id = EXCLUDED.commit_id\n    RETURNING id, commit_id, target_type, target_name, derivation_path, scheduled_at, completed_at, status\n    ",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "target_type: TargetType",
+        "name": "target_type",
         "type_info": "Text"
       },
       {
@@ -30,22 +30,26 @@
       },
       {
         "ordinal": 5,
-        "name": "build_timestamp",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 6,
         "name": "scheduled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 6,
         "name": "completed_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Text"
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Int4",
+        "Text",
+        "Text"
+      ]
     },
     "nullable": [
       false,
@@ -55,8 +59,8 @@
       true,
       true,
       true,
-      true
+      false
     ]
   },
-  "hash": "4a0b6f665a4f316a756b8b14425a4f1bbafd908b6880af9426d46fa3d6495c54"
+  "hash": "f236b229734ca556b33f416d55dc5c2adc20116ea777ab0749d058c75d230776"
 }

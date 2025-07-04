@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n    UPDATE tbl_evaluation_targets\n    SET derivation_path = $1,\n        completed_at = now()\n    WHERE commit_id = $2 AND target_type = $3 AND target_name = $4\n    RETURNING\n        id,\n        commit_id,\n        target_type as \"target_type: TargetType\",\n        target_name,\n        derivation_path,\n        build_timestamp,\n        scheduled_at,\n        completed_at\n    ",
+  "query": "\n    UPDATE evaluation_targets\n    SET derivation_path = $1,\n        completed_at = now(),\n        status = 'complete',\n        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000\n    WHERE commit_id = $2 AND target_type = $3 AND target_name = $4\n    RETURNING\n        id,\n        commit_id,\n        target_type as \"target_type: TargetType\",\n        target_name,\n        derivation_path,\n        scheduled_at,\n        completed_at,\n        status\n    ",
   "describe": {
     "columns": [
       {
@@ -30,18 +30,18 @@
       },
       {
         "ordinal": 5,
-        "name": "build_timestamp",
-        "type_info": "Timestamptz"
-      },
-      {
-        "ordinal": 6,
         "name": "scheduled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 6,
         "name": "completed_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -60,8 +60,8 @@
       true,
       true,
       true,
-      true
+      false
     ]
   },
-  "hash": "89c51af99ed154622111dce33474cf4be5d906230f7a7821404fc98b4828c404"
+  "hash": "5ff8469f47e442a71d85c3db22bdd30a5972cd2543db2831f6cf0099b53569f3"
 }

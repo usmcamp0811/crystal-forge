@@ -6,7 +6,7 @@ use std::fmt;
 pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<Flake> {
     let flake = sqlx::query_as::<_, Flake>(
         "
-        INSERT INTO tbl_flakes (name, repo_url)
+        INSERT INTO flakes (name, repo_url)
         VALUES ($1, $2)
         ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
         RETURNING *
@@ -21,7 +21,7 @@ pub async fn insert_flake(pool: &PgPool, name: &str, repo_url: &str) -> Result<F
 }
 
 pub async fn get_flake_by_name(pool: &PgPool, name: &str) -> Result<Flake> {
-    let commit = sqlx::query_as::<_, Flake>("SELECT * FROM tbl_flakes WHERE name = $1")
+    let commit = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE name = $1")
         .bind(name)
         .fetch_one(pool)
         .await?;
@@ -30,7 +30,7 @@ pub async fn get_flake_by_name(pool: &PgPool, name: &str) -> Result<Flake> {
 }
 
 pub async fn get_flake_by_id(pool: &PgPool, id: i32) -> Result<Flake> {
-    let commit = sqlx::query_as::<_, Flake>("SELECT * FROM tbl_flakes WHERE id = $1")
+    let commit = sqlx::query_as::<_, Flake>("SELECT * FROM flakes WHERE id = $1")
         .bind(id)
         .fetch_one(pool)
         .await?;
@@ -39,7 +39,7 @@ pub async fn get_flake_by_id(pool: &PgPool, id: i32) -> Result<Flake> {
 }
 
 pub async fn get_flake_id_by_repo_url(pool: &PgPool, repo_url: &str) -> Result<Option<i32>> {
-    let flake_id = sqlx::query_scalar!("SELECT id FROM tbl_flakes WHERE repo_url = $1", repo_url)
+    let flake_id = sqlx::query_scalar!("SELECT id FROM flakes WHERE repo_url = $1", repo_url)
         .fetch_optional(pool)
         .await?;
 
