@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE evaluation_targets \n        SET status = 'failed', \n            completed_at = NOW(),\n            evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d1979b058d8891762aa233ab88942fd352d49ac6839f398bcde46ec08638b35a"
+}

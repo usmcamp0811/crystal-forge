@@ -92,7 +92,7 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
 pub async fn update_scheduled_at(pool: &PgPool) -> Result<()> {
     sqlx::query!(
         r#"
-    UPDATE evaludation_targets
+    UPDATE evaluation_targets
     SET scheduled_at = NOW() WHERE status != 'complete';
     "#
     )

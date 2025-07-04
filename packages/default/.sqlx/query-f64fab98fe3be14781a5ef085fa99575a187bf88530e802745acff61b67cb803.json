@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    UPDATE evaluation_targets\n    SET scheduled_at = NOW() WHERE status != 'complete';\n    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "f64fab98fe3be14781a5ef085fa99575a187bf88530e802745acff61b67cb803"
+}
