@@ -73,7 +73,6 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                                     target_name, commit.git_commit_hash
                                 ),
                                 Err(e) => {
-                                    increment_evaluation_target_attempt_count(&pool, target_name);
                                     error!("❌ Failed to insert target for {}: {}", target_name, e)
                                 }
                             }
@@ -111,7 +110,12 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            error!("❌ Failed to resolve derivation path: {e}");
+                            if let Err(inc_err) =
+                                increment_evaluation_target_attempt_count(&pool, &target, &e).await
+                            {
+                                error!("❌ Failed to increment attempt count: {inc_err}");
+                            }
+
                             // Mark as failed instead of just incrementing attempts
                             if let Err(mark_err) =
                                 mark_target_failed(&pool, target.id, &e.to_string()).await

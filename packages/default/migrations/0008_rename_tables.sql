@@ -8,7 +8,7 @@ ALTER TABLE tbl_flakes RENAME TO flakes;
 ALTER TABLE tbl_system_states RENAME TO system_states;
 
 ALTER TABLE evaluation_targets
-    DROP COLUMN build_timestamp;
+    DROP COLUMN build_timestamp CASCADE;
 
 -- Add the new columns
 ALTER TABLE evaluation_targets

@@ -2,6 +2,7 @@ use crate::models::commits::Commit;
 use crate::models::evaluation_targets::{EvaluationTarget, TargetType};
 use anyhow::Result;
 use sqlx::PgPool;
+use tracing::error;
 
 pub async fn insert_evaluation_target(
     pool: &PgPool,
@@ -91,8 +92,10 @@ pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>>
 pub async fn increment_evaluation_target_attempt_count(
     pool: &PgPool,
     target: &EvaluationTarget,
+    error: &anyhow::Error,
 ) -> Result<()> {
-    let updated = sqlx::query!(
+    error!("❌ Failed to resolve derivation path: {}", error);
+    sqlx::query!(
         r#"
     UPDATE evaluation_targets
     SET attempt_count = attempt_count + 1
@@ -102,7 +105,6 @@ pub async fn increment_evaluation_target_attempt_count(
     )
     .execute(pool)
     .await?;
-
     Ok(())
 }
 
