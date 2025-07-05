@@ -1,6 +1,9 @@
+use crate::models::system_states::SystemState;
+use crate::queries::system_states::get_last_system_state_by_hostname;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use sqlx::PgPool;
 use uuid::Uuid;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -39,7 +42,7 @@ impl AgentHeartbeat {
             // States are the same - create heartbeat
             Ok(Self {
                 id: 0, // Will be set by database
-                system_id: Self::get_latest_system_state_id(pool, &state.hostname).await?,
+                system_state_id: Self::get_latest_system_state_id(pool, &state.hostname).await?,
                 timestamp: state.timestamp.unwrap_or_else(|| Utc::now()),
                 agent_version: state.agent_version.clone(),
                 agent_build_hash: state.agent_build_hash.clone(),
@@ -77,7 +80,7 @@ impl AgentHeartbeat {
             && current.primary_ip_address == previous.primary_ip_address
             && current.gateway_ip == previous.gateway_ip
             && current.selinux_status == previous.selinux_status
-            && current.tpm_present == previous.tmp_present
+            && current.tpm_present == previous.tpm_present
             && current.secure_boot_enabled == previous.secure_boot_enabled
             && current.fips_mode == previous.fips_mode
             && current.agent_version == previous.agent_version
