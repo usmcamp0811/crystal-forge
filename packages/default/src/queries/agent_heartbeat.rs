@@ -1,4 +1,4 @@
-use crate::models::commits::Commit;
+use crate::models::agent_heartbeats::AgentHeartbeat;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 

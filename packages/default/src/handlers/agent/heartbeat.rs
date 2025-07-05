@@ -1,10 +1,11 @@
 use crate::handlers::agent_request::{
     CFState, authenticate_agent_request, try_deserialize_system_state,
 };
-use crate::models::agent_heartbeats::AgentHeartbeat;
-use crate::models::system_states::{SystemState, SystemStateV1};
-use crate::queries::system_states::insert_system_state;
-use crate::queries::systems::get_by_hostname;
+use crate::models::{
+    agent_heartbeats::AgentHeartbeat,
+    system_states::{SystemState, SystemStateV1},
+};
+use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use anyhow::Result;
 use axum::{
     body::Bytes,
