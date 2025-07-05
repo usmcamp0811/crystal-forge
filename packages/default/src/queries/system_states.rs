@@ -307,7 +307,7 @@ mod tests {
         let current = SystemState::from_v1(v1);
 
         assert_eq!(current.hostname, "test");
-        assert_eq!(current.change_reason, "startup"); // mapped from "ctx"
+        assert_eq!(current.change_reason, "startup");
         assert_eq!(current.os, Some("NixOS".to_string()));
         assert_eq!(current.agent_version, None);
         assert_eq!(current.nixos_version, None);
