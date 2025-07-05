@@ -1,10 +1,9 @@
 CREATE TABLE agent_heartbeats (
     id bigserial PRIMARY KEY,
-    system_id uuid NOT NULL,
+    system_state_id integer NOT NULL REFERENCES system_states (id),
     timestamp timestamptz NOT NULL DEFAULT NOW(),
     agent_version varchar(50),
-    agent_build_hash varchar(64),
-    INDEX idx_heartbeats_system_timestamp (system_id, timestamp)
+    agent_build_hash varchar(64)
 );
 
 -- Update existing values to the new standardized ones (without restart)

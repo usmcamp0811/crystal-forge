@@ -88,6 +88,36 @@ pub async fn insert_system_state(
 
     Ok(())
 }
+pub fn get_last_system_state_by_hostname(
+    pool: &PgPool,
+    hostname: &str,
+) -> Result<Option<SystemState>> {
+    let row = sqlx::query_as::<_, SystemState>(
+        r#"
+        SELECT *
+        FROM system_states
+        WHERE hostname = $1
+        ORDER BY timestamp DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(hostname)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row)
+}
+
+pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result<Option<i32>> {
+    let id = sqlx::query_scalar!(
+        "SELECT id FROM system_states WHERE hostname = $1 ORDER BY timestamp DESC LIMIT 1",
+        hostname
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(id)
+}
 
 #[cfg(test)]
 mod tests {
