@@ -158,7 +158,7 @@ in
 
       agent_hostname = agent.succeed("hostname -s").strip()
       system_hash = agent.succeed("readlink /run/current-system").strip().split("-")[-1]
-      context = "agent-startup"
+      change_reason = "startup"
 
       try:
           server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep '✅ accepted agent'");
@@ -168,13 +168,13 @@ in
       agent.log("=== agent logs ===")
       agent.log(agent.succeed("journalctl -u crystal-forge-agent.service || true"))
 
-      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, derivation_path, context FROM system_states;'")
+      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, derivation_path, change_reason FROM system_states;'")
       server.log("Final DB state:\\n" + output)
 
       if agent_hostname not in output:
           pytest.fail(f"hostname '{agent_hostname}' not found in DB")
-      if context not in output:
-          pytest.fail(f"context '{context}' not found in DB")
+      if change_reason not in output:
+          pytest.fail(f"change_reason '{change_reason}' not found in DB")
       if system_hash not in output:
           pytest.fail(f"derivation_path '{system_hash}' not found in DB")
 

@@ -3,7 +3,9 @@ use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::background::spawn_server_background_tasks;
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
-use crystal_forge::handlers::current_system::{CFState, handle_current_system};
+use crystal_forge::handlers::agent::heartbeat;
+use crystal_forge::handlers::agent::state;
+use crystal_forge::handlers::agent_request::CFState;
 use crystal_forge::handlers::webhook::webhook_handler;
 use crystal_forge::models::config::CrystalForgeConfig;
 use crystal_forge::queries::commits::get_commits_pending_evaluation;
@@ -49,7 +51,9 @@ async fn main() -> anyhow::Result<()> {
 
     let state = CFState::new(pool);
     let app = Router::new()
-        .route("/current-system", post(handle_current_system))
+        .route("/system_state", post(state::update))
+        .route("/agent/heartbeat", post(heartbeat::log))
+        .route("/agent/state", post(state::update))
         .route("/webhook", post(webhook_handler))
         .with_state(state);
 

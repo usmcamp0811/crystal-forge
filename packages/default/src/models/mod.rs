@@ -1,3 +1,4 @@
+pub mod agent_heartbeats;
 pub mod commits;
 pub mod config;
 pub mod environments;

@@ -543,6 +543,7 @@ dependencies = [
  "axum 0.7.9",
  "axum-test",
  "base64 0.21.7",
+ "bytes",
  "chrono",
  "config",
  "dotenvy",

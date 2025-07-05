@@ -18,8 +18,9 @@ use crate::models::network_interfaces::{
 pub struct SystemStateV1 {
     pub id: Option<i32>,
     pub hostname: String,
-    pub derivation_path: Option<String>,
     pub context: String,
+    pub timestamp: Option<DateTime<Utc>>,
+    pub derivation_path: Option<String>,
     pub os: Option<String>,
     pub kernel: Option<String>,
     pub memory_gb: Option<f64>,
@@ -29,7 +30,20 @@ pub struct SystemStateV1 {
     pub board_serial: Option<String>,
     pub product_uuid: Option<String>,
     pub rootfs_uuid: Option<String>,
-    pub timestamp: Option<DateTime<Utc>>,
+    pub chassis_serial: Option<String>,
+    pub bios_version: Option<String>,
+    pub cpu_microcode: Option<String>,
+    pub network_interfaces: Option<serde_json::Value>,
+    pub primary_mac_address: Option<String>,
+    pub primary_ip_address: Option<String>,
+    pub gateway_ip: Option<String>,
+    pub selinux_status: Option<String>,
+    pub tpm_present: Option<bool>,
+    pub secure_boot_enabled: Option<bool>,
+    pub fips_mode: Option<bool>,
+    pub agent_version: Option<String>,
+    pub agent_build_hash: Option<String>,
+    pub nixos_version: Option<String>,
 }
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -37,7 +51,7 @@ pub struct SystemState {
     // ───── Identification ─────
     pub id: Option<i32>,
     pub hostname: String,
-    pub context: String,
+    pub change_reason: String,
     pub timestamp: Option<DateTime<Utc>>,
 
     // ───── System Info ─────
@@ -76,43 +90,60 @@ pub struct SystemState {
 }
 
 impl SystemState {
+    fn map_v1_context(context: &str) -> String {
+        match context {
+            "agent-startup" => "startup".to_string(),
+            "agent-loop" => "config_change".to_string(),
+            "agent-heartbeat" => "state_delta".to_string(),
+            _ => context.to_string(),
+        }
+    }
+
     pub fn from_v1(v1: SystemStateV1) -> Self {
         Self {
-            // Fields that exist in both V1 and current
+            // ───── Identification ─────
             id: v1.id,
             hostname: v1.hostname,
+            change_reason: Self::map_v1_context(&v1.context),
+            timestamp: v1.timestamp,
+
+            // ───── System Info ─────
             derivation_path: v1.derivation_path,
-            context: v1.context,
             os: v1.os,
             kernel: v1.kernel,
             memory_gb: v1.memory_gb,
             uptime_secs: v1.uptime_secs,
             cpu_brand: v1.cpu_brand,
             cpu_cores: v1.cpu_cores,
+
+            // ───── Hardware IDs ─────
             board_serial: v1.board_serial,
             product_uuid: v1.product_uuid,
             rootfs_uuid: v1.rootfs_uuid,
-            timestamp: v1.timestamp,
+            chassis_serial: v1.chassis_serial,
+            bios_version: v1.bios_version,
+            cpu_microcode: v1.cpu_microcode,
 
-            // New fields that didn't exist in V1 - default to None
-            chassis_serial: None,
-            bios_version: None,
-            cpu_microcode: None,
-            network_interfaces: None,
-            primary_mac_address: None,
-            primary_ip_address: None,
-            gateway_ip: None,
-            selinux_status: None,
-            tpm_present: None,
-            secure_boot_enabled: None,
-            fips_mode: None,
-            agent_version: None,
-            agent_build_hash: None,
-            nixos_version: None,
+            // ───── Network Identity ─────
+            network_interfaces: v1.network_interfaces,
+            primary_mac_address: v1.primary_mac_address,
+            primary_ip_address: v1.primary_ip_address,
+            gateway_ip: v1.gateway_ip,
+
+            // ───── Security & Compliance ─────
+            selinux_status: v1.selinux_status,
+            tpm_present: v1.tpm_present,
+            secure_boot_enabled: v1.secure_boot_enabled,
+            fips_mode: v1.fips_mode,
+
+            // ───── Software Identity ─────
+            agent_version: v1.agent_version,
+            agent_build_hash: v1.agent_build_hash,
+            nixos_version: v1.nixos_version,
         }
     }
 
-    pub fn gather(hostname: &str, context: &str, derivation_path: &str) -> Result<Self> {
+    pub fn gather(hostname: &str, change_reason: &str, derivation_path: &str) -> Result<Self> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -188,7 +219,7 @@ impl SystemState {
             timestamp: Some(Utc::now()),
             hostname: hostname.to_string(),
             derivation_path: Some(derivation_path.to_string()),
-            context: context.to_string(),
+            change_reason: change_reason.to_string(),
             os,
             kernel,
             memory_gb,
@@ -223,9 +254,9 @@ impl fmt::Display for SystemState {
 
         write!(
             f,
-            "✅ accepted agent: {}\n   • context:      {}\n   • hostname:     {}\n   • hash:         {}\n   • os:           {}\n   • kernel:       {}\n   • memory:       {} GB\n   • uptime:       {}d {}h\n   • cpu:          {} ({})\n   • board_serial: {}\n   • uuid:         {}",
+            "✅ accepted agent: {}\n   • change_reason:      {}\n   • hostname:     {}\n   • hash:         {}\n   • os:           {}\n   • kernel:       {}\n   • memory:       {} GB\n   • uptime:       {}d {}h\n   • cpu:          {} ({})\n   • board_serial: {}\n   • uuid:         {}",
             self.hostname,
-            self.context,
+            self.change_reason,
             self.hostname,
             self.derivation_path.as_deref().unwrap_or("unknown"),
             self.os.as_deref().unwrap_or("unknown"),

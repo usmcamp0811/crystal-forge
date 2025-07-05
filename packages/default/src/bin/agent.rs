@@ -42,51 +42,95 @@ fn readlink_path(path: &str) -> Result<PathBuf> {
 ///
 /// Returns an error if configuration cannot be loaded, the key cannot be read,
 /// signing fails, or the HTTP request fails.
-pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
+/// Creates and signs a system state payload
+fn create_signed_payload(
+    current_system: &OsStr,
+    context: &str,
+) -> Result<(SystemState, String, String)> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = cfg.client.expect("client config is required for agent");
 
-    // TODO: Add MAC Address & Hardware fingerprint along with hostname
     let hostname = hostname::get()?.to_string_lossy().into_owned();
     let system_hash = current_system.to_string_lossy().into_owned();
 
-    // construct payload to be sent to the server
+    // Construct payload to be sent to the server
     let payload = SystemState::gather(&hostname, context, &system_hash)?;
 
-    // Then serialize and send as before
+    // Serialize payload
     let payload_json = serde_json::to_string(&payload)?;
 
     // Load and decode private key from file
     let key_bytes = STANDARD
         .decode(fs::read_to_string(&client_cfg.private_key)?.trim())
         .context("failed to decode base64 private key")?;
-
     let signing_key = SigningKey::from_bytes(
         key_bytes
             .as_slice()
             .try_into()
             .context("expected a 32-byte Ed25519 private key")?,
     );
-    let signature = signing_key.sign(payload_json.as_bytes());
 
+    // Sign the payload
+    let signature = signing_key.sign(payload_json.as_bytes());
     let signature_b64 = STANDARD.encode(signature.to_bytes());
 
-    // Send HTTP POST with signed payload
+    Ok((payload, payload_json, signature_b64))
+}
+
+/// Posts system state changes to the server
+pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result<()> {
+    let cfg = CrystalForgeConfig::load()?;
+    let client_cfg = cfg.client.expect("client config is required for agent");
+
+    let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
+    let hostname = hostname::get()?.to_string_lossy().into_owned();
+
+    // Send to state endpoint
     let client = Client::new();
     let url = format!(
-        "http://{}:{}/current-system",
+        "http://{}:{}/agent/state",
         client_cfg.server_host, client_cfg.server_port
     );
 
-    println!("Server: {}", url);
-
+    println!("Posting state change to: {}", url);
     let res = client
         .post(url)
         .header("X-Signature", signature_b64)
         .header("X-Key-ID", hostname)
         .body(payload_json)
         .send()
-        .context("failed to send POST")?;
+        .context("failed to send state change POST")?;
+
+    if !res.status().is_success() {
+        anyhow::bail!("server responded with {}", res.status());
+    }
+
+    Ok(())
+}
+
+/// Posts heartbeat to the server
+pub fn post_system_heartbeat(current_system: &OsStr, context: &str) -> Result<()> {
+    let cfg = CrystalForgeConfig::load()?;
+    let client_cfg = cfg.client.expect("client config is required for agent");
+
+    let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
+    let hostname = hostname::get()?.to_string_lossy().into_owned();
+
+    // Send to heartbeat endpoint
+    let client = Client::new();
+    let url = format!(
+        "http://{}:{}/agent/heartbeat",
+        client_cfg.server_host, client_cfg.server_port
+    );
+
+    println!("Posting heartbeat to: {}", url);
+    let res = client
+        .post(url)
+        .header("X-Signature", signature_b64)
+        .header("X-Key-ID", hostname)
+        .body(payload_json)
+        .send()
+        .context("failed to send heartbeat POST")?;
 
     if !res.status().is_success() {
         anyhow::bail!("server responded with {}", res.status());
@@ -97,7 +141,12 @@ pub fn post_system_state(current_system: &OsStr, context: &str) -> Result<()> {
 
 /// Handles an inotify event for a specific file name by reading the current system path
 /// and invoking a callback to record the system state if the event matches "current-system".
-fn handle_event<F, R>(name: &OsStr, context: &str, readlink_fn: F, insert_fn: R) -> Result<()>
+fn report_current_system_derivation<F, R>(
+    name: &OsStr,
+    context: &str,
+    readlink_fn: F,
+    insert_fn: R,
+) -> Result<()>
 where
     F: Fn(&str) -> Result<PathBuf>,
     R: Fn(&OsStr, &str) -> Result<()>,
@@ -118,16 +167,20 @@ where
 
 /// Runs a loop that watches for inotify events and handles "current-system" changes using
 /// provided readlink and insertion callbacks. Designed for testing and flexibility.
-async fn watch_system_loop<F, R>(inotify: &mut Inotify, readlink_fn: F, insert_fn: R) -> Result<()>
+async fn watch_for_system_changes<F, R>(
+    inotify: &mut Inotify,
+    readlink_fn: F,
+    insert_fn: R,
+) -> Result<()>
 where
     F: Fn(&str) -> Result<PathBuf>,
     R: Fn(&OsStr, &str) -> Result<()>,
 {
     println!("Watching /run for changes to current-system...");
 
-    handle_event(
+    report_current_system_derivation(
         OsStr::new("current-system"),
-        "agent-startup",
+        "startup",
         &readlink_fn,
         &insert_fn,
     )?;
@@ -135,21 +188,21 @@ where
         for event in inotify.read_events()? {
             if let Some(name) = event.name {
                 println!("Detected change to /run/current-system");
-                handle_event(&name, "agent-loop", &readlink_fn, &insert_fn)?;
+                report_current_system_derivation(&name, "config_change", &readlink_fn, &insert_fn)?;
             }
         }
     }
 }
 
-async fn run_agent_health_check_loop() -> Result<()> {
+async fn run_periodic_heartbeat_loop() -> Result<()> {
     sleep(Duration::from_secs(600)).await;
     info!("💓 Starting heartbeat loop (every 10m)...");
     loop {
-        if let Err(e) = handle_event(
+        if let Err(e) = report_current_system_derivation(
             OsStr::new("current-system"),
-            "agent-heartbeat",
+            "heartbeat",
             readlink_path,
-            post_system_state,
+            post_system_heartbeat,
         ) {
             error!("❌ Heartbeat failed: {e}");
         }
@@ -167,9 +220,9 @@ pub async fn watch_system() -> Result<()> {
         AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO,
     )?;
 
-    tokio::spawn(run_agent_health_check_loop());
+    tokio::spawn(run_periodic_heartbeat_loop());
     // TODO: add watch for home-manager too
-    watch_system_loop(&mut inotify, readlink_path, post_system_state).await
+    watch_for_system_changes(&mut inotify, readlink_path, post_system_state_change).await
 }
 
 #[cfg(test)]
@@ -190,7 +243,7 @@ mod tests {
             Ok(())
         };
 
-        let result = handle_event(
+        let result = report_current_system_derivation(
             OsStr::new("current-system"),
             "test",
             readlink_mock,
@@ -205,7 +258,12 @@ mod tests {
         let readlink_mock = |_path: &str| panic!("should not be called");
         let insert_mock = |_os: &OsStr, _ctx: &str| panic!("should not be called"); // ← now takes 2 args
 
-        let result = handle_event(OsStr::new("other-file"), "test", readlink_mock, insert_mock);
+        let result = report_current_system_derivation(
+            OsStr::new("other-file"),
+            "test",
+            readlink_mock,
+            insert_mock,
+        );
         assert!(result.is_ok());
     }
 }
