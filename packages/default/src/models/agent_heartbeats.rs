@@ -39,7 +39,7 @@ impl AgentHeartbeat {
             // States are the same - create heartbeat
             Ok(Self {
                 id: 0, // Will be set by database
-                system_id: Self::get_or_create_system_uuid(pool, &state.hostname).await?,
+                system_id: Self::get_latest_system_state_id(pool, &state.hostname).await?,
                 timestamp: state.timestamp.unwrap_or_else(|| Utc::now()),
                 agent_version: state.agent_version.clone(),
                 agent_build_hash: state.agent_build_hash.clone(),
