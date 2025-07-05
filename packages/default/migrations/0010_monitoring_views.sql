@@ -1,5 +1,3 @@
--- Migration: Create monitoring views
--- File: packages/default/migrations/XXXX_create_monitoring_views.sql
 -- View 1: Systems Current State
 -- Shows each system with their current running configuration
 CREATE VIEW view_systems_current_state AS
