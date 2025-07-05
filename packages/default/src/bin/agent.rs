@@ -188,7 +188,7 @@ where
         for event in inotify.read_events()? {
             if let Some(name) = event.name {
                 println!("Detected change to /run/current-system");
-                report_current_system_derivation(&name, "agent-loop", &readlink_fn, &insert_fn)?;
+                report_current_system_derivation(&name, "config_change", &readlink_fn, &insert_fn)?;
             }
         }
     }
