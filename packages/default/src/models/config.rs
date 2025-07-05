@@ -2,8 +2,7 @@ use crate::models::systems::System;
 use crate::queries::environments::{
     get_environment_id_by_name, get_or_insert_environment_id_by_config,
 };
-use crate::queries::flakes::get_flake_id_by_repo_url;
-use crate::queries::flakes::insert_flake;
+use crate::queries::flakes::{get_flake_id_by_repo_url, insert_flake};
 use crate::queries::systems::insert_system;
 use anyhow::{Context, Result};
 use config::Config;
@@ -12,7 +11,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::collections::HashMap;
 use std::env;
 use tokio_postgres::NoTls;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 #[derive(Debug, Deserialize)]
 pub struct CrystalForgeConfig {
