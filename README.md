@@ -4,7 +4,7 @@ Crystal Forge is a lightweight monitoring and compliance system for NixOS machin
 
 Crystal Forge builds secure, verifiable software ecosystems by embedding compliance, integrity, and trust into the entire lifecycle—from development to deployment. We empower organizations to evolve DevSecOps into a system of continuous assurance, where every component is provable, auditable, aligned with policy, and mapped directly to required security frameworks.
 
-> ⚠️ **Early days:** This project is under active development and not yet production-ready. I’m working to get the minimal set of features running first.
+> 📋 **Beta Release**: This is the first official release (v0.1.0) with core monitoring functionality. While stable for basic use cases, advanced features are still in development.
 
 ---
 
@@ -14,28 +14,48 @@ Crystal Forge builds secure, verifiable software ecosystems by embedding complia
 - Strong cryptographic identity and verification of agents
 - Simple, reliable communication between clients and server
 - Store system metadata and fingerprints for compliance/auditability
+- Efficient monitoring with intelligent change detection
 
 ---
 
 ## 🧱 Architecture
 
-- `agent`: runs on NixOS systems and sends signed system fingerprints
-- `server`: receives and verifies agent reports, stores in PostgreSQL
-- `cf-keygen`: generates Ed25519 keys for agents
+- **`agent`**: runs on NixOS systems, monitors configuration changes, sends signed system fingerprints
+- **`server`**: receives and verifies agent reports, evaluates NixOS configurations, stores in PostgreSQL
+- **`evaluation engine`**: builds and tracks NixOS system derivations from Git commits
+- **`heartbeat system`**: efficient monitoring distinguishing between liveness signals and actual changes
 
 ---
 
-## 📦 Features (WIP)
+## 📦 Features (v0.1.0)
 
-- [x] Agent fingerprint collection
-- [x] Ed25519 signature-based authentication
-- [x] Server ingestion endpoint with verification
-- [x] PostgreSQL backend
-- [x] Auto-initializes DB table (`system_state`)
-- [ ] Dashboard for tracking system state
-- [ ] System drift detection
-- [ ] Rule-based compliance checks
-- [ ] Policy push / remote execution
+### Core Monitoring
+
+- [x] Comprehensive system fingerprint collection (hardware, software, network, security)
+- [x] Ed25519 signature-based agent authentication
+- [x] Intelligent heartbeat vs. state change detection
+- [x] Real-time system configuration monitoring via inotify
+
+### Infrastructure
+
+- [x] PostgreSQL backend with optimized schema
+- [x] Database migrations and auto-initialization
+- [x] Dual endpoint architecture (`/agent/heartbeat`, `/agent/state`)
+- [x] Git webhook integration for configuration updates
+
+### NixOS Integration
+
+- [x] Automatic NixOS configuration evaluation
+- [x] Derivation path tracking and comparison
+- [x] Background processing with concurrent evaluation
+- [x] System drift detection (current vs. latest configurations)
+
+### Coming Soon
+
+- [ ] Web dashboard for system monitoring
+- [ ] Advanced compliance reporting
+- [ ] Rule-based policy enforcement
+- [ ] Remote system management capabilities
 
 ---
 
@@ -61,14 +81,16 @@ name = "crystal_forge"
 host = "0.0.0.0"
 port = 3000
 
-[server.authorized_keys]
-host1 = "<base64-pubkey>"
-host2 = "<base64-pubkey>"
-
 [client]
 server_host = "localhost"
 server_port = 3000
 private_key = "/var/lib/crystal_forge/host.key"
+
+# System configurations to track
+[[systems]]
+hostname = "server1"
+flake_url = "git+https://github.com/yourorg/nixos-configs"
+derivation = "/nix/store/...-nixos-system-server1"
 ```
 
 Optionally set `CONFIG_PATH=/path/to/config.toml` to override the default location.
@@ -84,7 +106,6 @@ Crystal Forge can be configured entirely via environment variables, using a nest
 ```bash
 CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
 CRYSTAL_FORGE__SERVER__PORT=3000
-CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__host1=<base64-pubkey>
 CRYSTAL_FORGE__DATABASE__HOST=localhost
 CRYSTAL_FORGE__DATABASE__USER=crystal_forge
 CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
@@ -119,10 +140,6 @@ CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal_forge/host.key
       enable = true;
       host = "0.0.0.0";
       port = 3000;
-      authorized_keys = {
-        host1 = "<base64-pubkey>";
-        host2 = "<base64-pubkey>";
-      };
     };
 
     client = {
@@ -131,11 +148,43 @@ CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal_forge/host.key
       server_port = 3000;
       private_key = "/var/lib/crystal_forge/host.key";
     };
+
+    # Systems to monitor
+    systems = [
+      {
+        hostname = "server1";
+        flake_url = "git+https://github.com/yourorg/nixos-configs";
+        derivation = "/nix/store/...-nixos-system-server1";
+      }
+    ];
   };
 }
 ```
 
 The module will automatically generate the correct environment variables, systemd services, and config paths based on your input.
+
+## 🔍 Monitoring Features
+
+### System Fingerprinting
+
+Crystal Forge collects comprehensive system information including:
+
+- Hardware identifiers (serial numbers, UUIDs, MAC addresses)
+- System specifications (CPU, memory, network interfaces)
+- Security status (TPM, Secure Boot, SELinux, FIPS mode)
+- Software versions (NixOS, kernel, agent)
+
+### Change Detection
+
+- **Heartbeats**: Periodic liveness signals without state changes
+- **State Changes**: Full system reports when configuration actually changes
+- **Drift Detection**: Compare running systems against evaluated configurations
+
+### Performance
+
+- Optimized database storage reducing redundant data
+- Concurrent configuration evaluation
+- Background processing for minimal system impact
 
 ## 🧑‍💻 Development
 
@@ -180,5 +229,21 @@ From inside the dev shell:
 
 - `sqlx-refresh` — Resets the database and prepares SQLx.
 - `sqlx-prepare` — Runs `cargo sqlx prepare` without resetting.
+- `simulate-push` — Test webhook functionality
 
 The dev shell auto-generates an Ed25519 keypair if missing and sets all required `CRYSTAL_FORGE__*` env vars.
+
+---
+
+## 📊 System Requirements
+
+- **Server**: PostgreSQL 12+, Linux/macOS
+- **Agent**: NixOS systems only
+- **Network**: HTTPS recommended for production deployments
+
+## 🔐 Security
+
+- Ed25519 cryptographic signatures for all agent communications
+- No sensitive data transmitted without verification
+- Hardware-based system fingerprinting for identity assurance
+- Configurable authentication keys per system
