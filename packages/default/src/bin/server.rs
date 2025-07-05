@@ -3,6 +3,7 @@ use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::background::spawn_server_background_tasks;
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
+use crystal_forge::handlers::agent::heartbeat;
 use crystal_forge::handlers::agent::state;
 use crystal_forge::handlers::agent_request::CFState;
 use crystal_forge::handlers::webhook::webhook_handler;

@@ -1,10 +1,12 @@
 use crate::models::{system_states::SystemState, system_states::SystemStateV1, systems::System};
 use crate::queries::systems::get_by_hostname;
+use anyhow::Result;
 use axum::extract::FromRef;
 use axum::{http::HeaderMap, http::StatusCode};
 use base64::engine::{Engine, general_purpose}; // Add Engine trait
 use bytes::Bytes; // Add this import
 use ed25519_dalek::Signature;
+use ed25519_dalek::Verifier;
 use sqlx::PgPool;
 
 pub struct VerifiedAgentRequest {
@@ -48,7 +50,12 @@ pub async fn authenticate_agent_request(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if system.verifying_key().verify(&body, &signature).is_err() {
+    if system
+        .public_key
+        .verifying_key()
+        .verify(&body, &signature)
+        .is_err()
+    {
         return Err(StatusCode::UNAUTHORIZED);
     }
 

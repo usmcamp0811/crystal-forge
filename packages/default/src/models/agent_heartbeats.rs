@@ -2,6 +2,8 @@ use crate::models::system_states::SystemState;
 use crate::queries::system_states::{
     get_last_system_state_by_hostname, get_latest_system_state_id,
 };
+
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
@@ -31,11 +33,15 @@ impl AgentHeartbeat {
         }
 
         // Get the last known state for this system
-        let last_state = match get_last_system_state_by_hostname(pool, &state.hostname).await? {
-            Some(last) => last,
-            None => {
-                // No previous state exists - this is the first report, needs full state
+        let last_state = match get_last_system_state_by_hostname(pool, &state.hostname).await {
+            Ok(Some(state)) => state,
+            Ok(None) => {
+                // No previous state exists - this is the first report
                 return Err(StateChangeRequired::FirstReport);
+            }
+            Err(_db_error) => {
+                // Database error - treat as requiring state change to be safe
+                return Err(StateChangeRequired::DatabaseError);
             }
         };
 
@@ -44,7 +50,11 @@ impl AgentHeartbeat {
             // States are the same - create heartbeat
             Ok(Self {
                 id: 0, // Will be set by database
-                system_state_id: get_latest_system_state_id(pool, &state.hostname).await?,
+                system_state_id: match get_latest_system_state_id(pool, &state.hostname).await {
+                    Ok(Some(id)) => id,
+                    Ok(None) => return Err(StateChangeRequired::FirstReport),
+                    Err(_) => return Err(StateChangeRequired::DatabaseError),
+                },
                 timestamp: state.timestamp.unwrap_or_else(|| Utc::now()),
                 agent_version: state.agent_version.clone(),
                 agent_build_hash: state.agent_build_hash.clone(),
@@ -97,6 +107,7 @@ pub enum StateChangeRequired {
     NotHeartbeatType,
     FirstReport,
     StateChanged,
+    DatabaseError, // Add this variant
 }
 
 impl std::fmt::Display for StateChangeRequired {
@@ -105,6 +116,7 @@ impl std::fmt::Display for StateChangeRequired {
             Self::NotHeartbeatType => write!(f, "Change reason indicates this is not a heartbeat"),
             Self::FirstReport => write!(f, "No previous state exists - first report"),
             Self::StateChanged => write!(f, "System state has changed from previous report"),
+            Self::DatabaseError => write!(f, "Database error occurred while checking state"),
         }
     }
 }
