@@ -88,7 +88,7 @@ pub async fn insert_system_state(
 
     Ok(())
 }
-pub fn get_last_system_state_by_hostname(
+pub async fn get_last_system_state_by_hostname(
     pool: &PgPool,
     hostname: &str,
 ) -> Result<Option<SystemState>> {

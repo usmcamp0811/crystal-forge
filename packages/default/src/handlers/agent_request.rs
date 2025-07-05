@@ -1,5 +1,6 @@
-use crate::models::systems::System;
+use crate::models::{system_states::SystemState, system_states::SystemStateV1, systems::System};
 use crate::queries::systems::get_by_hostname;
+use axum::extract::FromRef;
 use axum::{http::HeaderMap, http::StatusCode};
 use base64::engine::{Engine, general_purpose}; // Add Engine trait
 use bytes::Bytes; // Add this import

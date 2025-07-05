@@ -1,2 +1,2 @@
-pub mod hearbeat;
+pub mod heartbeat;
 pub mod state;

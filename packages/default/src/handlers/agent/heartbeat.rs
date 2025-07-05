@@ -1,4 +1,7 @@
-use crate::handlers::agent_request::{CFState, authenticate_agent_request};
+use crate::handlers::agent_request::{
+    CFState, authenticate_agent_request, try_deserialize_system_state,
+};
+use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::models::system_states::{SystemState, SystemStateV1};
 use crate::queries::system_states::insert_system_state;
 use crate::queries::systems::get_by_hostname;
@@ -46,10 +49,23 @@ pub async fn log(
         agent_request.system.hostname, payload
     );
 
-    // Insert with compatibility flag
-    if let Err(e) = insert_system_state(&pool, &payload, version_compatible).await {
-        debug!("❌ failed to insert into DB: {e:?}");
-        return StatusCode::INTERNAL_SERVER_ERROR;
+    match AgentHeartbeat::from_system_state_if_heartbeat(&payload, &pool).await {
+        Ok(heartbeat) => {
+            // This is a heartbeat - insert to heartbeats table
+            if let Err(e) = insert_agent_heartbeat(&pool, &heartbeat).await {
+                debug!("❌ failed to insert heartbeat: {e:?}");
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+            info!("💓 Heartbeat recorded for {}", payload.hostname);
+        }
+        Err(_state_change_reason) => {
+            // State changed - insert full state record
+            if let Err(e) = insert_system_state(&pool, &payload, version_compatible).await {
+                debug!("❌ failed to insert system state: {e:?}");
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            }
+            info!("📊 State change recorded for {}", payload.hostname);
+        }
     }
 
     // Return different status codes based on compatibility

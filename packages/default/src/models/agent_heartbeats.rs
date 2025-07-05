@@ -52,7 +52,7 @@ impl AgentHeartbeat {
 
     /// Check if the change reason indicates this should be a heartbeat
     fn is_heartbeat_change_reason(change_reason: &str) -> bool {
-        matches!(change_reason, "heartbeat" | "state_delta")
+        matches!(change_reason, "heartbeat")
     }
 
     /// Compare two system states to determine if they're equivalent
