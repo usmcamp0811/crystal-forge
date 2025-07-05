@@ -114,3 +114,76 @@ COMMENT ON VIEW view_systems_deployment_status IS 'Combined view with deployment
 -- Add index for heartbeat lookups
 CREATE INDEX IF NOT EXISTS idx_agent_heartbeats_system_state_timestamp ON agent_heartbeats (system_state_id, timestamp DESC);
 
+-- View: Systems Behind Latest Configuration
+CREATE VIEW view_systems_behind AS
+SELECT
+    hostname,
+    current_derivation,
+    latest_derivation,
+    drift_duration_seconds,
+    last_seen
+FROM
+    view_systems_deployment_status
+WHERE
+    is_current = FALSE
+ORDER BY
+    drift_duration_seconds DESC;
+
+COMMENT ON VIEW view_systems_behind IS 'Systems that are running behind the latest evaluated configuration';
+
+-- View: Current System Inventory
+CREATE VIEW view_systems_inventory AS
+SELECT
+    hostname,
+    current_derivation_path,
+    ip_address,
+    uptime_days,
+    os,
+    kernel,
+    last_seen
+FROM
+    view_systems_current_state
+ORDER BY
+    last_seen DESC;
+
+COMMENT ON VIEW view_systems_inventory IS 'Complete inventory of all systems with current state and activity';
+
+-- View: Evaluation Pipeline Status
+CREATE VIEW view_evaluation_pipeline AS
+SELECT
+    hostname,
+    latest_derivation_path,
+    evaluation_status,
+    commit_timestamp,
+    commit_hash
+FROM
+    view_systems_latest_commit
+ORDER BY
+    commit_timestamp DESC;
+
+COMMENT ON VIEW view_evaluation_pipeline IS 'Status of the evaluation pipeline showing latest evaluations per system';
+
+-- View: Systems Requiring Attention
+CREATE VIEW view_systems_attention AS
+SELECT
+    hostname,
+    CASE WHEN is_current IS NULL THEN
+        'No Evaluation'
+    WHEN is_current = FALSE THEN
+        'Behind Latest'
+    ELSE
+        'Up to Date'
+    END AS status,
+    last_seen,
+    last_deployed,
+    current_derivation,
+    latest_derivation
+FROM
+    view_systems_deployment_status
+WHERE
+    is_current IS NOT TRUE
+ORDER BY
+    last_seen DESC;
+
+COMMENT ON VIEW view_systems_attention IS 'Systems that need attention - either behind latest config or have no evaluation';
+
