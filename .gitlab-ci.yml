@@ -20,6 +20,7 @@ auto-bump-patch:
     - git remote set-url origin "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
   script:
     - nix run .#ci.bump-patch
+    - nix run .#ci.cleanup-patch-tags -- 5 # Keep latest 5 patch tags
   only:
     - main
   when: on_success

@@ -78,5 +78,64 @@ with lib.crystal-forge; let
   get-version = pkgs.writeShellScriptBin "get-version" ''
     grep '^version =' packages/default/Cargo.toml | cut -d'"' -f2
   '';
+  cleanup-patch-tags = pkgs.writeShellScriptBin "cleanup-patch-tags" ''
+    set -euo pipefail
+
+    KEEP_COUNT=''${1:-10}  # Default to keeping 10 tags, but allow override
+
+    echo "🏷️  Cleaning up patch tags, keeping latest $KEEP_COUNT..."
+
+    # Get all tags, sort by version (semantic sort), filter to current major.minor
+    CURRENT_VERSION=$(grep '^version =' packages/default/Cargo.toml | cut -d'"' -f2)
+    MAJOR_MINOR=$(echo $CURRENT_VERSION | cut -d'.' -f1-2)
+
+    echo "Current version: $CURRENT_VERSION (keeping tags for $MAJOR_MINOR.x)"
+
+    # Get patch tags for current major.minor version, sorted by patch number (newest first)
+    PATCH_TAGS=$(${pkgs.git}/bin/git tag -l "v$MAJOR_MINOR.*" | \
+      ${pkgs.gnugrep}/bin/grep -E "^v$MAJOR_MINOR\.[0-9]+$" | \
+      ${pkgs.coreutils}/bin/sort -V -r)
+
+    if [ -z "$PATCH_TAGS" ]; then
+      echo "No patch tags found for $MAJOR_MINOR.x"
+      exit 0
+    fi
+
+    TOTAL_TAGS=$(echo "$PATCH_TAGS" | ${pkgs.coreutils}/bin/wc -l)
+    echo "Found $TOTAL_TAGS patch tags for $MAJOR_MINOR.x"
+
+    if [ "$TOTAL_TAGS" -le "$KEEP_COUNT" ]; then
+      echo "Only $TOTAL_TAGS tags found, nothing to clean up"
+      exit 0
+    fi
+
+    # Get tags to delete (everything after the first KEEP_COUNT)
+    TAGS_TO_DELETE=$(echo "$PATCH_TAGS" | ${pkgs.coreutils}/bin/tail -n +$((KEEP_COUNT + 1)))
+    DELETE_COUNT=$(echo "$TAGS_TO_DELETE" | ${pkgs.coreutils}/bin/wc -l)
+
+    echo "Will delete $DELETE_COUNT old patch tags:"
+    echo "$TAGS_TO_DELETE"
+
+    # Ask for confirmation unless in CI
+    if [ "''${CI:-}" != "true" ]; then
+      echo -n "Delete these tags? (y/N): "
+      read -r CONFIRM
+      if [ "$CONFIRM" != "y" ] && [ "$CONFIRM" != "Y" ]; then
+        echo "Cancelled"
+        exit 0
+      fi
+    fi
+
+    # Delete tags locally and remotely
+    echo "$TAGS_TO_DELETE" | while IFS= read -r tag; do
+      echo "Deleting $tag..."
+      ${pkgs.git}/bin/git tag -d "$tag" || true
+      if [ "''${CI:-}" = "true" ]; then
+        ${pkgs.git}/bin/git push origin ":refs/tags/$tag" || true
+      fi
+    done
+
+    echo "✅ Cleanup complete!"
+  '';
 in
-  bump-patch // {inherit bump-patch bump-version;}
+  bump-patch // {inherit bump-patch bump-version cleanup-patch-tags;}
