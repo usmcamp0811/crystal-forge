@@ -1,5 +1,13 @@
 -- View 1: Systems Current State
 -- Shows each system with their current running configuration
+-- Drop existing views if they exist
+DROP VIEW IF EXISTS view_systems_current_state CASCADE;
+
+DROP VIEW IF EXISTS view_monitored_flake_commits CASCADE;
+
+DROP VIEW IF EXISTS view_current_commit CASCADE;
+
+-- Recreate view: view_systems_current_state
 CREATE VIEW view_systems_current_state AS
 SELECT
     s.id,
@@ -36,8 +44,9 @@ FROM
             ah.timestamp DESC
         LIMIT 1) ah ON TRUE;
 
-COMMENT ON VIEW view_systems_current_state IS 'Shows each system with current config, last deployment time, and true last seen (including heartbeats)';
+COMMENT ON VIEW view_systems_current_state IS 'Shows each system with current config, last deployment time, and true last seen (including heartbeats).';
 
+-- Recreate view: view_monitored_flake_commits
 CREATE VIEW view_monitored_flake_commits AS
 SELECT
     c.id AS commit_id,
@@ -53,6 +62,7 @@ ORDER BY
 
 COMMENT ON VIEW view_monitored_flake_commits IS 'Shows all commits for monitored flakes, including flake name, repo URL, commit hash, and timestamp, ordered by most recent first.';
 
+-- Recreate view: view_current_commit
 CREATE VIEW view_current_commit AS
 SELECT
     c.id AS commit_id,
@@ -72,47 +82,36 @@ WHERE
 
 COMMENT ON VIEW view_current_commit IS 'Shows the most recent commit for each monitored flake, including commit and flake information.';
 
+CREATE VIEW view_systems_latest_flake_commit AS
 SELECT
-    s.id,
-    s.hostname,
-    c.commit_hash
-FROM
-    SYSTEM s
-    LEFT JOIN LATERAL (
-        SELECT
-            *
-        FROM
-            commits c
-        WHERE
-            s.)
-    -- View 2: Systems Latest Evaluation
-    -- Shows each system with the latest evaluated derivation
-    CREATE VIEW view_systems_latest_commit AS
+    latest.system_id AS id,
+    latest.hostname,
+    latest.commit_id,
+    latest.git_commit_hash,
+    latest.commit_timestamp,
+    latest.repo_url
+FROM (
     SELECT
-        et.target_name AS hostname,
-        et.derivation_path AS latest_derivation_path,
-        et.status AS evaluation_status,
-        c.commit_timestamp AS commit_timestamp,
-        c.git_commit_hash AS commit_hash
-    FROM ( SELECT DISTINCT ON (target_name)
-            target_name,
-            derivation_path,
-            status,
-            completed_at,
-            commit_id
-        FROM
-            evaluation_targets
-        WHERE
-            status = 'complete'
-        ORDER BY
-            target_name,
-            completed_at DESC) et
-    JOIN commits c ON et.commit_id = c.id
-ORDER BY
-    et.target_name;
+        et.*,
+        s.id AS system_id,
+        s.hostname,
+        f.id AS flake_id,
+        c.commit_timestamp,
+        c.git_commit_hash,
+        f.repo_url,
+        ROW_NUMBER() OVER (PARTITION BY s.id, f.id ORDER BY c.commit_timestamp DESC) AS rn
+    FROM
+        evaluation_targets et
+        JOIN systems s ON et.target_name = s.hostname
+        JOIN commits c ON c.id = et.commit_id
+        JOIN flakes f ON f.id = c.flake_id) latest
+WHERE
+    latest.rn = 1;
 
-COMMENT ON VIEW view_systems_latest_commit IS 'Shows each system with the latest evaluated derivation - most recent completed evaluation per system';
+COMMENT ON VIEW view_systems_latest_flake_commit IS 'Shows the latest commit for each flake evaluated by each system, including commit ID, timestamp, and repository URL.';
 
+--- Stuff i made
+---
 -- View 3: Systems Deployment Status (updated)
 CREATE VIEW view_systems_deployment_status AS
 SELECT
