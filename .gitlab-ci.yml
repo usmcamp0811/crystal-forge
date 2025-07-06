@@ -16,6 +16,8 @@ auto-bump-patch:
   stage: bump
   tags:
     - nix
+  before_script:
+    - git remote set-url origin "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
   script:
     - nix run .#ci.bump-patch
   only:
@@ -26,6 +28,8 @@ manual-version-bump:
   stage: bump
   tags:
     - nix
+  before_script:
+    - git remote set-url origin "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
   script:
     - nix run .#ci.bump-version -- $NEW_VERSION
   only:
