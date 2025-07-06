@@ -17,52 +17,19 @@ auto-bump-patch:
   tags:
     - nix
   script:
-    - CURRENT=$(grep '^version =' packages/default/Cargo.toml | cut -d'"' -f2)
-    - echo "Current version: $CURRENT"
-    - major=$(echo $CURRENT | cut -d'.' -f1)
-    - minor=$(echo $CURRENT | cut -d'.' -f2)
-    - patch=$(echo $CURRENT | cut -d'.' -f3)
-    - NEW_VERSION="$major.$minor.$((patch + 1))"
-    - echo "Bumping to: $NEW_VERSION"
-    - sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" packages/default/Cargo.toml
-    - git config user.name "Crystal Forge CI"
-    - git config user.email "ci@crystal-forge"
-    - git add packages/default/Cargo.toml
-    - git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
-    - git push origin HEAD:main
-    - git tag "v$NEW_VERSION"
-    - git push origin "v$NEW_VERSION"
+    - nix run .#bump-patch
   only:
     - main
   when: on_success
 
-# Manual job for major/minor bumps
 manual-version-bump:
   stage: bump
   tags:
     - nix
   script:
-    - |
-      echo "Current version: $(grep '^version =' packages/default/Cargo.toml | cut -d'"' -f2)"
-      echo "Set NEW_VERSION variable to desired version (e.g., 0.2.0)"
-
-      if [ -z "$NEW_VERSION" ]; then
-        echo "❌ NEW_VERSION variable required"
-        exit 1
-      fi
-
-      sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" packages/default/Cargo.toml
-
-      git config user.name "Crystal Forge CI"
-      git config user.email "ci@crystal-forge"
-      git add packages/default/Cargo.toml
-      git commit -m "chore: bump to v$NEW_VERSION"
-      git push origin HEAD:main
-
-      git tag "v$NEW_VERSION"
-      git push origin "v$NEW_VERSION"
+    - nix run .#bump-version -- $NEW_VERSION
   only:
     - main
   when: manual
   variables:
-    NEW_VERSION: "" # Set this when running manually
+    NEW_VERSION: ""
