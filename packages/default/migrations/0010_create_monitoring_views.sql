@@ -38,6 +38,40 @@ FROM
 
 COMMENT ON VIEW view_systems_current_state IS 'Shows each system with current config, last deployment time, and true last seen (including heartbeats)';
 
+CREATE VIEW view_monitored_flake_commits AS
+SELECT
+    c.id AS commit_id,
+    f.name,
+    f.repo_url,
+    c.git_commit_hash,
+    c.commit_timestamp
+FROM
+    flakes f
+    JOIN commits c ON f.id = c.flake_id
+ORDER BY
+    c.commit_timestamp DESC;
+
+COMMENT ON VIEW view_monitored_flake_commits IS 'Shows all commits for monitored flakes, including flake name, repo URL, commit hash, and timestamp, ordered by most recent first.';
+
+CREATE VIEW view_current_commit AS
+SELECT
+    c.id AS commit_id,
+    f.name,
+    f.repo_url,
+    c.git_commit_hash,
+    c.commit_timestamp
+FROM (
+    SELECT
+        *,
+        ROW_NUMBER() OVER (PARTITION BY flake_id ORDER BY commit_timestamp DESC) AS rn
+    FROM
+        commits) c
+    JOIN flakes f ON f.id = c.flake_id
+WHERE
+    c.rn = 1;
+
+COMMENT ON VIEW view_current_commit IS 'Shows the most recent commit for each monitored flake, including commit and flake information.';
+
 SELECT
     s.id,
     s.hostname,
@@ -48,8 +82,9 @@ FROM
         SELECT
             *
         FROM
-            commits c 
-        WHERE s.)
+            commits c
+        WHERE
+            s.)
     -- View 2: Systems Latest Evaluation
     -- Shows each system with the latest evaluated derivation
     CREATE VIEW view_systems_latest_commit AS
