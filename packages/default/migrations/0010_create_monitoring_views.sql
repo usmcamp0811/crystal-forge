@@ -1,117 +1,75 @@
 -- View 1: Systems Current State
 -- Shows each system with their current running configuration
--- Drop existing views if they exist
-DROP VIEW IF EXISTS view_systems_current_state CASCADE;
-
-DROP VIEW IF EXISTS view_monitored_flake_commits CASCADE;
-
-DROP VIEW IF EXISTS view_current_commit CASCADE;
-
--- Recreate view: view_systems_current_state
 CREATE VIEW view_systems_current_state AS
 SELECT
-    s.id,
-    s.hostname,
-    ss.primary_ip_address AS ip_address,
+    ss.hostname,
     ss.derivation_path AS current_derivation_path,
+    ss.timestamp AS last_deployed, -- When system state last changed
+    COALESCE(hb.last_heartbeat, ss.timestamp) AS last_seen, -- True last activity
+    ss.primary_ip_address AS ip_address,
     ROUND(ss.uptime_secs::numeric / 86400, 1) AS uptime_days,
     ss.os,
     ss.kernel,
-    ss.agent_version,
-    ss.id AS ssid,
-    ss.timestamp AS last_state_change,
-    ah.timestamp AS last_heartbeat
-FROM
-    systems s
-    LEFT JOIN LATERAL (
-        SELECT
-            *
+    ss.agent_version
+FROM ( SELECT DISTINCT ON (hostname)
+        hostname,
+        derivation_path,
+        timestamp,
+        primary_ip_address,
+        uptime_secs,
+        os,
+        kernel,
+        agent_version,
+        id
+    FROM
+        system_states
+    ORDER BY
+        hostname,
+        timestamp DESC) ss
+    LEFT JOIN (
+        -- Get the most recent heartbeat for each system
+        SELECT DISTINCT ON (ss2.hostname)
+            ss2.hostname,
+            ah.timestamp AS last_heartbeat
         FROM
-            system_states ss
-        WHERE
-            ss.hostname = s.hostname
+            system_states ss2
+            JOIN agent_heartbeats ah ON ah.system_state_id = ss2.id
         ORDER BY
-            ss.timestamp DESC
-        LIMIT 1) ss ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT
-            ah.timestamp
-        FROM
-            agent_heartbeats ah
-        WHERE
-            ah.system_state_id = ss.id
-        ORDER BY
-            ah.timestamp DESC
-        LIMIT 1) ah ON TRUE;
-
-COMMENT ON VIEW view_systems_current_state IS 'Shows each system with current config, last deployment time, and true last seen (including heartbeats).';
-
--- Recreate view: view_monitored_flake_commits
-CREATE VIEW view_monitored_flake_commits AS
-SELECT
-    c.id AS commit_id,
-    f.name,
-    f.repo_url,
-    c.git_commit_hash,
-    c.commit_timestamp
-FROM
-    flakes f
-    JOIN commits c ON f.id = c.flake_id
+            ss2.hostname,
+            ah.timestamp DESC) hb ON ss.hostname = hb.hostname
 ORDER BY
-    c.commit_timestamp DESC;
+    ss.hostname;
 
-COMMENT ON VIEW view_monitored_flake_commits IS 'Shows all commits for monitored flakes, including flake name, repo URL, commit hash, and timestamp, ordered by most recent first.';
+COMMENT ON VIEW view_systems_current_state IS 'Shows each system with current config, last deployment time, and true last seen (including heartbeats)';
 
--- Recreate view: view_current_commit
-CREATE VIEW view_current_commit AS
+-- View 2: Systems Latest Evaluation
+-- Shows each system with the latest evaluated derivation
+CREATE VIEW view_systems_latest_commit AS
 SELECT
-    c.id AS commit_id,
-    f.name,
-    f.repo_url,
-    c.git_commit_hash,
-    c.commit_timestamp
-FROM (
-    SELECT
-        *,
-        ROW_NUMBER() OVER (PARTITION BY flake_id ORDER BY commit_timestamp DESC) AS rn
+    et.target_name AS hostname,
+    et.derivation_path AS latest_derivation_path,
+    et.status AS evaluation_status,
+    c.commit_timestamp AS commit_timestamp,
+    c.git_commit_hash AS commit_hash
+FROM ( SELECT DISTINCT ON (target_name)
+        target_name,
+        derivation_path,
+        status,
+        completed_at,
+        commit_id
     FROM
-        commits) c
-    JOIN flakes f ON f.id = c.flake_id
-WHERE
-    c.rn = 1;
+        evaluation_targets
+    WHERE
+        status = 'complete'
+    ORDER BY
+        target_name,
+        completed_at DESC) et
+    JOIN commits c ON et.commit_id = c.id
+ORDER BY
+    et.target_name;
 
-COMMENT ON VIEW view_current_commit IS 'Shows the most recent commit for each monitored flake, including commit and flake information.';
+COMMENT ON VIEW view_systems_latest_commit IS 'Shows each system with the latest evaluated derivation - most recent completed evaluation per system';
 
-CREATE VIEW view_systems_latest_flake_commit AS
-SELECT
-    latest.system_id AS id,
-    latest.hostname,
-    latest.commit_id,
-    latest.git_commit_hash,
-    latest.commit_timestamp,
-    latest.repo_url
-FROM (
-    SELECT
-        et.*,
-        s.id AS system_id,
-        s.hostname,
-        f.id AS flake_id,
-        c.commit_timestamp,
-        c.git_commit_hash,
-        f.repo_url,
-        ROW_NUMBER() OVER (PARTITION BY s.id, f.id ORDER BY c.commit_timestamp DESC) AS rn
-    FROM
-        evaluation_targets et
-        JOIN systems s ON et.target_name = s.hostname
-        JOIN commits c ON c.id = et.commit_id
-        JOIN flakes f ON f.id = c.flake_id) latest
-WHERE
-    latest.rn = 1;
-
-COMMENT ON VIEW view_systems_latest_flake_commit IS 'Shows the latest commit for each flake evaluated by each system, including commit ID, timestamp, and repository URL.';
-
---- Stuff i made
----
 -- View 3: Systems Deployment Status (updated)
 CREATE VIEW view_systems_deployment_status AS
 SELECT
@@ -324,63 +282,4 @@ ORDER BY
     latest_hb.last_heartbeat DESC NULLS LAST;
 
 COMMENT ON VIEW view_system_heartbeat_health IS 'System liveness monitoring with health status based on heartbeat patterns';
-
--- THIS
-WITH latest_commit AS (
-    -- Get THE latest commit across all flakes
-    SELECT
-        id AS latest_commit_id,
-        git_commit_hash AS latest_commit_hash,
-        commit_timestamp AS latest_commit_timestamp
-    FROM
-        commits
-    ORDER BY
-        commit_timestamp DESC
-    LIMIT 1
-),
-all_systems AS (
-    -- Get all unique systems
-    SELECT DISTINCT
-        target_name AS hostname
-    FROM
-        evaluation_targets
-),
-latest_commit_evaluations AS (
-    -- Get evaluations for the latest commit
-    SELECT
-        target_name AS hostname,
-        derivation_path AS latest_derivation_path,
-        status AS evaluation_status
-    FROM
-        evaluation_targets et
-        CROSS JOIN latest_commit lc
-    WHERE
-        et.commit_id = lc.latest_commit_id
-        AND et.status = 'complete'
-),
-current_system_states AS (
-    -- Get current derivation for each system
-    SELECT DISTINCT ON (hostname)
-        hostname,
-        derivation_path AS current_derivation_path
-    FROM
-        system_states
-    ORDER BY
-        hostname,
-        timestamp DESC
-)
-SELECT
-    s.hostname,
-    css.current_derivation_path,
-    lce.latest_derivation_path,
-    lce.evaluation_status,
-    lc.latest_commit_timestamp AS commit_timestamp,
-    lc.latest_commit_hash AS commit_hash
-FROM
-    all_systems s
-    CROSS JOIN latest_commit lc
-    LEFT JOIN latest_commit_evaluations lce ON s.hostname = lce.hostname
-    LEFT JOIN current_system_states css ON s.hostname = css.hostname
-ORDER BY
-    s.hostname;
 
