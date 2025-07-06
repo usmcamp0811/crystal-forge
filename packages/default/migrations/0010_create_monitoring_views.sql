@@ -2,39 +2,43 @@
 -- Shows each system with their current running configuration
 CREATE VIEW view_systems_current_state AS
 SELECT
-    s.id,
-    s.hostname,
-    ss.derivation_path,
-    ss.timestamp AS last_deployed,
+    ss.hostname,
     ss.derivation_path AS current_derivation_path,
+    ss.timestamp AS last_deployed, -- When system state last changed
+    COALESCE(hb.last_heartbeat, ss.timestamp) AS last_seen, -- True last activity
     ss.primary_ip_address AS ip_address,
     ROUND(ss.uptime_secs::numeric / 86400, 1) AS uptime_days,
     ss.os,
     ss.kernel,
-    ss.agent_version,
-    ah.timestamp AS last_seen
-FROM
-    systems s
-    LEFT JOIN LATERAL (
-        SELECT
-            *
+    ss.agent_version
+FROM ( SELECT DISTINCT ON (hostname)
+        hostname,
+        derivation_path,
+        timestamp,
+        primary_ip_address,
+        uptime_secs,
+        os,
+        kernel,
+        agent_version,
+        id
+    FROM
+        system_states
+    ORDER BY
+        hostname,
+        timestamp DESC) ss
+    LEFT JOIN (
+        -- Get the most recent heartbeat for each system
+        SELECT DISTINCT ON (ss2.hostname)
+            ss2.hostname,
+            ah.timestamp AS last_heartbeat
         FROM
-            system_states ss
-        WHERE
-            ss.hostname = s.hostname
+            system_states ss2
+            JOIN agent_heartbeats ah ON ah.system_state_id = ss2.id
         ORDER BY
-            ss.timestamp DESC
-        LIMIT 1) ss ON TRUE
-    LEFT JOIN LATERAL (
-        SELECT
-            ah.timestamp
-        FROM
-            agent_heartbeats ah
-        WHERE
-            ah.system_state_id = ss.id
-        ORDER BY
-            ah.timestamp DESC
-        LIMIT 1) ah ON TRUE;
+            ss2.hostname,
+            ah.timestamp DESC) hb ON ss.hostname = hb.hostname
+ORDER BY
+    ss.hostname;
 
 COMMENT ON VIEW view_systems_current_state IS 'Shows each system with current config, last deployment time, and true last seen (including heartbeats)';
 
@@ -278,63 +282,4 @@ ORDER BY
     latest_hb.last_heartbeat DESC NULLS LAST;
 
 COMMENT ON VIEW view_system_heartbeat_health IS 'System liveness monitoring with health status based on heartbeat patterns';
-
--- THIS
-WITH latest_commit AS (
-    -- Get THE latest commit across all flakes
-    SELECT
-        id AS latest_commit_id,
-        git_commit_hash AS latest_commit_hash,
-        commit_timestamp AS latest_commit_timestamp
-    FROM
-        commits
-    ORDER BY
-        commit_timestamp DESC
-    LIMIT 1
-),
-all_systems AS (
-    -- Get all unique systems
-    SELECT DISTINCT
-        target_name AS hostname
-    FROM
-        evaluation_targets
-),
-latest_commit_evaluations AS (
-    -- Get evaluations for the latest commit
-    SELECT
-        target_name AS hostname,
-        derivation_path AS latest_derivation_path,
-        status AS evaluation_status
-    FROM
-        evaluation_targets et
-        CROSS JOIN latest_commit lc
-    WHERE
-        et.commit_id = lc.latest_commit_id
-        AND et.status = 'complete'
-),
-current_system_states AS (
-    -- Get current derivation for each system
-    SELECT DISTINCT ON (hostname)
-        hostname,
-        derivation_path AS current_derivation_path
-    FROM
-        system_states
-    ORDER BY
-        hostname,
-        timestamp DESC
-)
-SELECT
-    s.hostname,
-    css.current_derivation_path,
-    lce.latest_derivation_path,
-    lce.evaluation_status,
-    lc.latest_commit_timestamp AS commit_timestamp,
-    lc.latest_commit_hash AS commit_hash
-FROM
-    all_systems s
-    CROSS JOIN latest_commit lc
-    LEFT JOIN latest_commit_evaluations lce ON s.hostname = lce.hostname
-    LEFT JOIN current_system_states css ON s.hostname = css.hostname
-ORDER BY
-    s.hostname;
 
