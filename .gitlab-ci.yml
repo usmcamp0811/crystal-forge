@@ -17,7 +17,7 @@ auto-bump-patch:
   tags:
     - nix
   script:
-    - nix run .#bump-patch
+    - nix run .#ci.bump-patch
   only:
     - main
   when: on_success
@@ -27,7 +27,7 @@ manual-version-bump:
   tags:
     - nix
   script:
-    - nix run .#bump-version -- $NEW_VERSION
+    - nix run .#ci.bump-version -- $NEW_VERSION
   only:
     - main
   when: manual
