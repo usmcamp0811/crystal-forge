@@ -4,15 +4,15 @@ CREATE VIEW view_systems_current_state AS
 SELECT
     s.id,
     s.hostname,
-    ss.derivation_path,
-    ss.timestamp AS last_deployed,
-    ss.derivation_path AS current_derivation_path,
     ss.primary_ip_address AS ip_address,
+    ss.derivation_path AS current_derivation_path,
     ROUND(ss.uptime_secs::numeric / 86400, 1) AS uptime_days,
     ss.os,
     ss.kernel,
     ss.agent_version,
-    ah.timestamp AS last_seen
+    ss.id AS ssid,
+    ss.timestamp AS last_state_change,
+    ah.timestamp AS last_heartbeat
 FROM
     systems s
     LEFT JOIN LATERAL (
@@ -38,28 +38,40 @@ FROM
 
 COMMENT ON VIEW view_systems_current_state IS 'Shows each system with current config, last deployment time, and true last seen (including heartbeats)';
 
--- View 2: Systems Latest Evaluation
--- Shows each system with the latest evaluated derivation
-CREATE VIEW view_systems_latest_commit AS
 SELECT
-    et.target_name AS hostname,
-    et.derivation_path AS latest_derivation_path,
-    et.status AS evaluation_status,
-    c.commit_timestamp AS commit_timestamp,
-    c.git_commit_hash AS commit_hash
-FROM ( SELECT DISTINCT ON (target_name)
-        target_name,
-        derivation_path,
-        status,
-        completed_at,
-        commit_id
-    FROM
-        evaluation_targets
-    WHERE
-        status = 'complete'
-    ORDER BY
-        target_name,
-        completed_at DESC) et
+    s.id,
+    s.hostname,
+    c.commit_hash
+FROM
+    SYSTEM s
+    LEFT JOIN LATERAL (
+        SELECT
+            *
+        FROM
+            commits c 
+        WHERE s.)
+    -- View 2: Systems Latest Evaluation
+    -- Shows each system with the latest evaluated derivation
+    CREATE VIEW view_systems_latest_commit AS
+    SELECT
+        et.target_name AS hostname,
+        et.derivation_path AS latest_derivation_path,
+        et.status AS evaluation_status,
+        c.commit_timestamp AS commit_timestamp,
+        c.git_commit_hash AS commit_hash
+    FROM ( SELECT DISTINCT ON (target_name)
+            target_name,
+            derivation_path,
+            status,
+            completed_at,
+            commit_id
+        FROM
+            evaluation_targets
+        WHERE
+            status = 'complete'
+        ORDER BY
+            target_name,
+            completed_at DESC) et
     JOIN commits c ON et.commit_id = c.id
 ORDER BY
     et.target_name;
