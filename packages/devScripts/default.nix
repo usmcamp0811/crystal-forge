@@ -76,7 +76,7 @@ with lib.crystal-forge; let
       watched = [
         {
           name = "dotfiles";
-          repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+          repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
         }
       ];
     };
