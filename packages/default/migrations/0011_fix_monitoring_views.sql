@@ -1,9 +1,6 @@
--- View 1: Systems Current State
--- Shows each system with their current running configuration
 -- Drop existing views if they exist
-DROP VIEW IF EXISTS view_systems_current_state, view_current_commit, view_evaluation_pipeline, view_evaluation_queue_status, view_monitored_flake_commits, view_systems_current_state, view_systems_latest_commit, view_systems_latest_flake_commit CASCADE;
+DROP VIEW IF EXISTS view_systems_current_state, view_current_commit, view_evaluation_pipeline, view_evaluation_queue_status, view_monitored_flake_commits, view_systems_latest_commit, view_systems_latest_flake_commit, view_systems_deployment_status, view_systems_behind, view_systems_inventory, view_systems_attention, view_system_heartbeat_health CASCADE;
 
--- Recreate view: view_monitored_flake_commits
 CREATE VIEW view_monitored_flake_commits AS
 SELECT
     c.id AS commit_id,
@@ -19,7 +16,6 @@ ORDER BY
 
 COMMENT ON VIEW view_monitored_flake_commits IS 'Shows all commits for monitored flakes, including flake name, repo URL, commit hash, and timestamp, ordered by most recent first.';
 
--- Recreate view: view_current_commit
 CREATE VIEW view_current_commit AS
 SELECT
     c.id AS commit_id,
