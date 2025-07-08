@@ -20,6 +20,13 @@ with lib.crystal-forge; let
     NEW_VERSION="$major.$minor.$((patch + 1))"
     echo "Bumping to: $NEW_VERSION"
 
+    # Check if either "vX.Y.Z" or "X.Y.Z" already exists
+    if ${pkgs.git}/bin/git rev-parse "v$NEW_VERSION" >/dev/null 2>&1 || \
+       ${pkgs.git}/bin/git rev-parse "$NEW_VERSION" >/dev/null 2>&1; then
+      echo "❌ Tag v$NEW_VERSION or $NEW_VERSION already exists. Aborting."
+      exit 1
+    fi
+
     # Update Cargo.toml
     ${pkgs.gnused}/bin/sed -i "s/^version = \".*\"/version = \"$NEW_VERSION\"/" packages/default/Cargo.toml
 
@@ -31,7 +38,6 @@ with lib.crystal-forge; let
       ${pkgs.git}/bin/git commit -m "chore: auto-bump version to $NEW_VERSION [skip ci]"
       ${pkgs.git}/bin/git push origin HEAD:main
 
-      # Create tag for this patch release
       ${pkgs.git}/bin/git tag "v$NEW_VERSION"
       ${pkgs.git}/bin/git push origin "v$NEW_VERSION"
 
