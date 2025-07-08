@@ -7,6 +7,24 @@
   cfg = config.services.crystal-forge;
   tomlFormat = pkgs.formats.toml {};
 
+  sql-jobs = ../../../packages/default/postgres-jobs/.;
+
+  postgres-job = pkgs.writeShellApplication {
+    name = "run-postgres-jobs";
+    runtimeInputs = [pkgs.postgresql];
+    text = ''
+      set -euo pipefail
+
+      DB_NAME=${cfg.database.name}
+      DB_USER=${cfg.database.user}
+      JOB_DIR="/etc/postgres-jobs"
+
+      for sql_file in $(find "$JOB_DIR" -type f -name '*.sql' | sort); do
+        echo "🔧 Running job: $(basename "$sql_file")"
+        ${pkgs.postgresql}/bin/psql -U "$DB_USER" -d "$DB_NAME" -f "$sql_file"
+      done
+    '';
+  };
   # Generate the base TOML config structure
   baseConfig =
     {
@@ -308,6 +326,23 @@ in {
         host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
         host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
       '';
+    };
+
+    systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge Postgres Jobs";
+      serviceConfig = {
+        ExecStart = "${postgres-job}/bin/run-postgres-jobs";
+        Type = "oneshot";
+      };
+    };
+
+    systemd.timers."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
+      description = "Run Crystal Forge Postgres Jobs daily at midnight";
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnCalendar = "*-*-* 00:00:00";
+        Persistent = true;
+      };
     };
 
     nix.settings.allowed-users = ["root" "crystal-forge"];
