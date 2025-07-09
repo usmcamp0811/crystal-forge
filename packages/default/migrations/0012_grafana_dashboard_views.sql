@@ -186,37 +186,6 @@ ORDER BY
 COMMENT ON VIEW view_recent_failed_evaluations IS 'Recent evaluation failures with context for troubleshooting.
 Used for "Recent Failed Evaluations" Grafana panel with drill-down capability.';
 
-CREATE OR REPLACE VIEW view_systems_drift_time AS
-SELECT
-    hostname,
-    current_derivation_path,
-    latest_commit_derivation_path,
-    deployed_commit_timestamp,
-    -- Calculate how long system has been drifted
-    CASE WHEN is_running_latest_derivation = FALSE
-        AND deployed_commit_timestamp IS NOT NULL THEN
-        EXTRACT(EPOCH FROM (NOW() - deployed_commit_timestamp)) / 3600 -- hours
-    ELSE
-        0
-    END AS drift_hours,
-    CASE WHEN is_running_latest_derivation = FALSE
-        AND deployed_commit_timestamp IS NOT NULL THEN
-        EXTRACT(EPOCH FROM (NOW() - deployed_commit_timestamp)) / 86400 -- days
-    ELSE
-        0
-    END AS drift_days,
-    is_running_latest_derivation,
-    last_seen
-FROM
-    view_systems_current_state
-WHERE
-    is_running_latest_derivation = FALSE
-ORDER BY
-    drift_hours DESC;
-
-COMMENT ON VIEW view_systems_drift_time IS 'Systems ranked by how long they have been running behind the latest commit. 
-Used for "Top N Systems with Most Drift Time" Grafana panel.';
-
 CREATE TABLE IF NOT EXISTS daily_drift_snapshots (
     snapshot_date date,
     hostname varchar(255),
