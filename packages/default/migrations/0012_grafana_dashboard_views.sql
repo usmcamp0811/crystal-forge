@@ -195,3 +195,34 @@ CREATE TABLE IF NOT EXISTS daily_drift_snapshots (
     PRIMARY KEY (snapshot_date, hostname)
 );
 
+CREATE OR REPLACE VIEW view_systems_drift_time AS
+SELECT
+    hostname,
+    current_derivation_path,
+    latest_commit_derivation_path,
+    deployed_commit_timestamp,
+    -- Calculate how long system has been drifted
+    CASE WHEN is_running_latest_derivation = FALSE
+        AND deployed_commit_timestamp IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (NOW() - deployed_commit_timestamp)) / 3600 -- hours
+    ELSE
+        0 -- Up-to-date systems show 0 drift
+    END AS drift_hours,
+    CASE WHEN is_running_latest_derivation = FALSE
+        AND deployed_commit_timestamp IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (NOW() - deployed_commit_timestamp)) / 86400 -- days
+    ELSE
+        0 -- Up-to-date systems show 0 drift
+    END AS drift_days,
+    is_running_latest_derivation,
+    last_seen
+FROM
+    view_systems_current_state
+    -- REMOVED: WHERE is_running_latest_derivation = FALSE
+ORDER BY
+    drift_hours DESC;
+
+COMMENT ON VIEW view_systems_drift_time IS 'All systems with drift time calculations. 
+Up-to-date systems show 0 drift hours/days, behind systems show actual drift.
+Used for "Top N Systems with Most Drift Time" Grafana panel and daily_drift_snapshots job.';
+
