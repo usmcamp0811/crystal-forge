@@ -209,5 +209,45 @@ in
       active_services = agent.succeed("systemctl list-units --type=service --state=active")
       if "postgresql" in active_services:
           pytest.fail("PostgreSQL is unexpectedly running on the agent")
+
+
+      # Check if timer triggered and job inserted data
+      server.log("=== Checking if postgres job timer is active ===")
+
+      # Insert dummy data into system_states that will appear in view_systems_drift_time
+      server.succeed("""
+      psql -U crystal_forge -d crystal_forge -c "
+      INSERT INTO system_states (
+        hostname,
+        derivation_path,
+        change_reason,
+        uptime_secs,
+        timestamp
+      ) VALUES (
+        'drift-test',
+        'test-derivation',
+        'startup',
+        3600,
+        now()
+      );"
+      """)
+
+      timer_status = server.succeed("systemctl list-timers crystal-forge-postgres-jobs.timer")
+      if "crystal-forge-postgres-jobs.timer" not in timer_status:
+          pytest.fail("crystal-forge-postgres-jobs.timer is not active")
+
+      # Manually start the oneshot service
+      server.succeed("systemctl start crystal-forge-postgres-jobs.service")
+      job_log = server.succeed("journalctl -u crystal-forge-postgres-jobs.service --no-pager || true")
+      if "🔧 Running job" not in job_log:
+          pytest.fail("Postgres job did not run as expected")
+
+      # Validate SQL job inserted expected data
+      result = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT hostname FROM daily_drift_snapshots WHERE hostname = 'drift-test';\"")
+      server.log("daily_drift_snapshots contents:\\n" + result)
+
+      if "drift-test" not in result:
+          pytest.fail("Expected data not inserted by postgres jobs")
+
     '';
   }

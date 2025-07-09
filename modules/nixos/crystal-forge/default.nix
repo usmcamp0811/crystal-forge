@@ -17,7 +17,7 @@
 
       DB_NAME=${cfg.database.name}
       DB_USER=${cfg.database.user}
-      JOB_DIR="/etc/postgres-jobs"
+      JOB_DIR="${sql-jobs}"
 
       for sql_file in $(find "$JOB_DIR" -type f -name '*.sql' | sort); do
         echo "🔧 Running job: $(basename "$sql_file")"
