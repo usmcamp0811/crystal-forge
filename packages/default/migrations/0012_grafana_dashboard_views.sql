@@ -217,3 +217,44 @@ ORDER BY
 COMMENT ON VIEW view_systems_drift_time IS 'Systems ranked by how long they have been running behind the latest commit. 
 Used for "Top N Systems with Most Drift Time" Grafana panel.';
 
+CREATE TABLE IF NOT EXISTS daily_drift_snapshots (
+    snapshot_date date,
+    hostname varchar(255),
+    drift_hours numeric,
+    is_behind boolean,
+    created_at timestamptz DEFAULT NOW(),
+    PRIMARY KEY (snapshot_date, hostname)
+);
+
+CREATE TABLE IF NOT EXISTS job_log (
+    id serial PRIMARY KEY,
+    job_name text NOT NULL,
+    status text NOT NULL CHECK (status IN ('success', 'error')),
+    message text,
+    created_at timestamptz DEFAULT NOW()
+);
+
+-- Add error handling and logging
+SELECT
+    cron.schedule ('daily-drift-snapshot', '0 2 * * *', $$
+        DO $do$
+BEGIN
+    INSERT INTO daily_drift_snapshots (snapshot_date, hostname, drift_hours, is_behind)
+    SELECT
+        CURRENT_DATE, hostname, drift_hours, (drift_hours > 0) AS is_behind FROM view_systems_drift_time ON CONFLICT (snapshot_date, hostname)
+        DO UPDATE SET
+            drift_hours = EXCLUDED.drift_hours, is_behind = EXCLUDED.is_behind;
+    -- Log success
+    INSERT INTO job_log (job_name, status, message, created_at)
+        VALUES ('daily-drift-snapshot', 'success', 'Processed ' || ROW_COUNT || ' systems', NOW());
+EXCEPTION
+    WHEN OTHERS THEN
+        -- Log failure
+        INSERT INTO job_log (job_name, status, message, created_at)
+            VALUES ('daily-drift-snapshot', 'error', SQLERRM, NOW());
+            RAISE;
+END
+$do$;
+
+$$);
+

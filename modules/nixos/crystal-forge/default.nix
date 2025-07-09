@@ -6,12 +6,12 @@
 }: let
   cfg = config.services.crystal-forge;
   tomlFormat = pkgs.formats.toml {};
-
+  postgres_pkg = config.services.postgresql.package;
   sql-jobs = ../../../packages/default/postgres-jobs/.;
 
   postgres-job = pkgs.writeShellApplication {
     name = "run-postgres-jobs";
-    runtimeInputs = [pkgs.postgresql];
+    runtimeInputs = [postgres_pkg];
     text = ''
       set -euo pipefail
 
@@ -21,7 +21,7 @@
 
       for sql_file in $(find "$JOB_DIR" -type f -name '*.sql' | sort); do
         echo "🔧 Running job: $(basename "$sql_file")"
-        ${pkgs.postgresql}/bin/psql -U "$DB_USER" -d "$DB_NAME" -f "$sql_file"
+        ${postgres_pkg}/bin/psql -U "$DB_USER" -d "$DB_NAME" -f "$sql_file"
       done
     '';
   };
