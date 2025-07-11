@@ -17,7 +17,41 @@ with lib.crystal-forge; let
   # Create the dashboard JSON file
   crystalForgeDashboard = pkgs.writeTextFile {
     name = "crystal-forge-dashboard.json";
-    text = builtins.toJSON (builtins.fromJSON (builtins.readFile ./crystal-forge-dashboard.json));
+    text = builtins.toJSON (builtins.fromJSON (builtins.readFile ./dashboards/crystal-forge-dashboard.json));
+  };
+  dashboardProvisioning = pkgs.writeTextFile {
+    name = "dashboard-provisioning.yaml";
+    text = ''
+      apiVersion: 1
+      providers:
+        - name: 'Crystal Forge'
+          type: file
+          disableDeletion: false
+          updateIntervalSeconds: 10
+          allowUiUpdates: true
+          options:
+            path: ${crystalForgeDashboard}
+    '';
+  };
+  datasourceProvisioning = pkgs.writeTextFile {
+    name = "datasource-provisioning.yaml";
+    text = ''
+      apiVersion: 1
+      datasources:
+        - name: crystal-forge-postgres
+          type: grafana-postgresql-datasource
+          access: proxy
+          url: 127.0.0.1:${toString db_port}
+          database: crystal_forge
+          user: crystal_forge
+          secureJsonData:
+            password: ${db_password}
+          jsonData:
+            sslmode: disable
+            postgresVersion: 1500
+          isDefault: true
+          editable: true
+    '';
   };
   tomlFormat = pkgs.formats.toml {};
   generateConfig = pkgs.writeShellApplication {
@@ -186,22 +220,54 @@ with lib.crystal-forge; let
         };
         services.grafana.grafana = {
           enable = true;
-          extraConf = {
-            database = {
+          http_port = grafana_port;
+          domain = "localhost";
+          declarativePlugins = with pkgs.grafanaPlugins; [grafana-piechart-panel];
+          providers = [
+            {
+              name = "default";
+              type = "file";
+              disableDeletion = false;
+              updateIntervalSeconds = 10;
+              options = {
+                path = pkgs.linkFarm "grafana-dashboards" [
+                  {
+                    name = "crystal-forge-dashboard.json";
+                    path = crystalForgeDashboard;
+                  }
+                ];
+              };
+            }
+          ];
+          datasources = [
+            {
+              name = "PostgreSQL";
               type = "postgres";
-              host = "127.0.0.1:${toString db_port}";
-              name = "crystal_forge";
+              access = "proxy";
+              url = "localhost:${toString db_port}";
+              database = "crystal_forge";
               user = "crystal_forge";
-              password = db_password; # Add the missing password
-            };
-            server = {
-              http_port = grafana_port;
-              http_addr = "0.0.0.0";
-            };
-            security = {
-              admin_user = "admin";
-              admin_password = "password";
-            };
+              secureJsonData = {
+                password = db_password;
+              };
+              jsonData = {
+                sslmode = "disable";
+                maxOpenConns = 100;
+                maxIdleConns = 100;
+                maxIdleConnsAuto = true;
+              };
+            }
+          ];
+          extraConf."auth.anonymous" = {
+            enabled = true;
+            org_role = "Editor";
+          };
+          extraConf.database = with config.services.postgres.db; {
+            type = "postgres";
+            host = "localhost:${toString db_port}";
+            name = "crystal_forge";
+            user = "crystal_forge";
+            password = db_password;
           };
         };
         settings.processes."grafana".depends_on."db".condition = "process_healthy";
