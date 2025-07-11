@@ -12,8 +12,13 @@ with lib.crystal-forge; let
   db_port = 3042;
   db_password = "password";
   cf_port = 3445;
+  grafana_port = 3446;
   pgweb_port = 12084;
-
+  # Create the dashboard JSON file
+  crystalForgeDashboard = pkgs.writeTextFile {
+    name = "crystal-forge-dashboard.json";
+    text = builtins.toJSON (builtins.fromJSON (builtins.readFile ./crystal-forge-dashboard.json));
+  };
   tomlFormat = pkgs.formats.toml {};
   generateConfig = pkgs.writeShellApplication {
     name = "generate-config";
@@ -167,6 +172,7 @@ with lib.crystal-forge; let
             failure_threshold = 5;
           };
         };
+
         settings.processes.pgweb = {
           inherit namespace;
           command = "${pkgs.pgweb}/bin/pgweb --listen=${toString pgweb_port} --bind=0.0.0.0";
@@ -178,6 +184,27 @@ with lib.crystal-forge; let
           command = runAgent;
           depends_on."server".condition = "process_healthy";
         };
+        services.grafana.grafana = {
+          enable = true;
+          extraConf = {
+            database = {
+              type = "postgres";
+              host = "127.0.0.1:${toString db_port}";
+              name = "crystal_forge";
+              user = "crystal_forge";
+              password = db_password; # Add the missing password
+            };
+            server = {
+              http_port = grafana_port;
+              http_addr = "0.0.0.0";
+            };
+            security = {
+              admin_user = "admin";
+              admin_password = "password";
+            };
+          };
+        };
+        settings.processes."grafana".depends_on."db".condition = "process_healthy";
         services.postgres."db" = {
           inherit namespace;
           enable = true;
