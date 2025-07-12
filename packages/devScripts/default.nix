@@ -316,7 +316,7 @@ with lib.crystal-forge; let
     actions = [
       # Start with initial state
       {
-        type = "state";
+        type = "startup";
         derivationPath = "/nix/store/nixos-system-v1.2.3";
       }
 
@@ -334,7 +334,7 @@ with lib.crystal-forge; let
 
       # State change after 60 seconds (system update)
       {
-        type = "state";
+        type = "config_change";
         derivationPath = "/nix/store/nixos-system-v1.2.4";
         delay = 60;
       }
@@ -351,4 +351,5 @@ in
   // {
     inherit runServer runAgent simulatePush envExports;
     dbOnly = dbOnly.config.outputs.package;
+    agent = agent2.agent;
   }

@@ -36,7 +36,7 @@ in
     heartbeatInterval ? 30, # seconds between heartbeats
     actions ? [
       {
-        type = "state";
+        type = "startup";
         derivationPath = "/nix/store/test-system-${hostname}-v1";
       }
       {
@@ -48,7 +48,7 @@ in
         delay = 30;
       }
       {
-        type = "state";
+        type = "config_change";
         derivationPath = "/nix/store/test-system-${hostname}-v2";
         delay = 60;
       }
@@ -138,7 +138,8 @@ in
             local action_num="$3"
 
             # Mock signature for testing
-            local signature=$(echo "test_signature_$(echo -n "$payload" | sha256sum | cut -c1-32)" | base64 -w0)
+            local signature
+            signature=$(echo "test_signature_$(echo -n "$payload" | sha256sum | cut -c1-32)" | base64 -w0)
 
             echo "[$action_num] Sending $endpoint message..."
 
@@ -150,8 +151,10 @@ in
                 -d "$payload" \
                 "http://${serverHost}:${toString serverPort}/agent/$endpoint")
 
-            local body=$(echo "$response" | head -n -1)
-            local status=$(echo "$response" | tail -n 1)
+            local body
+            local status
+            body=$(echo "$response" | head -n -1)
+            status=$(echo "$response" | tail -n 1)
 
             if [[ "$status" == "200" ]]; then
                 echo "[$action_num] ✓ Success"
