@@ -177,6 +177,11 @@ with lib.crystal-forge; let
           command = agent1.agent;
           depends_on."server".condition = "process_healthy";
         };
+        settings.processes.agent2 = {
+          inherit namespace;
+          command = agent2.agent;
+          depends_on."server".condition = "process_healthy";
+        };
         settings.processes.server = {
           inherit namespace;
           command = runServer;

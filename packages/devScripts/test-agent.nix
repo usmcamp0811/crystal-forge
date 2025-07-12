@@ -59,22 +59,24 @@ in
     privateKey = mkPrivateKey hostname keyPair;
     publicKey = mkPublicKey hostname keyPair;
 
-    # Generate the action plan as a bash array
+    # Generate the action plan as a bash array - ensure delay is always numeric
     actionPlan =
       pkgs.lib.concatMapStringsSep "\n" (
         action: let
           actionType = action.type;
           derivPath = action.derivationPath or "/nix/store/test-system-${hostname}-generic";
-          delay = action.delay or 0;
+          delay = toString (action.delay or 0); # Ensure it's a string number
           changeReason =
-            if actionType == "state"
+            if actionType == "startup"
+            then "startup"
+            else if actionType == "config_change"
             then "config_change"
-            else "heartbeat";
+            else "state_delta";
           endpoint =
-            if actionType == "state"
+            if actionType == "startup" || actionType == "config_change"
             then "state"
             else "heartbeat";
-        in ''echo "${actionType}|${derivPath}|${changeReason}|${endpoint}|${toString delay}"''
+        in ''echo "${actionType}|${derivPath}|${changeReason}|${endpoint}|${delay}"''
       )
       actions;
   in {
@@ -122,7 +124,7 @@ in
           "primary_ip_address": "${primaryIpAddress}",
           "gateway_ip": "${gatewayIp}",
           "selinux_status": null,
-          "tmp_present": true,
+          "tpe_present": true,
           "secure_boot_enabled": false,
           "fips_mode": false,
           "agent_version": "0.1.0-test",
@@ -169,8 +171,14 @@ in
         action_num=1
 
         # Read action plan
-        while IFS='|' read -r action_type derivation_path change_reason endpoint delay; do
-            if [[ $action_num -gt 1 && $delay -gt 0 ]]; then
+        while IFS='|' read -r action_type derivation_path change_reason endpoint delay_str; do
+            # Safely convert delay to number, default to 0 if invalid
+            delay=0
+            if [[ "$delay_str" =~ ^[0-9]+$ ]]; then
+                delay="$delay_str"
+            fi
+
+            if [[ $action_num -gt 1 ]] && [[ $delay -gt 0 ]]; then
                 echo "[$action_num] Waiting $delay seconds..."
                 sleep "$delay"
             fi
