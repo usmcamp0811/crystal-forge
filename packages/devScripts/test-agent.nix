@@ -1,4 +1,8 @@
-{pkgs}: let
+{
+  pkgs,
+  lib,
+  ...
+}: let
   # Generate a keypair for an agent
   mkKeyPair = name:
     pkgs.runCommand "${name}-keypair" {} ''
@@ -15,10 +19,7 @@
 
   # Extract public key
   mkPublicKey = name: keyPair:
-    pkgs.runCommand "${name}-public-key" {} ''
-      mkdir -p $out
-      cp ${keyPair}/agent.pub $out/
-    '';
+    lib.strings.removeSuffix "\n" (builtins.readFile "${keyPair}/agent.pub");
 in
   # Main function to create an agent with planned actions
   {

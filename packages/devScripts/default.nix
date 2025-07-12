@@ -14,7 +14,7 @@ with lib.crystal-forge; let
   cf_port = 3445;
   grafana_port = 3446;
   pgweb_port = 12084;
-  mkAgent = import ./test-agent.nix {inherit pkgs;};
+  mkAgent = import ./test-agent.nix {inherit pkgs lib;};
   # Create the dashboard JSON file
   crystalForgeDashboard = pkgs.writeTextFile {
     name = "crystal-forge-dashboard.json";
@@ -74,6 +74,18 @@ with lib.crystal-forge; let
       {
         hostname = "HOSTNAME_PLACEHOLDER";
         public_key = "PUBLIC_KEY_PLACEHOLDER";
+        environment = "devshell";
+        flake_name = "dotfiles";
+      }
+      {
+        hostname = "agent1";
+        public_key = agent1.publicKey;
+        environment = "devshell";
+        flake_name = "dotfiles";
+      }
+      {
+        hostname = "agent2";
+        public_key = agent2.publicKey;
         environment = "devshell";
         flake_name = "dotfiles";
       }
@@ -160,6 +172,11 @@ with lib.crystal-forge; let
     modules = [
       inputs.services-flake.processComposeModules.default
       {
+        settings.processes.agent1 = {
+          inherit namespace;
+          command = agent1.agent;
+          depends_on."server".condition = "process_healthy";
+        };
         settings.processes.server = {
           inherit namespace;
           command = runServer;
@@ -303,16 +320,16 @@ with lib.crystal-forge; let
   };
   # Simple agent with default actions
   agent1 = mkAgent {
-    hostname = "test-host";
+    hostname = "agent1";
     serverHost = "localhost";
-    serverPort = 3445;
+    serverPort = cf_port;
   };
 
   # Agent with custom action plan
   agent2 = mkAgent {
-    hostname = "prod-server";
+    hostname = "agent2";
     serverHost = "localhost";
-    serverPort = 3445;
+    serverPort = cf_port;
     actions = [
       # Start with initial state
       {
@@ -351,5 +368,4 @@ in
   // {
     inherit runServer runAgent simulatePush envExports;
     dbOnly = dbOnly.config.outputs.package;
-    agent = agent2.agent;
   }
