@@ -371,6 +371,6 @@ with lib.crystal-forge; let
 in
   cf-dev.config.outputs.package
   // {
-    inherit runServer runAgent simulatePush envExports;
+    inherit runServer runAgent simulatePush envExports agent1 agent2;
     dbOnly = dbOnly.config.outputs.package;
   }

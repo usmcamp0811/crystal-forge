@@ -59,9 +59,34 @@ in
     privateKey = mkPrivateKey hostname keyPair;
     publicKey = mkPublicKey hostname keyPair;
 
+    # Separate Python script for signing with dependencies
+    signScript =
+      pkgs.writers.writePython3 "sign-payload" {
+        libraries = [pkgs.python3Packages.cryptography];
+      } ''
+        import base64
+        import sys
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+        if len(sys.argv) != 2:
+            print("Usage: sign-payload <private_key_file>", file=sys.stderr)
+            sys.exit(1)
+
+        private_key_file = sys.argv[1]
+
+        with open(private_key_file, 'r') as f:
+            private_key_b64 = f.read().strip()
+
+        private_key_bytes = base64.b64decode(private_key_b64)
+        private_key = Ed25519PrivateKey.from_private_bytes(private_key_bytes)
+        message = sys.stdin.buffer.read()
+        signature = private_key.sign(message)
+        print(base64.b64encode(signature).decode('ascii'))
+      '';
+
     # Generate the action plan as a bash array - ensure delay is always numeric
     actionPlan =
-      pkgs.lib.concatMapStringsSep "\n" (
+      lib.concatMapStringsSep "\n" (
         action: let
           actionType = action.type;
           derivPath = action.derivationPath or "/nix/store/test-system-${hostname}-generic";
@@ -76,16 +101,16 @@ in
             if actionType == "startup" || actionType == "config_change"
             then "state"
             else "heartbeat";
-        in ''echo "${actionType}|${derivPath}|${changeReason}|${endpoint}|${delay}"''
+        in "${actionType}|${derivPath}|${changeReason}|${endpoint}|${delay}"
       )
       actions;
   in {
     agent = pkgs.writeShellApplication {
       name = "cf-agent-${hostname}";
-      runtimeInputs = with pkgs; [curl coreutils util-linux];
+      runtimeInputs = with pkgs; [curl coreutils util-linux jq];
 
       text = ''
-        set -euo pipefail
+        set -euxo pipefail
 
         echo "Starting agent for ${hostname}..."
         echo "Server: ${serverHost}:${toString serverPort}"
@@ -124,7 +149,7 @@ in
           "primary_ip_address": "${primaryIpAddress}",
           "gateway_ip": "${gatewayIp}",
           "selinux_status": null,
-          "tpe_present": true,
+          "tpm_present": true,
           "secure_boot_enabled": false,
           "fips_mode": false,
           "agent_version": "0.1.0-test",
@@ -140,9 +165,19 @@ in
             local payload="$2"
             local action_num="$3"
 
-            # Mock signature for testing
+            echo "[$action_num] Creating ed25519 signature..."
+
+            # The private key is base64-encoded raw ed25519 bytes
             local signature
-            signature=$(echo "test_signature_$(echo -n "$payload" | sha256sum | cut -c1-32)" | base64 -w0)
+            if [ -f "${privateKey}/agent.key" ]; then
+                echo "[$action_num] Using ed25519 raw key signing..."
+
+                # Use separate Python script for signing
+                signature=$(echo -n "$payload" | ${signScript} "${privateKey}/agent.key")
+            else
+                echo "[$action_num] ⚠️  Private key not found, using mock signature"
+                signature=$(echo "test_signature_$(echo -n "$payload" | sha256sum | cut -c1-32)" | base64 -w0)
+            fi
 
             echo "[$action_num] Sending $endpoint message..."
 
@@ -191,9 +226,7 @@ in
 
             action_num=$((action_num + 1))
             echo ""
-        done << 'EOF'
-        ${actionPlan}
-        EOF
+        done <<< "${actionPlan}"
 
         echo "Agent ${hostname} completed all actions."
       '';
