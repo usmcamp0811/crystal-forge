@@ -67,7 +67,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+        "uid": "crystal-forge-ds"
       },
       "fieldConfig": {
         "defaults": {
@@ -136,7 +136,7 @@
           },
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+            "uid": "crystal-forge-ds"
           }
         }
       ],
@@ -159,7 +159,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+        "uid": "crystal-forge-ds"
       },
       "description": "",
       "fieldConfig": {
@@ -242,7 +242,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+            "uid": "crystal-forge-ds"
           },
           "editorMode": "code",
           "format": "table",
@@ -274,7 +274,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+        "uid": "crystal-forge-ds"
       },
       "fieldConfig": {
         "defaults": {
@@ -370,7 +370,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+            "uid": "crystal-forge-ds"
           },
           "editorMode": "code",
           "format": "table",
@@ -415,7 +415,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+        "uid": "crystal-forge-ds"
       },
       "fieldConfig": {
         "defaults": {
@@ -467,7 +467,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+            "uid": "crystal-forge-ds"
           },
           "editorMode": "code",
           "format": "table",

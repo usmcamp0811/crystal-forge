@@ -19,40 +19,6 @@ with lib.crystal-forge; let
     name = "crystal-forge-dashboard.json";
     text = builtins.toJSON (builtins.fromJSON (builtins.readFile ./dashboards/crystal-forge-dashboard.json));
   };
-  dashboardProvisioning = pkgs.writeTextFile {
-    name = "dashboard-provisioning.yaml";
-    text = ''
-      apiVersion: 1
-      providers:
-        - name: 'Crystal Forge'
-          type: file
-          disableDeletion: false
-          updateIntervalSeconds: 10
-          allowUiUpdates: true
-          options:
-            path: ${crystalForgeDashboard}
-    '';
-  };
-  datasourceProvisioning = pkgs.writeTextFile {
-    name = "datasource-provisioning.yaml";
-    text = ''
-      apiVersion: 1
-      datasources:
-        - name: crystal-forge-postgres
-          type: grafana-postgresql-datasource
-          access: proxy
-          url: 127.0.0.1:${toString db_port}
-          database: crystal_forge
-          user: crystal_forge
-          secureJsonData:
-            password: ${db_password}
-          jsonData:
-            sslmode: disable
-            postgresVersion: 1500
-          isDefault: true
-          editable: true
-    '';
-  };
   tomlFormat = pkgs.formats.toml {};
   generateConfig = pkgs.writeShellApplication {
     name = "generate-config";
@@ -241,7 +207,8 @@ with lib.crystal-forge; let
           ];
           datasources = [
             {
-              name = "PostgreSQL";
+              name = "CrystalForge DB";
+              uid = "crystal-forge-ds";
               type = "postgres";
               access = "proxy";
               url = "localhost:${toString db_port}";
@@ -257,17 +224,33 @@ with lib.crystal-forge; let
                 maxIdleConnsAuto = true;
               };
             }
+            {
+              name = "Grafana DB";
+              uid = "grafana-db";
+              type = "postgres";
+              access = "proxy";
+              url = "localhost:${toString db_port}";
+              database = "grafana_db";
+              user = "grafana_user";
+              secureJsonData = {
+                password = db_password;
+              };
+              jsonData = {
+                sslmode = "disable";
+                maxOpenConns = 100;
+                maxIdleConns = 100;
+                maxIdleConnsAuto = true;
+              };
+            }
           ];
           extraConf."auth.anonymous" = {
             enabled = true;
             org_role = "Editor";
           };
-          extraConf.database = with config.services.postgres.db; {
+          extraConf.database = with config.services.postgres.grafana-db; {
             type = "postgres";
             host = "localhost:${toString db_port}";
-            name = "crystal_forge";
-            user = "crystal_forge";
-            password = db_password;
+            name = "grafana_db";
           };
         };
         settings.processes."grafana".depends_on."db".condition = "process_healthy";
@@ -280,6 +263,11 @@ with lib.crystal-forge; let
             CREATE USER crystal_forge LOGIN;
             CREATE DATABASE crystal_forge OWNER crystal_forge;
             GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+
+            CREATE USER root WITH SUPERUSER LOGIN;
+            CREATE USER grafana_user LOGIN;
+            CREATE DATABASE grafana_db OWNER grafana_user;
+            GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana_user;
           '';
           initialDatabases = [];
         };
