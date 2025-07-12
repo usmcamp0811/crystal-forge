@@ -14,7 +14,7 @@ with lib.crystal-forge; let
   cf_port = 3445;
   grafana_port = 3446;
   pgweb_port = 12084;
-  testAgent = import ./test-agent.nix {inherit pkgs;};
+  mkAgent = import ./test-agent.nix {inherit pkgs;};
   # Create the dashboard JSON file
   crystalForgeDashboard = pkgs.writeTextFile {
     name = "crystal-forge-dashboard.json";
@@ -301,9 +301,54 @@ with lib.crystal-forge; let
       }
     ];
   };
+  # Simple agent with default actions
+  agent1 = mkAgent {
+    hostname = "test-host";
+    serverHost = "localhost";
+    serverPort = 3445;
+  };
+
+  # Agent with custom action plan
+  agent2 = mkAgent {
+    hostname = "prod-server";
+    serverHost = "localhost";
+    serverPort = 3445;
+    actions = [
+      # Start with initial state
+      {
+        type = "state";
+        derivationPath = "/nix/store/nixos-system-v1.2.3";
+      }
+
+      # Heartbeat after 30 seconds
+      {
+        type = "heartbeat";
+        delay = 30;
+      }
+
+      # Another heartbeat after 30 more seconds
+      {
+        type = "heartbeat";
+        delay = 30;
+      }
+
+      # State change after 60 seconds (system update)
+      {
+        type = "state";
+        derivationPath = "/nix/store/nixos-system-v1.2.4";
+        delay = 60;
+      }
+
+      # Final heartbeat
+      {
+        type = "heartbeat";
+        delay = 30;
+      }
+    ];
+  };
 in
   cf-dev.config.outputs.package
   // {
-    inherit runServer runAgent simulatePush envExports testAgent;
+    inherit runServer runAgent simulatePush envExports;
     dbOnly = dbOnly.config.outputs.package;
   }
