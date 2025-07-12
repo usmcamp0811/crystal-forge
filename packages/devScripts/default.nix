@@ -14,6 +14,7 @@ with lib.crystal-forge; let
   cf_port = 3445;
   grafana_port = 3446;
   pgweb_port = 12084;
+  testAgent = import ./test-agent.nix {inherit pkgs;};
   # Create the dashboard JSON file
   crystalForgeDashboard = pkgs.writeTextFile {
     name = "crystal-forge-dashboard.json";
@@ -303,6 +304,6 @@ with lib.crystal-forge; let
 in
   cf-dev.config.outputs.package
   // {
-    inherit runServer runAgent simulatePush envExports;
+    inherit runServer runAgent simulatePush envExports testAgent;
     dbOnly = dbOnly.config.outputs.package;
   }
