@@ -3,12 +3,11 @@
   config,
   ...
 }: let
-  postgres_pkg = config.services.postgresql.package;
   sql-jobs = ./jobs/.;
 in
   pkgs.writeShellApplication {
     name = "run-postgres-jobs";
-    runtimeInputs = [postgres_pkg];
+    runtimeInputs = [pkgs.postgresql];
     text = ''
       set -euo pipefail
 
