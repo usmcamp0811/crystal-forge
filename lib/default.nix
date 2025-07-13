@@ -1,28 +1,36 @@
-{
-  pkgs,
-  lib,
-  ...
-}: let
+{lib, ...}:
+with lib; rec {
   # Generate a keypair for an agent
-  mkKeyPair = name:
+  mkKeyPair = {
+    pkgs,
+    name,
+  }:
     pkgs.runCommand "${name}-keypair" {} ''
       mkdir -p $out
       ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/agent.key
     '';
 
   # Extract private key
-  mkPrivateKey = name: keyPair:
+  mkPrivateKey = {
+    pkgs,
+    name,
+    keyPair,
+  }:
     pkgs.runCommand "${name}-private-key" {} ''
       mkdir -p $out
       cp ${keyPair}/agent.key $out/
     '';
 
   # Extract public key
-  mkPublicKey = name: keyPair:
+  mkPublicKey = {
+    pkgs,
+    name,
+    keyPair,
+  }:
     lib.strings.removeSuffix "\n" (builtins.readFile "${keyPair}/agent.pub");
-in
-  # Main function to create an agent with planned actions
-  {
+
+  mkAgent = {
+    pkgs,
     hostname,
     serverHost ? "localhost",
     serverPort ? 8080,
@@ -59,9 +67,20 @@ in
     ],
   }: let
     # Generate keys if not provided
-    autoKeyPair = mkKeyPair hostname;
-    autoPrivateKey = mkPrivateKey hostname autoKeyPair;
-    autoPublicKey = mkPublicKey hostname autoKeyPair;
+    autoKeyPair = mkKeyPair {
+      inherit pkgs;
+      name = hostname;
+    };
+    autoPrivateKey = mkPrivateKey {
+      inherit pkgs;
+      name = hostname;
+      keyPair = autoKeyPair;
+    };
+    autoPublicKey = mkPublicKey {
+      inherit pkgs;
+      name = hostname;
+      keyPair = autoKeyPair;
+    };
 
     # Use provided keys or fall back to auto-generated ones
     privateKey =
@@ -256,4 +275,5 @@ in
 
     # Private key path (for reference, though it's in the script)
     privateKeyPath = "${privateKey}/agent.key";
-  }
+  };
+}
