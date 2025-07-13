@@ -23,13 +23,13 @@ with lib.crystal-forge; let
   gray = pkgs.writeShellApplication {
     name = "test-gray";
     text = ''
-      nix run $PROJECT_ROOT#testAgent.test-gray.agent
+      nix run "$PROJECT_ROOT#testAgents.test-gray.agent"
     '';
   };
   lucas = pkgs.writeShellApplication {
     name = "test-lucas";
     text = ''
-      nix run $PROJECT_ROOT#testAgent.test-lucas.agent
+      nix run "$PROJECT_ROOT#testAgents.test-lucas.agent"
     '';
   };
   generateConfig = pkgs.writeShellApplication {
@@ -80,6 +80,13 @@ with lib.crystal-forge; let
         risk_profile = "LOW";
         compliance_level = "NONE";
       }
+      {
+        name = "mockenv";
+        description = "An environment full of agents created from shell scripts for testing purposes";
+        is_active = true;
+        risk_profile = "LOW";
+        compliance_level = "NONE";
+      }
     ];
     systems = [
       {
@@ -89,15 +96,15 @@ with lib.crystal-forge; let
         flake_name = "dotfiles";
       }
       {
-        hostname = "test-gray";
+        hostname = "test.gray";
         public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
-        environment = "devshell";
+        environment = "mockenv";
         flake_name = "dotfiles";
       }
       {
-        hostname = "test-lucas";
+        hostname = "test.lucas";
         public_key = pkgs.crystal-forge.testAgents.test-lucas.publicKey;
-        environment = "devshell";
+        environment = "mockenv";
         flake_name = "dotfiles";
       }
     ];
@@ -135,10 +142,9 @@ with lib.crystal-forge; let
       git clone --quiet --depth=1 "$REPO_URL" "$TMP_DIR"
       cd "$TMP_DIR"
       COMMIT_HASH="$(git rev-parse HEAD)"
-      REPO_URL_WITH_PREFIX="git+''${REPO_URL}"
 
       PAYLOAD="$(jq -n \
-        --arg url "$REPO_URL_WITH_PREFIX" \
+        --arg url "$REPO_URL" \
         --arg sha "$COMMIT_HASH" \
         '{ project: { web_url: $url }, checkout_sha: $sha }')"
 
@@ -186,13 +192,13 @@ with lib.crystal-forge; let
         settings.processes.lucas-agent = {
           inherit namespace;
           command = lucas;
-          auto_start = false;
+          disabled = false;
           depends_on."server".condition = "process_healthy";
         };
         settings.processes.gray-agent = {
           inherit namespace;
           command = gray;
-          auto_start = false;
+          disabled = false;
           depends_on."server".condition = "process_healthy";
         };
         settings.processes.server = {
@@ -219,7 +225,7 @@ with lib.crystal-forge; let
           inherit namespace;
           command = runAgent;
           depends_on."server".condition = "process_healthy";
-          auto_start = false;
+          disabled = false;
         };
         services.grafana.grafana = {
           enable = true;
@@ -341,6 +347,6 @@ with lib.crystal-forge; let
 in
   cf-dev.config.outputs.package
   // {
-    inherit runServer runAgent simulatePush envExports agent1 agent2;
+    inherit runServer runAgent simulatePush envExports;
     dbOnly = dbOnly.config.outputs.package;
   }

@@ -148,7 +148,7 @@ with lib; rec {
       runtimeInputs = with pkgs; [curl coreutils util-linux jq];
 
       text = ''
-        set -euxo pipefail
+        set -euo pipefail
 
         echo "Starting agent for ${hostname}..."
         echo "Server: ${serverHost}:${toString serverPort}"
