@@ -33,7 +33,7 @@ with lib; rec {
     pkgs,
     hostname,
     serverHost ? "localhost",
-    serverPort ? 8080,
+    serverPort ? 3445,
     os ? "25.11",
     kernel ? "6.12.33",
     memoryGb ? 16.0,
