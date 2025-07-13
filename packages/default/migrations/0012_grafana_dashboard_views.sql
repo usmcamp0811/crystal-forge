@@ -1,3 +1,80 @@
+CREATE OR REPLACE VIEW view_systems_current_state AS
+SELECT
+    s.id AS system_id,
+    s.hostname,
+    -- Current deployment info (from latest flake commit)
+    vslfc.repo_url,
+    vslfc.git_commit_hash AS deployed_commit_hash,
+    vslfc.commit_timestamp AS deployed_commit_timestamp,
+    -- System state info (from latest system state)
+    lss.derivation_path AS current_derivation_path,
+    lss.primary_ip_address AS ip_address,
+    ROUND(lss.uptime_secs::numeric / 86400, 1) AS uptime_days,
+    lss.os,
+    lss.kernel,
+    lss.agent_version,
+    lss.timestamp AS last_deployed,
+    -- Latest commit evaluation info
+    latest_eval.derivation_path AS latest_commit_derivation_path,
+    latest_eval.evaluation_status AS latest_commit_evaluation_status,
+    -- Comparison: is system running the latest evaluated derivation?
+    CASE WHEN lss.derivation_path IS NOT NULL
+        AND latest_eval.derivation_path IS NOT NULL
+        AND lss.derivation_path = latest_eval.derivation_path THEN
+        TRUE
+    WHEN latest_eval.derivation_path IS NULL THEN
+        NULL -- No evaluation exists for latest commit
+    ELSE
+        FALSE
+    END AS is_running_latest_derivation,
+    -- Heartbeat info
+    lhb.last_heartbeat,
+    GREATEST (COALESCE(lss.timestamp, '1970-01-01'::timestamp), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamp)) AS last_seen
+FROM
+    systems s -- Start with ALL systems as the base
+    LEFT JOIN view_systems_latest_flake_commit vslfc ON s.hostname = vslfc.hostname
+    LEFT JOIN (
+        -- Get latest system state per hostname
+        SELECT DISTINCT ON (hostname)
+            hostname,
+            derivation_path,
+            primary_ip_address,
+            uptime_secs,
+            os,
+            kernel,
+            agent_version,
+            timestamp
+        FROM
+            system_states
+        ORDER BY
+            hostname,
+            timestamp DESC) lss ON s.hostname = lss.hostname
+    LEFT JOIN (
+        -- Get latest heartbeat per hostname
+        SELECT DISTINCT ON (ss.hostname)
+            ss.hostname,
+            ah.timestamp AS last_heartbeat
+        FROM
+            system_states ss
+            JOIN agent_heartbeats ah ON ah.system_state_id = ss.id
+        ORDER BY
+            ss.hostname,
+            ah.timestamp DESC) lhb ON s.hostname = lhb.hostname
+    LEFT JOIN (
+        -- Get evaluation for the latest commit for each system
+        SELECT
+            et.target_name AS hostname,
+            et.derivation_path,
+            et.status AS evaluation_status
+        FROM
+            evaluation_targets et
+            JOIN view_systems_latest_flake_commit vlc ON et.commit_id = vlc.commit_id
+                AND et.target_name = vlc.hostname
+        WHERE
+            et.status = 'complete') latest_eval ON s.hostname = latest_eval.hostname
+ORDER BY
+    s.hostname;
+
 CREATE OR REPLACE VIEW view_systems_summary AS
 SELECT
     (
