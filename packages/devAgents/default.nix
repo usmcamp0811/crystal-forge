@@ -1,4 +1,10 @@
-{pkgs, ...}: let
+{
+  pkgs,
+  lib,
+  ...
+}:
+with lib;
+with lib.crystal-forge; let
   agent1 = mkAgent {
     inherit pkgs;
     hostname = "agent1";
@@ -45,4 +51,6 @@
       }
     ];
   };
-in {inherit agent1 agent2;}
+  agents = {inherit agent1 agent2;};
+in
+  agents
