@@ -20,6 +20,18 @@ with lib.crystal-forge; let
     text = builtins.toJSON (builtins.fromJSON (builtins.readFile ./dashboards/crystal-forge-dashboard.json));
   };
   tomlFormat = pkgs.formats.toml {};
+  gray = pkgs.writeShellApplication {
+    name = "test-gray";
+    text = ''
+      nix run $PROJECT_ROOT#testAgent.test-gray.agent
+    '';
+  };
+  lucas = pkgs.writeShellApplication {
+    name = "test-lucas";
+    text = ''
+      nix run $PROJECT_ROOT#testAgent.test-lucas.agent
+    '';
+  };
   generateConfig = pkgs.writeShellApplication {
     name = "generate-config";
     runtimeInputs = with pkgs; [hostname coreutils];
@@ -77,14 +89,14 @@ with lib.crystal-forge; let
         flake_name = "dotfiles";
       }
       {
-        hostname = "agent1";
-        public_key = agent1.publicKey;
+        hostname = "test-gray";
+        public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
         environment = "devshell";
         flake_name = "dotfiles";
       }
       {
-        hostname = "agent2";
-        public_key = agent2.publicKey;
+        hostname = "test-lucas";
+        public_key = pkgs.crystal-forge.testAgents.test-lucas.publicKey;
         environment = "devshell";
         flake_name = "dotfiles";
       }
@@ -171,14 +183,16 @@ with lib.crystal-forge; let
     modules = [
       inputs.services-flake.processComposeModules.default
       {
-        settings.processes.agent1 = {
+        settings.processes.lucas-agent = {
           inherit namespace;
-          command = agent1.agent;
+          command = lucas;
+          auto_start = false;
           depends_on."server".condition = "process_healthy";
         };
-        settings.processes.agent2 = {
+        settings.processes.gray-agent = {
           inherit namespace;
-          command = agent2.agent;
+          command = gray;
+          auto_start = false;
           depends_on."server".condition = "process_healthy";
         };
         settings.processes.server = {
@@ -205,6 +219,7 @@ with lib.crystal-forge; let
           inherit namespace;
           command = runAgent;
           depends_on."server".condition = "process_healthy";
+          auto_start = false;
         };
         services.grafana.grafana = {
           enable = true;

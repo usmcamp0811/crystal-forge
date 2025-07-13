@@ -1,8 +1,4 @@
-{
-  lib,
-  pkgs,
-  ...
-}:
+{lib, ...}:
 with lib; rec {
   # Generate a keypair for an agent
   mkKeyPair = {

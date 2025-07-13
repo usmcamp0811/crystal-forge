@@ -14,8 +14,8 @@ with lib.crystal-forge; let
     hostname = "test.gray";
     serverHost = "localhost";
     serverPort = cf_port;
-    privateKey = "PjCQGMmzXHpPqGXjSPZ4sdHu7+stRX0AOuhZAvKwuKg=";
-    publicKey = "49+maHYdvvn/qUx1CMzg0TLu1BbLS64c1K4E0/2ORO4=";
+    privateKeyString = "PjCQGMmzXHpPqGXjSPZ4sdHu7+stRX0AOuhZAvKwuKg=";
+    publicKeyString = "49+maHYdvvn/qUx1CMzg0TLu1BbLS64c1K4E0/2ORO4=";
     actions = [
       # Start with initial state
       {
@@ -60,8 +60,8 @@ with lib.crystal-forge; let
     serverHost = "localhost";
     serverPort = cf_port;
 
-    privateKey = "uK2wOnCBjF8hOo3Ep8uy3UNpfM7aDHm/3K05tmbRt2o=";
-    publicKey = "pwByU3iXjxGB/WP5hVEoR4eL/xsYWv1QmOdBHkIchnM=";
+    privateKeyString = "uK2wOnCBjF8hOo3Ep8uy3UNpfM7aDHm/3K05tmbRt2o=";
+    publicKeyString = "pwByU3iXjxGB/WP5hVEoR4eL/xsYWv1QmOdBHkIchnM=";
     actions = [
       # Start with initial state
       {
@@ -127,16 +127,21 @@ in
       ## Usage
 
       Run the agents using:
-      - `nix run .#test-gray`
-      - `nix run .#test-lucas`
+      - `nix run .#test-gray.agent`
+      - `nix run .#test-lucas.agent`
 
       Both agents connect to localhost:${toString cf_port} by default.
       EOF
     '';
   }
   // {
-    passthru = {
-      test-gray = test-gray.agent;
-      test-lucas = test-lucas.agent;
+    # Convenience access to both agents and their keys
+    test-gray = {
+      agent = test-gray.agent;
+      publicKey = test-gray.publicKey;
+    };
+    test-lucas = {
+      agent = test-lucas.agent;
+      publicKey = test-lucas.publicKey;
     };
   }
