@@ -1,4 +1,8 @@
-{lib, ...}:
+{
+  lib,
+  pkgs,
+  ...
+}:
 with lib; rec {
   # Generate a keypair for an agent
   mkKeyPair = {
@@ -44,7 +48,7 @@ with lib; rec {
     gatewayIp ? "192.168.1.1",
     heartbeatInterval ? 30, # seconds between heartbeats
     # Optional key overrides - if null, auto-generate
-    privateKeyPath ? null, # Path to existing private key file
+    privateKeyString ? null, # Private key content as string (base64 encoded)
     publicKeyString ? null, # Public key as string
     actions ? [
       {
@@ -84,11 +88,11 @@ with lib; rec {
 
     # Use provided keys or fall back to auto-generated ones
     privateKey =
-      if privateKeyPath != null
+      if privateKeyString != null
       then
         pkgs.runCommand "${hostname}-private-key-wrapper" {} ''
           mkdir -p $out
-          cp ${privateKeyPath} $out/agent.key
+          echo -n "${privateKeyString}" > $out/agent.key
         ''
       else autoPrivateKey;
 
