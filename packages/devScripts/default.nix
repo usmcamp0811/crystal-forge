@@ -14,7 +14,6 @@ with lib.crystal-forge; let
   cf_port = 3445;
   grafana_port = 3446;
   pgweb_port = 12084;
-  mkAgent = import ./test-agent.nix {inherit pkgs lib;};
   # Create the dashboard JSON file
   crystalForgeDashboard = pkgs.writeTextFile {
     name = "crystal-forge-dashboard.json";
@@ -325,6 +324,7 @@ with lib.crystal-forge; let
   };
   # Simple agent with default actions
   agent1 = mkAgent {
+    inherit pkgs;
     hostname = "agent1";
     serverHost = "localhost";
     serverPort = cf_port;
@@ -332,6 +332,7 @@ with lib.crystal-forge; let
 
   # Agent with custom action plan
   agent2 = mkAgent {
+    inherit pkgs;
     hostname = "agent2";
     serverHost = "localhost";
     serverPort = cf_port;
