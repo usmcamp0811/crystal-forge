@@ -109,15 +109,17 @@ with lib.crystal-forge; let
     ];
   };
 in
-  pkgs.writeTextFile {
-    name = "crystal-forge-agents-readme";
+  pkgs.writeShellApplication {
+    name = "crystal-forge-agents";
+    runtimeInputs = with pkgs; [bat];
     text = ''
+          cat << 'EOF' | bat --language=markdown --style=plain
       # Crystal Forge Test Agents
 
       This package provides two test agents for Crystal Forge:
 
       ## test.gray
-      Agent that simulates a NixOS system upgrade
+      Agent that simulates a NixOS system upgrade from 25.11 to 25.05
 
       ## test.lucas
       Agent that simulates multiple configuration changes and heartbeats
@@ -129,6 +131,7 @@ in
       - `nix run .#test-lucas`
 
       Both agents connect to localhost:${toString cf_port} by default.
+      EOF
     '';
   }
   // {
