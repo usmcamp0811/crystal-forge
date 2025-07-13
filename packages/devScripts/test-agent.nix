@@ -35,6 +35,9 @@ in
     primaryMacAddress ? "02:00:00:00:00:01",
     gatewayIp ? "192.168.1.1",
     heartbeatInterval ? 30, # seconds between heartbeats
+    # Optional key overrides - if null, auto-generate
+    privateKeyPath ? null, # Path to existing private key file
+    publicKeyString ? null, # Public key as string
     actions ? [
       {
         type = "startup";
@@ -55,9 +58,25 @@ in
       }
     ],
   }: let
-    keyPair = mkKeyPair hostname;
-    privateKey = mkPrivateKey hostname keyPair;
-    publicKey = mkPublicKey hostname keyPair;
+    # Generate keys if not provided
+    autoKeyPair = mkKeyPair hostname;
+    autoPrivateKey = mkPrivateKey hostname autoKeyPair;
+    autoPublicKey = mkPublicKey hostname autoKeyPair;
+
+    # Use provided keys or fall back to auto-generated ones
+    privateKey =
+      if privateKeyPath != null
+      then
+        pkgs.runCommand "${hostname}-private-key-wrapper" {} ''
+          mkdir -p $out
+          cp ${privateKeyPath} $out/agent.key
+        ''
+      else autoPrivateKey;
+
+    publicKey =
+      if publicKeyString != null
+      then publicKeyString
+      else autoPublicKey;
 
     # Separate Python script for signing with dependencies
     signScript =
