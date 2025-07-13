@@ -7,24 +7,7 @@
   cfg = config.services.crystal-forge;
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
-  sql-jobs = ../../../packages/default/postgres-jobs/.;
 
-  postgres-job = pkgs.writeShellApplication {
-    name = "run-postgres-jobs";
-    runtimeInputs = [postgres_pkg];
-    text = ''
-      set -euo pipefail
-
-      DB_NAME=${cfg.database.name}
-      DB_USER=${cfg.database.user}
-      JOB_DIR="${sql-jobs}"
-
-      for sql_file in $(find "$JOB_DIR" -type f -name '*.sql' | sort); do
-        echo "🔧 Running job: $(basename "$sql_file")"
-        ${postgres_pkg}/bin/psql -U "$DB_USER" -d "$DB_NAME" -f "$sql_file"
-      done
-    '';
-  };
   # Generate the base TOML config structure
   baseConfig =
     {
@@ -331,8 +314,12 @@ in {
     systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Postgres Jobs";
       serviceConfig = {
-        ExecStart = "${postgres-job}/bin/run-postgres-jobs";
+        ExecStart = "${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs";
         Type = "oneshot";
+      };
+      environment = {
+        DB_NAME = cfg.database.name;
+        DB_USER = cfg.database.user;
       };
     };
 
