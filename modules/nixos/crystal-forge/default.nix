@@ -374,7 +374,7 @@ in {
 
         echo "Ensuring .cache/nix directory exists with correct ownership..."
         mkdir -p /var/lib/crystal-forge/.cache/nix
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/
       '';
 
       serviceConfig = {
