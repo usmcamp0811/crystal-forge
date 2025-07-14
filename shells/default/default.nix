@@ -30,7 +30,7 @@ in
       export CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
       export PROJECT_ROOT="$PWD"
       export DB_HOST="''${DB_HOST:-localhost}"
-      export DB_PORT="''${DB_PORT:-5432}"
+      export DB_PORT="''${DB_PORT:-3042}"
       export DB_NAME="''${DB_NAME:-crystal_forge}"
       export DB_USER="''${DB_USER:-crystal_forge}"
       export DB_PASSWORD="''${DB_PASSWORD:-password}"
