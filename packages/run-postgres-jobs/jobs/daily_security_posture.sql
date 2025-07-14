@@ -28,7 +28,7 @@ WITH latest_system_states AS (
     SELECT
         CURRENT_DATE AS snapshot_date,
         COUNT(*) AS total_systems,
-    COUNT(*) FILTER (WHERE tmp_present = TRUE) AS systems_with_tpm,
+    COUNT(*) FILTER (WHERE tpm_present = TRUE) AS systems_with_tpm,
     COUNT(*) FILTER (WHERE secure_boot_enabled = TRUE) AS systems_secure_boot,
     COUNT(*) FILTER (WHERE fips_mode = TRUE) AS systems_fips_mode,
     COUNT(*) FILTER (WHERE selinux_status = 'Enforcing') AS systems_selinux_enforcing,
