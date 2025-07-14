@@ -69,7 +69,7 @@ in
           flakes.watched = [
             {
               name = "dotfiles";
-              repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+              repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
             }
           ];
           environments = [
@@ -181,7 +181,7 @@ in
       commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"
       curl_data = f"""'{{
         "project": {{
-          "web_url": "git+https://gitlab.com/usmcamp0811/dotfiles"
+          "web_url": "https://gitlab.com/usmcamp0811/dotfiles"
         }},
         "checkout_sha": "{commit_hash}"
       }}'"""
@@ -196,8 +196,8 @@ in
       except Exception:
           pytest.fail("Commit hash was not processed by server")
 
-      flake_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT repo_url FROM flakes WHERE repo_url = 'git+https://gitlab.com/usmcamp0811/dotfiles';\"")
-      if "git+https://gitlab.com/usmcamp0811/dotfiles" not in flake_check:
+      flake_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT repo_url FROM flakes WHERE repo_url = 'https://gitlab.com/usmcamp0811/dotfiles';\"")
+      if "https://gitlab.com/usmcamp0811/dotfiles" not in flake_check:
           pytest.fail("flake not found in DB")
 
       commit_list = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT * FROM commits;'")

@@ -12,9 +12,26 @@ with lib.crystal-forge; let
   db_port = 3042;
   db_password = "password";
   cf_port = 3445;
+  grafana_port = 3446;
   pgweb_port = 12084;
-
+  # Create the dashboard JSON file
+  crystalForgeDashboard = pkgs.writeTextFile {
+    name = "crystal-forge-dashboard.json";
+    text = builtins.toJSON (builtins.fromJSON (builtins.readFile ./dashboards/crystal-forge-dashboard.json));
+  };
   tomlFormat = pkgs.formats.toml {};
+  gray = pkgs.writeShellApplication {
+    name = "test-gray";
+    text = ''
+      nix run "$PROJECT_ROOT#testAgents.test-gray.agent"
+    '';
+  };
+  lucas = pkgs.writeShellApplication {
+    name = "test-lucas";
+    text = ''
+      nix run "$PROJECT_ROOT#testAgents.test-lucas.agent"
+    '';
+  };
   generateConfig = pkgs.writeShellApplication {
     name = "generate-config";
     runtimeInputs = with pkgs; [hostname coreutils];
@@ -63,12 +80,31 @@ with lib.crystal-forge; let
         risk_profile = "LOW";
         compliance_level = "NONE";
       }
+      {
+        name = "mockenv";
+        description = "An environment full of agents created from shell scripts for testing purposes";
+        is_active = true;
+        risk_profile = "LOW";
+        compliance_level = "NONE";
+      }
     ];
     systems = [
       {
         hostname = "HOSTNAME_PLACEHOLDER";
         public_key = "PUBLIC_KEY_PLACEHOLDER";
         environment = "devshell";
+        flake_name = "dotfiles";
+      }
+      {
+        hostname = "test.gray";
+        public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
+        environment = "mockenv";
+        flake_name = "dotfiles";
+      }
+      {
+        hostname = "test.lucas";
+        public_key = pkgs.crystal-forge.testAgents.test-lucas.publicKey;
+        environment = "mockenv";
         flake_name = "dotfiles";
       }
     ];
@@ -106,10 +142,9 @@ with lib.crystal-forge; let
       git clone --quiet --depth=1 "$REPO_URL" "$TMP_DIR"
       cd "$TMP_DIR"
       COMMIT_HASH="$(git rev-parse HEAD)"
-      REPO_URL_WITH_PREFIX="git+''${REPO_URL}"
 
       PAYLOAD="$(jq -n \
-        --arg url "$REPO_URL_WITH_PREFIX" \
+        --arg url "$REPO_URL" \
         --arg sha "$COMMIT_HASH" \
         '{ project: { web_url: $url }, checkout_sha: $sha }')"
 
@@ -154,6 +189,18 @@ with lib.crystal-forge; let
     modules = [
       inputs.services-flake.processComposeModules.default
       {
+        settings.processes.lucas-agent = {
+          inherit namespace;
+          command = lucas;
+          disabled = false;
+          depends_on."server".condition = "process_healthy";
+        };
+        settings.processes.gray-agent = {
+          inherit namespace;
+          command = gray;
+          disabled = false;
+          depends_on."server".condition = "process_healthy";
+        };
         settings.processes.server = {
           inherit namespace;
           command = runServer;
@@ -167,6 +214,7 @@ with lib.crystal-forge; let
             failure_threshold = 5;
           };
         };
+
         settings.processes.pgweb = {
           inherit namespace;
           command = "${pkgs.pgweb}/bin/pgweb --listen=${toString pgweb_port} --bind=0.0.0.0";
@@ -177,7 +225,92 @@ with lib.crystal-forge; let
           inherit namespace;
           command = runAgent;
           depends_on."server".condition = "process_healthy";
+          disabled = false;
         };
+        settings.processes.postgres-jobs = {
+          inherit namespace;
+          command = ''
+            nix run "$PROJECT_ROOT#run-postgres-jobs"
+          '';
+          depends_on."db".condition = "process_healthy";
+          environment = {
+            DB_HOST = "127.0.0.1";
+            DB_PORT = toString db_port;
+            DB_NAME = "crystal_forge";
+            DB_USER = "crystal_forge";
+            DB_PASSWORD = db_password;
+          };
+        };
+        services.grafana.grafana = {
+          enable = true;
+          http_port = grafana_port;
+          domain = "localhost";
+          declarativePlugins = with pkgs.grafanaPlugins; [grafana-piechart-panel];
+          providers = [
+            {
+              name = "default";
+              type = "file";
+              disableDeletion = false;
+              updateIntervalSeconds = 10;
+              options = {
+                path = pkgs.linkFarm "grafana-dashboards" [
+                  {
+                    name = "crystal-forge-dashboard.json";
+                    path = crystalForgeDashboard;
+                  }
+                ];
+              };
+            }
+          ];
+          datasources = [
+            {
+              name = "CrystalForge DB";
+              uid = "crystal-forge-ds";
+              type = "postgres";
+              access = "proxy";
+              url = "localhost:${toString db_port}";
+              database = "crystal_forge";
+              user = "crystal_forge";
+              secureJsonData = {
+                password = db_password;
+              };
+              jsonData = {
+                sslmode = "disable";
+                maxOpenConns = 100;
+                maxIdleConns = 100;
+                maxIdleConnsAuto = true;
+              };
+            }
+            {
+              name = "Grafana DB";
+              uid = "grafana-db";
+              type = "postgres";
+              access = "proxy";
+              url = "localhost:${toString db_port}";
+              database = "grafana_db";
+              user = "grafana_user";
+              secureJsonData = {
+                password = db_password;
+              };
+              jsonData = {
+                sslmode = "disable";
+                maxOpenConns = 100;
+                maxIdleConns = 100;
+                maxIdleConnsAuto = true;
+              };
+            }
+          ];
+          extraConf."auth.anonymous" = {
+            enabled = true;
+            org_role = "Editor";
+          };
+          extraConf.database = with config.services.postgres.grafana-db; {
+            type = "postgres";
+            host = "localhost:${toString db_port}";
+            name = "grafana_db";
+          };
+        };
+        settings.processes."grafana".depends_on."db".condition = "process_healthy";
         services.postgres."db" = {
           inherit namespace;
           enable = true;
@@ -187,6 +320,11 @@ with lib.crystal-forge; let
             CREATE USER crystal_forge LOGIN;
             CREATE DATABASE crystal_forge OWNER crystal_forge;
             GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+
+            CREATE USER root WITH SUPERUSER LOGIN;
+            CREATE USER grafana_user LOGIN;
+            CREATE DATABASE grafana_db OWNER grafana_user;
+            GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana_user;
           '';
           initialDatabases = [];
         };
@@ -213,12 +351,18 @@ with lib.crystal-forge; let
             CREATE USER crystal_forge LOGIN;
             CREATE DATABASE crystal_forge OWNER crystal_forge;
             GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+
+            CREATE USER root WITH SUPERUSER LOGIN;
+            CREATE USER grafana_user LOGIN;
+            CREATE DATABASE grafana_db OWNER grafana_user;
+            GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana_user;
           '';
           initialDatabases = [];
         };
       }
     ];
   };
+  # Simple agent with default actions
 in
   cf-dev.config.outputs.package
   // {
