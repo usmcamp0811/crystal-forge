@@ -155,3 +155,5 @@ nix/packages/nix-rmf-slides/.vite/deps
 packages/default/.nixos-test-history
 .nixos-test-history
 data
+*.pub
+*.key

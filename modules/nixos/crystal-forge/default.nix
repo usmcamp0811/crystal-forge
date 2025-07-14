@@ -6,6 +6,7 @@
 }: let
   cfg = config.services.crystal-forge;
   tomlFormat = pkgs.formats.toml {};
+  postgres_pkg = config.services.postgresql.package;
 
   # Generate the base TOML config structure
   baseConfig =
@@ -310,6 +311,44 @@ in {
       '';
     };
 
+    systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge Postgres Jobs";
+      after = ["postgresql.service"];
+      wantedBy = ["multi-user.target"];
+
+      serviceConfig = {
+        Type = "oneshot";
+        User = "crystal-forge";
+        Group = "crystal-forge";
+      };
+
+      environment = {
+        DB_HOST = cfg.database.host;
+        DB_PORT = toString cfg.database.port;
+        DB_NAME = cfg.database.name;
+        DB_USER = cfg.database.user;
+        DB_PASSWORD = lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
+      };
+
+      script =
+        lib.optionalString (cfg.database.passwordFile != null) ''
+          export DB_PASSWORD="$(cat ${cfg.database.passwordFile})"
+          exec ${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs
+        ''
+        + lib.optionalString (cfg.database.passwordFile == null) ''
+          exec ${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs
+        '';
+    };
+
+    systemd.timers."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
+      description = "Run Crystal Forge Postgres Jobs daily at midnight";
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnCalendar = "*-*-* 00:00:00";
+        Persistent = true;
+      };
+    };
+
     nix.settings.allowed-users = ["root" "crystal-forge"];
 
     # Server service
@@ -335,7 +374,7 @@ in {
 
         echo "Ensuring .cache/nix directory exists with correct ownership..."
         mkdir -p /var/lib/crystal-forge/.cache/nix
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/
       '';
 
       serviceConfig = {
