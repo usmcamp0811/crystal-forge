@@ -1,4 +1,4 @@
-INSERT INTO daily_heartbeat_health (snapshot_date, total_systems, systems_healthy, systems_warning, systems_critical, systems_offline, systems_no_heartbeats, avg_heartbeat_interval_minutes, total_heartbeats_24h)
+INSERT INTO daily_heartbeat_health (snapshot_date, total_systems, systems_healthy, systems_warning, systems_critical, systems_offline, systems_no_heartbeats, avg_heartbeat_interval_minutes, total_heartbeats_24h, created_at)
 SELECT
     CURRENT_DATE AS snapshot_date,
     COUNT(*) AS total_systems,
@@ -8,7 +8,8 @@ SELECT
     COUNT(*) FILTER (WHERE status = 'Offline') AS systems_offline,
     COUNT(*) FILTER (WHERE status = 'No Heartbeats') AS systems_no_heartbeats,
     AVG(avg_heartbeat_interval_seconds / 60.0) AS avg_heartbeat_interval_minutes,
-    SUM(heartbeat_count_24h) AS total_heartbeats_24h
+    SUM(COALESCE(heartbeat_count_24h, 0)) AS total_heartbeats_24h,
+    NOW() AS created_at
 FROM
     view_system_heartbeat_health
 ON CONFLICT (snapshot_date)
