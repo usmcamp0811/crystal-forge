@@ -229,7 +229,9 @@ with lib.crystal-forge; let
         };
         settings.processes.postgres-jobs = {
           inherit namespace;
-          command = "${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs";
+          command = ''
+            nix run "$PROJECT_ROOT#run-postgres-jobs"
+          '';
           depends_on."db".condition = "process_healthy";
           environment = {
             DB_HOST = "127.0.0.1";
