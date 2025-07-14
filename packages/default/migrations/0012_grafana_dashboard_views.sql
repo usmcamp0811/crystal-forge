@@ -303,3 +303,131 @@ COMMENT ON VIEW view_systems_drift_time IS 'All systems with drift time calculat
 Up-to-date systems show 0 drift hours/days, behind systems show actual drift.
 Used for "Top N Systems with Most Drift Time" Grafana panel and daily_drift_snapshots job.';
 
+-- 1. SYSTEM COMPLIANCE TIME SERIES
+-- Tracks number of systems that are up-to-date vs behind vs offline
+CREATE TABLE IF NOT EXISTS daily_compliance_snapshots (
+    snapshot_date date PRIMARY KEY,
+    total_systems integer NOT NULL,
+    systems_up_to_date integer NOT NULL,
+    systems_behind integer NOT NULL,
+    systems_no_evaluation integer NOT NULL,
+    systems_offline integer NOT NULL,
+    systems_never_seen integer NOT NULL,
+    compliance_percentage numeric(5, 2) NOT NULL,
+    created_at timestamptz DEFAULT NOW()
+);
+
+-- 3. EVALUATION PIPELINE HEALTH TIME SERIES
+-- Tracks success/failure rates of evaluations
+CREATE TABLE IF NOT EXISTS daily_evaluation_health (
+    snapshot_date date PRIMARY KEY,
+    total_evaluations integer NOT NULL,
+    successful_evaluations integer NOT NULL,
+    failed_evaluations integer NOT NULL,
+    pending_evaluations integer NOT NULL,
+    avg_evaluation_duration_ms integer,
+    max_evaluation_duration_ms integer,
+    success_rate_percentage numeric(5, 2) NOT NULL,
+    evaluations_with_retries integer NOT NULL,
+    created_at timestamptz DEFAULT NOW()
+);
+
+-- 4. SYSTEM HEARTBEAT HEALTH TIME SERIES
+-- Tracks system connectivity and health patterns
+CREATE TABLE IF NOT EXISTS daily_heartbeat_health (
+    snapshot_date date PRIMARY KEY,
+    total_systems integer NOT NULL,
+    systems_healthy integer NOT NULL, -- heartbeat < 15 min
+    systems_warning integer NOT NULL, -- heartbeat 15min - 1hr
+    systems_critical integer NOT NULL, -- heartbeat 1hr - 4hr
+    systems_offline integer NOT NULL, -- heartbeat > 4hr
+    systems_no_heartbeats integer NOT NULL, -- never had heartbeat
+    avg_heartbeat_interval_minutes numeric(8, 2),
+    total_heartbeats_24h integer NOT NULL,
+    created_at timestamptz DEFAULT NOW()
+);
+
+-- 5. SECURITY POSTURE TIME SERIES
+-- Tracks security-relevant system configurations
+CREATE TABLE IF NOT EXISTS daily_security_posture (
+    snapshot_date date PRIMARY KEY,
+    total_systems integer NOT NULL,
+    systems_with_tpm integer NOT NULL,
+    systems_secure_boot integer NOT NULL,
+    systems_fips_mode integer NOT NULL,
+    systems_selinux_enforcing integer NOT NULL,
+    systems_agent_compatible integer NOT NULL,
+    unique_agent_versions integer NOT NULL,
+    outdated_agent_count integer NOT NULL,
+    created_at timestamptz DEFAULT NOW()
+);
+
+-- 6. COMMIT VELOCITY AND DEPLOYMENT LAG TIME SERIES
+-- Tracks how quickly commits are being evaluated and deployed
+CREATE TABLE IF NOT EXISTS daily_deployment_velocity (
+    snapshot_date date PRIMARY KEY,
+    new_commits_today integer NOT NULL,
+    commits_evaluated_today integer NOT NULL,
+    commits_deployed_today integer NOT NULL,
+    avg_eval_to_deploy_hours numeric(8, 2),
+    max_eval_to_deploy_hours numeric(8, 2),
+    systems_updated_today integer NOT NULL,
+    fastest_deployment_minutes integer,
+    slowest_deployment_hours numeric(8, 2),
+    created_at timestamptz DEFAULT NOW()
+);
+
+-- ============================================================================
+-- HELPER VIEWS FOR TIME SERIES ANALYSIS
+-- ============================================================================
+-- View: 7-day compliance trend
+CREATE OR REPLACE VIEW view_compliance_trend_7d AS
+SELECT
+    snapshot_date,
+    total_systems,
+    systems_up_to_date,
+    systems_behind,
+    compliance_percentage,
+    compliance_percentage - LAG(compliance_percentage) OVER (ORDER BY snapshot_date) AS daily_change
+FROM
+    daily_compliance_snapshots
+WHERE
+    snapshot_date >= CURRENT_DATE - INTERVAL '7 days'
+ORDER BY
+    snapshot_date;
+
+-- View: Security posture trends
+CREATE OR REPLACE VIEW view_security_trend_30d AS
+SELECT
+    snapshot_date,
+    total_systems,
+    ROUND(systems_with_tpm * 100.0 / total_systems, 1) AS tpm_percentage,
+    ROUND(systems_secure_boot * 100.0 / total_systems, 1) AS secure_boot_percentage,
+    ROUND(systems_fips_mode * 100.0 / total_systems, 1) AS fips_percentage,
+    ROUND(systems_selinux_enforcing * 100.0 / total_systems, 1) AS selinux_percentage,
+    unique_agent_versions,
+    outdated_agent_count
+FROM
+    daily_security_posture
+WHERE
+    snapshot_date >= CURRENT_DATE - INTERVAL '30 days'
+ORDER BY
+    snapshot_date;
+
+-- View: Deployment velocity trends
+CREATE OR REPLACE VIEW view_velocity_trend_14d AS
+SELECT
+    snapshot_date,
+    new_commits_today,
+    commits_evaluated_today,
+    commits_deployed_today,
+    ROUND(avg_eval_to_deploy_hours, 2) AS avg_eval_to_deploy_hours,
+    systems_updated_today,
+    ROUND(commits_deployed_today * 100.0 / NULLIF (commits_evaluated_today, 0), 1) AS deployment_rate_percentage
+FROM
+    daily_deployment_velocity
+WHERE
+    snapshot_date >= CURRENT_DATE - INTERVAL '14 days'
+ORDER BY
+    snapshot_date;
+
