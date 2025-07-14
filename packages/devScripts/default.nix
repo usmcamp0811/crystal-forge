@@ -227,6 +227,18 @@ with lib.crystal-forge; let
           depends_on."server".condition = "process_healthy";
           disabled = false;
         };
+        settings.processes.postgres-jobs = {
+          inherit namespace;
+          command = "${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs";
+          depends_on."db".condition = "process_healthy";
+          environment = {
+            DB_HOST = "127.0.0.1";
+            DB_PORT = toString db_port;
+            DB_NAME = "crystal_forge";
+            DB_USER = "crystal_forge";
+            DB_PASSWORD = db_password;
+          };
+        };
         services.grafana.grafana = {
           enable = true;
           http_port = grafana_port;

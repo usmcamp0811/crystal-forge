@@ -313,14 +313,31 @@ in {
 
     systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Postgres Jobs";
+      after = ["postgresql.service"];
+      wantedBy = ["multi-user.target"];
+
       serviceConfig = {
-        ExecStart = "${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs";
         Type = "oneshot";
+        User = "crystal-forge";
+        Group = "crystal-forge";
       };
+
       environment = {
+        DB_HOST = cfg.database.host;
+        DB_PORT = toString cfg.database.port;
         DB_NAME = cfg.database.name;
         DB_USER = cfg.database.user;
+        DB_PASSWORD = lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
       };
+
+      script =
+        lib.optionalString (cfg.database.passwordFile != null) ''
+          export DB_PASSWORD="$(cat ${cfg.database.passwordFile})"
+          exec ${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs
+        ''
+        + lib.optionalString (cfg.database.passwordFile == null) ''
+          exec ${pkgs.crystal-forge.run-postgres-jobs}/bin/run-postgres-jobs
+        '';
     };
 
     systemd.timers."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
