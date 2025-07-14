@@ -351,6 +351,11 @@ with lib.crystal-forge; let
             CREATE USER crystal_forge LOGIN;
             CREATE DATABASE crystal_forge OWNER crystal_forge;
             GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+
+            CREATE USER root WITH SUPERUSER LOGIN;
+            CREATE USER grafana_user LOGIN;
+            CREATE DATABASE grafana_db OWNER grafana_user;
+            GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana_user;
           '';
           initialDatabases = [];
         };
