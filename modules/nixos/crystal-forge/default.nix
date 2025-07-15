@@ -328,6 +328,7 @@ in {
         DB_NAME = cfg.database.name;
         DB_USER = cfg.database.user;
         DB_PASSWORD = lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
+        JOB_DIR = "${pkgs.crystal-forge.run-postgres-jobs}/jobs";
       };
 
       script =
