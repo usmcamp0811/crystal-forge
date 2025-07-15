@@ -209,5 +209,35 @@ in
       active_services = agent.succeed("systemctl list-units --type=service --state=active")
       if "postgresql" in active_services:
           pytest.fail("PostgreSQL is unexpectedly running on the agent")
+
+      # 1. Test that the postgres jobs timer is properly configured
+      try:
+          server.succeed("systemctl list-timers | grep crystal-forge-postgres-jobs")
+      except Exception:
+          pytest.fail("crystal-forge-postgres-jobs timer is not configured")
+
+      # 2. Manually trigger the postgres jobs service to ensure it works
+      try:
+          server.succeed("systemctl start crystal-forge-postgres-jobs.service")
+      except Exception:
+          pytest.fail("Failed to start crystal-forge-postgres-jobs.service")
+
+      # 3. Check that the service completed successfully by checking logs instead of status
+      # For oneshot services, we need to check the logs rather than status
+      try:
+          server.succeed("journalctl -u crystal-forge-postgres-jobs.service | grep 'All jobs completed successfully'")
+      except Exception:
+          pytest.fail("crystal-forge-postgres-jobs.service did not complete successfully")
+
+
+      # 6. Test that jobs can be run multiple times without error (idempotency)
+      try:
+          server.succeed("systemctl start crystal-forge-postgres-jobs.service")
+          # Check logs again for second successful run
+          server.succeed("journalctl -u crystal-forge-postgres-jobs.service | tail -20 | grep 'All jobs completed successfully'")
+      except Exception:
+          pytest.fail("postgres jobs are not idempotent - failed on second run")
+
+      server.log("=== postgres jobs validation completed ===")
     '';
   }
