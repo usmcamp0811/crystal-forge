@@ -276,4 +276,69 @@ with lib; rec {
     # Private key path (for reference, though it's in the script)
     privateKeyPath = "${privateKey}/agent.key";
   };
+
+  # Helper function to generate realistic heartbeat intervals
+  mkHeartbeats = count: interval:
+    map (i: {
+      type = "heartbeat";
+      delay = interval;
+    }) (range 1 count);
+
+  # Helper function to create a realistic week-long monitoring scenario
+  mkWeeklyActions = {
+    startDerivation,
+    updateDerivations ? [],
+    dailyHeartbeats ? 96, # Every 15 minutes = 96 per day
+    weeklyUpdates ? 2,
+    emergencyRestarts ? 1,
+    timeScale ? 1.0, # Real seconds per simulated minute (1.0 = real-time, 0.1 = 10x faster, 0.001 = 1000x faster)
+  }: let
+    # Time constants based on timeScale parameter
+    minute = 60.0 * timeScale;
+    hour = 60 * minute;
+    day = 24 * hour;
+
+    # Daily heartbeat interval (15 simulated minutes)
+    heartbeatInterval = 15 * minute;
+
+    # Generate actions for each day
+    generateDayActions = dayNum: let
+      dayStart = dayNum * day;
+
+      # Regular heartbeats throughout the day
+      heartbeats = map (i: {
+        type = "heartbeat";
+        delay =
+          if dayNum == 0 && i == 0
+          then 0
+          else heartbeatInterval;
+      }) (range 0 (dailyHeartbeats - 1));
+
+      # Potential system update (every 3-4 days)
+      updates = optional (dayNum > 0 && (mod dayNum 3 == 0) && (length updateDerivations > 0)) {
+        type = "config_change";
+        derivationPath = elemAt updateDerivations (mod (dayNum / 3) (length updateDerivations));
+        delay = 2 * hour; # Updates happen after 2 hours into the day
+      };
+
+      # Potential emergency restart (simulate system issues)
+      emergencies = optional (dayNum == 4) {
+        # Mid-week emergency
+        type = "startup";
+        derivationPath = startDerivation;
+        delay = 8 * hour; # Emergency at 8 hours into the day
+      };
+    in
+      heartbeats ++ updates ++ emergencies;
+
+    # Generate 7 days worth of actions
+    allDayActions = concatMap generateDayActions (range 0 6);
+  in
+    [
+      {
+        type = "startup";
+        derivationPath = startDerivation;
+      }
+    ]
+    ++ allDayActions;
 }
