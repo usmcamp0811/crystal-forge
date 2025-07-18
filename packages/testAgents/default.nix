@@ -17,6 +17,7 @@ with lib.crystal-forge; let
     privateKeyString = "PjCQGMmzXHpPqGXjSPZ4sdHu7+stRX0AOuhZAvKwuKg=";
     publicKeyString = "49+maHYdvvn/qUx1CMzg0TLu1BbLS64c1K4E0/2ORO4=";
     actions = mkWeeklyActions {
+      endTimeNow = true;
       timeScale = 0.01; # 100x faster - adjust as needed
       startDerivation = "/nix/store/rjl1jl1s2s1b76fjqibh9llxrfij6b0s-nixos-system-gray-25.11.20250708.9807714";
       updateDerivations = [
@@ -38,6 +39,7 @@ with lib.crystal-forge; let
     publicKeyString = "pwByU3iXjxGB/WP5hVEoR4eL/xsYWv1QmOdBHkIchnM=";
     actions = mkWeeklyActions {
       timeScale = 0.01; # 100x faster - adjust as needed
+      endTimeNow = true;
       startDerivation = "/nix/store/7jpnf4zpa92qhzi0qbvgapq15xs6bvj8-nixos-system-lucas-25.05.20250619.005b89d";
       updateDerivations = [
         "/nix/store/w30p4cmca85rzglsr2q33vn2m50l6yqy-nixos-system-lucas-25.11.20250708.9807714"

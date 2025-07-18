@@ -134,6 +134,8 @@ with lib; rec {
             then "startup"
             else if actionType == "config_change"
             then "config_change"
+            else if actionType == "heartbeat" # Add this line
+            then "heartbeat" # Add this line
             else "state_delta";
           endpoint =
             if actionType == "startup" || actionType == "config_change"
@@ -292,19 +294,18 @@ with lib; rec {
     weeklyUpdates ? 2,
     emergencyRestarts ? 1,
     timeScale ? 1.0, # Real seconds per simulated minute (1.0 = real-time, 0.1 = 10x faster, 0.001 = 1000x faster)
+    endTimeNow ? true, # If true, compress all delays to finish quickly
   }: let
     # Time constants based on timeScale parameter
     minute = 60.0 * timeScale;
     hour = 60 * minute;
     day = 24 * hour;
 
-    # Daily heartbeat interval (15 simulated minutes)
+    # Heartbeat interval always respects timeScale (15 simulated minutes)
     heartbeatInterval = 15 * minute;
 
     # Generate actions for each day
     generateDayActions = dayNum: let
-      dayStart = dayNum * day;
-
       # Regular heartbeats throughout the day
       heartbeats = map (i: {
         type = "heartbeat";
@@ -314,19 +315,33 @@ with lib; rec {
           else heartbeatInterval;
       }) (range 0 (dailyHeartbeats - 1));
 
-      # Potential system update (every 3-4 days)
-      updates = optional (dayNum > 0 && (mod dayNum 3 == 0) && (length updateDerivations > 0)) {
-        type = "config_change";
-        derivationPath = elemAt updateDerivations (mod (dayNum / 3) (length updateDerivations));
-        delay = 2 * hour; # Updates happen after 2 hours into the day
-      };
+      # Deterministic system updates - spread evenly through the week
+      updates =
+        if (length updateDerivations > 0) && dayNum > 0
+        then let
+          # Calculate which update to use based on day
+          updateIndex = mod (dayNum - 1) (length updateDerivations);
+          # Updates happen on days 1, 3, 5 (deterministic)
+          shouldUpdate = mod dayNum 2 == 1 && dayNum <= (length updateDerivations * 2);
+        in
+          optional shouldUpdate {
+            type = "config_change";
+            derivationPath = elemAt updateDerivations updateIndex;
+            delay =
+              if endTimeNow
+              then heartbeatInterval
+              else (2 * hour);
+          }
+        else [];
 
-      # Potential emergency restart (simulate system issues)
-      emergencies = optional (dayNum == 4) {
-        # Mid-week emergency
+      # Deterministic emergency restart on day 4
+      emergencies = optional (dayNum == 4 && emergencyRestarts > 0) {
         type = "startup";
         derivationPath = startDerivation;
-        delay = 8 * hour; # Emergency at 8 hours into the day
+        delay =
+          if endTimeNow
+          then heartbeatInterval
+          else (8 * hour);
       };
     in
       heartbeats ++ updates ++ emergencies;
