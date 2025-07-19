@@ -33,11 +33,11 @@ with lib.crystal-forge; let
   commonActionSettings = {
     dailyHeartbeats = 96; # Every 15 minutes = 96 per day
     weeklyUpdates = 2;
-    emergencyRestarts = 1;
+    emergencyRestarts = 3;
     endTimeNow = true;
   };
 
-  # Helper function to create an agent with actions
+  # Helper function to create an agent with actions (for legacy standalone agents)
   mkTestAgent = name: config: timeScale:
     mkAgent {
       inherit pkgs;
@@ -51,12 +51,27 @@ with lib.crystal-forge; let
         });
     };
 
+  # Helper to create agents for orchestrators (without pre-generated actions)
+  mkOrchestratorAgent = {
+    hostname,
+    privateKeyString,
+    publicKeyString ? null,
+    serverHost ? "localhost",
+    serverPort ? 3445,
+    currentDerivation ? null,
+    startDerivation ? null,
+  }: {
+    inherit hostname privateKeyString serverHost serverPort;
+    inherit currentDerivation startDerivation;
+    publicKey = publicKeyString;
+  };
+
   # Create individual agents for standalone use (100x faster)
-  test-gray = mkTestAgent "gray" agentConfigs.gray 0.01;
-  test-lucas = mkTestAgent "lucas" agentConfigs.lucas 0.01;
+  test-gray = mkTestAgent "gray" agentConfigs.gray 0.0001;
+  test-lucas = mkTestAgent "lucas" agentConfigs.lucas 0.0001;
 
   # Create agents for orchestrator (1000x faster for full simulation)
-  orchestrator-agents =
+  legacy-orchestrator-agents =
     mapAttrsToList (
       name: config: let
         agent = mkTestAgent name config 0.001;
@@ -66,12 +81,106 @@ with lib.crystal-forge; let
     )
     agentConfigs;
 
-  # Weekly orchestrator with SQL jobs
+  # Create simplified agents for new orchestrators
+  orchestrator-agents =
+    mapAttrsToList (
+      name: config:
+        mkOrchestratorAgent {
+          inherit (config) hostname privateKeyString publicKeyString startDerivation;
+          serverHost = "localhost";
+          serverPort = cf_port;
+          currentDerivation = config.startDerivation; # Use start derivation as current
+        }
+    )
+    agentConfigs;
+
+  # Weekly orchestrator with SQL jobs (using new approach)
   weekly-simulation = mkWeeklyOrchestrator {
     inherit pkgs;
-    timeScale = 0.001;
+    timeScale = 0.00001;
     agents = orchestrator-agents;
     sqlJobsPackage = pkgs.crystal-forge.run-postgres-jobs;
+    simulationDays = 7;
+    dailyHeartbeats = 96;
+    agentConfigChanges = {
+      "test.gray" = [
+        {
+          derivationPath = elemAt agentConfigs.gray.updateDerivations 0;
+          hour = 10;
+        }
+      ];
+      "test.lucas" = [
+        {
+          derivationPath = elemAt agentConfigs.lucas.updateDerivations 0;
+          hour = 14;
+        }
+      ];
+    };
+    agentRestarts = {
+      "test.gray" = [
+        {
+          derivationPath = agentConfigs.gray.startDerivation;
+          hour = 8;
+        }
+      ];
+    };
+  };
+
+  # Daily simulation example (simulate 3 days ago)
+  daily-sim = mkDailyOrchestrator {
+    inherit pkgs;
+    agents = orchestrator-agents;
+    daysBack = 3;
+    timeScale = 0.0000001;
+    # dailyHeartbeats = 96;
+    dailyHeartbeats = 96;
+    sqlJobsPackage = pkgs.crystal-forge.run-postgres-jobs;
+    agentConfigChanges = {
+      "test.gray" = [
+        {
+          derivationPath = elemAt agentConfigs.gray.updateDerivations 0;
+          hour = 10;
+        }
+        {
+          derivationPath = agentConfigs.gray.startDerivation;
+          hour = 16;
+        }
+      ];
+      "test.lucas" = [
+        {
+          derivationPath = elemAt agentConfigs.lucas.updateDerivations 0;
+          hour = 14;
+        }
+      ];
+    };
+    agentRestarts = {
+      "test.gray" = [
+        {
+          derivationPath = agentConfigs.gray.startDerivation;
+          hour = 8;
+        }
+      ];
+      # test.lucas has no restarts this day
+    };
+  };
+
+  # Multiple daily simulations for different days
+  daily-sim-yesterday = mkDailyOrchestrator {
+    inherit pkgs;
+    agents = orchestrator-agents;
+    daysBack = 1;
+    timeScale = 0.00001;
+    dailyHeartbeats = 96;
+    sqlJobsPackage = pkgs.crystal-forge.run-postgres-jobs;
+    agentConfigChanges = {
+      "test.lucas" = [
+        {
+          derivationPath = elemAt agentConfigs.lucas.updateDerivations 0;
+          hour = 9;
+        }
+      ];
+    };
+    agentRestarts = {};
   };
 in
   pkgs.writeShellApplication {
@@ -81,33 +190,35 @@ in
       cat << 'EOF' | bat --language=markdown --style=plain
       # Crystal Forge Test Agents
 
-      This package provides test agents for Crystal Forge with multiple time scales:
+      This package provides test agents for Crystal Forge with multiple approaches:
 
       ## Individual Agents (100x faster - ~1.7 hours for full week)
-      - **test-gray**: Simulates NixOS system management for gray host
-      - **test-lucas**: Simulates NixOS system management for lucas host
+      - **test-gray**: Legacy standalone agent for gray host
+      - **test-lucas**: Legacy standalone agent for lucas host
 
-      ## Full Weekly Simulation (1000x faster - ~10 minutes for full week)
-      - **weekly-simulation**: Runs both agents with coordinated timeline and midnight SQL jobs
+      ## New Orchestrator Simulations
+      - **weekly-simulation**: New approach with per-agent config changes and restarts
+      - **daily-sim**: Single day simulation (3 days ago) with specific events
+      - **daily-sim-yesterday**: Yesterday's simulation with different events
 
       ## Usage
 
-      Run individual agents for testing:
-      ```bash
-      nix run .#test-gray.agent
-      nix run .#test-lucas.agent
-      ```
-
-      Run complete weekly simulation with SQL jobs:
+      Run new orchestrator simulations:
       ```bash
       nix run .#weekly-simulation
+      nix run .#daily-sim
+      nix run .#daily-sim-yesterday
+      ```
+
+      Run legacy weekly simulation:
+      ```bash
+      nix run .#legacy-weekly-simulation
       ```
 
       ## Configuration
       - Server: localhost:${toString cf_port}
       - Daily heartbeats: ${toString commonActionSettings.dailyHeartbeats} (every 15 simulated minutes)
-      - Weekly updates: ${toString commonActionSettings.weeklyUpdates}
-      - Emergency restarts: ${toString commonActionSettings.emergencyRestarts}
+      - Time scales: 0.01 for daily sims, 0.001 for weekly sims
 
       ## Agent Details
       ${concatStringsSep "\n" (mapAttrsToList (name: config: ''
@@ -117,6 +228,12 @@ in
           - Public key: ${config.publicKeyString}
         '')
         agentConfigs)}
+
+      ## New Orchestrator Features
+      - Per-agent configuration changes at specific hours
+      - Per-agent restart schedules
+      - SQL jobs run at end of each simulated day
+      - Flexible daily or weekly simulation periods
       EOF
     '';
   }
@@ -131,6 +248,9 @@ in
       publicKey = test-lucas.publicKey;
     };
 
-    # Weekly orchestrator for full simulation
-    inherit weekly-simulation;
+    # New orchestrator simulations
+    inherit weekly-simulation daily-sim daily-sim-yesterday;
+
+    # Expose orchestrator agents for external use
+    inherit orchestrator-agents;
   }

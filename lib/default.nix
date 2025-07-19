@@ -322,45 +322,106 @@ with lib; rec {
     ]
     ++ allDayActions;
 
-  mkWeeklyOrchestrator = {
+  # Daily orchestrator - runs a single 24-hour period starting and ending at midnight
+  mkDailyOrchestrator = {
     pkgs,
     agents,
+    daysBack ? 1, # How many days ago to simulate (1 = yesterday)
     timeScale ? 0.01,
     sqlJobsPackage ? pkgs.crystal-forge.run-postgres-jobs,
-    simulationDays ? 7, # How many days to simulate
+    dailyHeartbeats ? 96, # Every 15 minutes = 96 per day
+    agentConfigChanges ? {}, # Attrset of hostname -> [{derivationPath, hour}] for config changes
+    agentRestarts ? {}, # Attrset of hostname -> [{derivationPath, hour}] for restarts
   }: let
+    # Helper function for absolute value
+    abs = x:
+      if x < 0
+      then -x
+      else x;
+
     # Time constants based on timeScale parameter
     minute = 60.0 * timeScale;
     hour = 60.0 * minute;
-    day = 24.0 * hour;
 
-    # Extract and merge all actions into timeline with agent info
-    allAgentActions = lib.flatten (map (
-        agent:
-          map (action:
-            action
-            // {
-              hostname = agent.hostname;
-              privateKey = agent.privateKeyString;
-              serverHost = agent.serverHost or "localhost";
-              serverPort = agent.serverPort or 3445;
-            })
-          agent.actions
-      )
-      agents);
+    # Calculate the start of the target day (midnight) in seconds back from now
+    dayStartSecondsBack = daysBack * 86400;
+    dayEndSecondsBack = (daysBack - 1) * 86400;
 
-    # Add SQL job events at midnight boundaries (one for each day)
-    midnightJobs = map (day: {
+    # Generate actions for each agent for this specific day
+    dailyAgentActions = lib.flatten (map (agent: let
+      # Get the current system derivation for this agent (use first available or fallback)
+      currentDerivation =
+        if agent ? currentDerivation
+        then agent.currentDerivation
+        else if agent ? startDerivation
+        then agent.startDerivation
+        else "/nix/store/default-system-${agent.hostname}";
+
+      # Get config changes and restarts for this specific agent
+      agentConfigChangesList = agentConfigChanges.${agent.hostname} or [];
+      agentRestartsList = agentRestarts.${agent.hostname} or [];
+
+      # Generate heartbeats throughout the day
+      heartbeatActions = map (i: let
+        # Calculate seconds within the day for this heartbeat (spread evenly)
+        secondsIntoDay = i * (86400 / dailyHeartbeats); # 86400 seconds per day
+        totalSecondsBack = dayStartSecondsBack - builtins.floor secondsIntoDay;
+      in {
+        type = "heartbeat";
+        derivationPath = currentDerivation;
+        secondsBack = totalSecondsBack;
+        hostname = agent.hostname;
+        privateKey = agent.privateKeyString;
+        serverHost = agent.serverHost or "localhost";
+        serverPort = agent.serverPort or 3445;
+        delay =
+          if i == 0
+          then 0
+          else (15 * minute); # 15 minute intervals
+      }) (range 0 (dailyHeartbeats - 1));
+
+      # Generate config change actions for this agent
+      configChangeActions =
+        map (change: {
+          type = "config_change";
+          derivationPath = change.derivationPath;
+          secondsBack = dayStartSecondsBack - (change.hour * 3600);
+          hostname = agent.hostname;
+          privateKey = agent.privateKeyString;
+          serverHost = agent.serverHost or "localhost";
+          serverPort = agent.serverPort or 3445;
+          delay = 30; # Brief delay between config changes
+        })
+        agentConfigChangesList;
+
+      # Generate restart actions for this agent
+      restartActions =
+        map (restart: {
+          type = "startup";
+          derivationPath = restart.derivationPath;
+          secondsBack = dayStartSecondsBack - (restart.hour * 3600);
+          hostname = agent.hostname;
+          privateKey = agent.privateKeyString;
+          serverHost = agent.serverHost or "localhost";
+          serverPort = agent.serverPort or 3445;
+          delay = 60; # Longer delay for restarts
+        })
+        agentRestartsList;
+    in
+      heartbeatActions ++ configChangeActions ++ restartActions)
+    agents);
+
+    # Add SQL job at the end of the day (just before next midnight)
+    sqlJobEvent = {
       type = "sql_job";
-      daysBack = simulationDays - day;
-      hoursBack = 0;
-      dayNum = day;
-    }) (range 0 (simulationDays - 1));
+      secondsBack = dayEndSecondsBack + 1; # 1 second before the next day starts
+      daysBack = daysBack - 1;
+      hoursBack = 23.999; # Just before midnight
+    };
 
-    # Sort all events chronologically (oldest first - largest total seconds back first)
+    # Sort all events chronologically (oldest first - largest seconds back first)
     allEvents = lib.sort (
       a: b: let
-        # Calculate total seconds back for each event
         aSecondsBack =
           if a ? secondsBack
           then a.secondsBack
@@ -371,36 +432,27 @@ with lib; rec {
           else (b.daysBack or 0) * 86400 + builtins.floor ((b.hoursBack or 0) * 3600);
       in
         aSecondsBack > bSecondsBack
-    ) (allAgentActions ++ midnightJobs);
+    ) (dailyAgentActions ++ [sqlJobEvent]);
 
-    # Generate execution script for timeline
+    # Generate execution script for the day
     executeTimeline =
       lib.concatMapStringsSep "\n" (
         event:
           if event.type == "sql_job"
           then ''
-            echo "🌙 [Day ${toString event.dayNum}] Running midnight SQL jobs..."
-            echo "  Simulated date: $(date -u -d "@$((sim_start_time - ${toString event.daysBack} * 86400))" '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "🌙 End of day - Running SQL jobs..."
+            echo "  Target date: $(date -u -d "@$((sim_start_time - ${toString event.secondsBack}))" '+%Y-%m-%d %H:%M:%S UTC')"
             ${sqlJobsPackage}/bin/run-postgres-jobs
             echo ""
           ''
           else let
-            # Calculate total seconds back from now
-            totalSecondsBack =
-              if event ? secondsBack
-              then event.secondsBack
-              else (event.daysBack or 0) * 86400 + builtins.floor ((event.hoursBack or 0) * 3600);
+            # Calculate timestamp for this event
+            timestampCalculation = ''$(date -u -d "@$((sim_start_time - ${toString event.secondsBack}))" '+%Y-%m-%dT%H:%M:%S.000000Z')'';
 
-            # Calculate timestamp for this event using total seconds back
-            timestampCalculation = ''$(date -u -d "@$((sim_start_time - ${toString totalSecondsBack}))" '+%Y-%m-%dT%H:%M:%S.000000Z')'';
+            # Debug info
+            debugInfo = "${toString event.secondsBack}s back";
 
-            # Debug info for troubleshooting
-            debugInfo =
-              if event ? secondsBack
-              then "${toString event.secondsBack}s back"
-              else "${toString (event.daysBack or 0)}d ${toString (event.hoursBack or 0)}h back (${toString totalSecondsBack}s)";
-
-            # Determine change reason and endpoint
+            # Determine change reason
             changeReason =
               if event.type == "startup"
               then "startup"
@@ -430,6 +482,71 @@ with lib; rec {
           ''
       )
       allEvents;
+
+    # Calculate the target date for display
+    targetDateCalc = ''$(date -u -d "@$((sim_start_time - ${toString dayStartSecondsBack}))" '+%Y-%m-%d')'';
+  in
+    pkgs.writeShellApplication {
+      name = "daily-orchestrator-${toString daysBack}";
+      runtimeInputs = with pkgs; [coreutils util-linux];
+      text = ''
+        set -euo pipefail
+
+        echo "🌅 Starting Daily Orchestrator..."
+        echo "Time scale: ${toString timeScale} (${toString (1.0 / timeScale)}x faster than real-time)"
+        echo "Days back: ${toString daysBack}"
+        echo "Daily heartbeats: ${toString dailyHeartbeats}"
+        echo "Agent config changes: ${toString (lib.attrNames agentConfigChanges)}"
+        echo "Agent restarts: ${toString (lib.attrNames agentRestarts)}"
+        echo "Total events: ${toString (length allEvents)}"
+        echo ""
+
+        # Record simulation start time (this becomes "now" in our timeline)
+        sim_start_time=$(date +%s)
+        target_date=${targetDateCalc}
+
+        echo "Simulating day: $target_date"
+        echo "  Period: $(date -u -d "@$((sim_start_time - ${toString dayStartSecondsBack}))" '+%Y-%m-%d 00:00:00 UTC') to $(date -u -d "@$((sim_start_time - ${toString dayEndSecondsBack}))" '+%Y-%m-%d 00:00:00 UTC')"
+        echo ""
+
+        # Execute all events in chronological order
+        ${executeTimeline}
+
+        echo "✅ Daily simulation complete for $target_date!"
+        echo "Simulated 24-hour period with SQL jobs at end of day"
+      '';
+    };
+
+  mkWeeklyOrchestrator = {
+    pkgs,
+    agents,
+    timeScale ? 0.01,
+    sqlJobsPackage ? pkgs.crystal-forge.run-postgres-jobs,
+    simulationDays ? 7, # How many days to simulate
+    dailyHeartbeats ? 96, # Every 15 minutes = 96 per day
+    agentConfigChanges ? {}, # Attrset of hostname -> [{derivationPath, hour}] for config changes per day
+    agentRestarts ? {}, # Attrset of hostname -> [{derivationPath, hour}] for restarts per day
+  }: let
+    # Generate daily orchestrators for each day in the simulation period
+    dailyOrchestrators = map (
+      dayOffset:
+        mkDailyOrchestrator {
+          inherit pkgs agents timeScale sqlJobsPackage dailyHeartbeats agentConfigChanges agentRestarts;
+          daysBack = simulationDays - dayOffset; # Start from furthest back day
+        }
+    ) (range 0 (simulationDays - 1));
+
+    # Create execution script that runs each daily orchestrator in sequence
+    executeWeeklyTimeline = lib.concatMapStringsSep "\n" (dayOrchestratorIndex: let
+      dayOffset = dayOrchestratorIndex;
+      daysBack = simulationDays - dayOffset;
+      orchestrator = elemAt dailyOrchestrators dayOrchestratorIndex;
+    in ''
+      echo "📅 Day ${toString (dayOffset + 1)} of ${toString simulationDays} (${toString daysBack} days ago)"
+      echo "Running daily orchestrator..."
+      ${orchestrator}/bin/daily-orchestrator-${toString daysBack}
+      echo ""
+    '') (range 0 (simulationDays - 1));
   in
     pkgs.writeShellApplication {
       name = "weekly-orchestrator";
@@ -437,26 +554,30 @@ with lib; rec {
       text = ''
         set -euo pipefail
 
-        echo "🚀 Starting Timeline Orchestrator..."
+        echo "🚀 Starting Weekly Timeline Orchestrator..."
         echo "Time scale: ${toString timeScale} (${toString (1.0 / timeScale)}x faster than real-time)"
         echo "Simulation days: ${toString simulationDays}"
-        echo "Total events: ${toString (length allEvents)}"
+        echo "Daily heartbeats: ${toString dailyHeartbeats}"
+        echo "Agents with config changes: ${toString (lib.attrNames agentConfigChanges)}"
+        echo "Agents with restarts: ${toString (lib.attrNames agentRestarts)}"
+        echo "Running ${toString simulationDays} consecutive daily simulations..."
         echo ""
 
-        # Record simulation start time (this becomes "now" in our timeline)
-        sim_start_time=$(date +%s)
-        sim_start_date=$(date -u -d "@$sim_start_time" '+%Y-%m-%d %H:%M:%S UTC')
+        # Record overall simulation start time
+        overall_start_time=$(date +%s)
+        overall_start_date=$(date -u -d "@$overall_start_time" '+%Y-%m-%d %H:%M:%S UTC')
 
-        echo "Simulation timeline:"
-        echo "  Start: $(date -u -d "@$((sim_start_time - ${toString simulationDays} * 86400))" '+%Y-%m-%d %H:%M:%S UTC') (${toString simulationDays} days ago)"
-        echo "  End:   $sim_start_date (now)"
+        echo "Weekly simulation timeline:"
+        echo "  Start: $(date -u -d "@$((overall_start_time - ${toString simulationDays} * 86400))" '+%Y-%m-%d %H:%M:%S UTC') (${toString simulationDays} days ago)"
+        echo "  End:   $overall_start_date (now)"
         echo ""
 
-        # Execute all events in chronological order
-        ${executeTimeline}
+        # Execute daily orchestrators in chronological order (oldest to newest)
+        ${executeWeeklyTimeline}
 
-        echo "✅ Timeline simulation complete!"
-        echo "Simulated ${toString simulationDays} days of monitoring data ending at $sim_start_date"
+        echo "✅ Weekly timeline simulation complete!"
+        echo "Simulated ${toString simulationDays} consecutive days ending at $overall_start_date"
+        echo "Each day included complete agent actions plus end-of-day SQL jobs"
       '';
     };
 }
