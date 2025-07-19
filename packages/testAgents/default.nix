@@ -157,7 +157,7 @@ with lib.crystal-forge; let
       "test.gray" = [
         {
           derivationPath = agentConfigs.gray.startDerivation;
-          hour = 8;
+          hour = 23;
         }
       ];
       # test.lucas has no restarts this day
