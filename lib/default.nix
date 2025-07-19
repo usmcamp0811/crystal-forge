@@ -129,19 +129,22 @@ with lib; rec {
           actionType = action.type;
           derivPath = action.derivationPath or "/nix/store/test-system-${hostname}-generic";
           delay = toString (action.delay or 0); # Ensure it's a string number
+          # Calculate historical timing
+          daysBack = toString (action.daysBack or 0);
+          hoursBack = toString (action.hoursBack or 0);
           changeReason =
             if actionType == "startup"
             then "startup"
             else if actionType == "config_change"
             then "config_change"
-            else if actionType == "heartbeat" # Add this line
-            then "heartbeat" # Add this line
+            else if actionType == "heartbeat"
+            then "heartbeat"
             else "state_delta";
           endpoint =
             if actionType == "startup" || actionType == "config_change"
             then "state"
             else "heartbeat";
-        in "${actionType}|${derivPath}|${changeReason}|${endpoint}|${delay}"
+        in "${actionType}|${derivPath}|${changeReason}|${endpoint}|${delay}|${daysBack}|${hoursBack}"
       )
       actions;
   in {
@@ -157,13 +160,22 @@ with lib; rec {
         echo "Planned actions: ${toString (builtins.length actions)}"
         echo ""
 
-        # Generate JSON payload
+        # Generate JSON payload with historical timestamp
         generate_payload() {
             local change_reason="$1"
             local derivation_path="$2"
+            local days_back="$3"
+            local hours_back="$4"
             local timestamp uptime_secs
 
-            timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%6NZ")
+            # Calculate historical timestamp
+            if [[ "$days_back" != "0" || "$hours_back" != "0" ]]; then
+                local total_seconds_back=$((days_back * 86400 + hours_back * 3600))
+                timestamp=$(date -u -d "@$(($(date +%s) - total_seconds_back))" +"%Y-%m-%dT%H:%M:%S.%6NZ")
+            else
+                timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%6NZ")
+            fi
+
             uptime_secs=$((RANDOM * 100 + 86400))
 
             cat << EOF
@@ -179,8 +191,8 @@ with lib; rec {
           "cpu_brand": "${cpuBrand}",
           "cpu_cores": ${toString cpuCores},
           "board_serial": "TEST123456789",
-          "product_uuid": "$(uuidgen)",
-          "rootfs_uuid": "$(uuidgen)",
+          "product_uuid": "test-uuid-${hostname}",
+          "rootfs_uuid": "test-rootfs-${hostname}",
           "chassis_serial": "CHASSIS123",
           "bios_version": "1.0.0",
           "cpu_microcode": null,
@@ -189,7 +201,7 @@ with lib; rec {
           "primary_ip_address": "${primaryIpAddress}",
           "gateway_ip": "${gatewayIp}",
           "selinux_status": null,
-          "tpm_present": true,
+          "tmp_present": true,
           "secure_boot_enabled": false,
           "fips_mode": false,
           "agent_version": "0.1.0-test",
@@ -246,11 +258,21 @@ with lib; rec {
         action_num=1
 
         # Read action plan
-        while IFS='|' read -r action_type derivation_path change_reason endpoint delay_str; do
+        while IFS='|' read -r action_type derivation_path change_reason endpoint delay_str days_back_str hours_back_str; do
             # Safely convert delay to number, default to 0 if invalid
             delay=0
             if [[ "$delay_str" =~ ^[0-9]+$ ]]; then
                 delay="$delay_str"
+            fi
+
+            # Extract timing info for historical timestamps
+            days_back=0
+            hours_back=0
+            if [[ "$days_back_str" =~ ^[0-9]+$ ]]; then
+                days_back="$days_back_str"
+            fi
+            if [[ "$hours_back_str" =~ ^[0-9]+$ ]]; then
+                hours_back="$hours_back_str"
             fi
 
             if [[ $action_num -gt 1 ]] && [[ $delay -gt 0 ]]; then
@@ -258,10 +280,15 @@ with lib; rec {
                 sleep "$delay"
             fi
 
+            payload=$(generate_payload "$change_reason" "$derivation_path" "$days_back" "$hours_back")
+
+            # Extract timestamp from payload for debugging
+            timestamp_debug=$(echo "$payload" | grep '"timestamp"' | sed 's/.*"timestamp": *"\([^"]*\)".*/\1/')
+
+            echo "[$action_num] DEBUG: action_type=$action_type, change_reason=$change_reason, endpoint=$endpoint, days_back=$days_back, hours_back=$hours_back, timestamp=$timestamp_debug" >&2
             echo "[$action_num] Executing $action_type action"
             echo "[$action_num] Derivation: $derivation_path"
 
-            payload=$(generate_payload "$change_reason" "$derivation_path")
             send_message "$endpoint" "$payload" "$action_num"
 
             action_num=$((action_num + 1))
@@ -304,33 +331,65 @@ with lib; rec {
     # Heartbeat interval always respects timeScale (15 simulated minutes)
     heartbeatInterval = 15 * minute;
 
+    # Track the current system state for each day
+    getCurrentDerivation = dayNum:
+      if dayNum == 0
+      then startDerivation
+      else if dayNum > 0 && (length updateDerivations > 0)
+      then let
+        updateIndex = mod (dayNum - 1) (length updateDerivations);
+      in
+        elemAt updateDerivations updateIndex
+      else startDerivation;
+
     # Generate actions for each day
     generateDayActions = dayNum: let
-      # Regular heartbeats throughout the day
+      currentDerivation = getCurrentDerivation dayNum;
+
+      # Calculate how far back this day is from "now"
+      daysBackFromNow = 6 - dayNum; # Day 0 = 6 days ago, Day 6 = 0 days ago (today)
+
+      # Regular heartbeats throughout the day - use current derivation
       heartbeats = map (i: {
         type = "heartbeat";
+        derivationPath = currentDerivation;
         delay =
           if dayNum == 0 && i == 0
           then 0
           else heartbeatInterval;
+        daysBack = daysBackFromNow;
+        hoursBack = i * (24 / dailyHeartbeats); # Spread throughout the day
       }) (range 0 (dailyHeartbeats - 1));
 
       # Deterministic system updates - spread evenly through the week
       updates =
-        if (length updateDerivations > 0) && dayNum > 0
+        if (length updateDerivations > 0) && dayNum > 0 && weeklyUpdates > 0
         then let
           # Calculate which update to use based on day
           updateIndex = mod (dayNum - 1) (length updateDerivations);
-          # Updates happen on days 1, 3, 5 (deterministic)
-          shouldUpdate = mod dayNum 2 == 1 && dayNum <= (length updateDerivations * 2);
+          # Determine if this day should have an update based on weeklyUpdates
+          # Spread updates evenly across the 7-day week
+          updateDays =
+            if weeklyUpdates >= 7
+            then
+              # If weeklyUpdates >= 7, update every day
+              true
+            else
+              # Otherwise, spread updates evenly: days 1, 3, 5 for weeklyUpdates=3, etc.
+              let
+                dayInterval = 6 / weeklyUpdates; # 6 days to spread across (excluding day 0)
+              in
+                mod dayNum (builtins.ceil dayInterval) == 1;
         in
-          optional shouldUpdate {
+          optional updateDays {
             type = "config_change";
             derivationPath = elemAt updateDerivations updateIndex;
             delay =
               if endTimeNow
               then heartbeatInterval
               else (2 * hour);
+            daysBack = daysBackFromNow;
+            hoursBack = 2; # Updates happen 2 hours into the day
           }
         else [];
 
@@ -342,6 +401,8 @@ with lib; rec {
           if endTimeNow
           then heartbeatInterval
           else (8 * hour);
+        daysBack = daysBackFromNow;
+        hoursBack = 8; # Emergency at 8 hours into the day
       };
     in
       heartbeats ++ updates ++ emergencies;
@@ -353,6 +414,8 @@ with lib; rec {
       {
         type = "startup";
         derivationPath = startDerivation;
+        daysBack = 7; # Initial startup was 7 days ago
+        hoursBack = 0;
       }
     ]
     ++ allDayActions;
