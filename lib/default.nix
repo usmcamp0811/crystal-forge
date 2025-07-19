@@ -434,8 +434,8 @@ with lib; rec {
     midnightInterval = builtins.floor day;
     agentStartScript =
       lib.concatMapStringsSep "\n" (agent: ''
-        echo "Starting agent: $(basename ${agent.agent}/bin/*)"
-        ${agent.agent}/bin/* &
+        echo "Starting agent: ${agent.agent.name}"
+        ${agent.agent}/bin/${agent.agent.name} &
         agent_pids+=($!)
       '')
       agents;
