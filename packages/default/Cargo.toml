@@ -32,6 +32,7 @@ futures = "0.3.31"
 sqlx = { version = "0.8.6", features = ["uuid", "postgres", "runtime-tokio", "chrono", "macros"] }
 chrono = { version = "0.4.41", features = ["serde"] }
 watch = "0.2.3"
+clap = { version = "4.0", features = ["derive"] }
 tokio-test = "0.4.4"
 axum-test = "17.3.0"
 winnow = "0.7.11"
