@@ -29,7 +29,6 @@ with lib.crystal-forge; let
     };
   };
 
-  # Agent with custom action plan
   test-lucas = mkAgent {
     inherit pkgs;
     hostname = "test.lucas";
@@ -49,34 +48,50 @@ with lib.crystal-forge; let
       emergencyRestarts = 1;
     };
   };
+
+  # Weekly orchestrator that runs both agents with midnight SQL jobs
+  weekly-simulation = mkWeeklyOrchestrator {
+    inherit pkgs;
+    timeScale = 0.01; # Must match agents' timeScale
+    agents = [
+      {agent = test-gray.agent;}
+      {agent = test-lucas.agent;}
+    ];
+    sqlJobsPackage = pkgs.crystal-forge.run-postgres-jobs;
+  };
 in
   pkgs.writeShellApplication {
     name = "crystal-forge-agents";
     runtimeInputs = with pkgs; [bat];
     text = ''
-          cat << 'EOF' | bat --language=markdown --style=plain
+           cat << 'EOF' | bat --language=markdown --style=plain
       # Crystal Forge Test Agents
 
-      This package provides two test agents for Crystal Forge:
+      This package provides test agents for Crystal Forge:
 
-      ## test.gray
-      Agent that simulates a NixOS system upgrade from 25.11 to 25.05
+      ## Individual Agents
+      - **test.gray**: Simulates NixOS system upgrade from 25.11 to 25.05
+      - **test.lucas**: Simulates multiple configuration changes and heartbeats
 
-      ## test.lucas
-      Agent that simulates multiple configuration changes and heartbeats
+      ## Weekly Simulation
+      - **weekly-simulation**: Runs both agents with midnight SQL jobs
 
       ## Usage
 
-      Run the agents using:
+      Run individual agents:
       - `nix run .#test-gray.agent`
       - `nix run .#test-lucas.agent`
 
-      Both agents connect to localhost:${toString cf_port} by default.
+      Run full weekly simulation with SQL jobs:
+      - `nix run .#weekly-simulation`
+
+      All agents connect to localhost:${toString cf_port} by default.
+      Time scale: 0.01 (100x faster - full week in ~1.7 hours)
       EOF
     '';
   }
   // {
-    # Convenience access to both agents and their keys
+    # Individual agents
     test-gray = {
       agent = test-gray.agent;
       publicKey = test-gray.publicKey;
@@ -85,4 +100,7 @@ in
       agent = test-lucas.agent;
       publicKey = test-lucas.publicKey;
     };
+
+    # Weekly orchestrator
+    inherit weekly-simulation;
   }
