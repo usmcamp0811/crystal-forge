@@ -235,19 +235,26 @@ with lib; rec {
     generateDayActions = dayNum: let
       currentDerivation = getCurrentDerivation dayNum;
 
-      # Calculate how far back this day is from "now"
+      # Calculate how far back this day is from "now" in total seconds
       daysBackFromNow = 6 - dayNum; # Day 0 = 6 days ago, Day 6 = 0 days ago (today)
+      dayStartSecondsBack = daysBackFromNow * 86400; # Start of this day in seconds back
 
       # Regular heartbeats throughout the day - use current derivation
-      heartbeats = map (i: {
+      heartbeats = map (i: let
+        # Calculate seconds within the day for this heartbeat (spread evenly)
+        secondsIntoDay = i * (86400 / dailyHeartbeats); # 86400 seconds per day
+        totalSecondsBack = dayStartSecondsBack + builtins.floor secondsIntoDay;
+      in {
         type = "heartbeat";
         derivationPath = currentDerivation;
         delay =
           if dayNum == 0 && i == 0
           then 0
           else heartbeatInterval;
+        secondsBack = totalSecondsBack;
+        # Keep legacy fields for compatibility but they won't be the primary calculation
         daysBack = daysBackFromNow;
-        hoursBack = i * (24 / dailyHeartbeats); # Spread throughout the day
+        hoursBack = secondsIntoDay / 3600.0;
       }) (range 0 (dailyHeartbeats - 1));
 
       # Deterministic system updates - spread evenly through the week
@@ -269,6 +276,8 @@ with lib; rec {
                 dayInterval = 6 / weeklyUpdates; # 6 days to spread across (excluding day 0)
               in
                 mod dayNum (builtins.ceil dayInterval) == 1;
+
+          updateSecondsBack = dayStartSecondsBack + (2 * 3600); # 2 hours into the day
         in
           optional updateDays {
             type = "config_change";
@@ -277,12 +286,14 @@ with lib; rec {
               if endTimeNow
               then heartbeatInterval
               else (2 * hour);
+            secondsBack = updateSecondsBack;
             daysBack = daysBackFromNow;
             hoursBack = 2; # Updates happen 2 hours into the day
           }
         else [];
 
       # Deterministic emergency restart on day 4
+      emergencySecondsBack = dayStartSecondsBack + (8 * 3600); # 8 hours into day 4
       emergencies = optional (dayNum == 4 && emergencyRestarts > 0) {
         type = "startup";
         derivationPath = startDerivation;
@@ -290,6 +301,7 @@ with lib; rec {
           if endTimeNow
           then heartbeatInterval
           else (8 * hour);
+        secondsBack = emergencySecondsBack;
         daysBack = daysBackFromNow;
         hoursBack = 8; # Emergency at 8 hours into the day
       };
@@ -303,6 +315,7 @@ with lib; rec {
       {
         type = "startup";
         derivationPath = startDerivation;
+        secondsBack = 7 * 86400; # 7 days ago in seconds
         daysBack = 7; # Initial startup was 7 days ago
         hoursBack = 0;
       }
@@ -344,13 +357,20 @@ with lib; rec {
       dayNum = day;
     }) (range 0 (simulationDays - 1));
 
-    # Sort all events chronologically (oldest first - largest daysBack first)
+    # Sort all events chronologically (oldest first - largest total seconds back first)
     allEvents = lib.sort (
       a: b: let
-        aTime = (a.daysBack or 0) * 24 + (a.hoursBack or 0);
-        bTime = (b.daysBack or 0) * 24 + (b.hoursBack or 0);
+        # Calculate total seconds back for each event
+        aSecondsBack =
+          if a ? secondsBack
+          then a.secondsBack
+          else (a.daysBack or 0) * 86400 + builtins.floor ((a.hoursBack or 0) * 3600);
+        bSecondsBack =
+          if b ? secondsBack
+          then b.secondsBack
+          else (b.daysBack or 0) * 86400 + builtins.floor ((b.hoursBack or 0) * 3600);
       in
-        aTime > bTime
+        aSecondsBack > bSecondsBack
     ) (allAgentActions ++ midnightJobs);
 
     # Generate execution script for timeline
@@ -365,13 +385,20 @@ with lib; rec {
             echo ""
           ''
           else let
-            # Calculate total seconds back from now (convert fractional hours to integer seconds)
-            daysBackSeconds = (event.daysBack or 0) * 86400;
-            hoursBackSeconds = builtins.floor ((event.hoursBack or 0) * 3600);
-            totalSecondsBack = daysBackSeconds + hoursBackSeconds;
+            # Calculate total seconds back from now
+            totalSecondsBack =
+              if event ? secondsBack
+              then event.secondsBack
+              else (event.daysBack or 0) * 86400 + builtins.floor ((event.hoursBack or 0) * 3600);
 
-            # Calculate timestamp for this event using integer seconds
+            # Calculate timestamp for this event using total seconds back
             timestampCalculation = ''$(date -u -d "@$((sim_start_time - ${toString totalSecondsBack}))" '+%Y-%m-%dT%H:%M:%S.000000Z')'';
+
+            # Debug info for troubleshooting
+            debugInfo =
+              if event ? secondsBack
+              then "${toString event.secondsBack}s back"
+              else "${toString (event.daysBack or 0)}d ${toString (event.hoursBack or 0)}h back (${toString totalSecondsBack}s)";
 
             # Determine change reason and endpoint
             changeReason =
@@ -383,7 +410,7 @@ with lib; rec {
               then "heartbeat"
               else "state_delta";
           in ''
-            # Execute ${event.type} for ${event.hostname} (${toString (event.daysBack or 0)}d ${toString (event.hoursBack or 0)}h back)
+            # Execute ${event.type} for ${event.hostname} (${debugInfo})
             echo "Executing ${event.type} for ${event.hostname} at ${timestampCalculation}"
             ${pkgs.crystal-forge.default}/bin/test-agent \
               --hostname "${event.hostname}" \

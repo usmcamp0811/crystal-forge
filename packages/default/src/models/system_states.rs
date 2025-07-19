@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use std::fmt;
@@ -158,8 +158,7 @@ impl SystemState {
     ) -> Result<Self> {
         Ok(SystemState {
             id: None,
-            timestamp: timestamp_override
-                .or_else(|| Some(Utc.with_ymd_and_hms(1775, 11, 10, 0, 0, 0).unwrap())),
+            timestamp: timestamp_override.or_else(|| Some(Utc::now())),
             hostname: hostname.to_string(),
             derivation_path: Some(derivation_path.to_string()),
             change_reason: change_reason.to_string(),
