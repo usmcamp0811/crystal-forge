@@ -365,8 +365,13 @@ with lib; rec {
             echo ""
           ''
           else let
-            # Calculate timestamp for this event (sim start time - daysBack days - hoursBack hours)
-            timestampCalculation = ''$(date -u -d "@$((sim_start_time - ${toString (event.daysBack or 0)} * 86400 - ${toString (event.hoursBack or 0)} * 3600))" '+%Y-%m-%dT%H:%M:%S.000000Z')'';
+            # Calculate total seconds back from now (convert fractional hours to integer seconds)
+            daysBackSeconds = (event.daysBack or 0) * 86400;
+            hoursBackSeconds = builtins.floor ((event.hoursBack or 0) * 3600);
+            totalSecondsBack = daysBackSeconds + hoursBackSeconds;
+
+            # Calculate timestamp for this event using integer seconds
+            timestampCalculation = ''$(date -u -d "@$((sim_start_time - ${toString totalSecondsBack}))" '+%Y-%m-%dT%H:%M:%S.000000Z')'';
 
             # Determine change reason and endpoint
             changeReason =

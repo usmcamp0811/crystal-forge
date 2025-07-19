@@ -6,85 +6,71 @@
 with lib;
 with lib.crystal-forge; let
   cf_port = 3445;
-  heartbeat_delay = 10;
-  config_delay = 15;
 
-  test-gray = mkAgent {
-    inherit pkgs;
-    hostname = "test.gray";
-    serverHost = "localhost";
-    serverPort = cf_port;
-    privateKeyString = "PjCQGMmzXHpPqGXjSPZ4sdHu7+stRX0AOuhZAvKwuKg=";
-    publicKeyString = "49+maHYdvvn/qUx1CMzg0TLu1BbLS64c1K4E0/2ORO4=";
-    actions = mkWeeklyActions {
-      endTimeNow = true;
-      timeScale = 0.01; # 100x faster - adjust as needed
+  # Define agent configurations - DRY principle
+  agentConfigs = {
+    gray = {
+      hostname = "test.gray";
+      privateKeyString = "PjCQGMmzXHpPqGXjSPZ4sdHu7+stRX0AOuhZAvKwuKg=";
+      publicKeyString = "49+maHYdvvn/qUx1CMzg0TLu1BbLS64c1K4E0/2ORO4=";
       startDerivation = "/nix/store/rjl1jl1s2s1b76fjqibh9llxrfij6b0s-nixos-system-gray-25.11.20250708.9807714";
       updateDerivations = [
         "/nix/store/wfz1hffcar6anakhl0wlz90dn2gngryp-nixos-system-gray-25.05.20250619.005b89d"
       ];
-      dailyHeartbeats = 96; # Every 15 minutes = 96 per day
-      weeklyUpdates = 2;
-      emergencyRestarts = 1;
     };
-  };
-
-  test-lucas = mkAgent {
-    inherit pkgs;
-    hostname = "test.lucas";
-    serverHost = "localhost";
-    serverPort = cf_port;
-    privateKeyString = "uK2wOnCBjF8hOo3Ep8uy3UNpfM7aDHm/3K05tmbRt2o=";
-    publicKeyString = "pwByU3iXjxGB/WP5hVEoR4eL/xsYWv1QmOdBHkIchnM=";
-    actions = mkWeeklyActions {
-      timeScale = 0.01; # 100x faster - adjust as needed
-      endTimeNow = true;
+    lucas = {
+      hostname = "test.lucas";
+      privateKeyString = "uK2wOnCBjF8hOo3Ep8uy3UNpfM7aDHm/3K05tmbRt2o=";
+      publicKeyString = "pwByU3iXjxGB/WP5hVEoR4eL/xsYWv1QmOdBHkIchnM=";
       startDerivation = "/nix/store/7jpnf4zpa92qhzi0qbvgapq15xs6bvj8-nixos-system-lucas-25.05.20250619.005b89d";
       updateDerivations = [
         "/nix/store/w30p4cmca85rzglsr2q33vn2m50l6yqy-nixos-system-lucas-25.11.20250708.9807714"
       ];
-      dailyHeartbeats = 96; # Every 15 minutes = 96 per day
-      weeklyUpdates = 2;
-      emergencyRestarts = 1;
     };
   };
 
-  # Weekly orchestrator that runs both agents with midnight SQL jobs
+  # Common action settings
+  commonActionSettings = {
+    dailyHeartbeats = 96; # Every 15 minutes = 96 per day
+    weeklyUpdates = 2;
+    emergencyRestarts = 1;
+    endTimeNow = true;
+  };
+
+  # Helper function to create an agent with actions
+  mkTestAgent = name: config: timeScale:
+    mkAgent {
+      inherit pkgs;
+      inherit (config) hostname privateKeyString publicKeyString;
+      serverHost = "localhost";
+      serverPort = cf_port;
+      actions = mkWeeklyActions (commonActionSettings
+        // {
+          inherit timeScale;
+          inherit (config) startDerivation updateDerivations;
+        });
+    };
+
+  # Create individual agents for standalone use (100x faster)
+  test-gray = mkTestAgent "gray" agentConfigs.gray 0.01;
+  test-lucas = mkTestAgent "lucas" agentConfigs.lucas 0.01;
+
+  # Create agents for orchestrator (1000x faster for full simulation)
+  orchestrator-agents =
+    mapAttrsToList (
+      name: config: let
+        agent = mkTestAgent name config 0.001;
+      in {
+        inherit (agent) agent hostname actions privateKeyString serverHost serverPort;
+      }
+    )
+    agentConfigs;
+
+  # Weekly orchestrator with SQL jobs
   weekly-simulation = mkWeeklyOrchestrator {
     inherit pkgs;
     timeScale = 0.001;
-    agents = [
-      {
-        agent = test-gray.agent;
-        hostname = "test.gray";
-        actions = mkWeeklyActions {
-          endTimeNow = true;
-          timeScale = 0.001;
-          startDerivation = "/nix/store/rjl1jl1s2s1b76fjqibh9llxrfij6b0s-nixos-system-gray-25.11.20250708.9807714";
-          updateDerivations = [
-            "/nix/store/wfz1hffcar6anakhl0wlz90dn2gngryp-nixos-system-gray-25.05.20250619.005b89d"
-          ];
-          dailyHeartbeats = 96;
-          weeklyUpdates = 2;
-          emergencyRestarts = 1;
-        };
-      }
-      {
-        agent = test-lucas.agent;
-        hostname = "test.lucas";
-        actions = mkWeeklyActions {
-          timeScale = 0.001;
-          endTimeNow = true;
-          startDerivation = "/nix/store/7jpnf4zpa92qhzi0qbvgapq15xs6bvj8-nixos-system-lucas-25.05.20250619.005b89d";
-          updateDerivations = [
-            "/nix/store/w30p4cmca85rzglsr2q33vn2m50l6yqy-nixos-system-lucas-25.11.20250708.9807714"
-          ];
-          dailyHeartbeats = 96;
-          weeklyUpdates = 2;
-          emergencyRestarts = 1;
-        };
-      }
-    ];
+    agents = orchestrator-agents;
     sqlJobsPackage = pkgs.crystal-forge.run-postgres-jobs;
   };
 in
@@ -92,34 +78,50 @@ in
     name = "crystal-forge-agents";
     runtimeInputs = with pkgs; [bat];
     text = ''
-           cat << 'EOF' | bat --language=markdown --style=plain
+      cat << 'EOF' | bat --language=markdown --style=plain
       # Crystal Forge Test Agents
 
-      This package provides test agents for Crystal Forge:
+      This package provides test agents for Crystal Forge with multiple time scales:
 
-      ## Individual Agents
-      - **test.gray**: Simulates NixOS system upgrade from 25.11 to 25.05
-      - **test.lucas**: Simulates multiple configuration changes and heartbeats
+      ## Individual Agents (100x faster - ~1.7 hours for full week)
+      - **test-gray**: Simulates NixOS system management for gray host
+      - **test-lucas**: Simulates NixOS system management for lucas host
 
-      ## Weekly Simulation
-      - **weekly-simulation**: Runs both agents with midnight SQL jobs
+      ## Full Weekly Simulation (1000x faster - ~10 minutes for full week)
+      - **weekly-simulation**: Runs both agents with coordinated timeline and midnight SQL jobs
 
       ## Usage
 
-      Run individual agents:
-      - `nix run .#test-gray.agent`
-      - `nix run .#test-lucas.agent`
+      Run individual agents for testing:
+      ```bash
+      nix run .#test-gray.agent
+      nix run .#test-lucas.agent
+      ```
 
-      Run full weekly simulation with SQL jobs:
-      - `nix run .#weekly-simulation`
+      Run complete weekly simulation with SQL jobs:
+      ```bash
+      nix run .#weekly-simulation
+      ```
 
-      All agents connect to localhost:${toString cf_port} by default.
-      Time scale: 0.01 (100x faster - full week in ~1.7 hours)
+      ## Configuration
+      - Server: localhost:${toString cf_port}
+      - Daily heartbeats: ${toString commonActionSettings.dailyHeartbeats} (every 15 simulated minutes)
+      - Weekly updates: ${toString commonActionSettings.weeklyUpdates}
+      - Emergency restarts: ${toString commonActionSettings.emergencyRestarts}
+
+      ## Agent Details
+      ${concatStringsSep "\n" (mapAttrsToList (name: config: ''
+          ### ${config.hostname}
+          - Start derivation: ${config.startDerivation}
+          - Update derivations: ${toString (length config.updateDerivations)} configured
+          - Public key: ${config.publicKeyString}
+        '')
+        agentConfigs)}
       EOF
     '';
   }
   // {
-    # Individual agents
+    # Individual agents for standalone testing
     test-gray = {
       agent = test-gray.agent;
       publicKey = test-gray.publicKey;
@@ -129,6 +131,6 @@ in
       publicKey = test-lucas.publicKey;
     };
 
-    # Weekly orchestrator
+    # Weekly orchestrator for full simulation
     inherit weekly-simulation;
   }
