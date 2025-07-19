@@ -52,10 +52,38 @@ with lib.crystal-forge; let
   # Weekly orchestrator that runs both agents with midnight SQL jobs
   weekly-simulation = mkWeeklyOrchestrator {
     inherit pkgs;
-    timeScale = 0.01; # Must match agents' timeScale
+    timeScale = 0.001;
     agents = [
-      {agent = test-gray.agent;}
-      {agent = test-lucas.agent;}
+      {
+        agent = test-gray.agent;
+        hostname = "test.gray";
+        actions = mkWeeklyActions {
+          endTimeNow = true;
+          timeScale = 0.001;
+          startDerivation = "/nix/store/rjl1jl1s2s1b76fjqibh9llxrfij6b0s-nixos-system-gray-25.11.20250708.9807714";
+          updateDerivations = [
+            "/nix/store/wfz1hffcar6anakhl0wlz90dn2gngryp-nixos-system-gray-25.05.20250619.005b89d"
+          ];
+          dailyHeartbeats = 96;
+          weeklyUpdates = 2;
+          emergencyRestarts = 1;
+        };
+      }
+      {
+        agent = test-lucas.agent;
+        hostname = "test.lucas";
+        actions = mkWeeklyActions {
+          timeScale = 0.001;
+          endTimeNow = true;
+          startDerivation = "/nix/store/7jpnf4zpa92qhzi0qbvgapq15xs6bvj8-nixos-system-lucas-25.05.20250619.005b89d";
+          updateDerivations = [
+            "/nix/store/w30p4cmca85rzglsr2q33vn2m50l6yqy-nixos-system-lucas-25.11.20250708.9807714"
+          ];
+          dailyHeartbeats = 96;
+          weeklyUpdates = 2;
+          emergencyRestarts = 1;
+        };
+      }
     ];
     sqlJobsPackage = pkgs.crystal-forge.run-postgres-jobs;
   };

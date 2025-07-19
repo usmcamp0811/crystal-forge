@@ -83,227 +83,116 @@ with lib; rec {
     };
 
     # Use provided keys or fall back to auto-generated ones
-    privateKey =
+    finalPrivateKeyString =
       if privateKeyString != null
-      then
-        pkgs.runCommand "${hostname}-private-key-wrapper" {} ''
-          mkdir -p $out
-          echo -n "${privateKeyString}" > $out/agent.key
-        ''
-      else autoPrivateKey;
+      then privateKeyString
+      else builtins.readFile "${autoPrivateKey}/agent.key";
 
     publicKey =
       if publicKeyString != null
       then publicKeyString
       else autoPublicKey;
 
-    # Separate Python script for signing with dependencies
-    signScript =
-      pkgs.writers.writePython3 "sign-payload" {
-        libraries = [pkgs.python3Packages.cryptography];
-      } ''
-        import base64
-        import sys
-        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    # Generate execution script using test-agent
+    executeTimeline =
+      lib.concatMapStringsSep "\n" (action: let
+        actionType = action.type;
+        derivPath = action.derivationPath or "/nix/store/test-system-${hostname}-generic";
+        delay = action.delay or 0;
+        daysBack = action.daysBack or 0;
+        hoursBack = action.hoursBack or 0;
 
-        if len(sys.argv) != 2:
-            print("Usage: sign-payload <private_key_file>", file=sys.stderr)
-            sys.exit(1)
+        changeReason =
+          if actionType == "startup"
+          then "startup"
+          else if actionType == "config_change"
+          then "config_change"
+          else if actionType == "heartbeat"
+          then "heartbeat"
+          else "state_delta";
 
-        private_key_file = sys.argv[1]
+        # Calculate historical timestamp
+        timestampCalc =
+          if daysBack != 0 || hoursBack != 0
+          then ''$(date -u -d "@$(($(date +%s) - ${toString daysBack} * 86400 - ${toString hoursBack} * 3600))" '+%Y-%m-%dT%H:%M:%S.000000Z')''
+          else ''''; # Empty means current time
+      in ''
+        # Execute ${actionType} action
+        echo "Executing ${actionType} for ${hostname}"
+        ${
+          if delay > 0
+          then "sleep ${toString delay}"
+          else ""
+        }
 
-        with open(private_key_file, 'r') as f:
-            private_key_b64 = f.read().strip()
-
-        private_key_bytes = base64.b64decode(private_key_b64)
-        private_key = Ed25519PrivateKey.from_private_bytes(private_key_bytes)
-        message = sys.stdin.buffer.read()
-        signature = private_key.sign(message)
-        print(base64.b64encode(signature).decode('ascii'))
-      '';
-
-    # Generate the action plan as a bash array - ensure delay is always numeric
-    actionPlan =
-      lib.concatMapStringsSep "\n" (
-        action: let
-          actionType = action.type;
-          derivPath = action.derivationPath or "/nix/store/test-system-${hostname}-generic";
-          delay = toString (action.delay or 0); # Ensure it's a string number
-          # Calculate historical timing
-          daysBack = toString (action.daysBack or 0);
-          hoursBack = toString (action.hoursBack or 0);
-          changeReason =
-            if actionType == "startup"
-            then "startup"
-            else if actionType == "config_change"
-            then "config_change"
-            else if actionType == "heartbeat"
-            then "heartbeat"
-            else "state_delta";
-          endpoint =
-            if actionType == "startup" || actionType == "config_change"
-            then "state"
-            else "heartbeat";
-        in "${actionType}|${derivPath}|${changeReason}|${endpoint}|${delay}|${daysBack}|${hoursBack}"
-      )
+        ${pkgs.crystal-forge.default}/bin/test-agent \
+          --hostname "${hostname}" \
+          --change-reason "${changeReason}" \
+          --derivation "${derivPath}" \
+          ${
+          if timestampCalc != ""
+          then ''--timestamp "${timestampCalc}"''
+          else ""
+        } \
+          --server-host "${serverHost}" \
+          --server-port "${toString serverPort}" \
+          --private-key "${finalPrivateKeyString}" \
+          ${
+          if os != "25.11"
+          then ''--os "${os}"''
+          else ""
+        } \
+          ${
+          if kernel != "6.12.33"
+          then ''--kernel "${kernel}"''
+          else ""
+        } \
+          ${
+          if memoryGb != 16.0
+          then ''--memory-gb "${toString memoryGb}"''
+          else ""
+        } \
+          ${
+          if cpuBrand != "Test CPU"
+          then ''--cpu-brand "${cpuBrand}"''
+          else ""
+        } \
+          ${
+          if cpuCores != 4
+          then ''--cpu-cores "${toString cpuCores}"''
+          else ""
+        }
+        echo ""
+      '')
       actions;
   in {
     agent = pkgs.writeShellApplication {
       name = "cf-agent-${hostname}";
-      runtimeInputs = with pkgs; [curl coreutils util-linux jq];
+      runtimeInputs = with pkgs; [coreutils util-linux];
 
       text = ''
         set -euo pipefail
 
-        echo "Starting agent for ${hostname}..."
+        echo "Starting test agent for ${hostname}..."
         echo "Server: ${serverHost}:${toString serverPort}"
         echo "Planned actions: ${toString (builtins.length actions)}"
         echo ""
 
-        # Generate JSON payload with historical timestamp
-        generate_payload() {
-            local change_reason="$1"
-            local derivation_path="$2"
-            local days_back="$3"
-            local hours_back="$4"
-            local timestamp uptime_secs
-
-            # Calculate historical timestamp
-            if [[ "$days_back" != "0" || "$hours_back" != "0" ]]; then
-                local total_seconds_back=$((days_back * 86400 + hours_back * 3600))
-                timestamp=$(date -u -d "@$(($(date +%s) - total_seconds_back))" +"%Y-%m-%dT%H:%M:%S.%6NZ")
-            else
-                timestamp=$(date -u +"%Y-%m-%dT%H:%M:%S.%6NZ")
-            fi
-
-            uptime_secs=$((RANDOM * 100 + 86400))
-
-            cat << EOF
-        {
-          "hostname": "${hostname}",
-          "change_reason": "$change_reason",
-          "timestamp": "$timestamp",
-          "derivation_path": "$derivation_path",
-          "os": "${os}",
-          "kernel": "${kernel}",
-          "memory_gb": ${toString memoryGb},
-          "uptime_secs": $uptime_secs,
-          "cpu_brand": "${cpuBrand}",
-          "cpu_cores": ${toString cpuCores},
-          "board_serial": "TEST123456789",
-          "product_uuid": "test-uuid-${hostname}",
-          "rootfs_uuid": "test-rootfs-${hostname}",
-          "chassis_serial": "CHASSIS123",
-          "bios_version": "1.0.0",
-          "cpu_microcode": null,
-          "network_interfaces": [],
-          "primary_mac_address": "${primaryMacAddress}",
-          "primary_ip_address": "${primaryIpAddress}",
-          "gateway_ip": "${gatewayIp}",
-          "selinux_status": null,
-          "tmp_present": true,
-          "secure_boot_enabled": false,
-          "fips_mode": false,
-          "agent_version": "0.1.0-test",
-          "agent_build_hash": "test-build",
-          "nixos_version": "${os}"
-        }
-        EOF
-        }
-
-        # Send message to server
-        send_message() {
-            local endpoint="$1"
-            local payload="$2"
-            local action_num="$3"
-
-            echo "[$action_num] Creating ed25519 signature..."
-
-            # The private key is base64-encoded raw ed25519 bytes
-            local signature
-            if [ -f "${privateKey}/agent.key" ]; then
-                echo "[$action_num] Using ed25519 raw key signing..."
-
-                # Use separate Python script for signing
-                signature=$(echo -n "$payload" | ${signScript} "${privateKey}/agent.key")
-            else
-                echo "[$action_num] ⚠️  Private key not found, using mock signature"
-                signature=$(echo "test_signature_$(echo -n "$payload" | sha256sum | cut -c1-32)" | base64 -w0)
-            fi
-
-            echo "[$action_num] Sending $endpoint message..."
-
-            local response
-            response=$(curl -s -w "\n%{http_code}" -X POST \
-                -H "Content-Type: application/json" \
-                -H "X-Signature: $signature" \
-                -H "X-Key-ID: ${hostname}" \
-                -d "$payload" \
-                "http://${serverHost}:${toString serverPort}/agent/$endpoint")
-
-            local body
-            local status
-            body=$(echo "$response" | head -n -1)
-            status=$(echo "$response" | tail -n 1)
-
-            if [[ "$status" == "200" ]]; then
-                echo "[$action_num] ✓ Success"
-            else
-                echo "[$action_num] ✗ Failed (HTTP $status)"
-                echo "[$action_num] Response: $body"
-            fi
-        }
-
-        # Execute action plan
-        action_num=1
-
-        # Read action plan
-        while IFS='|' read -r action_type derivation_path change_reason endpoint delay_str days_back_str hours_back_str; do
-            # Safely convert delay to number, default to 0 if invalid
-            delay=0
-            if [[ "$delay_str" =~ ^[0-9]+$ ]]; then
-                delay="$delay_str"
-            fi
-
-            # Extract timing info for historical timestamps
-            days_back=0
-            hours_back=0
-            if [[ "$days_back_str" =~ ^[0-9]+$ ]]; then
-                days_back="$days_back_str"
-            fi
-            if [[ "$hours_back_str" =~ ^[0-9]+$ ]]; then
-                hours_back="$hours_back_str"
-            fi
-
-            if [[ $action_num -gt 1 ]] && [[ $delay -gt 0 ]]; then
-                echo "[$action_num] Waiting $delay seconds..."
-                sleep "$delay"
-            fi
-
-            payload=$(generate_payload "$change_reason" "$derivation_path" "$days_back" "$hours_back")
-
-            # Extract timestamp from payload for debugging
-            timestamp_debug=$(echo "$payload" | grep '"timestamp"' | sed 's/.*"timestamp": *"\([^"]*\)".*/\1/')
-
-            echo "[$action_num] DEBUG: action_type=$action_type, change_reason=$change_reason, endpoint=$endpoint, days_back=$days_back, hours_back=$hours_back, timestamp=$timestamp_debug" >&2
-            echo "[$action_num] Executing $action_type action"
-            echo "[$action_num] Derivation: $derivation_path"
-
-            send_message "$endpoint" "$payload" "$action_num"
-
-            action_num=$((action_num + 1))
-            echo ""
-        done <<< "${actionPlan}"
+        ${executeTimeline}
 
         echo "Agent ${hostname} completed all actions."
       '';
     };
 
-    # Expose the public key for server configuration
+    # Expose everything needed for orchestrator
+    inherit actions hostname;
+    privateKeyString = finalPrivateKeyString;
+    inherit serverHost serverPort;
     publicKey = publicKey;
-
-    # Private key path (for reference, though it's in the script)
-    privateKeyPath = "${privateKey}/agent.key";
+    privateKeyPath =
+      if privateKeyString != null
+      then null # No physical path for string keys
+      else "${autoPrivateKey}/agent.key";
   };
 
   # Helper function to generate realistic heartbeat intervals
@@ -419,4 +308,123 @@ with lib; rec {
       }
     ]
     ++ allDayActions;
+
+  mkWeeklyOrchestrator = {
+    pkgs,
+    agents,
+    timeScale ? 0.01,
+    sqlJobsPackage ? pkgs.crystal-forge.run-postgres-jobs,
+    simulationDays ? 7, # How many days to simulate
+  }: let
+    # Time constants based on timeScale parameter
+    minute = 60.0 * timeScale;
+    hour = 60.0 * minute;
+    day = 24.0 * hour;
+
+    # Extract and merge all actions into timeline with agent info
+    allAgentActions = lib.flatten (map (
+        agent:
+          map (action:
+            action
+            // {
+              hostname = agent.hostname;
+              privateKey = agent.privateKeyString;
+              serverHost = agent.serverHost or "localhost";
+              serverPort = agent.serverPort or 3445;
+            })
+          agent.actions
+      )
+      agents);
+
+    # Add SQL job events at midnight boundaries (one for each day)
+    midnightJobs = map (day: {
+      type = "sql_job";
+      daysBack = simulationDays - day;
+      hoursBack = 0;
+      dayNum = day;
+    }) (range 0 (simulationDays - 1));
+
+    # Sort all events chronologically (oldest first - largest daysBack first)
+    allEvents = lib.sort (
+      a: b: let
+        aTime = (a.daysBack or 0) * 24 + (a.hoursBack or 0);
+        bTime = (b.daysBack or 0) * 24 + (b.hoursBack or 0);
+      in
+        aTime > bTime
+    ) (allAgentActions ++ midnightJobs);
+
+    # Generate execution script for timeline
+    executeTimeline =
+      lib.concatMapStringsSep "\n" (
+        event:
+          if event.type == "sql_job"
+          then ''
+            echo "🌙 [Day ${toString event.dayNum}] Running midnight SQL jobs..."
+            echo "  Simulated date: $(date -u -d "@$((sim_start_time - ${toString event.daysBack} * 86400))" '+%Y-%m-%d %H:%M:%S UTC')"
+            ${sqlJobsPackage}/bin/run-postgres-jobs
+            echo ""
+          ''
+          else let
+            # Calculate timestamp for this event (sim start time - daysBack days - hoursBack hours)
+            timestampCalculation = ''$(date -u -d "@$((sim_start_time - ${toString (event.daysBack or 0)} * 86400 - ${toString (event.hoursBack or 0)} * 3600))" '+%Y-%m-%dT%H:%M:%S.000000Z')'';
+
+            # Determine change reason and endpoint
+            changeReason =
+              if event.type == "startup"
+              then "startup"
+              else if event.type == "config_change"
+              then "config_change"
+              else if event.type == "heartbeat"
+              then "heartbeat"
+              else "state_delta";
+          in ''
+            # Execute ${event.type} for ${event.hostname} (${toString (event.daysBack or 0)}d ${toString (event.hoursBack or 0)}h back)
+            echo "Executing ${event.type} for ${event.hostname} at ${timestampCalculation}"
+            ${pkgs.crystal-forge.default}/bin/test-agent \
+              --hostname "${event.hostname}" \
+              --change-reason "${changeReason}" \
+              --derivation "${event.derivationPath or ""}" \
+              --timestamp "${timestampCalculation}" \
+              --server-host "${event.serverHost}" \
+              --server-port "${toString event.serverPort}" \
+              --private-key "${event.privateKey}"
+
+            # Respect timing delays (scaled)
+            ${
+              if (event.delay or 0) > 0
+              then "sleep ${toString event.delay}"
+              else ""
+            }
+          ''
+      )
+      allEvents;
+  in
+    pkgs.writeShellApplication {
+      name = "weekly-orchestrator";
+      runtimeInputs = with pkgs; [coreutils util-linux];
+      text = ''
+        set -euo pipefail
+
+        echo "🚀 Starting Timeline Orchestrator..."
+        echo "Time scale: ${toString timeScale} (${toString (1.0 / timeScale)}x faster than real-time)"
+        echo "Simulation days: ${toString simulationDays}"
+        echo "Total events: ${toString (length allEvents)}"
+        echo ""
+
+        # Record simulation start time (this becomes "now" in our timeline)
+        sim_start_time=$(date +%s)
+        sim_start_date=$(date -u -d "@$sim_start_time" '+%Y-%m-%d %H:%M:%S UTC')
+
+        echo "Simulation timeline:"
+        echo "  Start: $(date -u -d "@$((sim_start_time - ${toString simulationDays} * 86400))" '+%Y-%m-%d %H:%M:%S UTC') (${toString simulationDays} days ago)"
+        echo "  End:   $sim_start_date (now)"
+        echo ""
+
+        # Execute all events in chronological order
+        ${executeTimeline}
+
+        echo "✅ Timeline simulation complete!"
+        echo "Simulated ${toString simulationDays} days of monitoring data ending at $sim_start_date"
+      '';
+    };
 }
