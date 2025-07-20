@@ -300,7 +300,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Behind"
+              "options": "Outdated"
             },
             "properties": [
               {
@@ -315,7 +315,67 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "No System State"
+              "options": "Up to Date"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Updating"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unknown State"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#c58342",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Evaluation Stuck"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#c58342",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Offline"
             },
             "properties": [
               {
@@ -330,13 +390,13 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "No Evaluation"
+              "options": "No Data"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "orange",
+                  "fixedColor": "#f5f5f5",
                   "mode": "fixed"
                 }
               }
@@ -381,7 +441,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "-- More detailed deployment status\nSELECT \n    CASE \n        WHEN current_derivation_path IS NULL THEN 'No System State'\n        WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n        WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n        WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n        ELSE 'Behind'\n    END as deployment_status,\n    COUNT(*) as count\nFROM view_systems_current_state\nGROUP BY \n    CASE \n        WHEN current_derivation_path IS NULL THEN 'No System State'\n        WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n        WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n        WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n        ELSE 'Behind'\n    END\nORDER BY \n    CASE \n        WHEN CASE \n            WHEN current_derivation_path IS NULL THEN 'No System State'\n            WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n            WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n            WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n            ELSE 'Behind'\n        END = 'Current' THEN 1\n        WHEN CASE \n            WHEN current_derivation_path IS NULL THEN 'No System State'\n            WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n            WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n            WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n            ELSE 'Behind'\n        END = 'Behind' THEN 2\n        WHEN CASE \n            WHEN current_derivation_path IS NULL THEN 'No System State'\n            WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n            WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n            WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n            ELSE 'Behind'\n        END = 'Eval Pending' THEN 3\n        ELSE 4\n    END;",
+          "rawSql": "SELECT \n    status_text, \n    COUNT(*) as count\nFROM view_systems_status_table \nGROUP BY status, status_text\nORDER BY \n    CASE status\n        WHEN '🟢' THEN 1  -- Up to Date\n        WHEN '🟡' THEN 2  -- Updating\n        WHEN '🔴' THEN 3  -- Outdated\n        WHEN '🟤' THEN 4  -- Unknown/Stuck\n        WHEN '⚪' THEN 5  -- No Data\n        WHEN '⚫' THEN 6  -- Offline\n        ELSE 7\n    END;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -700,13 +760,13 @@
     "list": []
   },
   "time": {
-    "from": "2025-07-14T00:00:00.000Z",
-    "to": "2025-07-19T13:56:32.630Z"
+    "from": "now-5m",
+    "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Crystal Forge Dashboard",
   "uid": "3d70baf5-db41-4dfa-bbee-af52dbfbe736",
-  "version": 32,
+  "version": 33,
   "weekStart": ""
 }
