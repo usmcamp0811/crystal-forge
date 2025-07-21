@@ -37,6 +37,12 @@
     },
     {
       "type": "panel",
+      "id": "state-timeline",
+      "name": "State timeline",
+      "version": ""
+    },
+    {
+      "type": "panel",
       "id": "table",
       "name": "Table",
       "version": ""
@@ -466,12 +472,169 @@
       "type": "piechart"
     },
     {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "crystal-forge-ds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-YlBl"
+          },
+          "custom": {
+            "axisPlacement": "hidden",
+            "fillOpacity": 80,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineWidth": 0,
+            "spanNulls": true
+          },
+          "fieldMinMax": false,
+          "links": [],
+          "mappings": [
+            {
+              "options": {
+                "pattern": "^(0) deployed \\((.*)\\)§.*$",
+                "result": {
+                  "color": "dark-blue",
+                  "index": 0,
+                  "text": "$2"
+                }
+              },
+              "type": "regex"
+            },
+            {
+              "options": {
+                "pattern": "^(.*) deployed \\((.*)\\)§([3-9]|\\d{2,})$",
+                "result": {
+                  "color": "red",
+                  "index": 1,
+                  "text": "$1 deployed ($2)"
+                }
+              },
+              "type": "regex"
+            },
+            {
+              "options": {
+                "pattern": "^(.*) deployed \\((.*)\\)§[1-2]$",
+                "result": {
+                  "color": "yellow",
+                  "index": 2,
+                  "text": "$1 deployed ($2)"
+                }
+              },
+              "type": "regex"
+            },
+            {
+              "options": {
+                "pattern": "^(.*) deployed \\((.*)\\)§0$",
+                "result": {
+                  "color": "green",
+                  "index": 3,
+                  "text": "$1 deployed ($2)"
+                }
+              },
+              "type": "regex"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "id": 10,
+      "options": {
+        "alignValue": "center",
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": false,
+        "rowHeight": 0.49,
+        "showValue": "auto",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "crystal-forge-ds"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT                                        \n  commit_timestamp as time,\n  CONCAT(\n    currently_deployed_systems, \n    ' deployed (', \n    short_hash, \n    ')§', \n    ROW_NUMBER() OVER (PARTITION BY flake_name ORDER BY commit_timestamp DESC) - 1\n  ) as \"Config\",\n  flake_name\nFROM view_commit_deployment_timeline \nORDER BY commit_timestamp DESC",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Config Timeline",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "#.*",
+            "renamePattern": "''"
+          }
+        },
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": ["flake_name"],
+            "keepFields": false,
+            "naming": {
+              "asLabels": false
+            }
+          }
+        }
+      ],
+      "type": "state-timeline"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 17
       },
       "id": 3,
       "panels": [],
@@ -515,7 +678,7 @@
         "h": 11,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 18
       },
       "id": 7,
       "options": {
@@ -619,7 +782,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 25
+        "y": 29
       },
       "id": 9,
       "panels": [],
@@ -703,7 +866,7 @@
         "h": 7,
         "w": 24,
         "x": 0,
-        "y": 26
+        "y": 30
       },
       "id": 8,
       "options": {
@@ -757,16 +920,26 @@
   "schemaVersion": 41,
   "tags": [],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {},
+        "name": "query0",
+        "options": [],
+        "query": "",
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      }
+    ]
   },
   "time": {
-    "from": "now-5m",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Crystal Forge Dashboard",
   "uid": "3d70baf5-db41-4dfa-bbee-af52dbfbe736",
-  "version": 33,
+  "version": 39,
   "weekStart": ""
 }
