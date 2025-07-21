@@ -21,4 +21,8 @@ in
       name = "cf-keygen";
       text = "${pkgs.crystal-forge.default}/bin/cf-keygen \"$@\"";
     };
+    test-agent = pkgs.writeShellApplication {
+      name = "test-agent";
+      text = "${pkgs.crystal-forge.default}/bin/test-agent \"$@\"";
+    };
   }

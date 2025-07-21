@@ -20,16 +20,22 @@ with lib.crystal-forge; let
     text = builtins.toJSON (builtins.fromJSON (builtins.readFile ./dashboards/crystal-forge-dashboard.json));
   };
   tomlFormat = pkgs.formats.toml {};
-  gray = pkgs.writeShellApplication {
-    name = "test-gray";
+  # gray = pkgs.writeShellApplication {
+  #   name = "test-gray";
+  #   text = ''
+  #     nix run "$PROJECT_ROOT#testAgents.test-gray.agent"
+  #   '';
+  # };
+  # lucas = pkgs.writeShellApplication {
+  #   name = "test-lucas";
+  #   text = ''
+  #     nix run "$PROJECT_ROOT#testAgents.test-lucas.agent"
+  #   '';
+  # };
+  agent-sim = pkgs.writeShellApplication {
+    name = "agent-sim";
     text = ''
-      nix run "$PROJECT_ROOT#testAgents.test-gray.agent"
-    '';
-  };
-  lucas = pkgs.writeShellApplication {
-    name = "test-lucas";
-    text = ''
-      nix run "$PROJECT_ROOT#testAgents.test-lucas.agent"
+      nix run "$PROJECT_ROOT#testAgents.weekly-simulation"
     '';
   };
   generateConfig = pkgs.writeShellApplication {
@@ -189,18 +195,24 @@ with lib.crystal-forge; let
     modules = [
       inputs.services-flake.processComposeModules.default
       {
-        settings.processes.lucas-agent = {
+        settings.processes.agent-sim = {
           inherit namespace;
-          command = lucas;
+          command = agent-sim;
           disabled = false;
           depends_on."server".condition = "process_healthy";
         };
-        settings.processes.gray-agent = {
-          inherit namespace;
-          command = gray;
-          disabled = false;
-          depends_on."server".condition = "process_healthy";
-        };
+        # settings.processes.lucas-agent = {
+        #   inherit namespace;
+        #   command = lucas;
+        #   disabled = false;
+        #   depends_on."server".condition = "process_healthy";
+        # };
+        # settings.processes.gray-agent = {
+        #   inherit namespace;
+        #   command = gray;
+        #   disabled = false;
+        #   depends_on."server".condition = "process_healthy";
+        # };
         settings.processes.server = {
           inherit namespace;
           command = runServer;
