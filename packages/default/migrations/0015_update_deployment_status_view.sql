@@ -1,4 +1,6 @@
-CREATE OR REPLACE VIEW view_systems_status_table AS
+DROP VIEW IF EXISTS view_systems_status_table;
+
+CREATE VIEW view_systems_status_table AS
 WITH system_derivation_source AS (
     -- Find if current derivation path maps to any known evaluation target
     SELECT
