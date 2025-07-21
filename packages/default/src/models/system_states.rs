@@ -143,6 +143,67 @@ impl SystemState {
         }
     }
 
+    /// Create a SystemState from command line arguments (for testing)
+    pub fn gather_from_args(
+        hostname: &str,
+        change_reason: &str,
+        derivation_path: &str,
+        timestamp_override: Option<DateTime<Utc>>,
+        // Optional overrides for testing different scenarios
+        os_override: Option<&str>,
+        kernel_override: Option<&str>,
+        memory_gb_override: Option<f64>,
+        cpu_brand_override: Option<&str>,
+        cpu_cores_override: Option<i32>,
+    ) -> Result<Self> {
+        Ok(SystemState {
+            id: None,
+            timestamp: timestamp_override.or_else(|| Some(Utc::now())),
+            hostname: hostname.to_string(),
+            derivation_path: Some(derivation_path.to_string()),
+            change_reason: change_reason.to_string(),
+
+            // Use overrides or sensible test defaults
+            os: os_override
+                .map(|s| s.to_string())
+                .or_else(|| Some("25.11".to_string())),
+            kernel: kernel_override
+                .map(|s| s.to_string())
+                .or_else(|| Some("6.12.33".to_string())),
+            memory_gb: Some(memory_gb_override.unwrap_or(16.0)),
+            uptime_secs: Some(86400), // 1 day default
+            cpu_brand: cpu_brand_override
+                .map(|s| s.to_string())
+                .or_else(|| Some("Test CPU".to_string())),
+            cpu_cores: Some(cpu_cores_override.unwrap_or(4)),
+
+            // Test hardware IDs (consistent for testing)
+            board_serial: Some("TEST123456789".to_string()),
+            product_uuid: Some(format!("test-uuid-{}", hostname)),
+            rootfs_uuid: Some(format!("test-rootfs-{}", hostname)),
+            chassis_serial: Some("CHASSIS123".to_string()),
+            bios_version: Some("1.0.0".to_string()),
+            cpu_microcode: None,
+
+            // Test network identity
+            network_interfaces: Some(serde_json::Value::Array(vec![])),
+            primary_mac_address: Some("02:00:00:00:00:01".to_string()),
+            primary_ip_address: Some("192.168.1.100".to_string()),
+            gateway_ip: Some("192.168.1.1".to_string()),
+
+            // Security defaults
+            selinux_status: None,
+            tpm_present: Some(true),
+            secure_boot_enabled: Some(false),
+            fips_mode: Some(false),
+
+            // Software identity
+            agent_version: Some("0.1.0-test".to_string()),
+            agent_build_hash: Some("test-build".to_string()),
+            nixos_version: Some("25.11".to_string()),
+        })
+    }
+
     pub fn gather(hostname: &str, change_reason: &str, derivation_path: &str) -> Result<Self> {
         let mut sys = System::new_all();
         sys.refresh_all();
