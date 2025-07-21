@@ -1,3 +1,5 @@
+DROP VIEW IF EXISTS view_commit_deployment_timeline;
+
 CREATE OR REPLACE VIEW view_commit_deployment_timeline AS
 SELECT
     c.flake_id,
