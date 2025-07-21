@@ -15,13 +15,13 @@
       "type": "grafana",
       "id": "grafana",
       "name": "Grafana",
-      "version": "12.0.1+security-01"
+      "version": "12.0.2"
     },
     {
       "type": "datasource",
       "id": "grafana-postgresql-datasource",
       "name": "PostgreSQL",
-      "version": "12.0.1"
+      "version": "12.0.2"
     },
     {
       "type": "panel",
@@ -37,8 +37,20 @@
     },
     {
       "type": "panel",
+      "id": "state-timeline",
+      "name": "State timeline",
+      "version": ""
+    },
+    {
+      "type": "panel",
       "id": "table",
       "name": "Table",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
       "version": ""
     }
   ],
@@ -109,9 +121,13 @@
         "textMode": "auto",
         "wideLayout": true
       },
-      "pluginVersion": "12.0.1+security-01",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "crystal-forge-ds"
+          },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
@@ -133,10 +149,6 @@
               }
             ],
             "limit": 50
-          },
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "crystal-forge-ds"
           }
         }
       ],
@@ -237,7 +249,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.1+security-01",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "datasource": {
@@ -294,7 +306,7 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Behind"
+              "options": "Outdated"
             },
             "properties": [
               {
@@ -309,7 +321,67 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "No System State"
+              "options": "Up to Date"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Updating"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Unknown State"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#c58342",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Evaluation Stuck"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#c58342",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Offline"
             },
             "properties": [
               {
@@ -324,13 +396,13 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "No Evaluation"
+              "options": "No Data"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "orange",
+                  "fixedColor": "#f5f5f5",
                   "mode": "fixed"
                 }
               }
@@ -365,7 +437,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.1+security-01",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "datasource": {
@@ -375,7 +447,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "-- More detailed deployment status\nSELECT \n    CASE \n        WHEN current_derivation_path IS NULL THEN 'No System State'\n        WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n        WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n        WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n        ELSE 'Behind'\n    END as deployment_status,\n    COUNT(*) as count\nFROM view_systems_current_state\nGROUP BY \n    CASE \n        WHEN current_derivation_path IS NULL THEN 'No System State'\n        WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n        WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n        WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n        ELSE 'Behind'\n    END\nORDER BY \n    CASE \n        WHEN CASE \n            WHEN current_derivation_path IS NULL THEN 'No System State'\n            WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n            WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n            WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n            ELSE 'Behind'\n        END = 'Current' THEN 1\n        WHEN CASE \n            WHEN current_derivation_path IS NULL THEN 'No System State'\n            WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n            WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n            WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n            ELSE 'Behind'\n        END = 'Behind' THEN 2\n        WHEN CASE \n            WHEN current_derivation_path IS NULL THEN 'No System State'\n            WHEN latest_commit_derivation_path IS NULL THEN 'No Evaluation'\n            WHEN current_derivation_path = latest_commit_derivation_path THEN 'Current'\n            WHEN latest_commit_evaluation_status != 'complete' THEN 'Eval Pending'\n            ELSE 'Behind'\n        END = 'Eval Pending' THEN 3\n        ELSE 4\n    END;",
+          "rawSql": "SELECT \n    status_text, \n    COUNT(*) as count\nFROM view_systems_status_table \nGROUP BY status, status_text\nORDER BY \n    CASE status\n        WHEN '🟢' THEN 1  -- Up to Date\n        WHEN '🟡' THEN 2  -- Updating\n        WHEN '🔴' THEN 3  -- Outdated\n        WHEN '🟤' THEN 4  -- Unknown/Stuck\n        WHEN '⚪' THEN 5  -- No Data\n        WHEN '⚫' THEN 6  -- Offline\n        ELSE 7\n    END;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -400,12 +472,169 @@
       "type": "piechart"
     },
     {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "crystal-forge-ds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-YlBl"
+          },
+          "custom": {
+            "axisPlacement": "hidden",
+            "fillOpacity": 80,
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineWidth": 0,
+            "spanNulls": true
+          },
+          "fieldMinMax": false,
+          "links": [],
+          "mappings": [
+            {
+              "options": {
+                "pattern": "^(0) deployed \\((.*)\\)§.*$",
+                "result": {
+                  "color": "dark-blue",
+                  "index": 0,
+                  "text": "$2"
+                }
+              },
+              "type": "regex"
+            },
+            {
+              "options": {
+                "pattern": "^(.*) deployed \\((.*)\\)§([3-9]|\\d{2,})$",
+                "result": {
+                  "color": "red",
+                  "index": 1,
+                  "text": "$1 deployed ($2)"
+                }
+              },
+              "type": "regex"
+            },
+            {
+              "options": {
+                "pattern": "^(.*) deployed \\((.*)\\)§[1-2]$",
+                "result": {
+                  "color": "yellow",
+                  "index": 2,
+                  "text": "$1 deployed ($2)"
+                }
+              },
+              "type": "regex"
+            },
+            {
+              "options": {
+                "pattern": "^(.*) deployed \\((.*)\\)§0$",
+                "result": {
+                  "color": "green",
+                  "index": 3,
+                  "text": "$1 deployed ($2)"
+                }
+              },
+              "type": "regex"
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "transparent"
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 4,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "id": 10,
+      "options": {
+        "alignValue": "center",
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "mergeValues": false,
+        "rowHeight": 0.49,
+        "showValue": "auto",
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "crystal-forge-ds"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT                                        \n  commit_timestamp as time,\n  CONCAT(\n    currently_deployed_systems, \n    ' deployed (', \n    short_hash, \n    ')§', \n    ROW_NUMBER() OVER (PARTITION BY flake_name ORDER BY commit_timestamp DESC) - 1\n  ) as \"Config\",\n  flake_name\nFROM view_commit_deployment_timeline \nORDER BY commit_timestamp DESC",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Config Timeline",
+      "transformations": [
+        {
+          "id": "renameByRegex",
+          "options": {
+            "regex": "#.*",
+            "renamePattern": "''"
+          }
+        },
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": ["flake_name"],
+            "keepFields": false,
+            "naming": {
+              "asLabels": false
+            }
+          }
+        }
+      ],
+      "type": "state-timeline"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 13
+        "y": 17
       },
       "id": 3,
       "panels": [],
@@ -449,7 +678,7 @@
         "h": 11,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 18
       },
       "id": 7,
       "options": {
@@ -462,7 +691,7 @@
         },
         "showHeader": true
       },
-      "pluginVersion": "12.0.1+security-01",
+      "pluginVersion": "12.0.2",
       "targets": [
         {
           "datasource": {
@@ -546,21 +775,171 @@
       ],
       "title": "System Status Table",
       "type": "table"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 29
+      },
+      "id": 9,
+      "panels": [],
+      "title": "Compliance",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "crystal-forge-ds"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-RdYlGr",
+            "seriesBy": "last"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "axisSoftMax": 100,
+            "axisSoftMin": 0,
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "scheme",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 3,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "auto",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "max": 100,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red"
+              },
+              {
+                "color": "orange",
+                "value": 70
+              },
+              {
+                "color": "#EAB839",
+                "value": 90
+              },
+              {
+                "color": "green",
+                "value": 100
+              }
+            ]
+          },
+          "unit": "percent"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 24,
+        "x": 0,
+        "y": 30
+      },
+      "id": 8,
+      "options": {
+        "legend": {
+          "calcs": [],
+          "displayMode": "hidden",
+          "placement": "right",
+          "showLegend": false
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "crystal-forge-ds"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT\n    snapshot_date,\n    compliance_percentage\nFROM view_compliance_trend_7d\nORDER BY snapshot_date;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "7-Day Trend",
+      "type": "timeseries"
     }
   ],
   "schemaVersion": 41,
   "tags": [],
   "templating": {
-    "list": []
+    "list": [
+      {
+        "current": {},
+        "name": "query0",
+        "options": [],
+        "query": "",
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      }
+    ]
   },
   "time": {
-    "from": "now-6h",
+    "from": "now-7d",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Crystal Forge Dashboard",
   "uid": "3d70baf5-db41-4dfa-bbee-af52dbfbe736",
-  "version": 29,
+  "version": 39,
   "weekStart": ""
 }

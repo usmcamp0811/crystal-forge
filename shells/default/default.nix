@@ -38,6 +38,8 @@ in
       alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
       alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
       alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'
+      alias dbOnly='nix run $PROJECT_ROOT#devScripts.dbOnly --'
+      alias test-agent='nix run $PROJECT_ROOT#agent.test-agent --'
 
       echo "🔮 Welcome to the Crystal Forge Dev Environment"
       echo ""

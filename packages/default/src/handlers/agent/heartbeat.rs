@@ -60,6 +60,7 @@ pub async fn log(
             info!("💓 Heartbeat recorded for {}", payload.hostname);
         }
         Err(_state_change_reason) => {
+            info!("🔍 Heartbeat became state change: {}", _state_change_reason);
             // State changed - insert full state record
             if let Err(e) = insert_system_state(&pool, &payload, version_compatible).await {
                 debug!("❌ failed to insert system state: {e:?}");
