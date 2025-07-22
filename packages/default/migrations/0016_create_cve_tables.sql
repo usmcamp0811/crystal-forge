@@ -1,0 +1,372 @@
+-- CVE integration schema for existing NixOS management database
+-- ============================================================================
+-- CVE CORE TABLES
+-- ============================================================================
+-- CVE definitions from vulnerability databases
+CREATE TABLE cves (
+    id varchar(20) PRIMARY KEY, -- CVE-YYYY-NNNNN
+    cvss_v3_score DECIMAL(3, 1),
+    cvss_v2_score DECIMAL(3, 1),
+    description text,
+    published_date date,
+    modified_date date,
+    severity varchar(20), -- CRITICAL, HIGH, MEDIUM, LOW
+    vector varchar(100), -- CVSS vector string
+    cwe_id varchar(20), -- Common Weakness Enumeration
+    metadata jsonb, -- Additional CVE details (references, etc.)
+    created_at timestamptz DEFAULT NOW(),
+    updated_at timestamptz DEFAULT NOW()
+);
+
+-- Nix packages with version information
+CREATE TABLE nix_packages (
+    derivation_path text PRIMARY KEY, -- Natural primary key, already unique
+    name varchar(255) NOT NULL, -- Full package name for display
+    pname varchar(255) NOT NULL, -- Package name for CVE matching
+    version varchar(100) NOT NULL, -- Version for vulnerability assessment
+    created_at timestamptz DEFAULT NOW()
+);
+
+-- Link packages to CVEs with vulnerability details
+CREATE TABLE package_vulnerabilities (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
+    derivation_path text REFERENCES nix_packages (derivation_path) ON DELETE CASCADE,
+    cve_id varchar(20) REFERENCES cves (id) ON DELETE CASCADE,
+    is_whitelisted boolean DEFAULT FALSE,
+    whitelist_reason text,
+    whitelist_expires_at timestamptz,
+    fixed_version varchar(100), -- Version where CVE is fixed
+    detection_method varchar(50) DEFAULT 'vulnix', -- vulnix, trivy, osv, etc.
+    created_at timestamptz DEFAULT NOW(),
+    updated_at timestamptz DEFAULT NOW(),
+    UNIQUE (derivation_path, cve_id)
+);
+
+-- CVE scans tied to your existing system states
+CREATE TABLE cve_scans (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
+    system_state_id integer REFERENCES system_states (id) ON DELETE CASCADE,
+    scan_date timestamptz DEFAULT NOW(),
+    scanner_name varchar(50) NOT NULL, -- vulnix, trivy, grype, etc.
+    scanner_version varchar(50),
+    total_packages integer NOT NULL DEFAULT 0,
+    total_vulnerabilities integer NOT NULL DEFAULT 0,
+    critical_count integer NOT NULL DEFAULT 0,
+    high_count integer NOT NULL DEFAULT 0,
+    medium_count integer NOT NULL DEFAULT 0,
+    low_count integer NOT NULL DEFAULT 0,
+    scan_duration_ms integer,
+    scan_metadata jsonb, -- scanner-specific data
+    created_at timestamptz DEFAULT NOW()
+);
+
+-- Link CVE scans to discovered packages (many-to-many)
+CREATE TABLE scan_packages (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
+    scan_id uuid REFERENCES cve_scans (id) ON DELETE CASCADE,
+    derivation_path text REFERENCES nix_packages (derivation_path) ON DELETE CASCADE,
+    is_runtime_dependency boolean DEFAULT TRUE,
+    dependency_depth integer DEFAULT 0, -- 0 = direct, 1+ = transitive
+    created_at timestamptz DEFAULT NOW(),
+    UNIQUE (scan_id, derivation_path)
+);
+
+-- ============================================================================
+-- INDEXES FOR PERFORMANCE
+-- ============================================================================
+CREATE INDEX idx_cves_severity ON cves (severity);
+
+CREATE INDEX idx_cves_score ON cves (cvss_v3_score);
+
+CREATE INDEX idx_cves_published ON cves (published_date);
+
+CREATE INDEX idx_nix_packages_pname_version ON nix_packages (pname, version);
+
+CREATE INDEX idx_nix_packages_name ON nix_packages (name);
+
+CREATE INDEX idx_package_vulnerabilities_derivation ON package_vulnerabilities (derivation_path);
+
+CREATE INDEX idx_package_vulnerabilities_cve ON package_vulnerabilities (cve_id);
+
+CREATE INDEX idx_package_vulnerabilities_whitelist ON package_vulnerabilities (is_whitelisted);
+
+CREATE INDEX idx_cve_scans_system_state ON cve_scans (system_state_id);
+
+CREATE INDEX idx_cve_scans_date ON cve_scans (scan_date);
+
+CREATE INDEX idx_cve_scans_scanner ON cve_scans (scanner_name);
+
+CREATE INDEX idx_scan_packages_scan ON scan_packages (scan_id);
+
+CREATE INDEX idx_scan_packages_derivation ON scan_packages (derivation_path);
+
+-- ============================================================================
+-- VIEWS INTEGRATING WITH EXISTING SCHEMA
+-- ============================================================================
+-- CVE summary per system (integrates with existing view_systems_current_state)
+CREATE VIEW view_systems_cve_summary AS
+SELECT
+    sys.hostname,
+    sys.current_derivation_path,
+    sys.last_deployed,
+    sys.last_seen,
+    sys.ip_address,
+    latest_scan.scan_date AS last_cve_scan,
+    latest_scan.scanner_name,
+    COALESCE(latest_scan.total_packages, 0) AS total_packages,
+    COALESCE(latest_scan.total_vulnerabilities, 0) AS total_cves,
+    COALESCE(latest_scan.critical_count, 0) AS critical_cves,
+    COALESCE(latest_scan.high_count, 0) AS high_cves,
+    COALESCE(latest_scan.medium_count, 0) AS medium_cves,
+    COALESCE(latest_scan.low_count, 0) AS low_cves,
+    CASE WHEN latest_scan.total_vulnerabilities = 0 THEN
+        'Clean'
+    WHEN latest_scan.critical_count > 0 THEN
+        'Critical'
+    WHEN latest_scan.high_count > 0 THEN
+        'High Risk'
+    WHEN latest_scan.medium_count > 0 THEN
+        'Medium Risk'
+    WHEN latest_scan.low_count > 0 THEN
+        'Low Risk'
+    ELSE
+        'Unknown'
+    END AS security_status,
+    -- Days since last CVE scan
+    CASE WHEN latest_scan.scan_date IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (NOW() - latest_scan.scan_date)) / 86400
+    ELSE
+        NULL
+    END AS days_since_scan
+FROM
+    view_systems_current_state sys
+    LEFT JOIN (
+        -- Get most recent CVE scan per system
+        SELECT DISTINCT ON (ss.hostname)
+            ss.hostname,
+            cs.scan_date,
+            cs.scanner_name,
+            cs.total_packages,
+            cs.total_vulnerabilities,
+            cs.critical_count,
+            cs.high_count,
+            cs.medium_count,
+            cs.low_count
+        FROM
+            system_states ss
+            JOIN cve_scans cs ON ss.id = cs.system_state_id
+        ORDER BY
+            ss.hostname,
+            cs.scan_date DESC) latest_scan ON sys.hostname = latest_scan.hostname
+ORDER BY
+    sys.hostname;
+
+-- Detailed CVE view per system
+CREATE VIEW view_system_vulnerabilities AS
+SELECT
+    sys.hostname,
+    np.name AS package_name,
+    np.pname AS package_pname,
+    np.version AS package_version,
+    np.derivation_path,
+    c.id AS cve_id,
+    c.cvss_v3_score,
+    c.severity,
+    c.description,
+    pv.is_whitelisted,
+    pv.whitelist_reason,
+    pv.fixed_version,
+    pv.detection_method,
+    scan.scan_date,
+    scan.scanner_name
+FROM
+    view_systems_current_state sys
+    JOIN system_states ss ON sys.hostname = ss.hostname
+        AND sys.current_derivation_path = ss.derivation_path
+        AND ss.timestamp = sys.last_deployed
+    JOIN cve_scans scan ON ss.id = scan.system_state_id
+    JOIN scan_packages sp ON scan.id = sp.scan_id
+    JOIN nix_packages np ON sp.derivation_path = np.derivation_path
+    JOIN package_vulnerabilities pv ON np.derivation_path = pv.derivation_path
+    JOIN cves c ON pv.cve_id = c.id
+WHERE
+    NOT pv.is_whitelisted
+ORDER BY
+    sys.hostname,
+    c.cvss_v3_score DESC NULLS LAST;
+
+-- Security compliance view (integrates with your environments/compliance)
+CREATE VIEW view_environment_security_posture AS
+SELECT
+    e.name AS environment,
+    e.compliance_level_id,
+    cl.name AS compliance_level,
+    COUNT(DISTINCT s.hostname) AS total_systems,
+    COUNT(DISTINCT CASE WHEN latest_scan.total_vulnerabilities = 0 THEN
+            s.hostname
+        END) AS clean_systems,
+    COUNT(DISTINCT CASE WHEN latest_scan.critical_count > 0 THEN
+            s.hostname
+        END) AS critical_systems,
+    COUNT(DISTINCT CASE WHEN latest_scan.high_count > 0 THEN
+            s.hostname
+        END) AS high_risk_systems,
+    AVG(latest_scan.total_vulnerabilities) AS avg_vulnerabilities_per_system,
+    MIN(latest_scan.scan_date) AS oldest_scan,
+    MAX(latest_scan.scan_date) AS newest_scan
+FROM
+    environments e
+    LEFT JOIN systems s ON e.id = s.environment_id
+        AND s.is_active = TRUE
+    LEFT JOIN compliance_levels cl ON e.compliance_level_id = cl.id
+    LEFT JOIN (
+        -- Latest scan per system
+        SELECT DISTINCT ON (ss.hostname)
+            ss.hostname,
+            cs.scan_date,
+            cs.total_vulnerabilities,
+            cs.critical_count,
+            cs.high_count
+        FROM
+            system_states ss
+            JOIN cve_scans cs ON ss.id = cs.system_state_id
+        ORDER BY
+            ss.hostname,
+            cs.scan_date DESC) latest_scan ON s.hostname = latest_scan.hostname
+GROUP BY
+    e.id,
+    e.name,
+    e.compliance_level_id,
+    cl.name
+ORDER BY
+    e.name;
+
+-- CVE trend tracking (extends your existing time series pattern)
+CREATE VIEW view_cve_trends_7d AS
+SELECT
+    DATE(scan_date) AS scan_date,
+    COUNT(DISTINCT cs.system_state_id) AS systems_scanned,
+    AVG(cs.total_vulnerabilities) AS avg_vulnerabilities,
+    AVG(cs.critical_count) AS avg_critical,
+    AVG(cs.high_count) AS avg_high,
+    SUM(cs.total_vulnerabilities) AS total_vulnerabilities,
+    SUM(cs.critical_count) AS total_critical,
+    SUM(cs.high_count) AS total_high
+FROM
+    cve_scans cs
+WHERE
+    scan_date >= CURRENT_DATE - INTERVAL '7 days'
+GROUP BY
+    DATE(scan_date)
+ORDER BY
+    scan_date;
+
+-- Critical vulnerabilities requiring immediate attention
+CREATE VIEW view_critical_vulnerabilities_alert AS
+SELECT
+    sys.hostname,
+    sys.ip_address,
+    e.name AS environment,
+    cl.name AS compliance_level,
+    COUNT(DISTINCT c.id) AS critical_cve_count,
+    STRING_AGG(DISTINCT c.id, ', ' ORDER BY c.id) AS critical_cves,
+    MAX(c.cvss_v3_score) AS highest_cvss_score,
+    latest_scan.scan_date AS last_scan_date
+FROM
+    view_systems_current_state sys
+    JOIN systems s ON sys.hostname = s.hostname
+    JOIN environments e ON s.environment_id = e.id
+    LEFT JOIN compliance_levels cl ON e.compliance_level_id = cl.id
+    JOIN system_states ss ON sys.hostname = ss.hostname
+        AND sys.current_derivation_path = ss.derivation_path
+        AND ss.timestamp = sys.last_deployed
+    JOIN cve_scans latest_scan ON ss.id = latest_scan.system_state_id
+    JOIN scan_packages sp ON latest_scan.id = sp.scan_id
+    JOIN package_vulnerabilities pv ON sp.derivation_path = pv.derivation_path
+    JOIN cves c ON pv.cve_id = c.id
+WHERE
+    c.severity = 'CRITICAL'
+    AND NOT pv.is_whitelisted
+    AND (pv.whitelist_expires_at IS NULL
+        OR pv.whitelist_expires_at < NOW())
+GROUP BY
+    sys.hostname,
+    sys.ip_address,
+    e.name,
+    cl.name,
+    latest_scan.scan_date
+HAVING
+    COUNT(DISTINCT c.id) > 0
+ORDER BY
+    critical_cve_count DESC,
+    highest_cvss_score DESC;
+
+-- ============================================================================
+-- UPDATE TRIGGERS FOR CONSISTENCY
+-- ============================================================================
+CREATE TRIGGER update_cves_updated_at
+    BEFORE UPDATE ON cves
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column ();
+
+CREATE TRIGGER update_package_vulnerabilities_updated_at
+    BEFORE UPDATE ON package_vulnerabilities
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column ();
+
+-- ============================================================================
+-- HELPER FUNCTIONS
+-- ============================================================================
+-- Function to calculate severity from CVSS score
+CREATE OR REPLACE FUNCTION severity_from_cvss (score DECIMAL)
+    RETURNS varchar (
+        20
+)
+    AS $$
+BEGIN
+    IF score IS NULL THEN
+        RETURN 'UNKNOWN';
+    ELSIF score >= 9.0 THEN
+        RETURN 'CRITICAL';
+    ELSIF score >= 7.0 THEN
+        RETURN 'HIGH';
+    ELSIF score >= 4.0 THEN
+        RETURN 'MEDIUM';
+    ELSE
+        RETURN 'LOW';
+    END IF;
+END;
+$$
+LANGUAGE plpgsql
+IMMUTABLE;
+
+-- Function to get latest CVE scan for a system
+CREATE OR REPLACE FUNCTION get_latest_cve_scan (system_hostname text)
+    RETURNS TABLE (
+        scan_id uuid,
+        scan_date timestamptz,
+        total_vulnerabilities integer,
+        critical_count integer,
+        high_count integer
+    )
+    AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        cs.id,
+        cs.scan_date,
+        cs.total_vulnerabilities,
+        cs.critical_count,
+        cs.high_count
+    FROM
+        system_states ss
+        JOIN cve_scans cs ON ss.id = cs.system_state_id
+    WHERE
+        ss.hostname = system_hostname
+    ORDER BY
+        cs.scan_date DESC
+    LIMIT 1;
+END;
+$$
+LANGUAGE plpgsql;
+
