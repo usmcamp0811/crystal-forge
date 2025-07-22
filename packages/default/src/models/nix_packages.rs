@@ -34,7 +34,7 @@ impl NixPackage {
     /// Check if this package version is likely affected by a CVE with a fixed version
     pub fn is_likely_affected(&self, fixed_version: &str) -> bool {
         // Simple version comparison - in production you'd want more sophisticated logic
-        self.version < *fixed_version
+        *self.version < *fixed_version
     }
 }
 

@@ -19,11 +19,7 @@ pub struct PackageVulnerability {
 
 impl PackageVulnerability {
     /// Create a new vulnerability record
-    pub fn new(
-        derivation_path: String,
-        cve_id: String,
-        detection_method: String,
-    ) -> Self {
+    pub fn new(derivation_path: String, cve_id: String, detection_method: String) -> Self {
         Self {
             id: Uuid::new_v4(),
             derivation_path,
@@ -70,7 +66,7 @@ impl PackageVulnerability {
     /// Check if vulnerability affects a specific package version
     pub fn affects_version(&self, version: &str) -> bool {
         match &self.fixed_version {
-            Some(fixed) => version < fixed,
+            Some(fixed) => *version < **fixed,
             None => true, // No fixed version means all versions affected
         }
     }
