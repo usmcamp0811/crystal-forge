@@ -440,6 +440,7 @@ in {
         gnused
         gnugrep
         findutils
+        vulnix
       ];
       environment = {
         RUST_LOG = cfg.log_level;
