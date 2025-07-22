@@ -12,7 +12,7 @@ impl VulnixRunner {
     ///
     /// # Arguments
     /// * `nix_path` - Path to scan (derivation, store path, or gc root)
-    /// * `system_state_id` - ID to associate with this scan
+    /// * `evaluation_target_id` - ID to associate with this scan
     /// * `scanner_version` - Optional vulnix version for metadata
     ///
     /// # Examples
@@ -25,13 +25,13 @@ impl VulnixRunner {
     /// ```
     pub async fn scan_path(
         nix_path: &str,
-        system_state_id: i32,
+        evaluation_target_id: i32,
         scanner_version: Option<String>,
     ) -> Result<VulnixScanResult> {
         let start_time = Instant::now();
 
         info!("🔍 Starting vulnix scan for: {}", nix_path);
-        debug!("📋 System state ID: {}", system_state_id);
+        debug!("📋 Evaluation Target ID: {}", evaluation_target_id);
 
         // Validate the path exists (basic check)
         if !Self::validate_nix_path(nix_path) {
@@ -72,7 +72,7 @@ impl VulnixRunner {
 
         // Parse the JSON output
         let mut result =
-            VulnixParser::parse_and_convert(&json_output, system_state_id, scanner_version)
+            VulnixParser::parse_and_convert(&json_output, evaluation_target_id, scanner_version)
                 .context("Failed to parse vulnix JSON output")?;
 
         // Set scan timing
@@ -100,13 +100,13 @@ impl VulnixRunner {
 
     /// Run vulnix on the current system (uses --system flag)
     pub async fn scan_current_system(
-        system_state_id: i32,
+        evaluation_target_id: i32,
         scanner_version: Option<String>,
     ) -> Result<VulnixScanResult> {
         let start_time = Instant::now();
 
         info!("🔍 Starting vulnix scan for current system");
-        debug!("📋 System state ID: {}", system_state_id);
+        debug!("📋 Evaluation Target ID: {}", evaluation_target_id);
 
         // Run vulnix on current system
         let output = Command::new("vulnix")
@@ -135,15 +135,15 @@ impl VulnixRunner {
 
         // Parse the JSON output
         let mut result =
-            VulnixParser::parse_and_convert(&json_output, system_state_id, scanner_version)
-                .context("Failed to parse vulnix system scan JSON output")?;
+            VulnixParser::parse_and_convert(&json_output, evaluation_target_id, scanner_version)
+                .context("Failed to parse vulnix scan JSON output")?;
 
         // Set scan timing
         result.scan.finish_timing(start_time);
 
         let summary = result.summary();
         info!(
-            "✅ vulnix system scan completed in {:.2}s: {} packages, {} CVEs ({} critical, {} high)",
+            "✅ vulnix scan completed in {:.2}s: {} packages, {} CVEs ({} critical, {} high)",
             start_time.elapsed().as_secs_f64(),
             summary.total_packages,
             summary.total_cves,
@@ -153,7 +153,7 @@ impl VulnixRunner {
 
         if summary.critical_count > 0 {
             warn!(
-                "⚠️  {} critical vulnerabilities found in current system!",
+                "⚠️  {} critical vulnerabilities found in current evaluation!",
                 summary.critical_count
             );
         }
@@ -163,13 +163,13 @@ impl VulnixRunner {
 
     /// Run vulnix on all garbage collection roots
     pub async fn scan_gc_roots(
-        system_state_id: i32,
+        evaluation_target_id: i32,
         scanner_version: Option<String>,
     ) -> Result<VulnixScanResult> {
         let start_time = Instant::now();
 
         info!("🔍 Starting vulnix scan for all GC roots");
-        debug!("📋 System state ID: {}", system_state_id);
+        debug!("📋 Evaluation Target ID: {}", evaluation_target_id);
 
         // Run vulnix on GC roots
         let output = Command::new("vulnix")
@@ -198,7 +198,7 @@ impl VulnixRunner {
 
         // Parse the JSON output
         let mut result =
-            VulnixParser::parse_and_convert(&json_output, system_state_id, scanner_version)
+            VulnixParser::parse_and_convert(&json_output, evaluation_target_id, scanner_version)
                 .context("Failed to parse vulnix GC roots scan JSON output")?;
 
         // Set scan timing
@@ -309,22 +309,22 @@ impl VulnixRunner {
     /// Scan a derivation path with automatic version detection
     pub async fn scan_derivation(
         derivation_path: &str,
-        system_state_id: i32,
+        evaluation_target_id: i32,
     ) -> Result<VulnixScanResult> {
         let version = Self::get_vulnix_version().await.ok();
-        Self::scan_path(derivation_path, system_state_id, version).await
+        Self::scan_path(derivation_path, evaluation_target_id, version).await
     }
 
     /// Scan current system with automatic version detection
-    pub async fn scan_system(system_state_id: i32) -> Result<VulnixScanResult> {
+    pub async fn scan_system(evaluation_target_id: i32) -> Result<VulnixScanResult> {
         let version = Self::get_vulnix_version().await.ok();
-        Self::scan_current_system(system_state_id, version).await
+        Self::scan_current_system(evaluation_target_id, version).await
     }
 
     /// Scan GC roots with automatic version detection
-    pub async fn scan_gc_roots_auto(system_state_id: i32) -> Result<VulnixScanResult> {
+    pub async fn scan_gc_roots_auto(evaluation_target_id: i32) -> Result<VulnixScanResult> {
         let version = Self::get_vulnix_version().await.ok();
-        Self::scan_gc_roots(system_state_id, version).await
+        Self::scan_gc_roots(evaluation_target_id, version).await
     }
 }
 
