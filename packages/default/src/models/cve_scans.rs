@@ -6,7 +6,7 @@ use uuid::Uuid;
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct CveScan {
     pub id: Uuid,
-    pub system_state_id: i32,
+    pub evaluation_target_id: i32,
     pub scan_date: DateTime<Utc>,
     pub scanner_name: String, // vulnix, trivy, grype, etc.
     pub scanner_version: Option<String>,
@@ -26,7 +26,7 @@ impl CveScan {
     pub fn new(system_state_id: i32, scanner_name: String) -> Self {
         Self {
             id: Uuid::new_v4(),
-            system_state_id,
+            evaluation_target_id: system_state_id,
             scan_date: Utc::now(),
             scanner_name,
             scanner_version: None,
