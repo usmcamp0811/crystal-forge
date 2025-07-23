@@ -1,18 +1,17 @@
-use crate::models::commits::Commit;
-use crate::models::evaluation_targets::{EvaluationTarget, TargetType};
-use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, PgPool};
-use tracing::error;
+use anyhow::Result;
+use sqlx::PgPool;
+use uuid::Uuid;
 
-/// Get targets that need CVE scanning (ordered by priority)
-/// Returns array of EvaluationTargets - additional info can be fetched separately
+use crate::models::cve_scans::{CveScan, ScanStatus};
+use crate::models::evaluation_targets::EvaluationTarget;
+use crate::vulnix::database_scan_results::DatabaseScanResult;
+
+/// Get evaluation targets that need CVE scanning
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
-    limit: Option<i64>,
+    limit: Option<i32>,
 ) -> Result<Vec<EvaluationTarget>> {
-    let limit_clause = limit.unwrap_or(50); // Default to 50 if no limit specified
+    let limit = limit.unwrap_or(10);
 
     let targets = sqlx::query_as!(
         EvaluationTarget,
@@ -20,60 +19,80 @@ pub async fn get_targets_needing_cve_scan(
         SELECT 
             et.id,
             et.commit_id,
-            et.target_type as "target_type: TargetType",
             et.target_name,
+            et.target_type,
             et.derivation_path,
             et.scheduled_at,
+            et.started_at,
             et.completed_at,
-            et.status
+            et.status,
+            et.evaluation_duration_ms,
+            et.attempt_count,
+            et.error_message
         FROM evaluation_targets et
-        LEFT JOIN cve_scans cs ON et.id = cs.evaluation_target_id
-        WHERE 
-            et.completed_at IS NOT NULL 
-            AND et.status = 'complete'
+        LEFT JOIN cve_scans cs ON et.id = cs.evaluation_target_id 
+            AND cs.completed_at IS NOT NULL
+        WHERE et.status = 'complete'
             AND et.derivation_path IS NOT NULL
-            AND (
-                cs.id IS NULL 
-                OR (cs.status IN ('failed', 'pending') AND cs.attempts < 5)
-            )
-        ORDER BY 
-            COALESCE(cs.attempts, 0) ASC,
-            et.completed_at ASC
+            AND (cs.id IS NULL OR cs.completed_at < NOW() - INTERVAL '24 hours')
+        ORDER BY et.completed_at ASC
         LIMIT $1
         "#,
-        limit_clause
+        limit
     )
     .fetch_all(pool)
-    .await
-    .context("Failed to fetch targets needing CVE scan")?;
+    .await?;
 
     Ok(targets)
 }
 
-/// Mark a CVE scan as failed in the database
-async fn mark_cve_scan_failed(
+/// Create a new CVE scan record
+pub async fn create_cve_scan(
     pool: &PgPool,
-    target: &crate::models::evaluation_targets::EvaluationTarget,
-    error_message: &str,
-) -> Result<()> {
-    let scan_metadata = serde_json::json!({
-        "error": error_message,
-        "failed_at": chrono::Utc::now()
-    });
+    evaluation_target_id: i32,
+    scanner_name: &str,
+    scanner_version: Option<String>,
+) -> Result<Uuid> {
+    let scan_id = Uuid::new_v4();
 
     sqlx::query!(
         r#"
-        INSERT INTO cve_scans 
-            (evaluation_target_id, status, attempts, scanner_name, scan_metadata)
-        VALUES ($1, 'failed', 1, 'vulnix', $2)
-        ON CONFLICT (evaluation_target_id) DO UPDATE SET
-            status = 'failed',
-            attempts = cve_scans.attempts + 1,
-            scan_metadata = $2,
-            created_at = NOW()
+        INSERT INTO cve_scans (
+            id, evaluation_target_id, scanner_name, scanner_version,
+            status, total_packages, total_vulnerabilities,
+            critical_count, high_count, medium_count, low_count,
+            attempts
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
-        target.id,
-        scan_metadata
+        scan_id,
+        evaluation_target_id,
+        scanner_name,
+        scanner_version,
+        "pending" as &str,
+        0i32,
+        0i32,
+        0i32,
+        0i32,
+        0i32,
+        0i32,
+        0i32
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(scan_id)
+}
+
+/// Update CVE scan to in-progress status
+pub async fn mark_scan_in_progress(pool: &PgPool, scan_id: Uuid) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE cve_scans 
+        SET status = $1, attempts = attempts + 1
+        WHERE id = $2
+        "#,
+        "in_progress" as &str,
+        scan_id
     )
     .execute(pool)
     .await?;
@@ -81,65 +100,153 @@ async fn mark_cve_scan_failed(
     Ok(())
 }
 
-// Add this to your queries/cve_scans.rs file
-
-use crate::vulnix::vulnix_parser::VulnixScanResult;
-use anyhow::{Context, Result};
-use sqlx::PgPool;
-use tracing::{debug, info, warn};
-
-/// Save complete scan results to the database
-pub async fn save_scan_results(pool: &PgPool, scan_result: &VulnixScanResult) -> Result<()> {
-    let mut tx = pool.begin().await.context("Failed to start transaction")?;
-
-    // 1. Insert/update the CVE scan record
+/// Complete a CVE scan with results
+pub async fn complete_cve_scan(
+    pool: &PgPool,
+    scan_id: Uuid,
+    total_packages: i32,
+    total_vulnerabilities: i32,
+    critical_count: i32,
+    high_count: i32,
+    medium_count: i32,
+    low_count: i32,
+    scan_duration_ms: Option<i32>,
+    scan_metadata: Option<serde_json::Value>,
+) -> Result<()> {
     sqlx::query!(
         r#"
-        INSERT INTO cve_scans (
-            id, evaluation_target_id, completed_at, status, scanner_name, 
-            scanner_version, total_packages, total_vulnerabilities,
-            critical_count, high_count, medium_count, low_count,
-            scan_duration_ms, scan_metadata
-        ) VALUES ($1, $2, NOW(), 'completed', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        ON CONFLICT (id) DO UPDATE SET
+        UPDATE cve_scans 
+        SET 
+            status = $1,
             completed_at = NOW(),
-            status = 'completed',
-            total_packages = $5,
-            total_vulnerabilities = $6,
-            critical_count = $7,
-            high_count = $8,
-            medium_count = $9,
-            low_count = $10,
-            scan_duration_ms = $11,
-            scan_metadata = $12
+            total_packages = $2,
+            total_vulnerabilities = $3,
+            critical_count = $4,
+            high_count = $5,
+            medium_count = $6,
+            low_count = $7,
+            scan_duration_ms = $8,
+            scan_metadata = $9
+        WHERE id = $10
         "#,
-        scan_result.scan.id,
-        scan_result.scan.evaluation_target_id,
-        scan_result.scan.scanner_name,
-        scan_result.scan.scanner_version,
-        scan_result.scan.total_packages,
-        scan_result.scan.total_vulnerabilities,
-        scan_result.scan.critical_count,
-        scan_result.scan.high_count,
-        scan_result.scan.medium_count,
-        scan_result.scan.low_count,
-        scan_result.scan.scan_duration_ms,
-        scan_result.scan.scan_metadata
+        "completed" as &str,
+        total_packages,
+        total_vulnerabilities,
+        critical_count,
+        high_count,
+        medium_count,
+        low_count,
+        scan_duration_ms,
+        scan_metadata,
+        scan_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Mark CVE scan as failed
+pub async fn mark_cve_scan_failed(
+    pool: &PgPool,
+    target: &EvaluationTarget,
+    error_message: &str,
+) -> Result<()> {
+    // First try to find an existing pending/in-progress scan
+    let existing_scan = sqlx::query!(
+        r#"
+        SELECT id FROM cve_scans 
+        WHERE evaluation_target_id = $1 
+            AND status IN ('pending', 'in_progress')
+        ORDER BY scheduled_at DESC
+        LIMIT 1
+        "#,
+        target.id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let scan_id = if let Some(existing) = existing_scan {
+        existing.id
+    } else {
+        // Create a new scan record to mark as failed
+        create_cve_scan(pool, target.id, "vulnix", None).await?
+    };
+
+    // Create metadata with error details
+    let metadata = serde_json::json!({
+        "error": error_message,
+        "target_name": target.target_name,
+        "derivation_path": target.derivation_path
+    });
+
+    sqlx::query!(
+        r#"
+        UPDATE cve_scans 
+        SET 
+            status = $1,
+            completed_at = NOW(),
+            attempts = attempts + 1,
+            scan_metadata = $2
+        WHERE id = $3
+        "#,
+        "failed" as &str,
+        metadata,
+        scan_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Save complete scan results to database
+pub async fn save_scan_results(pool: &PgPool, scan_result: &DatabaseScanResult) -> Result<()> {
+    // Start a transaction
+    let mut tx = pool.begin().await?;
+
+    // Update the scan record
+    sqlx::query!(
+        r#"
+        UPDATE cve_scans 
+        SET 
+            status = $1,
+            completed_at = NOW(),
+            total_packages = $2,
+            total_vulnerabilities = $3,
+            critical_count = $4,
+            high_count = $5,
+            medium_count = $6,
+            low_count = $7,
+            scan_duration_ms = $8,
+            scan_metadata = $9
+        WHERE id = $10
+        "#,
+        "completed" as &str,
+        scan_result.total_packages,
+        scan_result.total_vulnerabilities,
+        scan_result.critical_count,
+        scan_result.high_count,
+        scan_result.medium_count,
+        scan_result.low_count,
+        scan_result.scan_duration_ms,
+        scan_result.metadata,
+        scan_result.scan_id
     )
     .execute(&mut *tx)
-    .await
-    .context("Failed to insert CVE scan")?;
+    .await?;
 
-    // 2. Insert packages (with conflict handling)
+    // Insert packages found during scan
     for package in &scan_result.packages {
+        // Insert or update package
         sqlx::query!(
             r#"
             INSERT INTO nix_packages (derivation_path, name, pname, version)
             VALUES ($1, $2, $3, $4)
             ON CONFLICT (derivation_path) DO UPDATE SET
-                name = $2,
-                pname = $3,
-                version = $4
+                name = EXCLUDED.name,
+                pname = EXCLUDED.pname,
+                version = EXCLUDED.version
             "#,
             package.derivation_path,
             package.name,
@@ -147,135 +254,137 @@ pub async fn save_scan_results(pool: &PgPool, scan_result: &VulnixScanResult) ->
             package.version
         )
         .execute(&mut *tx)
-        .await
-        .context("Failed to insert nix package")?;
-    }
+        .await?;
 
-    // 3. Insert scan-package relationships
-    for scan_package in &scan_result.scan_packages {
+        // Link package to scan
         sqlx::query!(
             r#"
-            INSERT INTO scan_packages (
-                id, scan_id, derivation_path, is_runtime_dependency, dependency_depth
-            ) VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO scan_packages (scan_id, derivation_path, is_runtime_dependency, dependency_depth)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (scan_id, derivation_path) DO NOTHING
             "#,
-            scan_package.id,
-            scan_package.scan_id,
-            scan_package.derivation_path,
-            scan_package.is_runtime_dependency,
-            scan_package.dependency_depth
+            scan_result.scan_id,
+            package.derivation_path,
+            true, // Assume runtime dependency for now
+            0i32  // Assume direct dependency for now
         )
         .execute(&mut *tx)
-        .await
-        .context("Failed to insert scan package")?;
+        .await?;
     }
 
-    // 4. Insert CVEs (with conflict handling)
+    // Insert CVEs found during scan
     for cve in &scan_result.cves {
+        // Insert or update CVE
         sqlx::query!(
             r#"
-            INSERT INTO cves (
-                id, cvss_v3_score, cvss_v2_score, description, published_date,
-                modified_date, vector, cwe_id, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            INSERT INTO cves (id, cvss_v3_score, description, published_date, modified_date)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (id) DO UPDATE SET
-                cvss_v3_score = COALESCE($2, cves.cvss_v3_score),
-                cvss_v2_score = COALESCE($3, cves.cvss_v2_score),
-                description = COALESCE($4, cves.description),
-                published_date = COALESCE($5, cves.published_date),
-                modified_date = COALESCE($6, cves.modified_date),
-                vector = COALESCE($7, cves.vector),
-                cwe_id = COALESCE($8, cves.cwe_id),
-                metadata = COALESCE($9, cves.metadata),
+                cvss_v3_score = EXCLUDED.cvss_v3_score,
+                description = EXCLUDED.description,
+                published_date = EXCLUDED.published_date,
+                modified_date = EXCLUDED.modified_date,
                 updated_at = NOW()
             "#,
             cve.id,
             cve.cvss_v3_score,
-            cve.cvss_v2_score,
             cve.description,
             cve.published_date,
-            cve.modified_date,
-            cve.vector,
-            cve.cwe_id,
-            cve.metadata
+            cve.modified_date
         )
         .execute(&mut *tx)
-        .await
-        .context("Failed to insert CVE")?;
+        .await?;
     }
 
-    // 5. Insert package vulnerabilities
-    for vuln in &scan_result.package_vulnerabilities {
+    // Insert package vulnerabilities
+    for vulnerability in &scan_result.vulnerabilities {
         sqlx::query!(
             r#"
             INSERT INTO package_vulnerabilities (
-                id, derivation_path, cve_id, is_whitelisted, whitelist_reason,
-                whitelist_expires_at, fixed_version, detection_method
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                derivation_path, cve_id, fixed_version, detection_method
+            )
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (derivation_path, cve_id) DO UPDATE SET
-                is_whitelisted = $4,
-                whitelist_reason = $5,
-                whitelist_expires_at = $6,
-                fixed_version = COALESCE($7, package_vulnerabilities.fixed_version),
-                detection_method = $8,
+                fixed_version = EXCLUDED.fixed_version,
+                detection_method = EXCLUDED.detection_method,
                 updated_at = NOW()
             "#,
-            vuln.id,
-            vuln.derivation_path,
-            vuln.cve_id,
-            vuln.is_whitelisted,
-            vuln.whitelist_reason,
-            vuln.whitelist_expires_at,
-            vuln.fixed_version,
-            vuln.detection_method
+            vulnerability.derivation_path,
+            vulnerability.cve_id,
+            vulnerability.fixed_version,
+            vulnerability.detection_method
         )
         .execute(&mut *tx)
-        .await
-        .context("Failed to insert package vulnerability")?;
+        .await?;
     }
 
-    tx.commit().await.context("Failed to commit transaction")?;
-
-    let summary = scan_result.summary();
-    info!(
-        "💾 Saved CVE scan results: {} packages, {} CVEs, {} vulnerabilities",
-        summary.total_packages, summary.total_cves, summary.total_vulnerabilities
-    );
-
-    if summary.critical_count > 0 {
-        warn!(
-            "⚠️  {} critical vulnerabilities saved to database!",
-            summary.critical_count
-        );
-    }
+    // Commit the transaction
+    tx.commit().await?;
 
     Ok(())
 }
 
-/// Get the latest CVE scan for a specific evaluation target
-pub async fn get_latest_scan_for_target(
-    pool: &PgPool,
-    evaluation_target_id: i32,
-) -> Result<Option<crate::models::cve_scans::CveScan>> {
-    let scan = sqlx::query_as!(
-        crate::models::cve_scans::CveScan,
+/// Get latest CVE scan for an evaluation target
+pub async fn get_latest_scan(pool: &PgPool, evaluation_target_id: i32) -> Result<Option<CveScan>> {
+    let scan = sqlx::query!(
         r#"
         SELECT 
-            id, evaluation_target_id, scheduled_at, completed_at, status,
-            attempts, scanner_name, scanner_version, total_packages,
-            total_vulnerabilities, critical_count, high_count, medium_count,
-            low_count, scan_duration_ms, scan_metadata, created_at
-        FROM cve_scans 
-        WHERE evaluation_target_id = $1 
-        ORDER BY created_at DESC 
+            id,
+            evaluation_target_id,
+            scheduled_at,
+            completed_at,
+            status,
+            attempts,
+            scanner_name,
+            scanner_version,
+            total_packages,
+            total_vulnerabilities,
+            critical_count,
+            high_count,
+            medium_count,
+            low_count,
+            scan_duration_ms,
+            scan_metadata,
+            created_at
+        FROM cve_scans
+        WHERE evaluation_target_id = $1
+        ORDER BY created_at DESC
         LIMIT 1
         "#,
         evaluation_target_id
     )
     .fetch_optional(pool)
-    .await
-    .context("Failed to fetch latest CVE scan")?;
+    .await?;
 
-    Ok(scan)
+    if let Some(row) = scan {
+        let status = match row.status.as_str() {
+            "pending" => ScanStatus::Pending,
+            "in_progress" => ScanStatus::InProgress,
+            "completed" => ScanStatus::Completed,
+            "failed" => ScanStatus::Failed,
+            _ => ScanStatus::Pending,
+        };
+
+        Ok(Some(CveScan {
+            id: row.id,
+            evaluation_target_id: row.evaluation_target_id,
+            scheduled_at: row.scheduled_at,
+            completed_at: row.completed_at,
+            status,
+            attempts: row.attempts,
+            scanner_name: row.scanner_name,
+            scanner_version: row.scanner_version,
+            total_packages: row.total_packages,
+            total_vulnerabilities: row.total_vulnerabilities,
+            critical_count: row.critical_count,
+            high_count: row.high_count,
+            medium_count: row.medium_count,
+            low_count: row.low_count,
+            scan_duration_ms: row.scan_duration_ms,
+            scan_metadata: row.scan_metadata,
+            created_at: row.created_at,
+        }))
+    } else {
+        Ok(None)
+    }
 }

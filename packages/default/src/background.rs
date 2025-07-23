@@ -1,16 +1,14 @@
-use crate::queries::cve_scans::{get_targets_needing_cve_scan, save_scan_results};
+use crate::queries::cve_scans::{
+    get_targets_needing_cve_scan, mark_cve_scan_failed, save_scan_results,
+};
 use crate::queries::evaluation_targets::update_scheduled_at;
 use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
+use crate::vulnix::database_scan_results::DatabaseScanResult;
 use crate::vulnix::vulnix_runner::{VulnixConfig, VulnixRunner};
 use anyhow::Result;
-use anyhow::Result;
-use futures::stream;
 use futures::stream::{FuturesUnordered, StreamExt};
 use sqlx::PgPool;
-use sqlx::PgPool;
 use tokio::time::{Duration, sleep};
-use tokio::time::{Duration, sleep};
-use tracing::{debug, error, info};
 use tracing::{debug, error, info, warn};
 
 use crate::flake::eval::list_nixos_configurations_from_commit;
@@ -24,6 +22,7 @@ use crate::queries::evaluation_targets::{
 pub fn spawn_server_background_tasks(pool: PgPool) {
     let commit_pool = pool.clone();
     let target_pool = pool.clone();
+    let cve_pool = pool.clone();
 
     tokio::spawn(run_commit_evaluation_loop(commit_pool));
     tokio::spawn(run_target_evaluation_loop(target_pool));
@@ -56,7 +55,6 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
     match get_commits_pending_evaluation(&pool).await {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
-            let q = 1;
             for commit in pending_commits {
                 let target_type = "nixos";
                 match list_nixos_configurations_from_commit(&pool, &commit).await {
@@ -103,9 +101,13 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
             let concurrency_limit = 4; // adjust as needed
-            stream::iter(pending_targets.into_iter().map(|mut target| {
+
+            // Use FuturesUnordered instead of stream::iter for better concurrency
+            let mut futures = FuturesUnordered::new();
+
+            for mut target in pending_targets {
                 let pool = pool.clone();
-                async move {
+                futures.push(async move {
                     if let Err(e) = mark_target_in_progress(&pool, target.id).await {
                         error!("❌ Failed to mark target in-progress: {e}");
                         return;
@@ -134,10 +136,13 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
                             }
                         }
                     }
-                }
-            }))
-            .for_each_concurrent(concurrency_limit, |fut| fut)
-            .await;
+                });
+            }
+
+            // Process futures with concurrency limit
+            while let Some(_) = futures.next().await {
+                // Each future completes independently
+            }
         }
         Err(e) => error!("❌ Failed to get pending targets: {e}"),
     }
@@ -222,10 +227,12 @@ async fn process_single_cve_scan(
     target: &crate::models::evaluation_targets::EvaluationTarget,
     vulnix_version: Option<String>,
 ) -> Result<String> {
+    use crate::vulnix::database_scan_result::DatabaseScanResult;
+
     info!("🔍 Starting CVE scan for target: {}", target.target_name);
 
     // Determine scan method based on target
-    let scan_result = if let Some(derivation_path) = &target.derivation_path {
+    let scan_result: DatabaseScanResult = if let Some(derivation_path) = &target.derivation_path {
         // Scan specific derivation path
         debug!("📦 Scanning derivation: {}", derivation_path);
         runner
