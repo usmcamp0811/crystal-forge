@@ -64,6 +64,30 @@ pub async fn update_evaluation_target_path(
     Ok(updated)
 }
 
+pub async fn get_target_by_id(pool: &PgPool, target_id: i32) -> Result<EvaluationTarget> {
+    let target = sqlx::query_as!(
+        EvaluationTarget,
+        r#"
+        SELECT
+            id,
+            commit_id,
+            target_type as "target_type: TargetType",
+            target_name,
+            derivation_path,
+            scheduled_at,
+            completed_at,
+            status
+        FROM evaluation_targets
+        WHERE id = $1
+        "#,
+        target_id
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(target)
+}
+
 pub async fn get_pending_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>> {
     let rows = sqlx::query_as!(
         EvaluationTarget,

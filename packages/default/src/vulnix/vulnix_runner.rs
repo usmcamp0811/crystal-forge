@@ -7,6 +7,7 @@ use std::process::Command;
 use tokio::process::Command as AsyncCommand;
 use tracing::{debug, error, info, warn};
 
+// TODO: Add vulnix config things to the CF config
 #[derive(Debug, Clone)]
 pub struct VulnixConfig {
     pub timeout_seconds: u64,
@@ -93,12 +94,8 @@ impl VulnixRunner {
         derivation_path: &str,
         evaluation_target_id: i32,
         vulnix_version: Option<String>,
-    ) -> Result<Vec<VulnixEntry>> {
+    ) -> Result<VulnixScanOutput> {
         info!("🔍 Scanning derivation path: {}", derivation_path);
-
-        let start_time = std::time::Instant::now();
-        let mut scan_result =
-            VulnixEntry::new(evaluation_target_id, "vulnix".to_string(), vulnix_version);
 
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
@@ -118,41 +115,29 @@ impl VulnixRunner {
 
         match tokio::time::timeout(timeout, cmd.output()).await {
             Ok(Ok(output)) => {
-                scan_result.set_duration(start_time);
-
                 if output.status.success() {
                     let json_output = String::from_utf8_lossy(&output.stdout);
 
-                    // Parse using your existing parser
-                    let parser_result = VulnixParser::parse_and_convert(
-                        &json_output,
-                        evaluation_target_id,
-                        scan_result.scanner_version.clone(),
-                    )?;
+                    // Parse vulnix JSON output directly
+                    let vulnix_entries: VulnixScanOutput = serde_json::from_str(&json_output)
+                        .map_err(|e| anyhow!("Failed to parse vulnix JSON output: {}", e))?;
 
-                    // Convert parser result to database result
-                    scan_result = DatabaseScanResult::from_parser_result(parser_result);
-                    scan_result.set_duration(start_time);
-                    scan_result.complete();
-
-                    info!("✅ Vulnix scan completed successfully");
+                    info!(
+                        "✅ Vulnix scan completed successfully with {} entries",
+                        vulnix_entries.len()
+                    );
+                    Ok(vulnix_entries)
                 } else {
                     let error_msg = String::from_utf8_lossy(&output.stderr);
-                    return Err(anyhow!("Vulnix scan failed: {}", error_msg));
+                    Err(anyhow!("Vulnix scan failed: {}", error_msg))
                 }
             }
-            Ok(Err(e)) => {
-                return Err(anyhow!("Failed to execute vulnix: {}", e));
-            }
-            Err(_) => {
-                return Err(anyhow!(
-                    "Vulnix scan timed out after {} seconds",
-                    self.config.timeout_seconds
-                ));
-            }
+            Ok(Err(e)) => Err(anyhow!("Failed to execute vulnix: {}", e)),
+            Err(_) => Err(anyhow!(
+                "Vulnix scan timed out after {} seconds",
+                self.config.timeout_seconds
+            )),
         }
-
-        Ok(scan_result)
     }
 
     // Scan an evaluation target (fallback method)
