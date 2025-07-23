@@ -45,7 +45,7 @@ CREATE TABLE package_vulnerabilities (
 -- Enhanced CVE scans table with simple attempt tracking
 CREATE TABLE cve_scans (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
-    evaluation_target_id integer REFERENCES evaluation_targets (id) ON DELETE CASCADE,
+    evaluation_target_id integer REFERENCES evaluation_targets (id) ON DELETE CASCADE NOT NULL,
     scheduled_at timestamptz DEFAULT NOW(),
     completed_at timestamptz,
     status varchar(20), -- 'pending', 'in_progress', 'completed', 'failed', etc.

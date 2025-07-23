@@ -1,0 +1,64 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            et.id,\n            et.commit_id,\n            et.target_type,\n            et.target_name,\n            et.derivation_path,\n            et.scheduled_at,\n            et.completed_at,\n            et.status\n        FROM evaluation_targets et\n        LEFT JOIN cve_scans cs ON et.id = cs.evaluation_target_id \n            AND cs.completed_at IS NOT NULL\n        WHERE et.status = 'complete'\n            AND et.derivation_path IS NOT NULL\n            AND (cs.id IS NULL OR cs.completed_at < NOW() - INTERVAL '24 hours')\n        ORDER BY et.completed_at ASC\n        LIMIT $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "target_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "target_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "derivation_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "509ae10ef3b329ec66d055666ddff63bfae130c8f8ec36fb39ac3ea1a0f2366a"
+}
