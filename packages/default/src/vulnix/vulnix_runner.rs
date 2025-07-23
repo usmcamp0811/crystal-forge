@@ -2,6 +2,7 @@ use crate::vulnix::vulnix_parser::VulnixParser;
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::process::Command;
 use tokio::process::Command as AsyncCommand;
 use tracing::{debug, error, info, warn};
@@ -24,6 +25,28 @@ impl Default for VulnixConfig {
         }
     }
 }
+
+/// Single entry from vulnix JSON output - represents one affected derivation
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VulnixEntry {
+    /// Package name and version
+    pub name: String,
+    /// Package name without version
+    pub pname: String,
+    /// Version only
+    pub version: String,
+    /// List of applicable CVE identifiers
+    pub affected_by: Vec<String>,
+    /// List of CVE identifiers which are masked by whitelist entries
+    pub whitelisted: Vec<String>,
+    /// Pathname of the scanned derivation file
+    pub derivation: String,
+    /// Dict of CVSS v3 impact base scores for each CVE found
+    pub cvssv3_basescore: HashMap<String, f64>,
+}
+
+/// Array of VulnixEntry - this is what vulnix outputs as JSON
+pub type VulnixScanOutput = Vec<VulnixEntry>;
 
 #[derive(Debug)]
 pub struct VulnixRunner {
@@ -70,12 +93,12 @@ impl VulnixRunner {
         derivation_path: &str,
         evaluation_target_id: i32,
         vulnix_version: Option<String>,
-    ) -> Result<DatabaseScanResult> {
+    ) -> Result<Vec<VulnixEntry>> {
         info!("🔍 Scanning derivation path: {}", derivation_path);
 
         let start_time = std::time::Instant::now();
         let mut scan_result =
-            DatabaseScanResult::new(evaluation_target_id, "vulnix".to_string(), vulnix_version);
+            VulnixEntry::new(evaluation_target_id, "vulnix".to_string(), vulnix_version);
 
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
