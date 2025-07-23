@@ -180,7 +180,7 @@ impl VulnixParser {
     /// Convert vulnix derivations to Crystal Forge models for database insertion
     pub fn to_scan_result(
         derivations: Vec<VulnixDerivation>,
-        evaluation_target_id: i32,
+        evaluation_target_id: i64,
         scanner_version: Option<String>,
     ) -> VulnixScanResult {
         let mut scan = CveScan::new(evaluation_target_id, "vulnix".to_string());
@@ -254,7 +254,7 @@ impl VulnixParser {
     /// Parse and convert in one step
     pub fn parse_and_convert(
         json_data: &str,
-        evaluation_target_id: i32,
+        evaluation_target_id: i64,
         scanner_version: Option<String>,
     ) -> Result<VulnixScanResult> {
         let derivations = Self::parse_json(json_data)?;
