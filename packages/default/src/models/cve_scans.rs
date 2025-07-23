@@ -137,7 +137,7 @@ impl std::fmt::Display for SecurityRiskLevel {
 impl std::fmt::Display for CveScan {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let scan_time = self
-            .scan_date
+            .completed_at
             .map(|d| d.format("%Y-%m-%d %H:%M").to_string())
             .unwrap_or_else(|| "unknown time".to_string());
 
