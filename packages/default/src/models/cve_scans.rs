@@ -23,10 +23,10 @@ pub struct CveScan {
 
 impl CveScan {
     /// Create a new CVE scan record
-    pub fn new(system_state_id: i32, scanner_name: String) -> Self {
+    pub fn new(evaluation_target_id: i32, scanner_name: String) -> Self {
         Self {
             id: Uuid::new_v4(),
-            evaluation_target_id: system_state_id,
+            evaluation_target_id: evaluation_target_id,
             scan_date: Utc::now(),
             scanner_name,
             scanner_version: None,

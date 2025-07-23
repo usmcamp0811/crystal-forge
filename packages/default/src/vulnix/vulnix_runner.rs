@@ -1,4 +1,4 @@
-use crate::models::vulnix_parser::{VulnixParser, VulnixScanResult};
+use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanResult};
 use anyhow::{Context, Result};
 use std::time::Instant;
 use tokio::process::Command;
@@ -25,7 +25,7 @@ impl VulnixRunner {
     /// ```
     pub async fn scan_path(
         nix_path: &str,
-        evaluation_target: i32,
+        evaluation_target: &str,
         scanner_version: Option<String>,
     ) -> Result<VulnixScanResult> {
         let start_time = Instant::now();
@@ -39,6 +39,7 @@ impl VulnixRunner {
         }
 
         // Run vulnix with JSON output
+        // TODO: make sure this runs on the evaluation target path
         let output = Command::new("vulnix")
             .args(["--json", nix_path])
             .output()
