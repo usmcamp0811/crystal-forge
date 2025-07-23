@@ -9,7 +9,7 @@ use tokio::process::Command as AsyncCommand;
 use tracing::{debug, error, info, warn};
 
 // TODO: Add vulnix config things to the CF config
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct VulnixConfig {
     pub timeout_seconds: u64,
     pub max_retries: u32,

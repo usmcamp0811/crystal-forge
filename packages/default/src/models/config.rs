@@ -4,6 +4,7 @@ use crate::queries::environments::{
 };
 use crate::queries::flakes::{get_flake_id_by_repo_url, insert_flake};
 use crate::queries::systems::insert_system;
+use crate::vulnix::vulnix_runner::VulnixConfig;
 use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
@@ -21,6 +22,7 @@ pub struct CrystalForgeConfig {
     pub client: Option<AgentConfig>,
     pub environments: Option<Vec<EnvironmentConfig>>,
     pub systems: Option<Vec<SystemConfig>>,
+    pub vulnix: Option<VulnixConfig>,
 }
 
 impl CrystalForgeConfig {
