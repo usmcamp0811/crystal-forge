@@ -9,7 +9,6 @@ pub struct CveScan {
     pub evaluation_target_id: i32,
     pub scheduled_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
-    pub scan_date: Option<DateTime<Utc>>, // <-- new field for canonical scan timestamp
     pub status: ScanStatus,
     pub attempts: i32,
     pub scanner_name: String,
@@ -35,7 +34,6 @@ impl CveScan {
             evaluation_target_id,
             scheduled_at: Some(now),
             completed_at: None,
-            scan_date: Some(now),
             status: ScanStatus::Pending,
             attempts: 0,
             scanner_name,
