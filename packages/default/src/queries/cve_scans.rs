@@ -10,7 +10,7 @@ use tracing::error;
 /// Returns array of EvaluationTargets - additional info can be fetched separately
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
-    limit: Option<i32>,
+    limit: Option<i64>,
 ) -> Result<Vec<EvaluationTarget>> {
     let limit_clause = limit.unwrap_or(50); // Default to 50 if no limit specified
 
