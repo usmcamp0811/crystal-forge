@@ -2,6 +2,7 @@ use crate::vulnix::vulnix_parser::VulnixParser;
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 use std::collections::HashMap;
 use std::process::Command;
 use tokio::process::Command as AsyncCommand;
@@ -89,13 +90,28 @@ impl VulnixRunner {
     }
 
     /// Scan a specific derivation path
-    pub async fn scan_path(
+    pub async fn scan_target(
         &self,
-        derivation_path: &str,
+        pool: &PgPool,
         evaluation_target_id: i32,
         vulnix_version: Option<String>,
     ) -> Result<VulnixScanOutput> {
-        info!("🔍 Scanning derivation path: {}", derivation_path);
+        // Get the evaluation target and extract derivation path
+        let target =
+            crate::queries::evaluation_targets::get_target_by_id(pool, evaluation_target_id)
+                .await?;
+
+        let derivation_path = target.derivation_path.ok_or_else(|| {
+            anyhow!(
+                "Evaluation target {} has no derivation path",
+                evaluation_target_id
+            )
+        })?;
+
+        info!(
+            "🔍 Scanning target {} with derivation path: {}",
+            evaluation_target_id, derivation_path
+        );
 
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
@@ -139,68 +155,6 @@ impl VulnixRunner {
             )),
         }
     }
-
-    // Scan an evaluation target (fallback method)
-    // pub async fn scan_evaluation_target(
-    //     &self,
-    //     evaluation_target_id: i32,
-    //     vulnix_version: Option<String>,
-    // ) -> Result<DatabaseScanResult> {
-    //     warn!(
-    //         "🔄 Fallback scan for evaluation target {}",
-    //         evaluation_target_id
-    //     );
-    //
-    //     // For now, create an empty scan result
-    //     // In a real implementation, this would scan the system or use a different method
-    //     let mut scan_result =
-    //         DatabaseScanResult::new(evaluation_target_id, "vulnix".to_string(), vulnix_version);
-    //
-    //     // Simulate a quick scan
-    //     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
-    //     scan_result.complete();
-    //
-    //     warn!(
-    //         "⚠️ Performed empty fallback scan for target {}",
-    //         evaluation_target_id
-    //     );
-    //     Ok(scan_result)
-    // }
-
-    // Scan multiple paths concurrently
-    //     pub async fn scan_paths_concurrent(
-    //         &self,
-    //         paths: Vec<String>,
-    //         evaluation_target_id: i32,
-    //         scanner_version: Option<String>,
-    //     ) -> Result<Vec<Result<DatabaseScanResult>>> {
-    //         info!(
-    //             "🔍 Starting concurrent vulnix scans for {} paths",
-    //             paths.len()
-    //         );
-    //
-    //         let tasks: Vec<_> = paths
-    //             .into_iter()
-    //             .map(|path| {
-    //                 let scanner_version = scanner_version.clone();
-    //                 async move {
-    //                     self.scan_path(&path, evaluation_target_id, scanner_version)
-    //                         .await
-    //                 }
-    //             })
-    //             .collect();
-    //
-    //         let results: Vec<_> = futures::future::join_all(tasks).await;
-    //
-    //         let success_count = results.iter().filter(|r| r.is_ok()).count();
-    //         info!(
-    //             "✅ Completed {} of {} concurrent scans successfully",
-    //             success_count,
-    //             results.len()
-    //         );
-    //
-    //         Ok(results)
-    //     }
 }
 
 impl Default for VulnixRunner {
