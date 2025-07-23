@@ -7,8 +7,12 @@ use uuid::Uuid;
 pub struct CveScan {
     pub id: Uuid,
     pub evaluation_target_id: i32,
-    pub scan_date: DateTime<Utc>,
-    pub scanner_name: String, // vulnix, trivy, grype, etc.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub scan_date: Option<DateTime<Utc>>, // <-- new field for canonical scan timestamp
+    pub status: ScanStatus,
+    pub attempts: i32,
+    pub scanner_name: String,
     pub scanner_version: Option<String>,
     pub total_packages: i32,
     pub total_vulnerabilities: i32,
@@ -17,17 +21,23 @@ pub struct CveScan {
     pub medium_count: i32,
     pub low_count: i32,
     pub scan_duration_ms: Option<i32>,
-    pub scan_metadata: Option<serde_json::Value>, // scanner-specific data
-    pub created_at: DateTime<Utc>,
+    pub scan_metadata: Option<serde_json::Value>,
+    pub created_at: Option<DateTime<Utc>>, // let Postgres default it
+    pub updated_at: Option<DateTime<Utc>>, // optional if you're selecting it
 }
 
 impl CveScan {
     /// Create a new CVE scan record
     pub fn new(evaluation_target_id: i32, scanner_name: String) -> Self {
+        let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
-            evaluation_target_id: evaluation_target_id,
-            scan_date: Utc::now(),
+            evaluation_target_id,
+            scheduled_at: Some(now),
+            completed_at: None,
+            scan_date: Some(now),
+            status: ScanStatus::Pending,
+            attempts: 0,
             scanner_name,
             scanner_version: None,
             total_packages: 0,
@@ -38,7 +48,8 @@ impl CveScan {
             low_count: 0,
             scan_duration_ms: None,
             scan_metadata: None,
-            created_at: Utc::now(),
+            created_at: Some(now),
+            updated_at: None,
         }
     }
 
@@ -100,6 +111,19 @@ pub enum SecurityRiskLevel {
     Medium,
     Low,
     Clean,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "varchar")]
+pub enum ScanStatus {
+    #[sqlx(rename = "pending")]
+    Pending,
+    #[sqlx(rename = "in_progress")]
+    InProgress,
+    #[sqlx(rename = "completed")]
+    Completed,
+    #[sqlx(rename = "failed")]
+    Failed,
 }
 
 impl std::fmt::Display for SecurityRiskLevel {

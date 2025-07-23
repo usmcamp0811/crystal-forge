@@ -42,11 +42,14 @@ CREATE TABLE package_vulnerabilities (
     UNIQUE (derivation_path, cve_id)
 );
 
--- CVE scans tied to your existing evaluation targets
+-- Enhanced CVE scans table with simple attempt tracking
 CREATE TABLE cve_scans (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid (),
     evaluation_target_id integer REFERENCES evaluation_targets (id) ON DELETE CASCADE,
-    scan_date timestamptz DEFAULT NOW(),
+    scheduled_at timestamptz DEFAULT NOW(),
+    completed_at timestamptz,
+    status varchar(20), -- 'pending', 'in_progress', 'completed', 'failed', etc.
+    attempts integer DEFAULT 0, -- increment each time we try to scan
     scanner_name varchar(50) NOT NULL, -- vulnix, trivy, grype, etc.
     scanner_version varchar(50),
     total_packages integer NOT NULL DEFAULT 0,
@@ -56,7 +59,7 @@ CREATE TABLE cve_scans (
     medium_count integer NOT NULL DEFAULT 0,
     low_count integer NOT NULL DEFAULT 0,
     scan_duration_ms integer,
-    scan_metadata jsonb, -- scanner-specific data
+    scan_metadata jsonb, -- scanner-specific data, error details if needed
     created_at timestamptz DEFAULT NOW()
 );
 
