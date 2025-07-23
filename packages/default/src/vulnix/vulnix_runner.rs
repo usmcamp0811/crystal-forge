@@ -64,73 +64,73 @@ impl VulnixRunner {
         }
     }
 
-    // Scan a specific derivation path
-    // pub async fn scan_path(
-    //     &self,
-    //     derivation_path: &str,
-    //     evaluation_target_id: i32,
-    //     vulnix_version: Option<String>,
-    // ) -> Result<DatabaseScanResult> {
-    //     info!("🔍 Scanning derivation path: {}", derivation_path);
-    //
-    //     let start_time = std::time::Instant::now();
-    //     let mut scan_result =
-    //         DatabaseScanResult::new(evaluation_target_id, "vulnix".to_string(), vulnix_version);
-    //
-    //     // Build vulnix command
-    //     let mut cmd = AsyncCommand::new("vulnix");
-    //     cmd.arg("--json").arg("--system").arg(derivation_path);
-    //
-    //     if self.config.enable_whitelist {
-    //         cmd.arg("--whitelist").arg("/etc/vulnix-whitelist.toml");
-    //     }
-    //
-    //     // Add extra args
-    //     for arg in &self.config.extra_args {
-    //         cmd.arg(arg);
-    //     }
-    //
-    //     // Execute scan with timeout
-    //     let timeout = tokio::time::Duration::from_secs(self.config.timeout_seconds);
-    //
-    //     match tokio::time::timeout(timeout, cmd.output()).await {
-    //         Ok(Ok(output)) => {
-    //             scan_result.set_duration(start_time);
-    //
-    //             if output.status.success() {
-    //                 let json_output = String::from_utf8_lossy(&output.stdout);
-    //
-    //                 // Parse using your existing parser
-    //                 let parser_result = VulnixParser::parse_and_convert(
-    //                     &json_output,
-    //                     evaluation_target_id,
-    //                     scan_result.scanner_version.clone(),
-    //                 )?;
-    //
-    //                 // Convert parser result to database result
-    //                 scan_result = DatabaseScanResult::from_parser_result(parser_result);
-    //                 scan_result.set_duration(start_time);
-    //                 scan_result.complete();
-    //
-    //                 info!("✅ Vulnix scan completed successfully");
-    //             } else {
-    //                 let error_msg = String::from_utf8_lossy(&output.stderr);
-    //                 return Err(anyhow!("Vulnix scan failed: {}", error_msg));
-    //             }
-    //         }
-    //         Ok(Err(e)) => {
-    //             return Err(anyhow!("Failed to execute vulnix: {}", e));
-    //         }
-    //         Err(_) => {
-    //             return Err(anyhow!(
-    //                 "Vulnix scan timed out after {} seconds",
-    //                 self.config.timeout_seconds
-    //             ));
-    //         }
-    //     }
-    //
-    //     Ok(scan_result)
-    // }
+    /// Scan a specific derivation path
+    pub async fn scan_path(
+        &self,
+        derivation_path: &str,
+        evaluation_target_id: i32,
+        vulnix_version: Option<String>,
+    ) -> Result<DatabaseScanResult> {
+        info!("🔍 Scanning derivation path: {}", derivation_path);
+
+        let start_time = std::time::Instant::now();
+        let mut scan_result =
+            DatabaseScanResult::new(evaluation_target_id, "vulnix".to_string(), vulnix_version);
+
+        // Build vulnix command
+        let mut cmd = AsyncCommand::new("vulnix");
+        cmd.arg("--json").arg("--system").arg(derivation_path);
+
+        if self.config.enable_whitelist {
+            cmd.arg("--whitelist").arg("/etc/vulnix-whitelist.toml");
+        }
+
+        // Add extra args
+        for arg in &self.config.extra_args {
+            cmd.arg(arg);
+        }
+
+        // Execute scan with timeout
+        let timeout = tokio::time::Duration::from_secs(self.config.timeout_seconds);
+
+        match tokio::time::timeout(timeout, cmd.output()).await {
+            Ok(Ok(output)) => {
+                scan_result.set_duration(start_time);
+
+                if output.status.success() {
+                    let json_output = String::from_utf8_lossy(&output.stdout);
+
+                    // Parse using your existing parser
+                    let parser_result = VulnixParser::parse_and_convert(
+                        &json_output,
+                        evaluation_target_id,
+                        scan_result.scanner_version.clone(),
+                    )?;
+
+                    // Convert parser result to database result
+                    scan_result = DatabaseScanResult::from_parser_result(parser_result);
+                    scan_result.set_duration(start_time);
+                    scan_result.complete();
+
+                    info!("✅ Vulnix scan completed successfully");
+                } else {
+                    let error_msg = String::from_utf8_lossy(&output.stderr);
+                    return Err(anyhow!("Vulnix scan failed: {}", error_msg));
+                }
+            }
+            Ok(Err(e)) => {
+                return Err(anyhow!("Failed to execute vulnix: {}", e));
+            }
+            Err(_) => {
+                return Err(anyhow!(
+                    "Vulnix scan timed out after {} seconds",
+                    self.config.timeout_seconds
+                ));
+            }
+        }
+
+        Ok(scan_result)
+    }
 
     // Scan an evaluation target (fallback method)
     // pub async fn scan_evaluation_target(
