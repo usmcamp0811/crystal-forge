@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n    SELECT \n        id,\n        evaluation_target_id,\n        scheduled_at,\n        completed_at,\n        status as \"status: ScanStatus\",\n        attempts,\n        scanner_name,\n        scanner_version,\n        total_packages,\n        total_vulnerabilities,\n        critical_count,\n        high_count,\n        medium_count,\n        low_count,\n        scan_duration_ms,\n        scan_metadata,\n        created_at\n    FROM cve_scans\n    WHERE evaluation_target_id = $1\n    ORDER BY created_at DESC\n    LIMIT 1\n    ",
+  "query": "\n    SELECT \n        id,\n        evaluation_target_id as \"evaluation_target_id!\",\n        scheduled_at,\n        completed_at,\n        status as \"status!: ScanStatus\",\n        attempts as \"attempts!\",\n        scanner_name as \"scanner_name!\",\n        scanner_version,\n        total_packages as \"total_packages!\",\n        total_vulnerabilities as \"total_vulnerabilities!\",\n        critical_count as \"critical_count!\",\n        high_count as \"high_count!\",\n        medium_count as \"medium_count!\",\n        low_count as \"low_count!\",\n        scan_duration_ms,\n        scan_metadata,\n        created_at\n    FROM cve_scans\n    WHERE evaluation_target_id = $1\n    ORDER BY created_at DESC\n    LIMIT 1\n    ",
   "describe": {
     "columns": [
       {
@@ -10,7 +10,7 @@
       },
       {
         "ordinal": 1,
-        "name": "evaluation_target_id",
+        "name": "evaluation_target_id!",
         "type_info": "Int4"
       },
       {
@@ -25,17 +25,17 @@
       },
       {
         "ordinal": 4,
-        "name": "status: ScanStatus",
+        "name": "status!: ScanStatus",
         "type_info": "Varchar"
       },
       {
         "ordinal": 5,
-        "name": "attempts",
+        "name": "attempts!",
         "type_info": "Int4"
       },
       {
         "ordinal": 6,
-        "name": "scanner_name",
+        "name": "scanner_name!",
         "type_info": "Varchar"
       },
       {
@@ -45,32 +45,32 @@
       },
       {
         "ordinal": 8,
-        "name": "total_packages",
+        "name": "total_packages!",
         "type_info": "Int4"
       },
       {
         "ordinal": 9,
-        "name": "total_vulnerabilities",
+        "name": "total_vulnerabilities!",
         "type_info": "Int4"
       },
       {
         "ordinal": 10,
-        "name": "critical_count",
+        "name": "critical_count!",
         "type_info": "Int4"
       },
       {
         "ordinal": 11,
-        "name": "high_count",
+        "name": "high_count!",
         "type_info": "Int4"
       },
       {
         "ordinal": 12,
-        "name": "medium_count",
+        "name": "medium_count!",
         "type_info": "Int4"
       },
       {
         "ordinal": 13,
-        "name": "low_count",
+        "name": "low_count!",
         "type_info": "Int4"
       },
       {
@@ -114,5 +114,5 @@
       true
     ]
   },
-  "hash": "2e7d005ebe2a095b93c992c11050ad544f9d8737fbc8ce77963025232f563827"
+  "hash": "946614869a0b98e256b16b5a9775415cd809b73ba5d7be48901b2378e8113e0b"
 }

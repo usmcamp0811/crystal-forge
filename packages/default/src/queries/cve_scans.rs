@@ -330,19 +330,19 @@ pub async fn get_latest_scan(pool: &PgPool, evaluation_target_id: i32) -> Result
         r#"
     SELECT 
         id,
-        evaluation_target_id,
+        evaluation_target_id as "evaluation_target_id!",
         scheduled_at,
         completed_at,
-        status as "status: ScanStatus",
-        attempts,
-        scanner_name,
+        status as "status!: ScanStatus",
+        attempts as "attempts!",
+        scanner_name as "scanner_name!",
         scanner_version,
-        total_packages,
-        total_vulnerabilities,
-        critical_count,
-        high_count,
-        medium_count,
-        low_count,
+        total_packages as "total_packages!",
+        total_vulnerabilities as "total_vulnerabilities!",
+        critical_count as "critical_count!",
+        high_count as "high_count!",
+        medium_count as "medium_count!",
+        low_count as "low_count!",
         scan_duration_ms,
         scan_metadata,
         created_at
@@ -355,6 +355,6 @@ pub async fn get_latest_scan(pool: &PgPool, evaluation_target_id: i32) -> Result
     )
     .fetch_optional(pool)
     .await?;
-
+    
     Ok(scan)
 }
