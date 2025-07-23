@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 /// Vulnix JSON output structure - array of these objects
@@ -51,7 +52,7 @@ impl VulnixDerivation {
         let scan_package = ScanPackage::new(
             scan_id,
             self.derivation.clone(),
-            true, // Assume runtime dependency
+            true, // Assume runtime dependency for vulnix scans
             0,    // Vulnix doesn't provide dependency depth
         );
         models.scan_package = Some(scan_package);
@@ -114,6 +115,27 @@ impl VulnixDerivation {
             .copied()
             .fold(None, |acc, score| Some(acc.map_or(score, |a| a.max(score))))
     }
+
+    /// Get vulnerability count by severity
+    pub fn vulnerability_counts(&self) -> SeverityCounts {
+        let mut counts = SeverityCounts::default();
+
+        for cve_id in &self.affected_by {
+            if let Some(score) = self.cvssv3_basescore.get(cve_id) {
+                match *score {
+                    s if s >= 9.0 => counts.critical += 1,
+                    s if s >= 7.0 => counts.high += 1,
+                    s if s >= 4.0 => counts.medium += 1,
+                    s if s > 0.0 => counts.low += 1,
+                    _ => counts.unknown += 1,
+                }
+            } else {
+                counts.unknown += 1;
+            }
+        }
+
+        counts
+    }
 }
 
 /// Collection of Crystal Forge models created from a single VulnixDerivation
@@ -142,7 +164,17 @@ pub struct VulnixParser;
 impl VulnixParser {
     /// Parse vulnix JSON output into array of VulnixDerivation structs
     pub fn parse_json(json_data: &str) -> Result<Vec<VulnixDerivation>> {
-        serde_json::from_str(json_data).context("Failed to parse vulnix JSON output")
+        if json_data.trim().is_empty() {
+            debug!("Empty vulnix output - no packages scanned or no vulnerabilities found");
+            return Ok(Vec::new());
+        }
+
+        serde_json::from_str(json_data).with_context(|| {
+            format!(
+                "Failed to parse vulnix JSON output. First 200 chars: {}",
+                &json_data.chars().take(200).collect::<String>()
+            )
+        })
     }
 
     /// Convert vulnix derivations to Crystal Forge models for database insertion
@@ -163,7 +195,7 @@ impl VulnixParser {
         };
 
         let mut unique_cves: HashMap<String, Cve> = HashMap::new();
-        let mut severity_counts = SeverityCounts::default();
+        let mut total_severity_counts = SeverityCounts::default();
 
         for derivation in derivations {
             let models = derivation.to_models(result.scan.id);
@@ -178,16 +210,16 @@ impl VulnixParser {
                 result.scan_packages.push(scan_package);
             }
 
+            // Aggregate severity counts for this derivation
+            let deriv_counts = derivation.vulnerability_counts();
+            total_severity_counts.critical += deriv_counts.critical;
+            total_severity_counts.high += deriv_counts.high;
+            total_severity_counts.medium += deriv_counts.medium;
+            total_severity_counts.low += deriv_counts.low;
+            total_severity_counts.unknown += deriv_counts.unknown;
+
             // Add CVEs (deduplicating)
             for cve in models.cves {
-                let severity = cve.severity();
-                match severity {
-                    crate::models::cves::CveSeverity::Critical => severity_counts.critical += 1,
-                    crate::models::cves::CveSeverity::High => severity_counts.high += 1,
-                    crate::models::cves::CveSeverity::Medium => severity_counts.medium += 1,
-                    crate::models::cves::CveSeverity::Low => severity_counts.low += 1,
-                    crate::models::cves::CveSeverity::Unknown => {}
-                }
                 unique_cves.insert(cve.id.clone(), cve);
             }
 
@@ -200,14 +232,21 @@ impl VulnixParser {
         // Update scan counts
         result.scan.total_packages = result.packages.len() as i32;
         result.scan.update_counts(
-            severity_counts.critical,
-            severity_counts.high,
-            severity_counts.medium,
-            severity_counts.low,
+            total_severity_counts.critical,
+            total_severity_counts.high,
+            total_severity_counts.medium,
+            total_severity_counts.low,
         );
 
         // Add unique CVEs to result
         result.cves = unique_cves.into_values().collect();
+
+        if total_severity_counts.unknown > 0 {
+            warn!(
+                "Found {} CVEs without CVSS scores",
+                total_severity_counts.unknown
+            );
+        }
 
         result
     }
@@ -224,6 +263,54 @@ impl VulnixParser {
             evaluation_target_id,
             scanner_version,
         ))
+    }
+
+    /// Validate vulnix JSON output structure before parsing
+    pub fn validate_json_structure(json_data: &str) -> Result<()> {
+        if json_data.trim().is_empty() {
+            return Ok(()); // Empty output is valid (no vulnerabilities)
+        }
+
+        // Basic JSON validation
+        let value: serde_json::Value =
+            serde_json::from_str(json_data).context("Invalid JSON format")?;
+
+        // Check if it's an array
+        if !value.is_array() {
+            anyhow::bail!(
+                "Expected JSON array, got {}",
+                value
+                    .as_object()
+                    .map_or("non-object".to_string(), |_| "object".to_string())
+            );
+        }
+
+        let array = value.as_array().unwrap();
+
+        // Validate structure of first few items
+        for (idx, item) in array.iter().take(3).enumerate() {
+            let obj = item
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("Item {} is not an object", idx))?;
+
+            // Check required fields
+            let required_fields = [
+                "name",
+                "pname",
+                "version",
+                "affected_by",
+                "whitelisted",
+                "derivation",
+                "cvssv3_basescore",
+            ];
+            for field in &required_fields {
+                if !obj.contains_key(*field) {
+                    anyhow::bail!("Missing required field '{}' in item {}", field, idx);
+                }
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -251,6 +338,31 @@ impl VulnixScanResult {
             risk_level: self.scan.risk_level(),
         }
     }
+
+    /// Get packages with critical vulnerabilities
+    pub fn critical_packages(&self) -> Vec<&NixPackage> {
+        let critical_derivations: std::collections::HashSet<&String> = self
+            .package_vulnerabilities
+            .iter()
+            .filter(|vuln| {
+                self.cves
+                    .iter()
+                    .find(|cve| cve.id == vuln.cve_id)
+                    .map_or(false, |cve| cve.is_critical())
+            })
+            .map(|vuln| &vuln.derivation_path)
+            .collect();
+
+        self.packages
+            .iter()
+            .filter(|pkg| critical_derivations.contains(&pkg.derivation_path))
+            .collect()
+    }
+
+    /// Check if scan has any actionable findings
+    pub fn has_actionable_findings(&self) -> bool {
+        self.scan.critical_count > 0 || self.scan.high_count > 0
+    }
 }
 
 #[derive(Debug)]
@@ -265,12 +377,29 @@ pub struct ScanSummary {
     pub risk_level: crate::models::cve_scans::SecurityRiskLevel,
 }
 
+impl std::fmt::Display for ScanSummary {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} packages scanned, {} CVEs found ({} critical, {} high, {} medium, {} low) - Risk: {}",
+            self.total_packages,
+            self.total_cves,
+            self.critical_count,
+            self.high_count,
+            self.medium_count,
+            self.low_count,
+            self.risk_level
+        )
+    }
+}
+
 #[derive(Debug, Default)]
-struct SeverityCounts {
-    critical: i32,
-    high: i32,
-    medium: i32,
-    low: i32,
+pub struct SeverityCounts {
+    pub critical: i32,
+    pub high: i32,
+    pub medium: i32,
+    pub low: i32,
+    pub unknown: i32,
 }
 
 #[cfg(test)]
@@ -320,6 +449,18 @@ mod tests {
         assert_eq!(curl.name, "curl-8.0.1");
         assert!(!curl.has_vulnerabilities());
         assert_eq!(curl.max_cvss_score(), None);
+    }
+
+    #[test]
+    fn test_validate_json_structure() {
+        let valid_json = r#"[{"name": "test", "pname": "test", "version": "1.0", "affected_by": [], "whitelisted": [], "derivation": "/nix/store/test", "cvssv3_basescore": {}}]"#;
+        assert!(VulnixParser::validate_json_structure(valid_json).is_ok());
+
+        let invalid_json = r#"{"not": "array"}"#;
+        assert!(VulnixParser::validate_json_structure(invalid_json).is_err());
+
+        let empty_json = "";
+        assert!(VulnixParser::validate_json_structure(empty_json).is_ok());
     }
 
     #[test]
@@ -377,5 +518,30 @@ mod tests {
         assert_eq!(summary.total_packages, 1);
         assert_eq!(summary.total_cves, 1);
         assert_eq!(summary.high_count, 1);
+    }
+
+    #[test]
+    fn test_vulnerability_counts() {
+        let derivation = VulnixDerivation {
+            name: "test-1.0".to_string(),
+            pname: "test".to_string(),
+            version: "1.0".to_string(),
+            affected_by: vec!["CVE-2023-1234".to_string(), "CVE-2023-5678".to_string()],
+            whitelisted: vec![],
+            derivation: "/nix/store/test".to_string(),
+            cvssv3_basescore: [
+                ("CVE-2023-1234".to_string(), 9.5), // Critical
+                ("CVE-2023-5678".to_string(), 6.0), // Medium
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let counts = derivation.vulnerability_counts();
+        assert_eq!(counts.critical, 1);
+        assert_eq!(counts.high, 0);
+        assert_eq!(counts.medium, 1);
+        assert_eq!(counts.low, 0);
+        assert_eq!(counts.unknown, 0);
     }
 }
