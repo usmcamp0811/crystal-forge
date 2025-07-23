@@ -1,0 +1,118 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            id, evaluation_target_id, scheduled_at, completed_at, status,\n            attempts, scanner_name, scanner_version, total_packages,\n            total_vulnerabilities, critical_count, high_count, medium_count,\n            low_count, scan_duration_ms, scan_metadata, created_at\n        FROM cve_scans \n        WHERE evaluation_target_id = $1 \n        ORDER BY created_at DESC \n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "evaluation_target_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "status",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 5,
+        "name": "attempts",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "scanner_name",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 7,
+        "name": "scanner_version",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 8,
+        "name": "total_packages",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "total_vulnerabilities",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "critical_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "high_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 12,
+        "name": "medium_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 13,
+        "name": "low_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 14,
+        "name": "scan_duration_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 15,
+        "name": "scan_metadata",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 16,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "a3b2929386e94df2324c3e8fe2f64d3f7e98e18af319757592410a0499f51170"
+}

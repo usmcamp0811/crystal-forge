@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO nix_packages (derivation_path, name, pname, version)\n            VALUES ($1, $2, $3, $4)\n            ON CONFLICT (derivation_path) DO UPDATE SET\n                name = $2,\n                pname = $3,\n                version = $4\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f05ec54e2acfc182cc357361eb96c322c240ca6967e86037ccb535d1d1b740cc"
+}

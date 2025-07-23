@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO cve_scans (\n            id, evaluation_target_id, completed_at, status, scanner_name, \n            scanner_version, total_packages, total_vulnerabilities,\n            critical_count, high_count, medium_count, low_count,\n            scan_duration_ms, scan_metadata\n        ) VALUES ($1, $2, NOW(), 'completed', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\n        ON CONFLICT (id) DO UPDATE SET\n            completed_at = NOW(),\n            status = 'completed',\n            total_packages = $5,\n            total_vulnerabilities = $6,\n            critical_count = $7,\n            high_count = $8,\n            medium_count = $9,\n            low_count = $10,\n            scan_duration_ms = $11,\n            scan_metadata = $12\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Jsonb"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0c36df1d1506952990261a9c00e8c7571e5aa17a19976785a5e26ebc3d4817fb"
+}
