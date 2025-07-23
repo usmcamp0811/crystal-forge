@@ -22,7 +22,6 @@ pub struct CveScan {
     pub scan_duration_ms: Option<i32>,
     pub scan_metadata: Option<serde_json::Value>,
     pub created_at: Option<DateTime<Utc>>, // let Postgres default it
-    pub updated_at: Option<DateTime<Utc>>, // optional if you're selecting it
 }
 
 impl CveScan {
@@ -47,7 +46,6 @@ impl CveScan {
             scan_duration_ms: None,
             scan_metadata: None,
             created_at: Some(now),
-            updated_at: None,
         }
     }
 
