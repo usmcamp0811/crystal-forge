@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO cve_scans (\n            id, evaluation_target_id, scanner_name, scanner_version,\n            status, total_packages, total_vulnerabilities,\n            critical_count, high_count, medium_count, low_count,\n            attempts\n        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int4",
+        "Varchar",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d9392c2106f37481b77b06f51c73ce973631fb73f36550219fda7203e3218a43"
+}

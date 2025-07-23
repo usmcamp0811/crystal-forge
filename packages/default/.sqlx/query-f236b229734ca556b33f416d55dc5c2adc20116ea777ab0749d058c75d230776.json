@@ -1,0 +1,66 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n    INSERT INTO evaluation_targets (commit_id, target_type, target_name)\n    VALUES ($1, $2, $3)\n    ON CONFLICT (commit_id, target_type, target_name)\n    DO UPDATE SET commit_id = EXCLUDED.commit_id\n    RETURNING id, commit_id, target_type, target_name, derivation_path, scheduled_at, completed_at, status\n    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "target_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "target_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "derivation_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "status",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "f236b229734ca556b33f416d55dc5c2adc20116ea777ab0749d058c75d230776"
+}

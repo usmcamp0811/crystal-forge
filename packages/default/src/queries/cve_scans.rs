@@ -4,7 +4,6 @@ use uuid::Uuid;
 
 use crate::models::cve_scans::{CveScan, ScanStatus};
 use crate::models::evaluation_targets::EvaluationTarget;
-use crate::vulnix::database_scan_results::DatabaseScanResult;
 
 /// Get evaluation targets that need CVE scanning
 pub async fn get_targets_needing_cve_scan(
@@ -201,7 +200,10 @@ pub async fn mark_cve_scan_failed(
 }
 
 /// Save complete scan results to database
-pub async fn save_scan_results(pool: &PgPool, scan_result: &DatabaseScanResult) -> Result<()> {
+pub async fn save_scan_results(
+    pool: &PgPool,
+    scan_result: &crate::vulnix::database_scan_result::DatabaseScanResult,
+) -> Result<()> {
     // Start a transaction
     let mut tx = pool.begin().await?;
 

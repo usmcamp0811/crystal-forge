@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE evaluation_targets SET status = 'pending' WHERE status != 'complete'",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "e298872fbb9c47bc070586e6fb9501280c0c154d637cce555a5c5378169c1a4e"
+}

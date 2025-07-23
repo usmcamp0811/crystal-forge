@@ -3,7 +3,6 @@ use crate::queries::cve_scans::{
 };
 use crate::queries::evaluation_targets::update_scheduled_at;
 use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
-use crate::vulnix::database_scan_results::DatabaseScanResult;
 use crate::vulnix::vulnix_runner::{VulnixConfig, VulnixRunner};
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
