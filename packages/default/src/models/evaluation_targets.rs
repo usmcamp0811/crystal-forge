@@ -55,7 +55,6 @@ impl EvaluationTarget {
     pub async fn summary(&self) -> Result<String> {
         let pool = CrystalForgeConfig::db_pool().await?;
         let commit = crate::queries::commits::get_commit_by_id(&pool, self.commit_id).await?;
-
         let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
         Ok(format!(
             "{}@{} ({})",
@@ -110,6 +109,10 @@ impl EvaluationTarget {
     /// # Returns
     /// * A string like `/nix/store/<hash>-toplevel`
     pub async fn evaluate_nixos_system(&self) -> Result<String> {
+        self.evaluate_nixos_system_with_build(false).await
+    }
+
+    pub async fn evaluate_nixos_system_with_build(&self, full_build: bool) -> Result<String> {
         let summary = self.summary().await?;
         info!("🔍 Determining derivation for {summary}");
 
@@ -154,12 +157,19 @@ impl EvaluationTarget {
             )
         };
 
-        debug!("🔨 Building flake target: {flake_target} (dry-run)");
+        let build_mode = if full_build { "full build" } else { "dry-run" };
+        debug!("🔨 Building flake target: {flake_target} ({})", build_mode);
 
-        let output = Command::new("nix")
-            .args(["build", &flake_target, "--dry-run", "--json"])
-            .output()
-            .await?;
+        let mut cmd = Command::new("nix");
+        cmd.args(["build", &flake_target]);
+
+        if !full_build {
+            cmd.arg("--dry-run");
+        }
+
+        cmd.arg("--json");
+
+        let output = cmd.output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -174,7 +184,15 @@ impl EvaluationTarget {
             .context("❌ Missing derivation output in nix build output")?
             .to_string();
 
-        info!("✅ Derivation path for {system}: {hash}");
+        info!(
+            "✅ {} path for {system}: {hash}",
+            if full_build {
+                "Built output"
+            } else {
+                "Derivation"
+            },
+            hash
+        );
         Ok(hash)
     }
 }
