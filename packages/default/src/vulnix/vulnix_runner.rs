@@ -1,3 +1,4 @@
+use crate::models::config::VulnixConfig;
 use crate::vulnix::vulnix_parser::{VulnixEntry, VulnixParser};
 
 use anyhow::{Result, anyhow};
@@ -8,26 +9,6 @@ use std::process::Command;
 use tokio::process::Command as AsyncCommand;
 use tracing::{debug, error, info, warn};
 
-// TODO: Add vulnix config things to the CF config
-#[derive(Debug, Clone, Deserialize)]
-pub struct VulnixConfig {
-    pub timeout_seconds: u64,
-    pub max_retries: u32,
-    pub enable_whitelist: bool,
-    pub extra_args: Vec<String>,
-}
-
-impl Default for VulnixConfig {
-    fn default() -> Self {
-        Self {
-            timeout_seconds: 300,
-            max_retries: 2,
-            enable_whitelist: true,
-            extra_args: vec![],
-        }
-    }
-}
-
 /// Array of VulnixEntry - this is what vulnix outputs as JSON
 pub type VulnixScanOutput = Vec<VulnixEntry>;
 
@@ -35,7 +16,7 @@ pub type VulnixScanOutput = Vec<VulnixEntry>;
 pub struct VulnixRunner {
     config: VulnixConfig,
 }
-
+// TODO: get from CyrstalForgeConfig
 impl VulnixRunner {
     pub fn new() -> Self {
         Self {

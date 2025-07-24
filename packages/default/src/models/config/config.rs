@@ -1,4 +1,4 @@
-use super::{
+use crate::models::config::{
     AgentConfig, BuildConfig, CacheConfig, DatabaseConfig, EnvironmentConfig, FlakeConfig,
     ServerConfig, SystemConfig, VulnixConfig,
 };

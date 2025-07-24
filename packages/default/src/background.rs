@@ -1,8 +1,7 @@
-use crate::models::config::CrystalForgeConfig;
+use crate::models::config::config::CrystalForgeConfig;
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::evaluation_targets::update_scheduled_at;
 use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
-use crate::vulnix::vulnix_runner::VulnixConfig;
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
