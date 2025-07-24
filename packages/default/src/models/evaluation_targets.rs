@@ -190,8 +190,7 @@ impl EvaluationTarget {
                 "Built output"
             } else {
                 "Derivation"
-            },
-            hash
+            }
         );
         Ok(hash)
     }

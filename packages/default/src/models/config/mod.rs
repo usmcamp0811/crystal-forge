@@ -1,17 +1,21 @@
+mod agent;
 mod build;
 mod cache;
 mod database;
+mod environment;
 mod flakes;
 mod server;
-mod systems;
+mod system;
 mod vulnix;
 
+pub use agent::*;
 pub use build::*;
 pub use cache::*;
 pub use database::*;
+pub use environment::*;
 pub use flakes::*;
 pub use server::*;
-pub use systems::*;
+pub use system::*;
 pub use vulnix::*;
 
 use crate::models::systems::System;
