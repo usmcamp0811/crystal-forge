@@ -1,4 +1,4 @@
-use crate::vulnix::vulnix_parser::VulnixParser;
+use crate::vulnix::vulnix_parser::{VulnixEntry, VulnixParser};
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
@@ -26,25 +26,6 @@ impl Default for VulnixConfig {
             extra_args: vec![],
         }
     }
-}
-
-/// Single entry from vulnix JSON output - represents one affected derivation
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct VulnixEntry {
-    /// Package name and version
-    pub name: String,
-    /// Package name without version
-    pub pname: String,
-    /// Version only
-    pub version: String,
-    /// List of applicable CVE identifiers
-    pub affected_by: Vec<String>,
-    /// List of CVE identifiers which are masked by whitelist entries
-    pub whitelisted: Vec<String>,
-    /// Pathname of the scanned derivation file
-    pub derivation: String,
-    /// Dict of CVSS v3 impact base scores for each CVE found
-    pub cvssv3_basescore: HashMap<String, f64>,
 }
 
 /// Array of VulnixEntry - this is what vulnix outputs as JSON
