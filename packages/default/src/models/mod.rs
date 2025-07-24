@@ -14,5 +14,3 @@ pub mod scan_packages;
 pub mod system_states;
 pub mod systems;
 pub mod users;
-
-pub use config::CrystalForgeConfig;
