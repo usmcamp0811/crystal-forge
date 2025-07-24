@@ -1,3 +1,4 @@
+use crate::flake::eval::{BuildConfig, CacheConfig};
 use crate::models::systems::System;
 use crate::queries::environments::{
     get_environment_id_by_name, get_or_insert_environment_id_by_config,
@@ -23,6 +24,8 @@ pub struct CrystalForgeConfig {
     pub environments: Option<Vec<EnvironmentConfig>>,
     pub systems: Option<Vec<SystemConfig>>,
     pub vulnix: Option<VulnixConfig>,
+    pub build: Option<BuildConfig>,
+    pub cache: Option<CacheConfig>,
 }
 
 impl CrystalForgeConfig {
