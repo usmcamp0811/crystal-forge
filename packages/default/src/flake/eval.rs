@@ -7,35 +7,6 @@ use tokio::process::Command;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, error};
 
-#[derive(Debug, Deserialize, Default)]
-pub struct BuildConfig {
-    #[serde(default = "BuildConfig::default_cores")]
-    pub cores: u32,
-    #[serde(default = "BuildConfig::default_max_jobs")]
-    pub max_jobs: u32,
-    #[serde(default)]
-    pub use_substitutes: bool, // defaults to false
-    #[serde(default)]
-    pub offline: bool, // defaults to false
-}
-
-impl BuildConfig {
-    fn default_cores() -> u32 {
-        1
-    }
-    fn default_max_jobs() -> u32 {
-        1
-    }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CacheConfig {
-    pub push_to: Option<String>, // e.g., "s3://my-bucket" or "https://cache.example.com"
-    pub push_after_build: bool,  // Auto-push after successful builds
-    pub signing_key: Option<String>, // Path to signing key for cache
-    pub compression: Option<String>, // "xz", "bzip2", etc.
-}
-
 /// Returns the list of NixOS configurations defined in a flake at a given Git commit.
 ///
 /// If `repo_url` is a local filesystem path, this will attempt to run
