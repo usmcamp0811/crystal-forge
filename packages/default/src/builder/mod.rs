@@ -1,0 +1,121 @@
+use crate::models::config::CrystalForgeConfig;
+use crate::models::config::VulnixConfig;
+use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
+use crate::queries::evaluation_targets::update_scheduled_at;
+use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
+use crate::vulnix::vulnix_runner::VulnixRunner;
+use anyhow::Result;
+use futures::stream::{FuturesUnordered, StreamExt};
+use sqlx::PgPool;
+use tokio::time::{Duration, sleep};
+use tracing::{debug, error, info, warn};
+
+use crate::flake::eval::list_nixos_configurations_from_commit;
+use crate::queries::commits::get_commits_pending_evaluation;
+use crate::queries::evaluation_targets::{
+    get_pending_targets, increment_evaluation_target_attempt_count, insert_evaluation_target,
+    update_evaluation_target_path,
+};
+
+pub fn spawn_background_tasks(pool: PgPool) {
+    let cve_pool = pool.clone();
+    tokio::spawn(run_cve_scanning_loop(cve_pool));
+}
+
+/// Runs the periodic CVE scanning loop
+async fn run_cve_scanning_loop(pool: PgPool) {
+    info!("🔍 Starting periodic CVE scanning loop (every 300s)...");
+
+    // Check if vulnix is available before starting the loop
+    if !VulnixRunner::check_vulnix_available().await {
+        error!("❌ vulnix is not available - CVE scanning disabled");
+        return;
+    }
+
+    // Get vulnix version once for all scans
+    let vulnix_version = VulnixRunner::get_vulnix_version().await.ok();
+    info!("🔧 Using vulnix version: {:?}", vulnix_version);
+
+    // Load vulnix config from Crystal Forge config or use default
+    let vulnix_config = match CrystalForgeConfig::load() {
+        Ok(cf_config) => cf_config.vulnix.unwrap_or_else(|| {
+            info!("No vulnix config found in Crystal Forge config, using defaults");
+            VulnixConfig::default()
+        }),
+        Err(e) => {
+            warn!(
+                "Failed to load Crystal Forge config: {}, using default vulnix config",
+                e
+            );
+            VulnixConfig::default()
+        }
+    };
+
+    info!(
+        "🔧 Vulnix config: timeout={}s, whitelist={}, extra_args={:?}",
+        vulnix_config.timeout_seconds, vulnix_config.enable_whitelist, vulnix_config.extra_args
+    );
+
+    // Create vulnix runner with loaded configuration
+    let runner = VulnixRunner::with_config(vulnix_config);
+
+    loop {
+        if let Err(e) = process_cve_scans(&pool, &runner, vulnix_version.clone()).await {
+            error!("❌ Error in CVE scanning cycle: {e}");
+        }
+        sleep(Duration::from_secs(300)).await; // 5 minutes between scans
+    }
+}
+
+/// Process targets that need CVE scanning
+async fn process_cve_scans(
+    pool: &PgPool,
+    runner: &VulnixRunner,
+    vulnix_version: Option<String>,
+) -> Result<()> {
+    match get_targets_needing_cve_scan(pool, Some(10)).await {
+        Ok(targets) => {
+            if targets.is_empty() {
+                debug!("🔍 No targets need CVE scanning");
+                return Ok(());
+            }
+
+            info!("🎯 Found {} targets needing CVE scan", targets.len());
+
+            for target in targets {
+                info!("🔍 Starting CVE scan for target: {}", target.target_name);
+
+                match runner
+                    .scan_target(pool, target.id, vulnix_version.clone())
+                    .await
+                {
+                    Ok(vulnix_entries) => {
+                        let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(
+                            &vulnix_entries,
+                        );
+
+                        // TODO: Save results to database here
+                        // save_scan_results(pool, target.id, &vulnix_entries, &stats).await?;
+
+                        info!(
+                            "✅ CVE scan completed for {}: {}",
+                            target.target_name, stats
+                        );
+                    }
+                    Err(e) => {
+                        error!("❌ CVE scan failed for {}: {}", target.target_name, e);
+
+                        // Mark scan as failed in database
+                        if let Err(save_err) =
+                            mark_cve_scan_failed(pool, &target, &e.to_string()).await
+                        {
+                            error!("❌ Failed to mark CVE scan as failed: {save_err}");
+                        }
+                    }
+                }
+            }
+        }
+        Err(e) => error!("❌ Failed to get targets needing CVE scan: {e}"),
+    }
+    Ok(())
+}
