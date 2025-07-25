@@ -1,7 +1,6 @@
 use anyhow::Context;
 use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
-use crystal_forge::background::spawn_server_background_tasks;
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
 use crystal_forge::handlers::agent::heartbeat;
 use crystal_forge::handlers::agent::state;
@@ -15,6 +14,7 @@ use crystal_forge::queries::evaluation_targets::{
     update_evaluation_target_path,
 };
 use crystal_forge::queries::flakes::insert_flake;
+use crystal_forge::server::spawn_server_background_tasks;
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
