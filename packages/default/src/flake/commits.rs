@@ -1,3 +1,4 @@
+use crate::models::config;
 use crate::queries::commits::{flake_has_commits, insert_commit};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
@@ -128,7 +129,7 @@ async fn get_recent_commit_hashes(repo_url: &str, max_commits: usize) -> Result<
 /// This is meant to run once when the server first starts
 pub async fn initialize_flake_commits(
     pool: &PgPool,
-    watched_flakes: &[crate::config::WatchedFlake],
+    watched_flakes: &[crate::models::config::WatchedFlake],
 ) -> Result<()> {
     info!(
         "🔄 Initializing commits for {} watched flakes",
@@ -176,7 +177,7 @@ pub async fn initialize_flake_commits(
 /// Sync commits for all watched flakes that have auto_poll enabled (for regular polling)
 pub async fn sync_all_watched_flakes_commits(
     pool: &PgPool,
-    watched_flakes: &[crate::config::WatchedFlake],
+    watched_flakes: &[config::WatchedFlake],
 ) -> Result<()> {
     info!(
         "🔄 Syncing commits for {} watched flakes",

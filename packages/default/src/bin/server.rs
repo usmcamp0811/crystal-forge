@@ -1,6 +1,7 @@
 use anyhow::Context;
 use axum::{Router, routing::post};
 use base64::{Engine as _, engine::general_purpose};
+use crystal_forge::flake::commits::initialize_flake_commits;
 use crystal_forge::flake::eval::list_nixos_configurations_from_commit;
 use crystal_forge::handlers::agent::heartbeat;
 use crystal_forge::handlers::agent::state;
@@ -37,6 +38,8 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
     let background_pool = pool.clone();
+    let flake_init_pool = pool.clone();
+    initialize_flake_commits(&flake_init_pool, &cfg.flakes.as_ref().unwrap().watched).await?;
     reset_non_complete_targets(&pool);
     spawn_background_tasks(background_pool);
 

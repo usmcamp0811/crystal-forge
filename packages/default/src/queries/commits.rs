@@ -72,7 +72,7 @@ pub async fn increment_commit_list_attempt_count(pool: &PgPool, target: &Commit)
 }
 
 /// Check if a flake already has commits in the database
-async fn flake_has_commits(pool: &PgPool, repo_url: &str) -> Result<bool> {
+pub async fn flake_has_commits(pool: &PgPool, repo_url: &str) -> Result<bool> {
     let count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM commits c 
          JOIN flakes f ON c.flake_id = f.id 

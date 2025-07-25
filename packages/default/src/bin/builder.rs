@@ -32,7 +32,7 @@ async fn main() -> anyhow::Result<()> {
     CrystalForgeConfig::validate_db_connection().await?;
     info!("Starting Crystal Forge Builder...");
     let builder_cfg = cfg
-        .builder
+        .build
         .as_ref()
         .expect("missing [builder] section in config");
 
