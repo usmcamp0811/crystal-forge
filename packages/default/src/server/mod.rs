@@ -25,7 +25,6 @@ pub fn spawn_server_background_tasks(pool: PgPool) {
 
     tokio::spawn(run_commit_evaluation_loop(commit_pool));
     tokio::spawn(run_target_evaluation_loop(target_pool));
-    tokio::spawn(run_cve_scanning_loop(cve_pool));
 }
 
 /// Runs the periodic commit evaluation check loop
