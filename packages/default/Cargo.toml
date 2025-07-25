@@ -54,6 +54,10 @@ name = "server"
 path = "src/bin/server.rs"
 
 [[bin]]
+name = "builder"
+path = "src/bin/builder.rs"
+
+[[bin]]
 name = "cf-keygen"
 path = "src/bin/cf-keygen.rs"
 
