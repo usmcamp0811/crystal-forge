@@ -9,4 +9,5 @@ pub struct FlakeConfig {
 pub struct WatchedFlake {
     pub name: String,
     pub repo_url: String,
+    pub auto_poll: bool, // true = server polls git directly, false = webhook-only
 }
