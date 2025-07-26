@@ -1,12 +1,10 @@
 use crate::models::config::CrystalForgeConfig;
 use crate::models::config::VulnixConfig;
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
-use crate::queries::evaluation_targets::mark_target_dry_run_in_progress;
-use crate::queries::evaluation_targets::mark_target_failed;
-use crate::queries::evaluation_targets::update_scheduled_at;
 use crate::queries::evaluation_targets::{
     get_pending_dry_run_targets, increment_evaluation_target_attempt_count,
-    insert_evaluation_target, mark_target_dry_run_complete,
+    insert_evaluation_target, mark_target_dry_run_complete, mark_target_dry_run_in_progress,
+    mark_target_failed, update_scheduled_at,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
