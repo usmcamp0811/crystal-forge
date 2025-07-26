@@ -17,7 +17,7 @@ fn default_pg_port() -> u16 {
 }
 
 impl DatabaseConfig {
-    fn default() -> Self {
+    pub fn default() -> Self {
         Self {
             host: "localhost".to_string(),
             port: 5432,

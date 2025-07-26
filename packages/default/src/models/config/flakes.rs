@@ -13,7 +13,7 @@ pub struct WatchedFlake {
 }
 
 impl FlakeConfig {
-    fn default() -> Self {
+    pub fn default() -> Self {
         Self { watched: vec![] }
     }
 }

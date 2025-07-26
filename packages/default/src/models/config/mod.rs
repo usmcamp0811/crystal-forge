@@ -47,7 +47,7 @@ pub struct CrystalForgeConfig {
 }
 
 impl CrystalForgeConfig {
-    fn default() -> Self {
+    pub fn default() -> Self {
         Self {
             flakes: Some(FlakeConfig::default()),
             database: Some(DatabaseConfig::default()),
