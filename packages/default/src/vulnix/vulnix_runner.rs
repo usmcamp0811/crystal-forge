@@ -24,8 +24,8 @@ impl VulnixRunner {
         }
     }
 
-    pub fn with_config(config: VulnixConfig) -> Self {
-        Self { config }
+    pub fn with_config(config: &VulnixConfig) -> Self {
+        Self { config: config.clone() }
     }
 
     /// Check if vulnix is available on the system

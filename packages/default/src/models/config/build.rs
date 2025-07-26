@@ -17,7 +17,7 @@ pub struct BuildConfig {
 }
 
 impl Default for BuildConfig {
-    pub fn default() -> Self {
+    fn default() -> Self {
         Self {
             cores: 1,
             max_jobs: 1,
