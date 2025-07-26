@@ -46,18 +46,19 @@ async fn run_build_loop(pool: PgPool) {
     let vulnix_version = VulnixRunner::get_vulnix_version().await.ok();
     let vulnix_config = cfg.vulnix.as_ref().unwrap();
 
-    info!("🔧 Using vulnix version: {:?}", vulnix_version);
+    debug!("🔧 Using vulnix version: {:?}", vulnix_version);
 
-    info!(
+    debug!(
         "🔧 Vulnix config: timeout={}s, whitelist={}, extra_args={:?}",
         vulnix_config.timeout_seconds, vulnix_config.enable_whitelist, vulnix_config.extra_args
     );
 
     // Create vulnix runner with loaded configuration
-    let runner = VulnixRunner::with_config(vulnix_config);
+    let vulnix_runner = VulnixRunner::with_config(vulnix_config);
+    // let build_runner =
 
     loop {
-        if let Err(e) = process_cve_scans(&pool, &runner, vulnix_version.clone()).await {
+        if let Err(e) = build_evaluation_targets(&pool, &runner, vulnix_version.clone()).await {
             error!("❌ Error in CVE scanning cycle: {e}");
         }
         sleep(Duration::from_secs(
@@ -68,7 +69,7 @@ async fn run_build_loop(pool: PgPool) {
 }
 
 /// Process targets that need CVE scanning
-async fn process_cve_scans(
+async fn build_evaluation_targets(
     pool: &PgPool,
     runner: &VulnixRunner,
     vulnix_version: Option<String>,

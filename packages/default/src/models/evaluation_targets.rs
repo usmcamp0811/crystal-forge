@@ -106,24 +106,29 @@ impl EvaluationTarget {
     }
 
     /// Returns the derivation output path (hash) for a specific NixOS system from a given flake.
-    /// # Returns
-    /// * A string like `/nix/store/<hash>-toplevel`
     pub async fn evaluate_nixos_system(&self) -> Result<String> {
-        self.evaluate_nixos_system_with_build(false).await
+        let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
+            warn!("Failed to load Crystal Forge config: {}, using defaults", e);
+            CrystalForgeConfig::default()
+        });
+        let build_config = cfg.build.as_ref().unwrap();
+        self.evaluate_nixos_system_with_build(false, build_config)
+            .await
     }
 
-    pub async fn evaluate_nixos_system_with_build(&self, full_build: bool) -> Result<String> {
+    pub async fn evaluate_nixos_system_with_build(
+        &self,
+        full_build: bool,
+        build_config: &BuildConfig,
+    ) -> Result<String> {
         let summary = self.summary().await?;
         info!("🔍 Determining derivation for {summary}");
-
         let pool = CrystalForgeConfig::db_pool().await?;
         let commit = crate::queries::commits::get_commit_by_id(&pool, self.commit_id).await?;
         let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
-
         let flake_url = &flake.repo_url;
         let commit_hash = &commit.git_commit_hash;
         let system = &self.target_name;
-
         let is_path = Path::new(flake_url).exists();
         debug!("📁 Is local path: {is_path}");
 
@@ -133,7 +138,6 @@ impl EvaluationTarget {
                 .args(["-C", flake_url, "checkout", &commit.git_commit_hash])
                 .status()
                 .await?;
-
             if !status.success() {
                 anyhow::bail!(
                     "❌ git checkout failed for path {} at rev {}",
@@ -166,11 +170,12 @@ impl EvaluationTarget {
         if !full_build {
             cmd.arg("--dry-run");
         }
-
         cmd.arg("--json");
 
-        let output = cmd.output().await?;
+        // Apply build configuration
+        build_config.apply_to_command(&mut cmd);
 
+        let output = cmd.output().await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("❌ nix build failed: {}", stderr.trim());
