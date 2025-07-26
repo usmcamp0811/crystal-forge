@@ -9,7 +9,7 @@ use crystal_forge::handlers::agent_request::CFState;
 use crystal_forge::handlers::webhook::webhook_handler;
 use crystal_forge::models::config::CrystalForgeConfig;
 use crystal_forge::queries::commits::get_commits_pending_evaluation;
-use crystal_forge::queries::evaluation_targets::reset_non_complete_targets;
+use crystal_forge::queries::evaluation_targets::reset_non_dry_run_complete_targets;
 use crystal_forge::queries::evaluation_targets::{
     get_pending_targets, increment_evaluation_target_attempt_count, insert_evaluation_target,
     update_evaluation_target_path,

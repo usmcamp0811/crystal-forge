@@ -2,7 +2,10 @@ use crate::models::config::CrystalForgeConfig;
 use crate::models::config::VulnixConfig;
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::evaluation_targets::update_scheduled_at;
-use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
+use crate::queries::evaluation_targets::{
+    get_pending_dry_run_targets, increment_evaluation_target_attempt_count,
+    mark_target_dry_run_complete,
+};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -94,24 +97,22 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
 
 async fn process_pending_targets(pool: &PgPool) -> Result<()> {
     update_scheduled_at(pool).await?;
-    match get_pending_targets(pool).await {
+    match get_pending_dry_run_targets(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
             let concurrency_limit = 4; // adjust as needed
-
             // Use FuturesUnordered instead of stream::iter for better concurrency
             let mut futures = FuturesUnordered::new();
-
-            for mut target in pending_targets {
+            for target in pending_targets {
                 let pool = pool.clone();
                 futures.push(async move {
-                    if let Err(e) = mark_target_in_progress(&pool, target.id).await {
+                    if let Err(e) = mark_target_dry_run_in_progress(&pool, target.id).await {
                         error!("❌ Failed to mark target in-progress: {e}");
                         return;
                     }
                     match target.resolve_derivation_path(&pool).await {
                         Ok(path) => {
-                            match update_evaluation_target_path(&pool, &target, &path).await {
+                            match mark_target_dry_run_complete(&pool, target.id, &path).await {
                                 Ok(updated) => info!("✅ Updated: {:?}", updated),
                                 Err(e) => error!("❌ Failed to update path: {e}"),
                             }
@@ -122,10 +123,10 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
                             {
                                 error!("❌ Failed to increment attempt count: {inc_err}");
                             }
-
                             // Mark as failed instead of just incrementing attempts
                             if let Err(mark_err) =
-                                mark_target_failed(&pool, target.id, &e.to_string()).await
+                                mark_target_failed(&pool, target.id, "dry-run", &e.to_string())
+                                    .await
                             {
                                 error!("❌ Failed to mark target as failed: {mark_err}");
                             } else {
@@ -135,7 +136,6 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
                     }
                 });
             }
-
             // Process futures with concurrency limit
             while let Some(_) = futures.next().await {
                 // Each future completes independently

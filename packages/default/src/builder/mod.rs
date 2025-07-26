@@ -1,7 +1,7 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::evaluation_targets::update_scheduled_at;
-use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
+use crate::queries::evaluation_targets::{mark_target_dry_run_failed, mark_target_in_progress};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -20,8 +20,6 @@ pub fn spawn_background_tasks(pool: PgPool) {
     let cve_pool = pool.clone();
     tokio::spawn(run_build_loop(cve_pool));
 }
-
-async fn run_nix_build_loop(pool: PgPool) {}
 
 /// Runs the periodic build and CVE scanning loop
 async fn run_build_loop(pool: PgPool) {
