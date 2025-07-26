@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE evaluation_targets \n        SET status = CASE \n            WHEN derivation_path IS NULL THEN $1\n            ELSE $2\n        END\n        WHERE status NOT IN ($3, $4, $5, $6)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c650b6888eed6a68ff5e46e5391ed3d6e7187499e0c72aa633e9b867c8fd39d1"
+}
