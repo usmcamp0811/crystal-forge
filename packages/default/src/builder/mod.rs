@@ -33,7 +33,7 @@ async fn run_build_loop(pool: PgPool) {
 
     info!(
         "🔍 Starting Derivation Build scanning loop (every {}s)...",
-        build_config.poll_interval
+        cfg.build.as_ref().unwrap().poll_interval
     );
 
     // Check if vulnix is available before starting the loop
@@ -44,6 +44,8 @@ async fn run_build_loop(pool: PgPool) {
 
     // Get vulnix version once for all scans
     let vulnix_version = VulnixRunner::get_vulnix_version().await.ok();
+    let vulnix_config = cfg.vulnix.as_ref().unwrap();
+
     info!("🔧 Using vulnix version: {:?}", vulnix_version);
 
     info!(
@@ -58,7 +60,10 @@ async fn run_build_loop(pool: PgPool) {
         if let Err(e) = process_cve_scans(&pool, &runner, vulnix_version.clone()).await {
             error!("❌ Error in CVE scanning cycle: {e}");
         }
-        sleep(Duration::from_secs(build_config.poll_interval)).await; // 5 minutes between scans
+        sleep(Duration::from_secs(
+            cfg.build.as_ref().unwrap().poll_interval,
+        ))
+        .await; // 5 minutes between scans
     }
 }
 
