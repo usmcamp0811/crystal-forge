@@ -9,6 +9,12 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 3000,
+        }
+    }
     /// Returns the full socket address to bind to.
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)

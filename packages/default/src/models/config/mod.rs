@@ -47,6 +47,19 @@ pub struct CrystalForgeConfig {
 }
 
 impl CrystalForgeConfig {
+    fn default() -> Self {
+        Self {
+            flakes: Some(FlakeConfig::default()),
+            database: Some(DatabaseConfig::default()),
+            server: Some(ServerConfig::default()),
+            client: Some(AgentConfig::default()),
+            environments: Some(vec![]),
+            systems: Some(vec![]),
+            vulnix: Some(VulnixConfig::default()),
+            build: Some(BuildConfig::default()),
+            cache: Some(CacheConfig::default()),
+        }
+    }
     pub fn load() -> Result<Self> {
         let config_path = env::var("CRYSTAL_FORGE_CONFIG")
             .unwrap_or_else(|_| "/var/lib/crystal_forge/config.toml".to_string());

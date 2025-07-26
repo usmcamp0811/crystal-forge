@@ -1,5 +1,4 @@
-use crate::models::config::CrystalForgeConfig;
-use crate::models::config::VulnixConfig;
+use crate::models::config::{BuildConfig, CrystalForgeConfig, VulnixConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::evaluation_targets::update_scheduled_at;
 use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
@@ -19,16 +18,37 @@ use crate::queries::evaluation_targets::{
 
 pub fn spawn_background_tasks(pool: PgPool) {
     let cve_pool = pool.clone();
-    tokio::spawn(run_cve_scanning_loop(cve_pool));
+    tokio::spawn(run_build_loop(cve_pool));
 }
 
-async fn run_nix_build_loop(pool: PgPool) {
-    info!("🔍 Starting Derivation Build scanning loop (every 300s)...");
-}
+async fn run_nix_build_loop(pool: PgPool) {}
 
 /// Runs the periodic CVE scanning loop
-async fn run_cve_scanning_loop(pool: PgPool) {
-    info!("🔍 Starting periodic CVE scanning loop (every 300s)...");
+async fn run_build_loop(pool: PgPool) {
+    // Load vulnix config from Crystal Forge config or use default
+    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
+        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
+        CrystalForgeConfig::default()
+    });
+    let vulnix_config = cfg.vulnix.clone().unwrap_or_else(|| {
+        info!("No vulnix config found in Crystal Forge config, using defaults");
+        VulnixConfig::default()
+    });
+
+    let build_config = cfg.build.clone().unwrap_or_else(|| {
+        info!("No build config found in Crystal Forge config, using defaults");
+        BuildConfig::default()
+    });
+
+    let cache_config = cfg.build.clone().unwrap_or_else(|| {
+        info!("No cache config found in Crystal Forge config, using defaults");
+        CacheConfig::default()
+    });
+
+    info!(
+        "🔍 Starting Derivation Build scanning loop (every {}s)...",
+        build_config.poll_interval
+    );
 
     // Check if vulnix is available before starting the loop
     if !VulnixRunner::check_vulnix_available().await {
@@ -39,21 +59,6 @@ async fn run_cve_scanning_loop(pool: PgPool) {
     // Get vulnix version once for all scans
     let vulnix_version = VulnixRunner::get_vulnix_version().await.ok();
     info!("🔧 Using vulnix version: {:?}", vulnix_version);
-
-    // Load vulnix config from Crystal Forge config or use default
-    let vulnix_config = match CrystalForgeConfig::load() {
-        Ok(cf_config) => cf_config.vulnix.unwrap_or_else(|| {
-            info!("No vulnix config found in Crystal Forge config, using defaults");
-            VulnixConfig::default()
-        }),
-        Err(e) => {
-            warn!(
-                "Failed to load Crystal Forge config: {}, using default vulnix config",
-                e
-            );
-            VulnixConfig::default()
-        }
-    };
 
     info!(
         "🔧 Vulnix config: timeout={}s, whitelist={}, extra_args={:?}",
@@ -67,7 +72,7 @@ async fn run_cve_scanning_loop(pool: PgPool) {
         if let Err(e) = process_cve_scans(&pool, &runner, vulnix_version.clone()).await {
             error!("❌ Error in CVE scanning cycle: {e}");
         }
-        sleep(Duration::from_secs(300)).await; // 5 minutes between scans
+        sleep(Duration::from_secs(build_config.poll_interval)).await; // 5 minutes between scans
     }
 }
 

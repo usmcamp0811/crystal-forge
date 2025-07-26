@@ -11,3 +11,9 @@ pub struct WatchedFlake {
     pub repo_url: String,
     pub auto_poll: bool, // true = server polls git directly, false = webhook-only
 }
+
+impl FlakeConfig {
+    fn default() -> Self {
+        Self { watched: vec![] }
+    }
+}

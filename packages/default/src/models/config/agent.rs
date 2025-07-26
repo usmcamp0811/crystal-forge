@@ -7,6 +7,13 @@ pub struct AgentConfig {
 }
 
 impl AgentConfig {
+    fn default() -> Self {
+        Self {
+            server_host: "127.0.0.1".to_string(),
+            server_port: 3000,
+            private_key: "/etc/crystal-forge/private.key".to_string(),
+        }
+    }
     /// Returns the full HTTP URL to the configured server.
     pub fn endpoint(&self) -> String {
         format!("http://{}:{}", self.server_host, self.server_port)

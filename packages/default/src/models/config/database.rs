@@ -17,6 +17,15 @@ fn default_pg_port() -> u16 {
 }
 
 impl DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            host: "localhost".to_string(),
+            port: 5432,
+            user: "crystal_forge".to_string(),
+            password: "password".to_string(),
+            name: "crystal_forge".to_string(),
+        }
+    }
     /// Returns a PostgreSQL connection string.
     pub fn to_url(&self) -> String {
         format!(
