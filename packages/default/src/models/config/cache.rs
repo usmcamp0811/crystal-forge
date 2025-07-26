@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 /// Configuration for nix cache pushing and distribution
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct CacheConfig {
     /// Cache URI to push to (e.g., "s3://bucket", "https://cache.example.com")
     pub push_to: Option<String>,

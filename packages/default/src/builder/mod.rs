@@ -1,20 +1,14 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::evaluation_targets::update_scheduled_at;
-use crate::queries::evaluation_targets::{mark_target_dry_run_failed, mark_target_in_progress};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
-use futures::stream::{FuturesUnordered, StreamExt};
 use sqlx::PgPool;
-use tokio::time::{Duration, sleep};
+use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::queries::commits::get_commits_pending_evaluation;
-use crate::queries::evaluation_targets::{
-    get_pending_targets, increment_evaluation_target_attempt_count, insert_evaluation_target,
-    update_evaluation_target_path,
-};
 
 pub fn spawn_background_tasks(pool: PgPool) {
     let cve_pool = pool.clone();
@@ -113,7 +107,9 @@ async fn build_evaluation_targets(
                 Err(e) => {
                     error!("❌ Build failed for {}: {}", target.target_name, e);
                     // Mark build as failed in database
-                    if let Err(save_err) = mark_build_failed(pool, target, &e.to_string()).await {
+                    if let Err(save_err) =
+                        mark_target_failed(pool, target.id, "build", &e.to_string()).await
+                    {
                         error!("❌ Failed to mark build as failed: {save_err}");
                     }
                     return Err(e);

@@ -1,10 +1,12 @@
 use crate::models::config::CrystalForgeConfig;
 use crate::models::config::VulnixConfig;
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
+use crate::queries::evaluation_targets::mark_target_dry_run_in_progress;
+use crate::queries::evaluation_targets::mark_target_failed;
 use crate::queries::evaluation_targets::update_scheduled_at;
 use crate::queries::evaluation_targets::{
     get_pending_dry_run_targets, increment_evaluation_target_attempt_count,
-    mark_target_dry_run_complete,
+    insert_evaluation_target, mark_target_dry_run_complete,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
@@ -15,10 +17,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::queries::commits::get_commits_pending_evaluation;
-use crate::queries::evaluation_targets::{
-    get_pending_targets, increment_evaluation_target_attempt_count, insert_evaluation_target,
-    update_evaluation_target_path,
-};
 
 /// Spawns both background evaluation loops
 pub fn spawn_background_tasks(pool: PgPool) {
@@ -64,7 +62,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             commit.git_commit_hash,
                             nixos_targets.len()
                         );
-                        for target_name in nixos_targets {
+                        for mut target_name in nixos_targets {
                             match insert_evaluation_target(
                                 &pool,
                                 &commit,
@@ -103,7 +101,7 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
             let concurrency_limit = 4; // adjust as needed
             // Use FuturesUnordered instead of stream::iter for better concurrency
             let mut futures = FuturesUnordered::new();
-            for target in pending_targets {
+            for mut target in pending_targets {
                 let pool = pool.clone();
                 futures.push(async move {
                     if let Err(e) = mark_target_dry_run_in_progress(&pool, target.id).await {

@@ -1,5 +1,4 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
-use crate::queries::evaluation_targets::{mark_target_in_progress, reset_non_dry_run_complete_targets};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,7 +8,7 @@ use std::path::Path;
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
-use tracing::{debug, error, warn, info};
+use tracing::{debug, error, info, warn};
 
 // Basically just derivations / outputs of a flake / aka System derivations
 #[derive(Debug, FromRow, Serialize, Deserialize)]

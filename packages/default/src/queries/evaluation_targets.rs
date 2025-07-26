@@ -86,28 +86,29 @@ pub async fn update_evaluation_target_status(
     let status_str = status.as_str();
 
     // Build the query dynamically based on what fields need updating
-    let mut query_parts = vec!["UPDATE evaluation_targets SET status = $1"];
+    let mut query_parts = vec!["UPDATE evaluation_targets SET status = $1".to_string()];
     let mut param_count = 1;
 
     // Always update timestamps based on status
     if status.is_in_progress() {
-        query_parts.push("started_at = NOW()");
+        query_parts.push("started_at = NOW()".to_string());
     } else if status.is_terminal() {
-        query_parts.push("completed_at = NOW()");
-        query_parts
-            .push("evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000");
+        query_parts.push("completed_at = NOW()".to_string());
+        query_parts.push(
+            "evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000".to_string(),
+        );
     }
 
     // Handle derivation path updates
-    if let Some(_) = derivation_path {
+    if derivation_path.is_some() {
         param_count += 1;
-        query_parts.push(&format!("derivation_path = ${}", param_count));
+        query_parts.push(format!("derivation_path = ${}", param_count));
     }
 
     // Handle error message updates
-    if let Some(_) = error_message {
+    if error_message.is_some() {
         param_count += 1;
-        query_parts.push(&format!("error_message = ${}", param_count));
+        query_parts.push(format!("error_message = ${}", param_count));
     }
 
     param_count += 1;
