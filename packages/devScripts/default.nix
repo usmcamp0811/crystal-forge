@@ -119,6 +119,7 @@ with lib.crystal-forge; let
         {
           name = "dotfiles";
           repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
+          auto_poll = true;
         }
       ];
     };
