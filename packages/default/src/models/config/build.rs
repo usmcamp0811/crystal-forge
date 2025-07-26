@@ -1,36 +1,34 @@
 use serde::Deserialize;
 
 /// Configuration for nix build resource limits and behavior
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct BuildConfig {
     /// Maximum CPU cores to use per build job
-    #[serde(default = "BuildConfig::default_cores")]
     pub cores: u32,
-
     /// Maximum number of concurrent build jobs
-    #[serde(default = "BuildConfig::default_max_jobs")]
     pub max_jobs: u32,
-
     /// Whether to use binary substitutes/caches
-    #[serde(default = "BuildConfig::default_use_substitutes")]
     pub use_substitutes: bool,
-
     /// Build in offline mode (no network access)
-    #[serde(default)]
     pub offline: bool,
+    /// Interval in seconds between checking for new build jobs
+    pub poll_interval: u64,
+}
+
+impl Default for BuildConfig {
+    fn default() -> Self {
+        Self {
+            cores: 1,
+            max_jobs: 1,
+            use_substitutes: true,
+            offline: false,
+            poll_interval: 300, // 5 minutes
+        }
+    }
 }
 
 impl BuildConfig {
-    fn default_cores() -> u32 {
-        1
-    }
-    fn default_max_jobs() -> u32 {
-        1
-    }
-    fn default_use_substitutes() -> bool {
-        true
-    }
-
     /// Apply build configuration to a nix command
     pub fn apply_to_command(&self, cmd: &mut tokio::process::Command) {
         cmd.args([
@@ -48,15 +46,9 @@ impl BuildConfig {
             cmd.arg("--offline");
         }
     }
-}
 
-impl Default for BuildConfig {
-    fn default() -> Self {
-        Self {
-            cores: 1,
-            max_jobs: 1,
-            use_substitutes: true,
-            offline: false,
-        }
+    /// Get the poll interval as a Duration
+    pub fn poll_duration(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.poll_interval)
     }
 }

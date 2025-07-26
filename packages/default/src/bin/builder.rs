@@ -38,10 +38,7 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = CrystalForgeConfig::db_pool().await?;
     let builder_pool = pool.clone();
-    reset_non_complete_targets(&pool);
     spawn_background_tasks(builder_pool);
-
-    // Start HTTP server
 
     Ok(())
 }

@@ -6,6 +6,7 @@ pub struct VulnixConfig {
     pub max_retries: u32,
     pub enable_whitelist: bool,
     pub extra_args: Vec<String>,
+    pub poll_interval: u64,
 }
 
 impl Default for VulnixConfig {
@@ -15,6 +16,7 @@ impl Default for VulnixConfig {
             max_retries: 2,
             enable_whitelist: true,
             extra_args: vec![],
+            poll_interval: 300,
         }
     }
 }

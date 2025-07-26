@@ -22,6 +22,10 @@ pub fn spawn_background_tasks(pool: PgPool) {
     tokio::spawn(run_cve_scanning_loop(cve_pool));
 }
 
+async fn run_nix_build_loop(pool: PgPool) {
+    info!("🔍 Starting Derivation Build scanning loop (every 300s)...");
+}
+
 /// Runs the periodic CVE scanning loop
 async fn run_cve_scanning_loop(pool: PgPool) {
     info!("🔍 Starting periodic CVE scanning loop (every 300s)...");
