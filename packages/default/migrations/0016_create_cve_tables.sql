@@ -74,6 +74,10 @@ CREATE TABLE scan_packages (
     CONSTRAINT uq_scan_package UNIQUE (scan_id, derivation_path)
 );
 
+-- migrate add build_attempt_count to evaluation_targets
+ALTER TABLE evaluation_targets
+    ADD COLUMN build_attempt_count integer NOT NULL DEFAULT 0;
+
 -- ============================================================================
 -- INDEXES FOR PERFORMANCE
 -- ============================================================================

@@ -125,7 +125,28 @@ pub async fn update_scheduled_at(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
+/// Increment the number of attempts to do a dry-run to get the derivation path
 pub async fn increment_evaluation_target_attempt_count(
+    pool: &PgPool,
+    target: &EvaluationTarget,
+    error: &anyhow::Error,
+) -> Result<()> {
+    error!("❌ Failed to resolve derivation path: {}", error);
+    sqlx::query!(
+        r#"
+    UPDATE evaluation_targets
+    SET attempt_count = attempt_count + 1
+    WHERE id = $1
+    "#,
+        target.id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Increment the number of attempts to build
+pub async fn increment_evaluation_target_build_attempt_count(
     pool: &PgPool,
     target: &EvaluationTarget,
     error: &anyhow::Error,
@@ -147,6 +168,16 @@ pub async fn increment_evaluation_target_attempt_count(
 pub async fn mark_target_in_progress(pool: &PgPool, target_id: i32) -> Result<()> {
     sqlx::query!(
         "UPDATE evaluation_targets SET status = 'in-progress', started_at = NOW() WHERE id = $1",
+        target_id
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_target_in_building(pool: &PgPool, target_id: i32) -> Result<()> {
+    sqlx::query!(
+        "UPDATE evaluation_targets SET status = 'building', started_at = NOW() WHERE id = $1",
         target_id
     )
     .execute(pool)

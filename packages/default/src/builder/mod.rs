@@ -1,4 +1,4 @@
-use crate::models::config::{BuildConfig, CrystalForgeConfig, VulnixConfig};
+use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::evaluation_targets::update_scheduled_at;
 use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
@@ -33,20 +33,19 @@ async fn run_build_loop(pool: PgPool) {
 
     let build_config = cfg.build.as_ref().unwrap();
     let vulnix_config = cfg.vulnix.as_ref().unwrap();
-    let cache_config = cfg.cache.as_ref().unwrap_or(&CacheConfig::default());
+    let cache_config_owned = cfg.cache.clone().unwrap_or_default(); // clone if needed
+    let cache_config = &cache_config_owned;
 
     info!(
         "🔍 Starting Derivation Build loop (every {}s)...",
         build_config.poll_interval
     );
 
-    // Check if vulnix is available before starting the loop
     if !VulnixRunner::check_vulnix_available().await {
         error!("❌ vulnix is not available - CVE scanning disabled");
         return;
     }
 
-    // Get vulnix version once for all scans
     let vulnix_version = VulnixRunner::get_vulnix_version().await.ok();
 
     debug!("🔧 Using vulnix version: {:?}", vulnix_version);
@@ -66,7 +65,6 @@ async fn run_build_loop(pool: PgPool) {
         cache_config.push_after_build, cache_config.push_to
     );
 
-    // Create vulnix runner with loaded configuration
     let vulnix_runner = VulnixRunner::with_config(vulnix_config);
 
     loop {
@@ -95,7 +93,7 @@ async fn build_evaluation_targets(
     cache_config: &CacheConfig,
 ) -> Result<()> {
     // Get targets that need building (not just CVE scanning)
-    match get_targets_needing_build(pool, Some(1)).await {
+    match get_targets_needing_cve_scan(pool, Some(1)).await {
         Ok(targets) => {
             if targets.is_empty() {
                 debug!("🔍 No targets need building");

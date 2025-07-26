@@ -1,4 +1,4 @@
-use crate::models::config::{CrystalForgeConfig CacheConfig};
+use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::queries::evaluation_targets::{mark_target_in_progress, reset_non_complete_targets};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -9,7 +9,7 @@ use std::path::Path;
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
-use tracing::{debug, error, info};
+use tracing::{debug, error, warn, info};
 
 // Basically just derivations / outputs of a flake / aka System derivations
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -253,7 +253,7 @@ impl EvaluationTarget {
         build_config: &BuildConfig,
         cache_config: &CacheConfig,
     ) -> Result<String> {
-        let store_path = self
+        let store_path: String = self
             .evaluate_nixos_system_with_build(full_build, build_config)
             .await?;
 
