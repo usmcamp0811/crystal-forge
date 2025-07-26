@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
     let builder_cfg = cfg
         .build
         .as_ref()
-        .expect("missing [builder] section in config");
+        .expect("missing [build] section in config");
 
     let pool = CrystalForgeConfig::db_pool().await?;
     let builder_pool = pool.clone();

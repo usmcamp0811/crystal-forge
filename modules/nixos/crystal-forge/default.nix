@@ -167,6 +167,10 @@ in {
               type = lib.types.str;
               description = "Repository URL of the flake";
             };
+            auto_poll = lib.mkOption {
+              type = lib.types.bool;
+              description = "Whether to automatically poll the repository for new commits instead of relying solely on webhooks";
+            };
           };
         });
         default = [];
