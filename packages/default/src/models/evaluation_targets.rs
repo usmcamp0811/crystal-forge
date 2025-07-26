@@ -1,4 +1,4 @@
-use crate::models::config::CrystalForgeConfig;
+use crate::models::config::{CrystalForgeConfig CacheConfig};
 use crate::queries::evaluation_targets::{mark_target_in_progress, reset_non_complete_targets};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -198,5 +198,73 @@ impl EvaluationTarget {
             }
         );
         Ok(hash)
+    }
+
+    /// Pushes a built derivation to the configured cache
+    pub async fn push_to_cache(&self, store_path: &str, cache_config: &CacheConfig) -> Result<()> {
+        // Check if we should push this target
+        if !cache_config.should_push(&self.target_name) {
+            info!(
+                "⏭️ Skipping cache push for {} (filtered out)",
+                self.target_name
+            );
+            return Ok(());
+        }
+
+        // Get the nix copy command arguments
+        let args = match cache_config.copy_command_args(store_path) {
+            Some(args) => args,
+            None => {
+                warn!("⚠️ No cache push configuration found, skipping cache push");
+                return Ok(());
+            }
+        };
+
+        info!("📤 Pushing {} to cache...", store_path);
+        info!("🔧 nix copy command: nix {}", args.join(" "));
+
+        let mut cmd = Command::new("nix");
+        cmd.args(&args);
+
+        let output = cmd
+            .output()
+            .await
+            .context("Failed to execute nix copy command")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("❌ nix copy failed: {}", stderr.trim());
+            anyhow::bail!("nix copy failed: {}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if !stdout.trim().is_empty() {
+            info!("📤 nix copy output: {}", stdout.trim());
+        }
+
+        info!("✅ Successfully pushed {} to cache", store_path);
+        Ok(())
+    }
+
+    /// Evaluates and optionally pushes to cache in one go
+    pub async fn evaluate_and_push_to_cache(
+        &self,
+        full_build: bool,
+        build_config: &BuildConfig,
+        cache_config: &CacheConfig,
+    ) -> Result<String> {
+        let store_path = self
+            .evaluate_nixos_system_with_build(full_build, build_config)
+            .await?;
+
+        // Only push to cache if we did a full build (not a dry-run)
+        if full_build && cache_config.push_after_build {
+            if let Err(e) = self.push_to_cache(&store_path, cache_config).await {
+                warn!("⚠️ Cache push failed but continuing: {}", e);
+                // Don't fail the whole operation if cache push fails
+            }
+        }
+
+        Ok(store_path)
     }
 }
