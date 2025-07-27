@@ -372,19 +372,19 @@ pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
         r#"
         UPDATE evaluation_targets 
         SET status = CASE 
-            WHEN derivation_path IS NULL THEN $1                    -- No derivation yet, back to DryRunPending
-            WHEN derivation_path IS NOT NULL THEN $2                -- Has derivation, ready to build
-            ELSE $1                                                 -- Default fallback
+            WHEN derivation_path IS NULL THEN $1
+            WHEN derivation_path IS NOT NULL THEN $2
+            ELSE $1
         END,
         scheduled_at = NOW()
         WHERE status NOT IN ($3, $4, $5, $6)
         "#,
-        EvaluationStatus::DryRunPending.as_str(),    // $1
-        EvaluationStatus::BuildPending.as_str(),     // $2  
-        EvaluationStatus::DryRunComplete.as_str(),   // $3
-        EvaluationStatus::DryRunFailed.as_str(),     // $4
-        EvaluationStatus::BuildComplete.as_str(),    // $5
-        EvaluationStatus::BuildFailed.as_str()       // $6
+        EvaluationStatus::DryRunPending.as_str(),  // $1
+        EvaluationStatus::BuildPending.as_str(),   // $2
+        EvaluationStatus::DryRunComplete.as_str(), // $3
+        EvaluationStatus::DryRunFailed.as_str(),   // $4
+        EvaluationStatus::BuildComplete.as_str(),  // $5
+        EvaluationStatus::BuildFailed.as_str()     // $6
     )
     .execute(pool)
     .await?;
