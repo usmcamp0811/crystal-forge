@@ -114,11 +114,12 @@ pub async fn update_evaluation_target_status(
     param_count += 1;
     let where_clause = format!("WHERE id = ${}", param_count);
 
+    // CRITICAL: No type cast here!
     let returning_clause = r#"
     RETURNING
         id,
         commit_id,
-        target_type as "target_type: TargetType",
+        target_type,
         target_name,
         derivation_path,
         scheduled_at,
