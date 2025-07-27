@@ -1,5 +1,5 @@
 use serde::Deserialize;
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct SystemConfig {
     pub hostname: String,
     pub public_key: String,

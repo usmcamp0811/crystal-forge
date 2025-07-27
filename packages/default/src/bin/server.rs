@@ -39,7 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let flake_init_pool = pool.clone();
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.as_ref().unwrap().watched).await?;
     reset_non_terminal_targets(&pool);
-    spawn_background_tasks(background_pool);
+    spawn_background_tasks(cfg.clone(), background_pool);
 
     // Start HTTP server
     info!("Starting Crystal Forge Server...");

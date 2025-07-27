@@ -1,5 +1,5 @@
 use serde::Deserialize;
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct AgentConfig {
     pub server_host: String,
     pub server_port: u16,

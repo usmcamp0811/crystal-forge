@@ -1,5 +1,5 @@
 use serde::Deserialize;
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct EnvironmentConfig {
     pub name: String,
     pub description: String,

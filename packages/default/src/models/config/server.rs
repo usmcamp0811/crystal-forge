@@ -2,7 +2,7 @@ use serde::Deserialize;
 /// Configuration for the server itself.
 ///
 /// This section is loaded from `[server]` in `config.toml`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,

@@ -37,6 +37,7 @@ tokio-test = "0.4.4"
 axum-test = "17.3.0"
 winnow = "0.7.11"
 bytes = "1.10.1"
+humantime-serde = "1.1.1"
 
 [lib]
 path = "src/lib.rs"

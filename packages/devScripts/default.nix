@@ -118,7 +118,7 @@ with lib.crystal-forge; let
       watched = [
         {
           name = "dotfiles";
-          repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
+          repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
           auto_poll = true;
         }
       ];
@@ -196,12 +196,12 @@ with lib.crystal-forge; let
     modules = [
       inputs.services-flake.processComposeModules.default
       {
-        settings.processes.agent-sim = {
-          inherit namespace;
-          command = agent-sim;
-          disabled = false;
-          depends_on."server".condition = "process_healthy";
-        };
+        # settings.processes.agent-sim = {
+        #   inherit namespace;
+        #   command = agent-sim;
+        #   disabled = false;
+        #   depends_on."server".condition = "process_healthy";
+        # };
         # settings.processes.lucas-agent = {
         #   inherit namespace;
         #   command = lucas;

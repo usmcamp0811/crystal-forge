@@ -2,7 +2,7 @@ use serde::Deserialize;
 /// PostgreSQL database connection configuration.
 ///
 /// This section is loaded from `[database]` in `config.toml`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseConfig {
     pub host: String,
     #[serde(default = "default_pg_port")]

@@ -33,7 +33,7 @@ use std::env;
 use tokio_postgres::NoTls;
 use tracing::{debug, info};
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct CrystalForgeConfig {
     pub flakes: Option<FlakeConfig>,
     pub database: Option<DatabaseConfig>,
