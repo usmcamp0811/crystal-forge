@@ -23,20 +23,25 @@ pub struct EvaluationTarget {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text")]
-#[sqlx(rename_all = "lowercase")]
+#[sqlx(rename_all = "lowercase")] // Add this line
 pub enum TargetType {
     NixOS,
     HomeManager,
 }
 
+// SQLx requires this for deserialization - make it safe
 impl From<String> for TargetType {
     fn from(s: String) -> Self {
         match s.as_str() {
             "nixos" => TargetType::NixOS,
             "homemanager" => TargetType::HomeManager,
-            _ => panic!("Invalid TargetType: {}", s),
+            _ => {
+                // Log the error but provide a default instead of panicking
+                eprintln!("Warning: Unknown TargetType '{}', defaulting to NixOS", s);
+                TargetType::NixOS
+            }
         }
     }
 }
@@ -112,17 +117,6 @@ impl EvaluationTarget {
 
         Ok(hash)
     }
-
-    /// Returns the derivation output path (hash) for a specific NixOS system from a given flake.
-    // pub async fn evaluate_nixos_system(&self) -> Result<String> {
-    //     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
-    //         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
-    //         CrystalForgeConfig::default()
-    //     });
-    //     let build_config = cfg.build.as_ref().unwrap();
-    //     self.evaluate_nixos_system_with_build(false, build_config)
-    //         .await
-    // }
 
     pub async fn evaluate_nixos_system_with_build(
         &self,
