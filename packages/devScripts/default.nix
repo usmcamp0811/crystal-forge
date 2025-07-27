@@ -73,6 +73,11 @@ with lib.crystal-forge; let
       host = "0.0.0.0";
       port = cf_port;
     };
+    build = {
+      cores = 4;
+      max_jobs = 1;
+      poll_interval = "1m";
+    };
     client = {
       server_host = "127.0.0.1";
       server_port = cf_port;

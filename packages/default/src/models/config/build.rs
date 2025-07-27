@@ -1,4 +1,5 @@
 use serde::Deserialize;
+use std::time::Duration;
 
 /// Configuration for nix build resource limits and behavior
 #[derive(Debug, Clone, Deserialize)]
@@ -13,7 +14,8 @@ pub struct BuildConfig {
     /// Build in offline mode (no network access)
     pub offline: bool,
     /// Interval in seconds between checking for new build jobs
-    pub poll_interval: u64,
+    #[serde(with = "humantime_serde")]
+    pub poll_interval: Duration,
 }
 
 impl Default for BuildConfig {
@@ -23,7 +25,7 @@ impl Default for BuildConfig {
             max_jobs: 1,
             use_substitutes: true,
             offline: false,
-            poll_interval: 300, // 5 minutes
+            poll_interval: Duration::from_secs(300), // 5 minutes
         }
     }
 }
@@ -45,10 +47,5 @@ impl BuildConfig {
         if self.offline {
             cmd.arg("--offline");
         }
-    }
-
-    /// Get the poll interval as a Duration
-    pub fn poll_duration(&self) -> std::time::Duration {
-        std::time::Duration::from_secs(self.poll_interval)
     }
 }

@@ -27,7 +27,7 @@ async fn run_build_loop(pool: PgPool) {
     let cache_config = cfg.get_cache_config();
     info!(
         "🔍 Starting Derivation Build loop (every {}s)...",
-        build_config.poll_interval
+        build_config.poll_interval.as_secs()
     );
 
     if !VulnixRunner::check_vulnix_available().await {
@@ -40,14 +40,16 @@ async fn run_build_loop(pool: PgPool) {
     debug!("🔧 Using vulnix version: {:?}", vulnix_version);
     debug!(
         "🔧 Vulnix config: timeout={}s, whitelist={}, extra_args={:?}",
-        vulnix_config.timeout_seconds, vulnix_config.enable_whitelist, vulnix_config.extra_args
+        vulnix_config.timeout_seconds(),
+        vulnix_config.enable_whitelist,
+        vulnix_config.extra_args
     );
     debug!(
         "🔧 Build config: cores={}, max_jobs={}, substitutes={}, poll_interval={}s",
         build_config.cores,
         build_config.max_jobs,
         build_config.use_substitutes,
-        build_config.poll_interval
+        build_config.poll_interval.as_secs()
     );
     debug!(
         "🔧 Cache config: push_after_build={}, push_to={:?}",
@@ -69,7 +71,7 @@ async fn run_build_loop(pool: PgPool) {
             error!("❌ Error in build cycle: {e}");
         }
 
-        sleep(build_config.poll_duration()).await;
+        sleep(build_config.poll_interval).await;
     }
 }
 

@@ -19,6 +19,7 @@ async fn main() -> anyhow::Result<()> {
         .expect("missing [build] section in config");
 
     let pool = CrystalForgeConfig::db_pool().await?;
+    sqlx::migrate!("./migrations").run(&pool).await?;
     let builder_pool = pool.clone();
     spawn_background_tasks(builder_pool);
 

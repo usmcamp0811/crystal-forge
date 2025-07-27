@@ -25,7 +25,9 @@ impl VulnixRunner {
     }
 
     pub fn with_config(config: &VulnixConfig) -> Self {
-        Self { config: config.clone() }
+        Self {
+            config: config.clone(),
+        }
     }
 
     /// Check if vulnix is available on the system
@@ -88,10 +90,7 @@ impl VulnixRunner {
             cmd.arg(arg);
         }
 
-        // Execute scan with timeout
-        let timeout = tokio::time::Duration::from_secs(self.config.timeout_seconds);
-
-        match tokio::time::timeout(timeout, cmd.output()).await {
+        match tokio::time::timeout(self.config.timeout, cmd.output()).await {
             Ok(Ok(output)) => {
                 if output.status.success() {
                     let json_output = String::from_utf8_lossy(&output.stdout);
@@ -113,7 +112,7 @@ impl VulnixRunner {
             Ok(Err(e)) => Err(anyhow!("Failed to execute vulnix: {}", e)),
             Err(_) => Err(anyhow!(
                 "Vulnix scan timed out after {} seconds",
-                self.config.timeout_seconds
+                self.config.timeout_seconds()
             )),
         }
     }
