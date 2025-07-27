@@ -91,8 +91,17 @@ impl EvaluationTarget {
             }
         });
 
+        let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
+            warn!("Failed to load Crystal Forge config: {}, using defaults", e);
+            CrystalForgeConfig::default()
+        });
+        let build_config = cfg.build.as_ref().unwrap();
+
         let hash = match self.target_type {
-            TargetType::NixOS => self.evaluate_nixos_system().await?,
+            TargetType::NixOS => {
+                self.evaluate_nixos_system_with_build(false, build_config)
+                    .await?
+            }
             TargetType::HomeManager => anyhow::bail!("Home Manager evaluation not implemented yet"),
         };
 
@@ -105,15 +114,15 @@ impl EvaluationTarget {
     }
 
     /// Returns the derivation output path (hash) for a specific NixOS system from a given flake.
-    pub async fn evaluate_nixos_system(&self) -> Result<String> {
-        let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
-            warn!("Failed to load Crystal Forge config: {}, using defaults", e);
-            CrystalForgeConfig::default()
-        });
-        let build_config = cfg.build.as_ref().unwrap();
-        self.evaluate_nixos_system_with_build(false, build_config)
-            .await
-    }
+    // pub async fn evaluate_nixos_system(&self) -> Result<String> {
+    //     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
+    //         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
+    //         CrystalForgeConfig::default()
+    //     });
+    //     let build_config = cfg.build.as_ref().unwrap();
+    //     self.evaluate_nixos_system_with_build(false, build_config)
+    //         .await
+    // }
 
     pub async fn evaluate_nixos_system_with_build(
         &self,
