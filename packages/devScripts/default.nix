@@ -115,6 +115,9 @@ with lib.crystal-forge; let
       }
     ];
     flakes = {
+      flake_polling_interval = "10m";
+      commit_evaluation_interval = "1m";
+      build_processing_interval = "1m";
       watched = [
         {
           name = "dotfiles";
@@ -180,7 +183,7 @@ with lib.crystal-forge; let
 
   runServer = pkgs.writeShellApplication {
     name = "run-server";
-    runtimeInputs = [pkgs.nix];
+    runtimeInputs = [pkgs.nix pkgs.git pkgs.vulnix];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG

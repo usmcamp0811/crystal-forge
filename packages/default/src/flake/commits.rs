@@ -23,11 +23,18 @@ pub async fn fetch_and_insert_latest_commit(
 async fn get_latest_commit_hash(repo_url: &str) -> Result<String> {
     use tokio::process::Command;
 
+    let git_url = normalize_repo_url_for_git(repo_url);
     let output = Command::new("git")
-        .args(&["ls-remote", repo_url, "HEAD"])
-        .output()
-        .await
-        .context("Failed to execute git ls-remote")?;
+    .args(&["ls-remote", "--heads", "--tags", &git_url])
+    .output()
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to spawn git process for 'git ls-remote --heads --tags {}' (normalized from '{}')", 
+            git_url,
+            repo_url
+        )
+    })?;
 
     if !output.status.success() {
         return Err(anyhow::anyhow!("git ls-remote failed"));
@@ -82,14 +89,29 @@ pub async fn fetch_and_insert_recent_commits(
 async fn get_recent_commit_hashes(repo_url: &str, max_commits: usize) -> Result<Vec<String>> {
     use tokio::process::Command;
 
+    let git_url = normalize_repo_url_for_git(repo_url);
     let output = Command::new("git")
-        .args(&["ls-remote", "--heads", "--tags", repo_url])
-        .output()
-        .await
-        .context("Failed to execute git ls-remote")?;
+    .args(&["ls-remote", "--heads", "--tags", &git_url])
+    .output()
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to spawn git process for 'git ls-remote --heads --tags {}' (normalized from '{}')", 
+            git_url,
+            repo_url
+        )
+    })?;
 
     if !output.status.success() {
-        return Err(anyhow::anyhow!("git ls-remote failed"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        return Err(anyhow::anyhow!(
+            "git ls-remote failed for repository '{}' (exit code: {})\nError output: {}",
+            repo_url,
+            exit_code,
+            stderr.trim()
+        ));
     }
 
     let stdout = String::from_utf8(output.stdout)?;
@@ -209,4 +231,23 @@ pub async fn sync_all_watched_flakes_commits(
     }
 
     Ok(())
+}
+
+fn normalize_repo_url_for_git(repo_url: &str) -> String {
+    // Handle different Nix flake URL formats
+    if let Some(stripped) = repo_url.strip_prefix("git+") {
+        // Remove git+ prefix
+        stripped.to_string()
+    } else if repo_url.starts_with("github:") {
+        // Convert github: to https://
+        let repo_path = repo_url.strip_prefix("github:").unwrap();
+        format!("https://github.com/{}", repo_path)
+    } else if repo_url.starts_with("gitlab:") {
+        // Convert gitlab: to https://
+        let repo_path = repo_url.strip_prefix("gitlab:").unwrap();
+        format!("https://gitlab.com/{}", repo_path)
+    } else {
+        // Already a regular git URL
+        repo_url.to_string()
+    }
 }
