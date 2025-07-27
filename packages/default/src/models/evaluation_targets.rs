@@ -135,7 +135,7 @@ impl EvaluationTarget {
         debug!("📁 Is local path: {is_path}");
 
         if is_path {
-            debug!("📌 Running 'git checkout {:?}' in {}", commit, flake_url);
+            info!("📌 Running 'git checkout {:?}' in {}", commit, flake_url);
             let status = Command::new("git")
                 .args(["-C", flake_url, "checkout", &commit.git_commit_hash])
                 .status()
@@ -164,7 +164,7 @@ impl EvaluationTarget {
         };
 
         let build_mode = if full_build { "full build" } else { "dry-run" };
-        debug!("🔨 Building flake target: {flake_target} ({})", build_mode);
+        info!("🔨 Building flake target: {flake_target} ({})", build_mode);
 
         let mut cmd = Command::new("nix");
         cmd.args(["build", &flake_target]);
