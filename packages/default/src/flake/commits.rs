@@ -21,26 +21,7 @@ pub async fn fetch_and_insert_latest_commit(
 
 /// Get the latest commit hash from any git repository
 async fn get_latest_commit_hash(repo_url: &str) -> Result<String> {
-    use tokio::process::Command;
-
-    let git_url = normalize_repo_url_for_git(repo_url);
-    let output = Command::new("git")
-    .args(&["ls-remote", "--heads", "--tags", &git_url])
-    .output()
-    .await
-    .with_context(|| {
-        format!(
-            "Failed to spawn git process for 'git ls-remote --heads --tags {}' (normalized from '{}')", 
-            git_url,
-            repo_url
-        )
-    })?;
-
-    if !output.status.success() {
-        return Err(anyhow::anyhow!("git ls-remote failed"));
-    }
-
-    let stdout = String::from_utf8(output.stdout)?;
+    let stdout = run_ls_remote(repo_url).await?;
     let commit_hash = stdout
         .lines()
         .next()
@@ -48,6 +29,34 @@ async fn get_latest_commit_hash(repo_url: &str) -> Result<String> {
         .context("Could not parse git ls-remote output")?;
 
     Ok(commit_hash.to_string())
+}
+
+async fn get_recent_commit_hashes(repo_url: &str, max_commits: usize) -> Result<Vec<String>> {
+    let stdout = run_ls_remote(repo_url).await?;
+    let mut commits = Vec::new();
+
+    if let Some(head_line) = stdout.lines().find(|line| line.ends_with("HEAD")) {
+        if let Some(commit_hash) = head_line.split_whitespace().next() {
+            commits.push(commit_hash.to_string());
+        }
+    }
+
+    if commits.is_empty() {
+        for branch_name in &["refs/heads/main", "refs/heads/master"] {
+            if let Some(branch_line) = stdout.lines().find(|line| line.ends_with(branch_name)) {
+                if let Some(commit_hash) = branch_line.split_whitespace().next() {
+                    commits.push(commit_hash.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    if commits.is_empty() {
+        return Err(anyhow::anyhow!("No commits found in repository"));
+    }
+
+    Ok(commits)
 }
 
 /// Fetch up to 10 recent commits from a git repository and insert them into the database
@@ -83,68 +92,6 @@ pub async fn fetch_and_insert_recent_commits(
         repo_url
     );
     Ok(inserted_commits)
-}
-
-/// Get recent commit hashes using git log
-async fn get_recent_commit_hashes(repo_url: &str, max_commits: usize) -> Result<Vec<String>> {
-    use tokio::process::Command;
-
-    let git_url = normalize_repo_url_for_git(repo_url);
-    let output = Command::new("git")
-    .args(&["ls-remote", "--heads", "--tags", &git_url])
-    .output()
-    .await
-    .with_context(|| {
-        format!(
-            "Failed to spawn git process for 'git ls-remote --heads --tags {}' (normalized from '{}')", 
-            git_url,
-            repo_url
-        )
-    })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        return Err(anyhow::anyhow!(
-            "git ls-remote failed for repository '{}' (exit code: {})\nError output: {}",
-            repo_url,
-            exit_code,
-            stderr.trim()
-        ));
-    }
-
-    let stdout = String::from_utf8(output.stdout)?;
-    let mut commits = Vec::new();
-
-    // Get HEAD first if available
-    if let Some(head_line) = stdout.lines().find(|line| line.ends_with("HEAD")) {
-        if let Some(commit_hash) = head_line.split_whitespace().next() {
-            commits.push(commit_hash.to_string());
-        }
-    }
-
-    // If we don't have HEAD, get the main/master branch
-    if commits.is_empty() {
-        for branch_name in &["refs/heads/main", "refs/heads/master"] {
-            if let Some(branch_line) = stdout.lines().find(|line| line.ends_with(branch_name)) {
-                if let Some(commit_hash) = branch_line.split_whitespace().next() {
-                    commits.push(commit_hash.to_string());
-                    break;
-                }
-            }
-        }
-    }
-
-    // For getting multiple commits, we need to use git log which requires cloning
-    // Since you want to avoid that, we'll just return the latest commit
-    // If you really need multiple commits, we'd need to do a shallow clone
-
-    if commits.is_empty() {
-        return Err(anyhow::anyhow!("No commits found in repository"));
-    }
-
-    Ok(commits)
 }
 
 /// Initialize commits for all watched flakes that don't have any commits yet
@@ -250,4 +197,34 @@ fn normalize_repo_url_for_git(repo_url: &str) -> String {
         // Already a regular git URL
         repo_url.to_string()
     }
+}
+
+async fn run_ls_remote(repo_url: &str) -> Result<String> {
+    use tokio::process::Command;
+
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let output = Command::new("git")
+        .args(&["ls-remote", "--heads", "--tags", &git_url])
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to spawn git process for 'git ls-remote --heads --tags {}' (normalized from '{}')",
+                git_url, repo_url
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        return Err(anyhow::anyhow!(
+            "git ls-remote failed for repository '{}' (exit code: {})\nError output: {}",
+            repo_url,
+            exit_code,
+            stderr.trim()
+        ));
+    }
+
+    Ok(String::from_utf8(output.stdout)?)
 }
