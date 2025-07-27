@@ -75,26 +75,62 @@ CREATE TABLE scan_packages (
 );
 
 -- migrate update status from 'complete' to 'dry-run-complete'
+BEGIN;
+-- Add error_message column (referenced in your Rust code but missing from schema)
+ALTER TABLE evaluation_targets
+    ADD COLUMN IF NOT EXISTS error_message text;
+-- Drop the old check constraint
+ALTER TABLE evaluation_targets
+    DROP CONSTRAINT IF EXISTS valid_status;
+-- Add new check constraint with all the status values from EvaluationStatus enum
+ALTER TABLE evaluation_targets
+    ADD CONSTRAINT valid_status CHECK (status = ANY (ARRAY['dry-run-pending'::text, 'dry-run-inprogress'::text, 'dry-run-complete'::text, 'dry-run-failed'::text, 'build-pending'::text, 'build-inprogress'::text, 'build-complete'::text, 'build-failed'::text,
+    -- Keep old values for backward compatibility during transition
+    'pending'::text, 'queued'::text, 'in-progress'::text, 'complete'::text, 'failed'::text]));
+-- Update existing records to use new status values
+-- Map old statuses to new ones based on whether they have derivation_path
 UPDATE
     evaluation_targets
 SET
-    status = 'dry-run-complete'
+    status = CASE WHEN status = 'pending'
+        AND derivation_path IS NULL THEN
+        'dry-run-pending'
+    WHEN status = 'pending'
+        AND derivation_path IS NOT NULL THEN
+        'build-pending'
+    WHEN status = 'queued'
+        AND derivation_path IS NULL THEN
+        'dry-run-pending'
+    WHEN status = 'queued'
+        AND derivation_path IS NOT NULL THEN
+        'build-pending'
+    WHEN status = 'in-progress'
+        AND derivation_path IS NULL THEN
+        'dry-run-inprogress'
+    WHEN status = 'in-progress'
+        AND derivation_path IS NOT NULL THEN
+        'build-inprogress'
+    WHEN status = 'complete'
+        AND derivation_path IS NULL THEN
+        'dry-run-complete'
+    WHEN status = 'complete'
+        AND derivation_path IS NOT NULL THEN
+        'build-complete'
+    WHEN status = 'failed'
+        AND derivation_path IS NULL THEN
+        'dry-run-failed'
+    WHEN status = 'failed'
+        AND derivation_path IS NOT NULL THEN
+        'build-failed'
+    ELSE
+        status -- Keep new statuses as-is
+    END
 WHERE
-    status = 'complete';
-
-UPDATE
-    evaluation_targets
-SET
-    status = 'dry-run-pending'
-WHERE
-    status = 'pending';
-
-UPDATE
-    evaluation_targets
-SET
-    status = 'dry-run-inprogress'
-WHERE
-    status = 'inprogress';
+    status IN ('pending', 'queued', 'in-progress', 'complete', 'failed');
+-- Update the default value for new records
+ALTER TABLE evaluation_targets
+    ALTER COLUMN status SET DEFAULT 'dry-run-pending';
+COMMIT;
 
 -- ============================================================================
 -- INDEXES FOR PERFORMANCE
