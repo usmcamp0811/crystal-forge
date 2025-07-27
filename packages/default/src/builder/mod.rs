@@ -82,7 +82,7 @@ async fn build_evaluation_targets(
     match get_targets_needing_cve_scan(pool, Some(1)).await {
         Ok(targets) => {
             if targets.is_empty() {
-                debug!("🔍 No targets need building");
+                info!("🔍 No targets need building");
                 return Ok(());
             }
 
