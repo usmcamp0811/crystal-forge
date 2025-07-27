@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE evaluation_targets \n        SET status = CASE \n            WHEN derivation_path IS NULL THEN $1  -- DryRunPending\n            WHEN derivation_path IS NOT NULL AND status IN ($7, $8) THEN $2  -- BuildPending only if was building\n            ELSE $1  -- Default back to DryRunPending\n        END,\n        scheduled_at = NOW()\n        WHERE status NOT IN ($3, $4, $5, $6)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c65024fd0e318afdb79f52e215cf78d17ecf1fd4187e4e23d6e6d208accaf84e"
+}

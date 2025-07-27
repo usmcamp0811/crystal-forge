@@ -22,12 +22,9 @@ async fn run_build_loop(pool: PgPool) {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
         CrystalForgeConfig::default()
     });
-
-    let build_config = cfg.build.as_ref().unwrap();
-    let vulnix_config = cfg.vulnix.as_ref().unwrap();
-    let cache_config_owned = cfg.cache.clone().unwrap_or_default(); // clone if needed
-    let cache_config = &cache_config_owned;
-
+    let build_config = cfg.get_build_config();
+    let vulnix_config = cfg.get_vulnix_config();
+    let cache_config = cfg.get_cache_config();
     info!(
         "🔍 Starting Derivation Build loop (every {}s)...",
         build_config.poll_interval
@@ -57,15 +54,15 @@ async fn run_build_loop(pool: PgPool) {
         cache_config.push_after_build, cache_config.push_to
     );
 
-    let vulnix_runner = VulnixRunner::with_config(vulnix_config);
+    let vulnix_runner = VulnixRunner::with_config(&vulnix_config);
 
     loop {
         if let Err(e) = build_evaluation_targets(
             &pool,
             &vulnix_runner,
             vulnix_version.clone(),
-            build_config,
-            cache_config,
+            &build_config,
+            &cache_config,
         )
         .await
         {
