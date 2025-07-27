@@ -8,8 +8,9 @@ use tracing::{debug, info, warn};
 pub async fn fetch_and_insert_latest_commit(
     pool: &PgPool,
     repo_url: &str,
+    branch: &str,
 ) -> Result<Option<String>> {
-    let commit_hash = get_latest_commit_hash(repo_url).await?;
+    let commit_hash = get_latest_commit_hash(repo_url, branch).await?;
 
     insert_commit(pool, &commit_hash, repo_url).await?;
     info!(
@@ -19,16 +20,38 @@ pub async fn fetch_and_insert_latest_commit(
     Ok(Some(commit_hash))
 }
 
-/// Get the latest commit hash from any git repository
-async fn get_latest_commit_hash(repo_url: &str) -> Result<String> {
+/// Get the latest commit hash from a specific branch in a git repository
+async fn get_latest_commit_hash(repo_url: &str, branch: &str) -> Result<String> {
     let stdout = run_ls_remote(repo_url).await?;
-    let commit_hash = stdout
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().next())
-        .context("Could not parse git ls-remote output")?;
 
-    Ok(commit_hash.to_string())
+    // Try specified branch first
+    let target_ref = format!("refs/heads/{}", branch);
+    if let Some(line) = stdout.lines().find(|l| l.ends_with(&target_ref)) {
+        if let Some(hash) = line.split_whitespace().next() {
+            return Ok(hash.to_string());
+        }
+    }
+
+    // Fallback to HEAD
+    if let Some(line) = stdout.lines().find(|l| l.ends_with("HEAD")) {
+        if let Some(hash) = line.split_whitespace().next() {
+            return Ok(hash.to_string());
+        }
+    }
+
+    // Fallback to common branches
+    for fallback in ["refs/heads/main", "refs/heads/master"] {
+        if let Some(line) = stdout.lines().find(|l| l.ends_with(fallback)) {
+            if let Some(hash) = line.split_whitespace().next() {
+                return Ok(hash.to_string());
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "No suitable commit found in ls-remote output for branch '{}'",
+        branch
+    ))
 }
 
 async fn get_recent_commit_hashes(repo_url: &str, max_commits: usize) -> Result<Vec<String>> {
@@ -161,7 +184,7 @@ pub async fn sync_all_watched_flakes_commits(
 
         info!("🔗 Syncing commits for flake: {}", flake.name);
 
-        match fetch_and_insert_latest_commit(pool, &flake.repo_url).await {
+        match fetch_and_insert_latest_commit(pool, &flake.repo_url, &flake.branch).await {
             Ok(Some(commit_hash)) => {
                 info!(
                     "✅ Successfully synced commit {} for {}",

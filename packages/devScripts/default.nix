@@ -115,7 +115,7 @@ with lib.crystal-forge; let
       }
     ];
     flakes = {
-      flake_polling_interval = "10m";
+      flake_polling_interval = "1m";
       commit_evaluation_interval = "1m";
       build_processing_interval = "1m";
       watched = [
@@ -123,6 +123,7 @@ with lib.crystal-forge; let
           name = "dotfiles";
           repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
           auto_poll = true;
+          branch = "nixos";
         }
       ];
     };

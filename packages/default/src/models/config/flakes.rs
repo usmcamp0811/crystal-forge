@@ -17,6 +17,12 @@ pub struct WatchedFlake {
     pub name: String,
     pub repo_url: String,
     pub auto_poll: bool, // true = server polls git directly, false = webhook-only
+    #[serde(default = "default_branch")]
+    pub branch: String,
+}
+
+fn default_branch() -> String {
+    "main".to_string()
 }
 
 impl FlakeConfig {
