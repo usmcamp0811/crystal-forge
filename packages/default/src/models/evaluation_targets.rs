@@ -100,11 +100,11 @@ impl EvaluationTarget {
             warn!("Failed to load Crystal Forge config: {}, using defaults", e);
             CrystalForgeConfig::default()
         });
-        let build_config = cfg.build.as_ref().unwrap();
+        let build_config = cfg.get_build_config();
 
         let hash = match self.target_type {
             TargetType::NixOS => {
-                self.evaluate_nixos_system_with_build(false, build_config)
+                self.evaluate_nixos_system_with_build(false, &build_config)
                     .await?
             }
             TargetType::HomeManager => anyhow::bail!("Home Manager evaluation not implemented yet"),

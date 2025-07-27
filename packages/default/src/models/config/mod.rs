@@ -28,6 +28,7 @@ use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
 use tokio_postgres::NoTls;
@@ -58,6 +59,28 @@ impl CrystalForgeConfig {
             vulnix: Some(VulnixConfig::default()),
             build: Some(BuildConfig::default()),
             cache: Some(CacheConfig::default()),
+        }
+    }
+    /// Gets build config, returning owned value with defaults if missing
+    pub fn get_build_config(&self) -> BuildConfig {
+        self.build.clone().unwrap_or_default()
+    }
+
+    /// Gets vulnix config, returning owned value with defaults if missing  
+    pub fn get_vulnix_config(&self) -> VulnixConfig {
+        self.vulnix.clone().unwrap_or_default()
+    }
+
+    /// Gets cache config, returning owned value with defaults if missing
+    pub fn get_cache_config(&self) -> CacheConfig {
+        self.cache.clone().unwrap_or_default()
+    }
+
+    /// Gets build config as reference (for when you need to avoid cloning)
+    pub fn build_config_ref(&self) -> Cow<'_, BuildConfig> {
+        match &self.build {
+            Some(config) => Cow::Borrowed(config),
+            None => Cow::Owned(BuildConfig::default()),
         }
     }
     pub fn load() -> Result<Self> {
