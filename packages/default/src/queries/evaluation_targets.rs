@@ -259,7 +259,7 @@ pub async fn get_target_by_id(pool: &PgPool, target_id: i32) -> Result<Evaluatio
         SELECT
             id,
             commit_id,
-            target_type as "target_type: TargetType",
+            target_type,
             target_name,
             derivation_path,
             scheduled_at,
@@ -284,7 +284,7 @@ pub async fn get_pending_dry_run_targets(pool: &PgPool) -> Result<Vec<Evaluation
         SELECT
             id,
             commit_id,
-            target_type as "target_type: TargetType",
+            target_type,
             target_name,
             derivation_path,
             scheduled_at,

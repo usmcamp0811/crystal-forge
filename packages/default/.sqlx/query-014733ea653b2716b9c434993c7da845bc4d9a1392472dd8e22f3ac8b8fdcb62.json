@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            status\n        FROM evaluation_targets\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type,\n            target_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            status\n        FROM evaluation_targets\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "target_type: TargetType",
+        "name": "target_type",
         "type_info": "Text"
       },
       {
@@ -60,5 +60,5 @@
       false
     ]
   },
-  "hash": "dae9fcb643e319ab3f43f10fb50c2088e40f9a7432cda7b8334c8ac5fc3066f3"
+  "hash": "014733ea653b2716b9c434993c7da845bc4d9a1392472dd8e22f3ac8b8fdcb62"
 }
