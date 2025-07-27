@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
     cfg.sync_systems_to_db(&pool).await?;
     let background_pool = pool.clone();
     let flake_init_pool = pool.clone();
+    // TODO: Update this to get the first N commits on the first time
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.as_ref().unwrap().watched).await?;
     reset_non_terminal_targets(&pool);
     spawn_background_tasks(cfg.clone(), background_pool);

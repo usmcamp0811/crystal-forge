@@ -9,6 +9,7 @@ use crate::queries::evaluation_targets::{
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
+use futures::stream;
 use futures::stream::{FuturesUnordered, StreamExt};
 
 use sqlx::PgPool;
@@ -128,46 +129,48 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
     match get_pending_dry_run_targets(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
-            let concurrency_limit = 4; // adjust as needed
-            // Use FuturesUnordered instead of stream::iter for better concurrency
-            let mut futures = FuturesUnordered::new();
-            for mut target in pending_targets {
-                let pool = pool.clone();
-                futures.push(async move {
-                    if let Err(e) = mark_target_dry_run_in_progress(&pool, target.id).await {
-                        error!("❌ Failed to mark target in-progress: {e}");
-                        return;
-                    }
-                    match target.resolve_derivation_path(&pool).await {
-                        Ok(path) => {
-                            match mark_target_dry_run_complete(&pool, target.id, &path).await {
-                                Ok(updated) => info!("✅ Updated: {:?}", updated),
-                                Err(e) => error!("❌ Failed to update path: {e}"),
+            let concurrency_limit = 4;
+
+            // Create a stream of futures and limit concurrency
+            let results = stream::iter(pending_targets)
+                .map(|mut target| {
+                    let pool = pool.clone();
+                    async move {
+                        if let Err(e) = mark_target_dry_run_in_progress(&pool, target.id).await {
+                            error!("❌ Failed to mark target in-progress: {e}");
+                            return;
+                        }
+                        match target.resolve_derivation_path(&pool).await {
+                            Ok(path) => {
+                                match mark_target_dry_run_complete(&pool, target.id, &path).await {
+                                    Ok(updated) => info!("✅ Updated: {:?}", updated),
+                                    Err(e) => error!("❌ Failed to update path: {e}"),
+                                }
+                            }
+                            Err(e) => {
+                                if let Err(inc_err) =
+                                    increment_evaluation_target_attempt_count(&pool, &target, &e)
+                                        .await
+                                {
+                                    error!("❌ Failed to increment attempt count: {inc_err}");
+                                }
+                                // Mark as failed instead of just incrementing attempts
+                                if let Err(mark_err) =
+                                    mark_target_failed(&pool, target.id, "dry-run", &e.to_string())
+                                        .await
+                                {
+                                    error!("❌ Failed to mark target as failed: {mark_err}");
+                                } else {
+                                    info!("💥 Marked target {} as failed", target.target_name);
+                                }
                             }
                         }
-                        Err(e) => {
-                            if let Err(inc_err) =
-                                increment_evaluation_target_attempt_count(&pool, &target, &e).await
-                            {
-                                error!("❌ Failed to increment attempt count: {inc_err}");
-                            }
-                            // Mark as failed instead of just incrementing attempts
-                            if let Err(mark_err) =
-                                mark_target_failed(&pool, target.id, "dry-run", &e.to_string())
-                                    .await
-                            {
-                                error!("❌ Failed to mark target as failed: {mark_err}");
-                            } else {
-                                info!("💥 Marked target {} as failed", target.target_name);
-                            }
-                        }
                     }
-                });
-            }
-            // Process futures with concurrency limit
-            while let Some(_) = futures.next().await {
-                // Each future completes independently
-            }
+                })
+                .buffer_unordered(concurrency_limit); // This is the key line!
+
+            // Collect all results
+            results.collect::<Vec<_>>().await;
         }
         Err(e) => error!("❌ Failed to get pending targets: {e}"),
     }

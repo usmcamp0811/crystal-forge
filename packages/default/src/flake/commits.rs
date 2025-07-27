@@ -54,20 +54,32 @@ async fn get_latest_commit_hash(repo_url: &str, branch: &str) -> Result<String> 
     ))
 }
 
-async fn get_recent_commit_hashes(repo_url: &str, max_commits: usize) -> Result<Vec<String>> {
+async fn get_recent_commit_hashes(repo_url: &str, branch: &str) -> Result<Vec<String>> {
     let stdout = run_ls_remote(repo_url).await?;
     let mut commits = Vec::new();
 
-    if let Some(head_line) = stdout.lines().find(|line| line.ends_with("HEAD")) {
-        if let Some(commit_hash) = head_line.split_whitespace().next() {
+    // Try specified branch first
+    let target_ref = format!("refs/heads/{}", branch);
+    if let Some(line) = stdout.lines().find(|line| line.ends_with(&target_ref)) {
+        if let Some(commit_hash) = line.split_whitespace().next() {
             commits.push(commit_hash.to_string());
         }
     }
 
+    // Fallback to HEAD
     if commits.is_empty() {
-        for branch_name in &["refs/heads/main", "refs/heads/master"] {
-            if let Some(branch_line) = stdout.lines().find(|line| line.ends_with(branch_name)) {
-                if let Some(commit_hash) = branch_line.split_whitespace().next() {
+        if let Some(head_line) = stdout.lines().find(|line| line.ends_with("HEAD")) {
+            if let Some(commit_hash) = head_line.split_whitespace().next() {
+                commits.push(commit_hash.to_string());
+            }
+        }
+    }
+
+    // Fallback to common defaults
+    if commits.is_empty() {
+        for fallback in ["refs/heads/main", "refs/heads/master"] {
+            if let Some(line) = stdout.lines().find(|l| l.ends_with(fallback)) {
+                if let Some(commit_hash) = line.split_whitespace().next() {
                     commits.push(commit_hash.to_string());
                     break;
                 }
@@ -76,7 +88,10 @@ async fn get_recent_commit_hashes(repo_url: &str, max_commits: usize) -> Result<
     }
 
     if commits.is_empty() {
-        return Err(anyhow::anyhow!("No commits found in repository"));
+        return Err(anyhow::anyhow!(
+            "No commits found in repository for branch '{}'",
+            branch
+        ));
     }
 
     Ok(commits)
@@ -86,10 +101,9 @@ async fn get_recent_commit_hashes(repo_url: &str, max_commits: usize) -> Result<
 pub async fn fetch_and_insert_recent_commits(
     pool: &PgPool,
     repo_url: &str,
-    max_commits: usize,
+    branch: &str,
 ) -> Result<Vec<String>> {
-    let max_commits = std::cmp::min(max_commits, 10);
-    let commit_hashes = get_recent_commit_hashes(repo_url, max_commits).await?;
+    let commit_hashes = get_recent_commit_hashes(repo_url, branch).await?;
 
     let mut inserted_commits = Vec::new();
 
@@ -117,6 +131,7 @@ pub async fn fetch_and_insert_recent_commits(
     Ok(inserted_commits)
 }
 
+// TODO: update this to get the last N commits for each flake if we are starting for the first time
 /// Initialize commits for all watched flakes that don't have any commits yet
 /// This is meant to run once when the server first starts
 pub async fn initialize_flake_commits(
@@ -149,16 +164,20 @@ pub async fn initialize_flake_commits(
             }
         }
 
-        match fetch_and_insert_recent_commits(pool, &flake.repo_url, 10).await {
+        match fetch_and_insert_recent_commits(pool, &flake.repo_url, &flake.branch).await {
             Ok(commits) => {
                 info!(
-                    "✅ Successfully initialized {} commits for {}",
+                    "✅ Successfully initialized {} commits for {} on branch {}",
                     commits.len(),
-                    flake.name
+                    flake.name,
+                    flake.branch
                 );
             }
             Err(e) => {
-                warn!("❌ Failed to initialize commits for {}: {}", flake.name, e);
+                warn!(
+                    "❌ Failed to initialize commits for {}: {} on branch {}",
+                    flake.name, e, flake.branch
+                );
             }
         }
     }
