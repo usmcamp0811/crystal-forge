@@ -10,13 +10,8 @@ use tracing::{debug, error, info, warn};
 use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::queries::commits::get_commits_pending_evaluation;
 
-pub fn spawn_background_tasks(pool: PgPool) {
-    let cve_pool = pool.clone();
-    tokio::spawn(run_build_loop(cve_pool));
-}
-
 /// Runs the periodic build and CVE scanning loop
-async fn run_build_loop(pool: PgPool) {
+pub async fn run_build_loop(pool: PgPool) {
     // Load config from Crystal Forge config or use default
     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);

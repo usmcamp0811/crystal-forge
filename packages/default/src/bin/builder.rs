@@ -1,4 +1,4 @@
-use crystal_forge::builder::spawn_background_tasks;
+use crystal_forge::builder::run_build_loop;
 use crystal_forge::models::config::CrystalForgeConfig;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -13,6 +13,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = CrystalForgeConfig::load()?;
     CrystalForgeConfig::validate_db_connection().await?;
     info!("Starting Crystal Forge Builder...");
+
     let builder_cfg = cfg
         .build
         .as_ref()
@@ -20,8 +21,9 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = CrystalForgeConfig::db_pool().await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
+
     let builder_pool = pool.clone();
-    spawn_background_tasks(builder_pool);
+    run_build_loop(builder_pool).await;
 
     Ok(())
 }

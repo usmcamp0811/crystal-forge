@@ -27,7 +27,7 @@ pub async fn get_targets_needing_cve_scan(
         FROM evaluation_targets et
         LEFT JOIN cve_scans cs ON et.id = cs.evaluation_target_id 
             AND cs.completed_at IS NOT NULL
-        WHERE et.status = 'complete'
+        WHERE et.status = 'dry-run-complete'
             AND et.derivation_path IS NOT NULL
             AND (cs.id IS NULL OR cs.completed_at < NOW() - INTERVAL '24 hours')
         ORDER BY et.completed_at ASC
@@ -355,6 +355,6 @@ pub async fn get_latest_scan(pool: &PgPool, evaluation_target_id: i32) -> Result
     )
     .fetch_optional(pool)
     .await?;
-    
+
     Ok(scan)
 }
