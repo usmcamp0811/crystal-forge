@@ -1,6 +1,8 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
-use crate::queries::evaluation_targets::{mark_target_build_in_progress, mark_target_failed};
+use crate::queries::evaluation_targets::{
+    get_targets_ready_for_build, mark_target_build_in_progress, mark_target_failed,
+};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use sqlx::PgPool;
@@ -10,19 +12,52 @@ use tracing::{debug, error, info, warn};
 use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::queries::commits::get_commits_pending_evaluation;
 
-/// Runs the periodic build and CVE scanning loop
+/// Runs the periodic build and cache push loop
 pub async fn run_build_loop(pool: PgPool) {
-    // Load config from Crystal Forge config or use default
     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
         CrystalForgeConfig::default()
     });
     let build_config = cfg.get_build_config();
-    let vulnix_config = cfg.get_vulnix_config();
     let cache_config = cfg.get_cache_config();
+
     info!(
-        "🔍 Starting Derivation Build loop (every {}s)...",
+        "🔍 Starting Build loop (every {}s)...",
         build_config.poll_interval.as_secs()
+    );
+
+    debug!(
+        "🔧 Build config: cores={}, max_jobs={}, substitutes={}, poll_interval={}s",
+        build_config.cores,
+        build_config.max_jobs,
+        build_config.use_substitutes,
+        build_config.poll_interval.as_secs()
+    );
+    debug!(
+        "🔧 Cache config: push_after_build={}, push_to={:?}",
+        cache_config.push_after_build, cache_config.push_to
+    );
+
+    loop {
+        if let Err(e) = build_targets(&pool, &build_config, &cache_config).await {
+            error!("❌ Error in build cycle: {e}");
+        }
+
+        sleep(build_config.poll_interval).await;
+    }
+}
+
+/// Runs the periodic CVE scanning loop
+pub async fn run_cve_scan_loop(pool: PgPool) {
+    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
+        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
+        CrystalForgeConfig::default()
+    });
+    let vulnix_config = cfg.get_vulnix_config();
+
+    info!(
+        "🔍 Starting CVE Scan loop (every {}s)...",
+        vulnix_config.poll_interval.as_secs()
     );
 
     if !VulnixRunner::check_vulnix_available().await {
@@ -39,47 +74,26 @@ pub async fn run_build_loop(pool: PgPool) {
         vulnix_config.enable_whitelist,
         vulnix_config.extra_args
     );
-    debug!(
-        "🔧 Build config: cores={}, max_jobs={}, substitutes={}, poll_interval={}s",
-        build_config.cores,
-        build_config.max_jobs,
-        build_config.use_substitutes,
-        build_config.poll_interval.as_secs()
-    );
-    debug!(
-        "🔧 Cache config: push_after_build={}, push_to={:?}",
-        cache_config.push_after_build, cache_config.push_to
-    );
 
     let vulnix_runner = VulnixRunner::with_config(&vulnix_config);
 
     loop {
-        if let Err(e) = build_evaluation_targets(
-            &pool,
-            &vulnix_runner,
-            vulnix_version.clone(),
-            &build_config,
-            &cache_config,
-        )
-        .await
-        {
-            error!("❌ Error in build cycle: {e}");
+        if let Err(e) = scan_targets(&pool, &vulnix_runner, vulnix_version.clone()).await {
+            error!("❌ Error in CVE scan cycle: {e}");
         }
 
-        sleep(build_config.poll_interval).await;
+        sleep(vulnix_config.poll_interval).await;
     }
 }
 
-/// Process targets that need CVE scanning
-async fn build_evaluation_targets(
+/// Process targets that need building and cache pushing
+async fn build_targets(
     pool: &PgPool,
-    vulnix_runner: &VulnixRunner,
-    vulnix_version: Option<String>,
     build_config: &BuildConfig,
     cache_config: &CacheConfig,
 ) -> Result<()> {
-    // Get targets that need building (not just CVE scanning)
-    match get_targets_needing_cve_scan(pool, Some(1)).await {
+    // Get targets ready for building (those with dry-run-complete status)
+    match get_targets_ready_for_build(pool).await {
         Ok(targets) => {
             if targets.is_empty() {
                 info!("🔍 No targets need building");
@@ -91,7 +105,7 @@ async fn build_evaluation_targets(
 
             mark_target_build_in_progress(pool, target.id).await?;
 
-            // Step 1: Build the target (sequential, expensive)
+            // Build the target
             let store_path = match target
                 .evaluate_nixos_system_with_build(true, build_config)
                 .await
@@ -102,7 +116,6 @@ async fn build_evaluation_targets(
                 }
                 Err(e) => {
                     error!("❌ Build failed for {}: {}", target.target_name, e);
-                    // Mark build as failed in database
                     if let Err(save_err) =
                         mark_target_failed(pool, target.id, "build", &e.to_string()).await
                     {
@@ -112,30 +125,61 @@ async fn build_evaluation_targets(
                 }
             };
 
-            // TODO: Update Status to Scanning
-            // Step 2: Run CVE scan and cache push in parallel (both use the built store path)
-            let cve_scan_future = async {
-                info!("🔍 Starting CVE scan for target: {}", target.target_name);
-                vulnix_runner
-                    .scan_target(pool, target.id, vulnix_version.clone())
-                    .await
-            };
-
-            let cache_push_future = async {
-                if cache_config.push_after_build {
-                    info!("📤 Starting cache push for target: {}", target.target_name);
-                    target.push_to_cache(&store_path, cache_config).await
-                } else {
-                    info!("⏭️ Skipping cache push (push_after_build = false)");
-                    Ok(())
+            // Push to cache if configured
+            if cache_config.push_after_build {
+                info!("📤 Starting cache push for target: {}", target.target_name);
+                match target.push_to_cache(&store_path, cache_config).await {
+                    Ok(_) => {
+                        info!("✅ Cache push completed for {}", target.target_name);
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Cache push failed for {}: {}", target.target_name, e);
+                        // Cache push failures are non-fatal, just log and continue
+                    }
                 }
-            };
+            } else {
+                info!("⏭️ Skipping cache push (push_after_build = false)");
+            }
 
-            // Run both operations in parallel
-            let (cve_result, cache_result) = tokio::join!(cve_scan_future, cache_push_future);
+            // Mark as build complete (this will make it available for CVE scanning)
+            use crate::queries::evaluation_targets::mark_target_build_complete;
+            mark_target_build_complete(pool, target.id).await?;
+        }
+        Err(e) => error!("❌ Failed to get targets ready for build: {e}"),
+    }
+    Ok(())
+}
 
-            // Handle CVE scan result
-            match cve_result {
+/// Process targets that need CVE scanning
+async fn scan_targets(
+    pool: &PgPool,
+    vulnix_runner: &VulnixRunner,
+    vulnix_version: Option<String>,
+) -> Result<()> {
+    // Get targets that need CVE scanning (those with build-complete status)
+    match get_targets_needing_cve_scan(pool, Some(1)).await {
+        Ok(targets) => {
+            if targets.is_empty() {
+                info!("🔍 No targets need CVE scanning");
+                return Ok(());
+            }
+
+            let target = &targets[0];
+            info!("🔍 Starting CVE scan for target: {}", target.target_name);
+
+            // Get the store path from the target's derivation_path
+            let store_path = target.derivation_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Target {} has no derivation path for scanning",
+                    target.target_name
+                )
+            })?;
+
+            // Run CVE scan using the store path
+            match vulnix_runner
+                .scan_target(&pool, target.id, vulnix_version)
+                .await
+            {
                 Ok(vulnix_entries) => {
                     let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(
                         &vulnix_entries,
@@ -155,19 +199,8 @@ async fn build_evaluation_targets(
                     }
                 }
             }
-
-            // Handle cache push result
-            match cache_result {
-                Ok(_) => {
-                    info!("✅ Cache push completed for {}", target.target_name);
-                }
-                Err(e) => {
-                    warn!("⚠️ Cache push failed for {}: {}", target.target_name, e);
-                    // Cache push failures are non-fatal, just log and continue
-                }
-            }
         }
-        Err(e) => error!("❌ Failed to get targets needing build: {e}"),
+        Err(e) => error!("❌ Failed to get targets needing CVE scan: {e}"),
     }
     Ok(())
 }

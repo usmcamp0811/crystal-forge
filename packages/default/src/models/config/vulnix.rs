@@ -10,6 +10,9 @@ pub struct VulnixConfig {
     pub enable_whitelist: bool,
     pub extra_args: Vec<String>,
     pub whitelist_path: Option<String>,
+    /// Interval in seconds between checking for new build jobs
+    #[serde(with = "humantime_serde")]
+    pub poll_interval: Duration,
 }
 
 impl Default for VulnixConfig {
@@ -20,6 +23,7 @@ impl Default for VulnixConfig {
             enable_whitelist: false,
             extra_args: vec![],
             whitelist_path: None,
+            poll_interval: Duration::from_secs(300), // 5 minutes
         }
     }
 }
