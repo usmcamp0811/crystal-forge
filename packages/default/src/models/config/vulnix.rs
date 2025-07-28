@@ -9,6 +9,7 @@ pub struct VulnixConfig {
     pub max_retries: u32,
     pub enable_whitelist: bool,
     pub extra_args: Vec<String>,
+    pub whitelist_path: Option<String>,
 }
 
 impl Default for VulnixConfig {
@@ -16,8 +17,9 @@ impl Default for VulnixConfig {
         Self {
             timeout: Duration::from_secs(300), // 5 minutes
             max_retries: 2,
-            enable_whitelist: true,
+            enable_whitelist: false,
             extra_args: vec![],
+            whitelist_path: None,
         }
     }
 }
@@ -26,5 +28,25 @@ impl VulnixConfig {
     /// Get timeout in seconds for compatibility/logging
     pub fn timeout_seconds(&self) -> u64 {
         self.timeout.as_secs()
+    }
+    /// Get vulnix command args
+    pub fn get_vulnix_args(&self) -> Vec<String> {
+        let mut args = self.extra_args.clone();
+
+        // Only add whitelist if enabled and path exists
+        if self.enable_whitelist {
+            if let Some(whitelist_path) = &self.whitelist_path {
+                if std::path::Path::new(whitelist_path).exists() {
+                    args.extend_from_slice(&["--whitelist".to_string(), whitelist_path.clone()]);
+                } else {
+                    eprintln!(
+                        "Warning: Whitelist enabled but file {} not found",
+                        whitelist_path
+                    );
+                }
+            }
+        }
+
+        args
     }
 }

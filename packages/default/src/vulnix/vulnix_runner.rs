@@ -79,7 +79,7 @@ impl VulnixRunner {
 
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
-        cmd.arg("--json").arg("--system").arg(derivation_path);
+        cmd.arg("--json").arg(derivation_path);
 
         if self.config.enable_whitelist {
             cmd.arg("--whitelist").arg("/etc/vulnix-whitelist.toml");
