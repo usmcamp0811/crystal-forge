@@ -74,7 +74,7 @@ with lib.crystal-forge; let
       port = cf_port;
     };
     build = {
-      cores = 4;
+      cores = 7;
       max_jobs = 1;
       poll_interval = "1m";
     };

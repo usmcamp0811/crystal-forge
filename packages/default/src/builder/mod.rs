@@ -89,6 +89,8 @@ async fn build_evaluation_targets(
             let target = &targets[0];
             info!("🏗️ Starting build for target: {}", target.target_name);
 
+            mark_target_build_in_progress(pool, target.id).await?;
+
             // Step 1: Build the target (sequential, expensive)
             let store_path = match target
                 .evaluate_nixos_system_with_build(true, build_config)
@@ -110,6 +112,7 @@ async fn build_evaluation_targets(
                 }
             };
 
+            // TODO: Update Status to Scanning
             // Step 2: Run CVE scan and cache push in parallel (both use the built store path)
             let cve_scan_future = async {
                 info!("🔍 Starting CVE scan for target: {}", target.target_name);
