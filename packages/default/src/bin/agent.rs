@@ -87,9 +87,15 @@ pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result
 
     // Send to state endpoint
     let client = Client::new();
+    let (scheme, port_suffix) = match client_cfg.server_port {
+        443 => ("https", "".to_string()),       // Omit :443 for HTTPS
+        80 => ("http", "".to_string()),         // Omit :80 for HTTP
+        port => ("http", format!(":{}", port)), // Include port for non-standard
+    };
+
     let url = format!(
-        "http://{}:{}/agent/state",
-        client_cfg.server_host, client_cfg.server_port
+        "{}://{}{}/agent/state",
+        scheme, client_cfg.server_host, port_suffix
     );
 
     println!("Posting state change to: {}", url);
