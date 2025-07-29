@@ -15,22 +15,22 @@ pub async fn get_targets_needing_cve_scan(
     let targets = sqlx::query_as!(
         EvaluationTarget,
         r#"
-        SELECT 
-            et.id,
-            et.commit_id,
-            et.target_type,
-            et.target_name,
-            et.derivation_path,
-            et.scheduled_at,
-            et.completed_at,
-            et.status
-        FROM evaluation_targets et
-        LEFT JOIN cve_scans cs ON et.id = cs.evaluation_target_id 
-            AND cs.completed_at IS NOT NULL
-        WHERE et.status = 'dry-run-complete'
-            AND et.derivation_path IS NOT NULL
-            AND (cs.id IS NULL OR cs.completed_at < NOW() - INTERVAL '24 hours')
-        ORDER BY et.completed_at ASC
+          SELECT 
+              et.id,
+              et.commit_id,
+              et.target_type,
+              et.target_name,
+              et.derivation_path,
+              et.scheduled_at,
+              et.completed_at,
+              et.status
+          FROM evaluation_targets et
+          LEFT JOIN cve_scans cs ON et.id = cs.evaluation_target_id 
+              AND cs.status != 'failed' 
+              AND cs.attempts < 5
+          WHERE et.status IN ('dry-run-complete', 'build-complete')
+              AND et.derivation_path IS NOT NULL
+          ORDER BY et.completed_at ASC
         LIMIT $1
         "#,
         limit
