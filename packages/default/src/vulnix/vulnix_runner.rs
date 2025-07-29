@@ -64,13 +64,23 @@ impl VulnixRunner {
         let target =
             crate::queries::evaluation_targets::get_target_by_id(pool, evaluation_target_id)
                 .await?;
-
         let derivation_path = target.derivation_path.ok_or_else(|| {
             anyhow!(
                 "Evaluation target {} has no derivation path",
                 evaluation_target_id
             )
         })?;
+
+        // Check if the derivation path actually exists on the filesystem
+        if !tokio::fs::try_exists(&derivation_path)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(anyhow!(
+                "Derivation path does not exist on filesystem: {}",
+                derivation_path
+            ));
+        }
 
         info!(
             "🔍 Scanning target {} with derivation path: {}",
@@ -80,25 +90,20 @@ impl VulnixRunner {
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
         cmd.arg("--json").arg(derivation_path);
-
         if self.config.enable_whitelist {
             cmd.arg("--whitelist").arg("/etc/vulnix-whitelist.toml");
         }
-
         // Add extra args
         for arg in &self.config.extra_args {
             cmd.arg(arg);
         }
-
         match tokio::time::timeout(self.config.timeout, cmd.output()).await {
             Ok(Ok(output)) => {
                 if output.status.success() {
                     let json_output = String::from_utf8_lossy(&output.stdout);
-
                     // Parse vulnix JSON output directly
                     let vulnix_entries: VulnixScanOutput = serde_json::from_str(&json_output)
                         .map_err(|e| anyhow!("Failed to parse vulnix JSON output: {}", e))?;
-
                     info!(
                         "✅ Vulnix scan completed successfully with {} entries",
                         vulnix_entries.len()
