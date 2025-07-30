@@ -26,13 +26,14 @@
       pkgs.pkg-config
       pkgs.openssl
       pkgs.sqlx-cli
-      pkgs.libressl # Ensure OpenSSL-related libraries are available
+      pkgs.libressl
     ];
 
     # Runtime dependencies that need to be in PATH
     runtimeDeps = with pkgs; [
       util-linux # findmnt, blkid
       zfs # zfs command (optional)
+      vulnix
     ];
 
     # Set the GIT_HASH environment variable during build

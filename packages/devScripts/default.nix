@@ -73,6 +73,11 @@ with lib.crystal-forge; let
       host = "0.0.0.0";
       port = cf_port;
     };
+    build = {
+      cores = 7;
+      max_jobs = 1;
+      poll_interval = "1m";
+    };
     client = {
       server_host = "127.0.0.1";
       server_port = cf_port;
@@ -115,10 +120,15 @@ with lib.crystal-forge; let
       }
     ];
     flakes = {
+      flake_polling_interval = "1m";
+      commit_evaluation_interval = "1m";
+      build_processing_interval = "1m";
       watched = [
         {
           name = "dotfiles";
-          repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
+          repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+          auto_poll = true;
+          branch = "nixos";
         }
       ];
     };
@@ -179,7 +189,7 @@ with lib.crystal-forge; let
 
   runServer = pkgs.writeShellApplication {
     name = "run-server";
-    runtimeInputs = [pkgs.nix];
+    runtimeInputs = [pkgs.nix pkgs.git pkgs.vulnix];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -195,12 +205,12 @@ with lib.crystal-forge; let
     modules = [
       inputs.services-flake.processComposeModules.default
       {
-        settings.processes.agent-sim = {
-          inherit namespace;
-          command = agent-sim;
-          disabled = false;
-          depends_on."server".condition = "process_healthy";
-        };
+        # settings.processes.agent-sim = {
+        #   inherit namespace;
+        #   command = agent-sim;
+        #   disabled = false;
+        #   depends_on."server".condition = "process_healthy";
+        # };
         # settings.processes.lucas-agent = {
         #   inherit namespace;
         #   command = lucas;

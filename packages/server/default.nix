@@ -8,6 +8,7 @@
       mkdir -p $out/bin
       cp ${pkgs.crystal-forge.default}/bin/${pname} $out/bin/${pname}
       cp ${pkgs.crystal-forge.default}/bin/cf-keygen $out/bin/cf-keygen
+      cp ${pkgs.crystal-forge.default}/bin/builder $out/bin/builder
     '';
   };
 in
@@ -16,5 +17,9 @@ in
     cf-keygen = pkgs.writeShellApplication {
       name = "cf-keygen";
       text = "${pkgs.crystal-forge.default}/bin/cf-keygen \"$@\"";
+    };
+    builder = pkgs.writeShellApplication {
+      name = "builder";
+      text = "${pkgs.crystal-forge.default}/bin/builder \"$@\"";
     };
   }
