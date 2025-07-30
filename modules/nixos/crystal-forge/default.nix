@@ -632,12 +632,36 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
 
+        # Memory management - CRITICAL for preventing OOM kills
+        MemoryMax = "16G"; # Double your current limit
+        MemoryHigh = "12G"; # Start throttling at 12GB
+        MemorySwapMax = "4G"; # Allow some swap usage
+
+        # CPU limits to prevent overwhelming the system
+        CPUQuota = "200%"; # Limit to 2 cores max
+        # File system access
+        ReadWritePaths = [
+          "/var/lib/crystal-forge"
+          "/nix/store" # Nix builds need write access to store
+          "/tmp" # Nix builds use /tmp
+        ];
+
+        # Additional Nix-related paths that might be needed
+        ReadOnlyPaths = [
+          "/etc/nix" # Nix configuration
+          "/etc/ssl/certs" # For HTTPS substituters
+        ];
+
+        # Cache directory for Nix
+        CacheDirectory = "crystal-forge-nix";
+        CacheDirectoryMode = "0750";
+        # Working directory - important for Nix builds
+        WorkingDirectory = "/var/lib/crystal-forge/workdir";
         # Security settings
         NoNewPrivileges = true;
-        # TODO: test if we can do strict
+
         ProtectSystem = "no";
         ProtectHome = true;
-        ReadWritePaths = ["/var/lib/crystal-forge"];
         PrivateTmp = true;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
