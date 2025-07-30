@@ -59,30 +59,30 @@
       };
     }
     // {
-      vulnix = {
-        timeout = cfg.vulnix.timeout;
-        max_retries = cfg.vulnix.max_retries;
-        enable_whitelist = cfg.vulnix.enable_whitelist;
-        extra_args = cfg.vulnix.extra_args;
-        whitelist_path =
-          if cfg.vulnix.whitelist_path != null
-          then toString cfg.vulnix.whitelist_path
-          else null;
-        poll_interval = cfg.vulnix.poll_interval;
-      };
+      vulnix =
+        {
+          timeout = cfg.vulnix.timeout;
+          max_retries = cfg.vulnix.max_retries;
+          enable_whitelist = cfg.vulnix.enable_whitelist;
+          extra_args = cfg.vulnix.extra_args;
+          poll_interval = cfg.vulnix.poll_interval;
+        }
+        // lib.optionalAttrs (cfg.vulnix.whitelist_path != null) {
+          whitelist_path = toString cfg.vulnix.whitelist_path;
+        };
     }
     // lib.optionalAttrs (cfg.cache.push_to != null) {
-      cache = {
-        push_to = cfg.cache.push_to;
-        push_after_build = cfg.cache.push_after_build;
-        signing_key =
-          if cfg.cache.signing_key != null
-          then toString cfg.cache.signing_key
-          else null;
-        compression = cfg.cache.compression;
-        push_filter = cfg.cache.push_filter;
-        parallel_uploads = cfg.cache.parallel_uploads;
-      };
+      cache =
+        {
+          push_to = cfg.cache.push_to;
+          push_after_build = cfg.cache.push_after_build;
+          compression = cfg.cache.compression;
+          push_filter = cfg.cache.push_filter;
+          parallel_uploads = cfg.cache.parallel_uploads;
+        }
+        // lib.optionalAttrs (cfg.cache.signing_key != null) {
+          signing_key = toString cfg.cache.signing_key;
+        };
     };
   # Generate the raw config file
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
