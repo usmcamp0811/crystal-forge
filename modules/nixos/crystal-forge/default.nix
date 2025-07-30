@@ -129,7 +129,29 @@
 
   # Builder wrapper scripts
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
+    set -euo pipefail
+
+    # Set up environment
     export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    export TMPDIR="/var/lib/crystal-forge/tmp"
+    export HOME="/var/lib/crystal-forge"
+
+    # Ensure we're in a writable directory
+    cd /var/lib/crystal-forge/workdir
+
+    # Clean up any stale symlinks
+    find . -name "result*" -type l -delete 2>/dev/null || true
+
+    # Set NIX_BUILD_CORES if not already set
+    export NIX_BUILD_CORES="${toString cfg.build.cores}"
+    export NIX_MAX_JOBS="${toString cfg.build.max_jobs}"
+
+    echo "Crystal Forge Builder starting..."
+    echo "Working directory: $(pwd)"
+    echo "Config file: $CRYSTAL_FORGE_CONFIG"
+    echo "Temp directory: $TMPDIR"
+
+    # Run the actual builder
     exec ${pkgs.crystal-forge.server}/bin/builder "$@"
   '';
 
@@ -471,6 +493,49 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
+    # Allow crystal-forge user to build
+    nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable) {
+      allowed-users = ["root" "crystal-forge"];
+      trusted-users = ["root" "crystal-forge"]; # Add if you want to allow substitutes
+
+      # Build settings that match your Crystal Forge config
+      cores = lib.mkDefault cfg.build.cores;
+      max-jobs = lib.mkDefault cfg.build.max_jobs;
+
+      # Ensure build isolation
+      sandbox = lib.mkDefault true;
+
+      # Add binary caches if you're using them
+      substituters = lib.mkIf cfg.build.use_substitutes [
+        "https://cache.nixos.org/"
+        # Add your custom caches here
+      ];
+    };
+
+    # Grant crystal-forge user access to nix commands
+    users.users.crystal-forge = lib.mkIf (cfg.server.enable || cfg.build.enable) {
+      description = "Crystal Forge service user";
+      isSystemUser = true;
+      group = "crystal-forge";
+      home = "/var/lib/crystal-forge";
+      createHome = true;
+
+      # Add to nixbld group for build access
+      extraGroups = ["nixbld"];
+    };
+
+    # Ensure the crystal-forge group exists
+    users.groups.crystal-forge = {};
+
+    # Add to systemd-tmpfiles for proper directory setup
+    systemd.tmpfiles.rules = [
+      "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/tmp 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/builds 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
+    ];
     # PostgreSQL setup when using local database
     services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
       enable = true;
@@ -530,8 +595,6 @@ in {
       };
     };
 
-    nix.settings.allowed-users = ["root" "crystal-forge"];
-
     systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
@@ -546,16 +609,21 @@ in {
       environment = {
         RUST_LOG = cfg.log_level;
         NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
+        TMPDIR = "/var/lib/crystal-forge/tmp";
       };
 
       preStart = ''
-        echo "Starting Crystal Forge Server configuration generation..."
+        echo "Starting Crystal Forge Builder configuration generation..."
         ${configScript}
         echo "Configuration generation complete"
 
-        echo "Ensuring .cache/nix directory exists with correct ownership..."
+        echo "Ensuring directory structure exists with correct ownership..."
         mkdir -p /var/lib/crystal-forge/.cache/nix
+        mkdir -p /var/lib/crystal-forge/tmp
+        mkdir -p /var/lib/crystal-forge/builds
+        mkdir -p /var/lib/crystal-forge/workdir
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/
+        chmod -R 755 /var/lib/crystal-forge/
       '';
 
       serviceConfig = {
@@ -704,17 +772,6 @@ in {
         StateDirectoryMode = "0750";
       };
     };
-
-    # Create system user and group
-    users.users.crystal-forge = lib.mkIf cfg.server.enable {
-      description = "Crystal Forge service user";
-      isSystemUser = true;
-      group = "crystal-forge";
-      home = "/var/lib/crystal-forge";
-      createHome = true;
-    };
-
-    users.groups.crystal-forge = lib.mkIf cfg.server.enable {};
 
     # Assertions for validation
     assertions = [
