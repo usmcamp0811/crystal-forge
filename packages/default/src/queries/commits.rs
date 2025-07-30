@@ -47,7 +47,7 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
         FROM commits c
         LEFT JOIN evaluation_targets t ON c.id = t.commit_id
         WHERE t.commit_id IS NULL
-        AND c.attempt_count <= 5
+        AND c.attempt_count < 5
         "#
     )
     .fetch_all(pool)
@@ -69,4 +69,18 @@ pub async fn increment_commit_list_attempt_count(pool: &PgPool, target: &Commit)
     .await?;
 
     Ok(())
+}
+
+/// Check if a flake already has commits in the database
+pub async fn flake_has_commits(pool: &PgPool, repo_url: &str) -> Result<bool> {
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM commits c 
+         JOIN flakes f ON c.flake_id = f.id 
+         WHERE f.repo_url = $1",
+    )
+    .bind(repo_url)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.0 > 0)
 }
