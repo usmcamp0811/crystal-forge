@@ -3,8 +3,8 @@ use crate::models::cve_scans::{CveScan, ScanStatus};
 use crate::models::evaluation_targets::EvaluationTarget;
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
-use bigdecimal::BigDecimal; // make sure this is in scope
-use bigdecimal::FromPrimitive; // required for `from_f32`
+use bigdecimal::BigDecimal;
+use bigdecimal::FromPrimitive;
 use sqlx::PgPool;
 use uuid::Uuid;
 

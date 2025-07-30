@@ -1,5 +1,7 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
-use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
+use crate::queries::cve_scans::{
+    get_targets_needing_cve_scan, mark_cve_scan_failed, save_scan_results,
+};
 use crate::queries::evaluation_targets::{
     get_targets_ready_for_build, mark_target_build_in_progress, mark_target_failed,
 };
@@ -184,8 +186,8 @@ async fn scan_targets(
                     let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(
                         &vulnix_entries,
                     );
-                    // TODO: Save results to database here
-                    // save_scan_results(pool, target.id, &vulnix_entries, &stats).await?;
+                    // TODO: replace None with scan duration
+                    save_scan_results(pool, target.id, &vulnix_entries, None).await?;
                     info!(
                         "✅ CVE scan completed for {}: {}",
                         target.target_name, stats
