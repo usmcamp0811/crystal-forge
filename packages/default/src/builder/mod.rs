@@ -1,6 +1,7 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::queries::cve_scans::{
-    get_targets_needing_cve_scan, mark_cve_scan_failed, save_scan_results,
+    create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
+    save_scan_results,
 };
 use crate::queries::evaluation_targets::{
     get_targets_ready_for_build, mark_target_build_in_progress, mark_target_failed,
@@ -169,25 +170,29 @@ async fn scan_targets(
             let target = &targets[0];
             info!("🔍 Starting CVE scan for target: {}", target.target_name);
 
-            // Get the store path from the target's derivation_path
-            let store_path = target.derivation_path.as_ref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Target {} has no derivation path for scanning",
-                    target.target_name
-                )
-            })?;
+            // Create a new scan record before starting
+            let scan_id =
+                create_cve_scan(pool, target.id.into(), "vulnix", vulnix_version.clone()).await?;
 
-            // Run CVE scan using the store path
+            // Mark scan as in progress
+            mark_scan_in_progress(pool, scan_id).await?;
+
+            let start_time = std::time::Instant::now();
+
+            // Run CVE scan using the vulnix runner
             match vulnix_runner
                 .scan_target(&pool, target.id, vulnix_version)
                 .await
             {
                 Ok(vulnix_entries) => {
+                    let scan_duration_ms = Some(start_time.elapsed().as_millis() as i32);
                     let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(
                         &vulnix_entries,
                     );
-                    // TODO: replace None with scan duration
-                    save_scan_results(pool, target.id, &vulnix_entries, None).await?;
+
+                    // Save the detailed scan results to database
+                    save_scan_results(pool, scan_id, &vulnix_entries, scan_duration_ms).await?;
+
                     info!(
                         "✅ CVE scan completed for {}: {}",
                         target.target_name, stats
