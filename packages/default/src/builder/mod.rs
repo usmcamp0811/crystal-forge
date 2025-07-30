@@ -160,7 +160,7 @@ async fn scan_targets(
     vulnix_version: Option<String>,
 ) -> Result<()> {
     // Get targets that need CVE scanning (those with build-complete status)
-    match get_targets_needing_cve_scan(pool, Some(1)).await {
+    match get_targets_needing_cve_scan(pool, Some(20)).await {
         Ok(targets) => {
             if targets.is_empty() {
                 info!("🔍 No targets need CVE scanning");
