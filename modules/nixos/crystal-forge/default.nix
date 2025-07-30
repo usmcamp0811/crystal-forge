@@ -48,6 +48,41 @@
     }
     // lib.optionalAttrs (cfg.environments != []) {
       environments = cfg.environments;
+    }
+    // {
+      build = {
+        cores = cfg.build.cores;
+        max_jobs = cfg.build.max_jobs;
+        use_substitutes = cfg.build.use_substitutes;
+        offline = cfg.build.offline;
+        poll_interval = cfg.build.poll_interval;
+      };
+    }
+    // {
+      vulnix = {
+        timeout = cfg.vulnix.timeout;
+        max_retries = cfg.vulnix.max_retries;
+        enable_whitelist = cfg.vulnix.enable_whitelist;
+        extra_args = cfg.vulnix.extra_args;
+        whitelist_path =
+          if cfg.vulnix.whitelist_path != null
+          then toString cfg.vulnix.whitelist_path
+          else null;
+        poll_interval = cfg.vulnix.poll_interval;
+      };
+    }
+    // lib.optionalAttrs (cfg.cache.push_to != null) {
+      cache = {
+        push_to = cfg.cache.push_to;
+        push_after_build = cfg.cache.push_after_build;
+        signing_key =
+          if cfg.cache.signing_key != null
+          then toString cfg.cache.signing_key
+          else null;
+        compression = cfg.cache.compression;
+        push_filter = cfg.cache.push_filter;
+        parallel_uploads = cfg.cache.parallel_uploads;
+      };
     };
   # Generate the raw config file
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
@@ -204,7 +239,116 @@ in {
         description = "Interval between build processing checks (e.g., '1m', '5m')";
       };
     };
+    # Build configuration options
+    build = {
+      cores = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 1;
+        description = "Maximum CPU cores to use per build job";
+      };
 
+      max_jobs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 1;
+        description = "Maximum number of concurrent build jobs";
+      };
+
+      use_substitutes = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether to use binary substitutes/caches";
+      };
+
+      offline = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Build in offline mode (no network access)";
+      };
+
+      poll_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "5m";
+        description = "Interval between checking for new build jobs";
+      };
+    };
+
+    # Vulnix configuration options
+    vulnix = {
+      timeout = lib.mkOption {
+        type = lib.types.str;
+        default = "5m";
+        description = "Timeout for vulnix scans";
+      };
+
+      max_retries = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 5;
+        description = "Maximum number of retry attempts for failed scans";
+      };
+
+      enable_whitelist = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Enable CVE whitelist filtering";
+      };
+
+      extra_args = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = "Additional arguments to pass to vulnix";
+      };
+
+      whitelist_path = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to CVE whitelist file";
+      };
+
+      poll_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "1m";
+        description = "Interval between checking for new CVE scan jobs";
+      };
+    };
+
+    # Cache configuration options
+    cache = {
+      push_to = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Cache URI to push to (e.g., 's3://bucket', 'https://cache.example.com')";
+      };
+
+      push_after_build = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Automatically push builds to cache after successful completion";
+      };
+
+      signing_key = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to private signing key for cache signatures";
+      };
+
+      compression = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Compression method for cache uploads";
+      };
+
+      push_filter = lib.mkOption {
+        type = lib.types.nullOr (lib.types.listOf lib.types.str);
+        default = null;
+        description = "Only push builds for these systems/targets";
+      };
+
+      parallel_uploads = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 4;
+        description = "Maximum parallel uploads to cache";
+      };
+    };
     systems = lib.mkOption {
       type = lib.types.listOf (lib.types.submodule {
         options = {
