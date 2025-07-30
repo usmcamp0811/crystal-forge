@@ -14,7 +14,6 @@ pub async fn get_targets_needing_cve_scan(
     limit: Option<i64>,
 ) -> Result<Vec<EvaluationTarget>> {
     let limit = limit.unwrap_or(10);
-
     let targets = sqlx::query_as!(
         EvaluationTarget,
         r#"
@@ -28,11 +27,29 @@ pub async fn get_targets_needing_cve_scan(
               et.completed_at,
               et.status
           FROM evaluation_targets et
-          LEFT JOIN cve_scans cs ON et.id = cs.evaluation_target_id 
-              AND cs.status != 'failed' 
-              AND cs.attempts < 5
           WHERE et.status IN ('dry-run-complete', 'build-complete')
               AND et.derivation_path IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 
+                  FROM cve_scans cs 
+                  WHERE cs.evaluation_target_id = et.id 
+                      AND cs.status = 'completed'
+              )
+              AND (
+                  -- Either no scan exists, or only failed scans with < 5 attempts
+                  NOT EXISTS (
+                      SELECT 1 
+                      FROM cve_scans cs2 
+                      WHERE cs2.evaluation_target_id = et.id
+                  )
+                  OR EXISTS (
+                      SELECT 1 
+                      FROM cve_scans cs3 
+                      WHERE cs3.evaluation_target_id = et.id 
+                          AND cs3.status = 'failed' 
+                          AND cs3.attempts < 5
+                  )
+              )
           ORDER BY et.completed_at ASC
         LIMIT $1
         "#,
@@ -40,7 +57,6 @@ pub async fn get_targets_needing_cve_scan(
     )
     .fetch_all(pool)
     .await?;
-
     Ok(targets)
 }
 
