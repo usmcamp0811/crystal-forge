@@ -38,16 +38,13 @@ async fn main() -> anyhow::Result<()> {
     let background_pool = pool.clone();
     let flake_init_pool = pool.clone();
     // TODO: Update this to get the first N commits on the first time
-    initialize_flake_commits(&flake_init_pool, &cfg.flakes.as_ref().unwrap().watched).await?;
+    initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
     reset_non_terminal_targets(&pool);
     spawn_background_tasks(cfg.clone(), background_pool);
 
     // Start HTTP server
     info!("Starting Crystal Forge Server...");
-    let server_cfg = cfg
-        .server
-        .as_ref()
-        .expect("missing [server] section in config");
+    let server_cfg = &cfg.server;
     info!("Host: 0.0.0.0");
     info!("Port: {}", server_cfg.port);
 

@@ -25,7 +25,7 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     let target_pool = pool.clone();
 
     // Get the flake config with a fallback
-    let flake_config = cfg.flakes.unwrap_or_else(|| FlakeConfig::default());
+    let flake_config = cfg.flakes;
 
     tokio::spawn(run_flake_polling_loop(flake_pool, flake_config.clone()));
     tokio::spawn(run_commit_evaluation_loop(

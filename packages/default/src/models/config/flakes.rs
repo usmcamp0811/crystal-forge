@@ -1,7 +1,7 @@
 use serde::Deserialize;
 use std::time::Duration;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Default, Debug, Deserialize, Clone)]
 pub struct FlakeConfig {
     pub watched: Vec<WatchedFlake>,
     #[serde(with = "humantime_serde")]

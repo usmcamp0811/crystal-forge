@@ -48,7 +48,7 @@ fn create_signed_payload(
     context: &str,
 ) -> Result<(SystemState, String, String)> {
     let cfg = CrystalForgeConfig::load()?;
-    let client_cfg = cfg.client.expect("client config is required for agent");
+    let client_cfg = &cfg.client;
 
     let hostname = hostname::get()?.to_string_lossy().into_owned();
     let system_hash = current_system.to_string_lossy().into_owned();
@@ -80,7 +80,7 @@ fn create_signed_payload(
 /// Posts system state changes to the server
 pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result<()> {
     let cfg = CrystalForgeConfig::load()?;
-    let client_cfg = cfg.client.expect("client config is required for agent");
+    let client_cfg = &cfg.client;
 
     let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
@@ -117,7 +117,7 @@ pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result
 /// Posts heartbeat to the server
 pub fn post_system_heartbeat(current_system: &OsStr, context: &str) -> Result<()> {
     let cfg = CrystalForgeConfig::load()?;
-    let client_cfg = cfg.client.expect("client config is required for agent");
+    let client_cfg = &cfg.client;
 
     let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
