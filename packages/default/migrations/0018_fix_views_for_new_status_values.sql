@@ -1,8 +1,32 @@
 -- Fix views to use new evaluation status values
 -- ============================================================================
--- Drop and recreate view_commit_deployment_timeline with correct status values
+-- Drop all views in dependency order (dependents first)
+-- Drop all views that depend on other views first
+DROP VIEW IF EXISTS view_systems_status_table;
+
+DROP VIEW IF EXISTS view_recent_failed_evaluations;
+
+DROP VIEW IF EXISTS view_evaluation_queue_status;
+
+DROP VIEW IF EXISTS view_systems_cve_summary;
+
+DROP VIEW IF EXISTS view_system_vulnerabilities;
+
+DROP VIEW IF EXISTS view_environment_security_posture;
+
+DROP VIEW IF EXISTS view_critical_vulnerabilities_alert;
+
+-- Drop views that depend on view_systems_current_state
+DROP VIEW IF EXISTS view_systems_current_state;
+
+-- Drop views that depend on view_systems_latest_flake_commit
+DROP VIEW IF EXISTS view_systems_latest_flake_commit;
+
+-- Drop the base views
 DROP VIEW IF EXISTS view_commit_deployment_timeline;
 
+-- Now recreate all views in the correct order
+-- 1. First recreate view_commit_deployment_timeline
 CREATE OR REPLACE VIEW view_commit_deployment_timeline AS
 SELECT
     c.flake_id,
@@ -46,9 +70,7 @@ GROUP BY
 ORDER BY
     c.commit_timestamp DESC;
 
--- Fix view_systems_latest_flake_commit to use new status values
-DROP VIEW IF EXISTS view_systems_latest_flake_commit;
-
+-- 2. Recreate view_systems_latest_flake_commit
 CREATE VIEW view_systems_latest_flake_commit AS
 SELECT
     latest.system_id AS id,
@@ -78,9 +100,7 @@ FROM (
 WHERE
     latest.rn = 1;
 
--- Fix view_systems_current_state to use new status values in the latest_eval subquery
-DROP VIEW IF EXISTS view_systems_current_state;
-
+-- 3. Recreate view_systems_current_state
 CREATE OR REPLACE VIEW view_systems_current_state AS
 SELECT
     s.id AS system_id,
@@ -159,9 +179,7 @@ FROM
 ORDER BY
     s.hostname;
 
--- Fix view_systems_status_table to use new status values in pending evaluation checks
-DROP VIEW IF EXISTS view_systems_status_table;
-
+-- 4. Recreate view_systems_status_table
 CREATE VIEW view_systems_status_table AS
 WITH system_derivation_source AS (
     -- Find if current derivation path maps to any known evaluation target
@@ -374,9 +392,7 @@ ORDER BY
     END,
     last_seen DESC;
 
--- Fix view_recent_failed_evaluations to use new status values
-DROP VIEW IF EXISTS view_recent_failed_evaluations;
-
+-- 5. Recreate view_recent_failed_evaluations
 CREATE OR REPLACE VIEW view_recent_failed_evaluations AS
 SELECT
     et.target_name AS hostname,
@@ -401,9 +417,7 @@ WHERE
 ORDER BY
     et.completed_at DESC;
 
--- Fix view_evaluation_queue_status to use new status values
-DROP VIEW IF EXISTS view_evaluation_queue_status;
-
+-- 6. Recreate view_evaluation_queue_status
 CREATE VIEW view_evaluation_queue_status AS
 SELECT
     target_name,
@@ -451,9 +465,7 @@ ORDER BY
 
 COMMENT ON VIEW view_evaluation_queue_status IS 'Current evaluation pipeline status - active evaluations and recent completions (updated for new status values)';
 
--- Fix CVE-related views to use new status values
-DROP VIEW IF EXISTS view_systems_cve_summary;
-
+-- 7. Recreate CVE-related views
 CREATE OR REPLACE VIEW view_systems_cve_summary AS
 SELECT
     sys.hostname,
@@ -512,9 +524,6 @@ FROM
 ORDER BY
     sys.hostname;
 
--- Fix view_system_vulnerabilities to use new status values
-DROP VIEW IF EXISTS view_system_vulnerabilities;
-
 CREATE OR REPLACE VIEW view_system_vulnerabilities AS
 SELECT
     et.target_name AS hostname,
@@ -552,9 +561,6 @@ WHERE
 ORDER BY
     et.target_name,
     c.cvss_v3_score DESC NULLS LAST;
-
--- Fix view_environment_security_posture to use new status values
-DROP VIEW IF EXISTS view_environment_security_posture;
 
 CREATE OR REPLACE VIEW view_environment_security_posture AS
 SELECT
@@ -606,9 +612,6 @@ GROUP BY
     cl.name
 ORDER BY
     e.name;
-
--- Fix view_critical_vulnerabilities_alert to use new status values
-DROP VIEW IF EXISTS view_critical_vulnerabilities_alert;
 
 CREATE OR REPLACE VIEW view_critical_vulnerabilities_alert AS
 SELECT
