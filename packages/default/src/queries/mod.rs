@@ -1,5 +1,6 @@
 pub mod agent_heartbeat;
 pub mod commits;
+pub mod cve_scans;
 pub mod environments;
 pub mod evaluation_targets;
 pub mod flakes;

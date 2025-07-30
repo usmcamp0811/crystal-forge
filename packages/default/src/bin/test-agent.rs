@@ -63,7 +63,7 @@ struct Args {
 
 fn create_test_payload(args: &Args) -> Result<(SystemState, String, String)> {
     let cfg = CrystalForgeConfig::load()?;
-    let client_cfg = cfg.client.expect("client config is required for agent");
+    let client_cfg = &cfg.client;
 
     // Parse timestamp if provided
     let timestamp_override = if let Some(ts_str) = &args.timestamp {
@@ -116,7 +116,7 @@ fn create_test_payload(args: &Args) -> Result<(SystemState, String, String)> {
 
 fn send_test_request(args: &Args) -> Result<()> {
     let cfg = CrystalForgeConfig::load()?;
-    let client_cfg = cfg.client.expect("client config is required for agent");
+    let client_cfg = &cfg.client;
 
     let (payload, payload_json, signature_b64) = create_test_payload(args)?;
 

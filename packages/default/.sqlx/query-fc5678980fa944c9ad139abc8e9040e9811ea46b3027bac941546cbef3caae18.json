@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n    INSERT INTO evaluation_targets (commit_id, target_type, target_name)\n    VALUES ($1, $2, $3)\n    ON CONFLICT (commit_id, target_type, target_name)\n    DO UPDATE SET commit_id = EXCLUDED.commit_id\n    RETURNING id, commit_id, target_type, target_name, derivation_path, scheduled_at, completed_at, status\n    ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            target_type as \"target_type: TargetType\",\n            target_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            status\n        FROM evaluation_targets\n        WHERE status = $1\n        ORDER BY completed_at ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "target_type",
+        "name": "target_type: TargetType",
         "type_info": "Text"
       },
       {
@@ -46,8 +46,6 @@
     ],
     "parameters": {
       "Left": [
-        "Int4",
-        "Text",
         "Text"
       ]
     },
@@ -62,5 +60,5 @@
       false
     ]
   },
-  "hash": "f236b229734ca556b33f416d55dc5c2adc20116ea777ab0749d058c75d230776"
+  "hash": "fc5678980fa944c9ad139abc8e9040e9811ea46b3027bac941546cbef3caae18"
 }

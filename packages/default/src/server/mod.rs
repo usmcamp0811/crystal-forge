@@ -1,47 +1,82 @@
-use crate::queries::evaluation_targets::update_scheduled_at;
-use crate::queries::evaluation_targets::{mark_target_failed, mark_target_in_progress};
+use crate::flake::commits::sync_all_watched_flakes_commits;
+use crate::models::config::VulnixConfig;
+use crate::models::config::{CrystalForgeConfig, FlakeConfig};
+use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
+use crate::queries::evaluation_targets::{
+    get_pending_dry_run_targets, increment_evaluation_target_attempt_count,
+    insert_evaluation_target, mark_target_dry_run_complete, mark_target_dry_run_in_progress,
+    mark_target_failed, update_evaluation_target_path, update_scheduled_at,
+};
+use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use futures::stream;
 use futures::stream::{FuturesUnordered, StreamExt};
+
 use sqlx::PgPool;
 use tokio::time::{Duration, sleep};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::queries::commits::get_commits_pending_evaluation;
-use crate::queries::evaluation_targets::{
-    get_pending_targets, increment_evaluation_target_attempt_count, insert_evaluation_target,
-    update_evaluation_target_path,
-};
 
-/// Spawns both background evaluation loops
-pub fn spawn_server_background_tasks(pool: PgPool) {
+pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
+    let flake_pool = pool.clone();
     let commit_pool = pool.clone();
     let target_pool = pool.clone();
 
-    tokio::spawn(run_commit_evaluation_loop(commit_pool));
-    tokio::spawn(run_target_evaluation_loop(target_pool));
+    // Get the flake config with a fallback
+    let flake_config = cfg.flakes;
+
+    tokio::spawn(run_flake_polling_loop(flake_pool, flake_config.clone()));
+    tokio::spawn(run_commit_evaluation_loop(
+        commit_pool,
+        flake_config.commit_evaluation_interval,
+    ));
+    tokio::spawn(run_target_evaluation_loop(
+        target_pool,
+        flake_config.build_processing_interval,
+    ));
+}
+
+/// Runs the periodic flake polling loop to check for new commits
+async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
+    info!(
+        "🔁 Starting periodic flake polling loop (every {:?})...",
+        flake_config.flake_polling_interval
+    );
+    loop {
+        if let Err(e) = sync_all_watched_flakes_commits(&pool, &flake_config.watched).await {
+            error!("❌ Error in flake polling cycle: {e}");
+        }
+        tokio::time::sleep(flake_config.flake_polling_interval).await;
+    }
 }
 
 /// Runs the periodic commit evaluation check loop
-async fn run_commit_evaluation_loop(pool: PgPool) {
-    info!("🔁 Starting periodic commit evaluation check loop (every 60s)...");
+async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
+    info!(
+        "🔁 Starting periodic commit evaluation check loop (every {:?})...",
+        interval
+    );
     loop {
         if let Err(e) = process_pending_commits(&pool).await {
             error!("❌ Error in commit evaluation cycle: {e}");
         }
-        sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(interval).await;
     }
 }
 
 /// Runs the periodic evaluation target resolution loop  
-async fn run_target_evaluation_loop(pool: PgPool) {
-    info!("🔍 Starting periodic evaluation target check loop (every 60s)...");
+async fn run_target_evaluation_loop(pool: PgPool, interval: Duration) {
+    info!(
+        "🔍 Starting periodic evaluation target check loop (every {:?})...",
+        interval
+    );
     loop {
         if let Err(e) = process_pending_targets(&pool).await {
             error!("❌ Error in target evaluation cycle: {e}");
         }
-        sleep(Duration::from_secs(60)).await;
+        tokio::time::sleep(interval).await;
     }
 }
 
@@ -49,7 +84,6 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
     match get_commits_pending_evaluation(&pool).await {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
-            let q = 1;
             for commit in pending_commits {
                 let target_type = "nixos";
                 match list_nixos_configurations_from_commit(&pool, &commit).await {
@@ -59,7 +93,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             commit.git_commit_hash,
                             nixos_targets.len()
                         );
-                        for target_name in nixos_targets {
+                        for mut target_name in nixos_targets {
                             match insert_evaluation_target(
                                 &pool,
                                 &commit,
@@ -92,14 +126,14 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
 
 async fn process_pending_targets(pool: &PgPool) -> Result<()> {
     update_scheduled_at(pool).await?;
-    match get_pending_targets(pool).await {
+    match get_pending_dry_run_targets(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
             let concurrency_limit = 4; // adjust as needed
             stream::iter(pending_targets.into_iter().map(|mut target| {
                 let pool = pool.clone();
                 async move {
-                    if let Err(e) = mark_target_in_progress(&pool, target.id).await {
+                    if let Err(e) = mark_target_dry_run_in_progress(&pool, target.id).await {
                         error!("❌ Failed to mark target in-progress: {e}");
                         return;
                     }
@@ -119,7 +153,8 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
 
                             // Mark as failed instead of just incrementing attempts
                             if let Err(mark_err) =
-                                mark_target_failed(&pool, target.id, &e.to_string()).await
+                                mark_target_failed(&pool, target.id, "dry-run", &e.to_string())
+                                    .await
                             {
                                 error!("❌ Failed to mark target as failed: {mark_err}");
                             } else {

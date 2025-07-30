@@ -41,10 +41,48 @@
     // lib.optionalAttrs (cfg.flakes.watched != []) {
       flakes = {
         watched = cfg.flakes.watched;
+        flake_polling_interval = cfg.flakes.flake_polling_interval;
+        commit_evaluation_interval = cfg.flakes.commit_evaluation_interval;
+        build_processing_interval = cfg.flakes.build_processing_interval;
       };
     }
     // lib.optionalAttrs (cfg.environments != []) {
       environments = cfg.environments;
+    }
+    // lib.optionalAttrs cfg.build.enable {
+      build = {
+        cores = cfg.build.cores;
+        max_jobs = cfg.build.max_jobs;
+        use_substitutes = cfg.build.use_substitutes;
+        offline = cfg.build.offline;
+        poll_interval = cfg.build.poll_interval;
+      };
+    }
+    // {
+      vulnix =
+        {
+          timeout = cfg.vulnix.timeout;
+          max_retries = cfg.vulnix.max_retries;
+          enable_whitelist = cfg.vulnix.enable_whitelist;
+          extra_args = cfg.vulnix.extra_args;
+          poll_interval = cfg.vulnix.poll_interval;
+        }
+        // lib.optionalAttrs (cfg.vulnix.whitelist_path != null) {
+          whitelist_path = toString cfg.vulnix.whitelist_path;
+        };
+    }
+    // lib.optionalAttrs (cfg.cache.push_to != null) {
+      cache =
+        {
+          push_to = cfg.cache.push_to;
+          push_after_build = cfg.cache.push_after_build;
+          compression = cfg.cache.compression;
+          push_filter = cfg.cache.push_filter;
+          parallel_uploads = cfg.cache.parallel_uploads;
+        }
+        // lib.optionalAttrs (cfg.cache.signing_key != null) {
+          signing_key = toString cfg.cache.signing_key;
+        };
     };
   # Generate the raw config file
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
@@ -87,6 +125,12 @@
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
     exec ${pkgs.crystal-forge.server}/bin/server "$@"
+  '';
+
+  # Builder wrapper scripts
+  builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
+    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    exec ${pkgs.crystal-forge.server}/bin/builder "$@"
   '';
 
   # Agent wrapper script
@@ -167,6 +211,10 @@ in {
               type = lib.types.str;
               description = "Repository URL of the flake";
             };
+            auto_poll = lib.mkOption {
+              type = lib.types.bool;
+              description = "Whether to automatically poll the repository for new commits instead of relying solely on webhooks";
+            };
           };
         });
         default = [];
@@ -175,11 +223,143 @@ in {
           {
             name = "dotfiles";
             repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+            auto_poll = false;
           }
         ];
       };
+      flake_polling_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "10m"; # 10 minutes
+        description = "Interval between flake polling checks (e.g., '10m', '1h')";
+      };
+
+      commit_evaluation_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "1m"; # 1 minute
+        description = "Interval between commit evaluation checks (e.g., '1m', '5m')";
+      };
+
+      build_processing_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "1m"; # 1 minute
+        description = "Interval between build processing checks (e.g., '1m', '5m')";
+      };
+    };
+    # Build configuration options
+    build = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = cfg.server.enable;
+        description = "Crystal Forge Builder";
+      };
+      cores = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 1;
+        description = "Maximum CPU cores to use per build job";
+      };
+
+      max_jobs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 1;
+        description = "Maximum number of concurrent build jobs";
+      };
+
+      use_substitutes = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether to use binary substitutes/caches";
+      };
+
+      offline = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Build in offline mode (no network access)";
+      };
+
+      poll_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "5m";
+        description = "Interval between checking for new build jobs";
+      };
     };
 
+    # Vulnix configuration options
+    vulnix = {
+      timeout = lib.mkOption {
+        type = lib.types.str;
+        default = "5m";
+        description = "Timeout for vulnix scans";
+      };
+
+      max_retries = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 5;
+        description = "Maximum number of retry attempts for failed scans";
+      };
+
+      enable_whitelist = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Enable CVE whitelist filtering";
+      };
+
+      extra_args = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = "Additional arguments to pass to vulnix";
+      };
+
+      whitelist_path = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to CVE whitelist file";
+      };
+
+      poll_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "1m";
+        description = "Interval between checking for new CVE scan jobs";
+      };
+    };
+
+    # Cache configuration options
+    cache = {
+      push_to = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Cache URI to push to (e.g., 's3://bucket', 'https://cache.example.com')";
+      };
+
+      push_after_build = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Automatically push builds to cache after successful completion";
+      };
+
+      signing_key = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to private signing key for cache signatures";
+      };
+
+      compression = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Compression method for cache uploads";
+      };
+
+      push_filter = lib.mkOption {
+        type = lib.types.nullOr (lib.types.listOf lib.types.str);
+        default = null;
+        description = "Only push builds for these systems/targets";
+      };
+
+      parallel_uploads = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 4;
+        description = "Maximum parallel uploads to cache";
+      };
+    };
     systems = lib.mkOption {
       type = lib.types.listOf (lib.types.submodule {
         options = {
@@ -352,6 +532,59 @@ in {
 
     nix.settings.allowed-users = ["root" "crystal-forge"];
 
+    systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
+      description = "Crystal Forge Builder";
+      wantedBy = ["multi-user.target"];
+      after = lib.optional cfg.local-database "postgresql.service";
+      wants = lib.optional cfg.local-database "postgresql.service";
+
+      path = with pkgs; [
+        nix
+        git
+        vulnix
+      ];
+      environment = {
+        RUST_LOG = cfg.log_level;
+        NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
+      };
+
+      preStart = ''
+        echo "Starting Crystal Forge Server configuration generation..."
+        ${configScript}
+        echo "Configuration generation complete"
+
+        echo "Ensuring .cache/nix directory exists with correct ownership..."
+        mkdir -p /var/lib/crystal-forge/.cache/nix
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/
+      '';
+
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = builderScript;
+        User = "crystal-forge";
+        Group = "crystal-forge";
+
+        # Security settings
+        NoNewPrivileges = true;
+        # TODO: test if we can do strict
+        ProtectSystem = "no";
+        ProtectHome = true;
+        ReadWritePaths = ["/var/lib/crystal-forge"];
+        PrivateTmp = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+
+        # Restart settings
+        Restart = "always";
+        RestartSec = 5;
+
+        # State directory
+        StateDirectory = "crystal-forge";
+        StateDirectoryMode = "0750";
+      };
+    };
+
     # Server service
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
@@ -440,6 +673,7 @@ in {
         gnused
         gnugrep
         findutils
+        vulnix
       ];
       environment = {
         RUST_LOG = cfg.log_level;

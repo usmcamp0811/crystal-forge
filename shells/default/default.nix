@@ -24,6 +24,7 @@ in
       fzf
       postgresql
       sqlx-cli
+      vulnix
     ];
 
     shellHook = ''

@@ -29,7 +29,8 @@ reqwest = { version = "0.11", features = ["json","blocking", "rustls-tls"] }
 sha2 = "0.10.9"
 systemstat = "0.2.4"
 futures = "0.3.31"
-sqlx = { version = "0.8.6", features = ["uuid", "postgres", "runtime-tokio", "chrono", "macros"] }
+bigdecimal = { version = "0.4", features = ["serde"] }
+sqlx = { version = "0.8.6", features = ["uuid", "postgres", "runtime-tokio", "chrono", "macros", "bigdecimal"] }
 chrono = { version = "0.4.41", features = ["serde"] }
 watch = "0.2.3"
 clap = { version = "4.0", features = ["derive"] }
@@ -37,6 +38,7 @@ tokio-test = "0.4.4"
 axum-test = "17.3.0"
 winnow = "0.7.11"
 bytes = "1.10.1"
+humantime-serde = "1.1.1"
 
 [lib]
 path = "src/lib.rs"
@@ -52,6 +54,10 @@ path = "src/bin/test-agent.rs"
 [[bin]]
 name = "server"
 path = "src/bin/server.rs"
+
+[[bin]]
+name = "builder"
+path = "src/bin/builder.rs"
 
 [[bin]]
 name = "cf-keygen"
