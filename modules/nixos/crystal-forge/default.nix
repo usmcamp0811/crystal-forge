@@ -49,7 +49,7 @@
     // lib.optionalAttrs (cfg.environments != []) {
       environments = cfg.environments;
     }
-    // {
+    // lib.optionalAttrs cfg.build.enable {
       build = {
         cores = cfg.build.cores;
         max_jobs = cfg.build.max_jobs;
@@ -125,6 +125,12 @@
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
     exec ${pkgs.crystal-forge.server}/bin/server "$@"
+  '';
+
+  # Builder wrapper scripts
+  builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
+    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    exec ${pkgs.crystal-forge.server}/bin/builder "$@"
   '';
 
   # Agent wrapper script
@@ -241,6 +247,11 @@ in {
     };
     # Build configuration options
     build = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = cfg.server.enable;
+        description = "Crystal Forge Builder";
+      };
       cores = lib.mkOption {
         type = lib.types.ints.positive;
         default = 1;
@@ -520,6 +531,59 @@ in {
     };
 
     nix.settings.allowed-users = ["root" "crystal-forge"];
+
+    systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
+      description = "Crystal Forge Builder";
+      wantedBy = ["multi-user.target"];
+      after = lib.optional cfg.local-database "postgresql.service";
+      wants = lib.optional cfg.local-database "postgresql.service";
+
+      path = with pkgs; [
+        nix
+        git
+        vulnix
+      ];
+      environment = {
+        RUST_LOG = cfg.log_level;
+        NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
+      };
+
+      preStart = ''
+        echo "Starting Crystal Forge Server configuration generation..."
+        ${configScript}
+        echo "Configuration generation complete"
+
+        echo "Ensuring .cache/nix directory exists with correct ownership..."
+        mkdir -p /var/lib/crystal-forge/.cache/nix
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/
+      '';
+
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = builderScript;
+        User = "crystal-forge";
+        Group = "crystal-forge";
+
+        # Security settings
+        NoNewPrivileges = true;
+        # TODO: test if we can do strict
+        ProtectSystem = "no";
+        ProtectHome = true;
+        ReadWritePaths = ["/var/lib/crystal-forge"];
+        PrivateTmp = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+
+        # Restart settings
+        Restart = "always";
+        RestartSec = 5;
+
+        # State directory
+        StateDirectory = "crystal-forge";
+        StateDirectoryMode = "0750";
+      };
+    };
 
     # Server service
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
