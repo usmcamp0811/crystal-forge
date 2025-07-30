@@ -18,12 +18,12 @@ pub struct VulnixConfig {
 impl Default for VulnixConfig {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_secs(300), // 5 minutes
-            max_retries: 2,
+            timeout: Duration::from_secs(300),
+            max_retries: 5,
             enable_whitelist: false,
             extra_args: vec![],
             whitelist_path: None,
-            poll_interval: Duration::from_secs(300), // 5 minutes
+            poll_interval: Duration::from_secs(60),
         }
     }
 }
