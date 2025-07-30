@@ -41,6 +41,9 @@
     // lib.optionalAttrs (cfg.flakes.watched != []) {
       flakes = {
         watched = cfg.flakes.watched;
+        flake_polling_interval = cfg.flakes.flake_polling_interval;
+        commit_evaluation_interval = cfg.flakes.commit_evaluation_interval;
+        build_processing_interval = cfg.flakes.build_processing_interval;
       };
     }
     // lib.optionalAttrs (cfg.environments != []) {
@@ -182,6 +185,23 @@ in {
             auto_poll = false;
           }
         ];
+      };
+      flake_polling_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "10m"; # 10 minutes
+        description = "Interval between flake polling checks (e.g., '10m', '1h')";
+      };
+
+      commit_evaluation_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "1m"; # 1 minute
+        description = "Interval between commit evaluation checks (e.g., '1m', '5m')";
+      };
+
+      build_processing_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "1m"; # 1 minute
+        description = "Interval between build processing checks (e.g., '1m', '5m')";
       };
     };
 
