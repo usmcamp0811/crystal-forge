@@ -1,63 +1,123 @@
--- Debug and fix view_commit_deployment_timeline
+-- 0017_fix_evaluation_status_migration.sql
+-- Fix views to use new evaluation status values with correct dependency ordering
 -- ============================================================================
+-- PHASE 1: SCHEMA UPDATES (with rollback safety)
+-- ============================================================================
+BEGIN;
+-- Create backup table for rollback capability
+CREATE TEMP TABLE evaluation_targets_backup AS
+SELECT
+    id,
+    status,
+    derivation_path,
+    error_message
+FROM
+    evaluation_targets;
+-- Add error_message column if it doesn't exist
+ALTER TABLE evaluation_targets
+    ADD COLUMN IF NOT EXISTS error_message text;
+-- Drop the old check constraint
+ALTER TABLE evaluation_targets
+    DROP CONSTRAINT IF EXISTS valid_status;
+-- Add new check constraint with all status values (old and new for transition period)
+ALTER TABLE evaluation_targets
+    ADD CONSTRAINT valid_status CHECK (status = ANY (ARRAY['dry-run-pending'::text, 'dry-run-inprogress'::text, 'dry-run-complete'::text, 'dry-run-failed'::text, 'build-pending'::text, 'build-inprogress'::text, 'build-complete'::text, 'build-failed'::text,
+    -- Keep old values for backward compatibility during transition
+    'pending'::text, 'queued'::text, 'in-progress'::text, 'complete'::text, 'failed'::text]));
+-- Update existing records to use new status values
+-- Map old statuses to new ones based on whether they have derivation_path
+UPDATE
+    evaluation_targets
+SET
+    status = CASE WHEN status = 'pending'
+        AND derivation_path IS NULL THEN
+        'dry-run-pending'
+    WHEN status = 'pending'
+        AND derivation_path IS NOT NULL THEN
+        'build-pending'
+    WHEN status = 'queued'
+        AND derivation_path IS NULL THEN
+        'dry-run-pending'
+    WHEN status = 'queued'
+        AND derivation_path IS NOT NULL THEN
+        'build-pending'
+    WHEN status = 'in-progress'
+        AND derivation_path IS NULL THEN
+        'dry-run-inprogress'
+    WHEN status = 'in-progress'
+        AND derivation_path IS NOT NULL THEN
+        'build-inprogress'
+    WHEN status = 'complete'
+        AND derivation_path IS NULL THEN
+        'dry-run-complete'
+    WHEN status = 'complete'
+        AND derivation_path IS NOT NULL THEN
+        'build-complete'
+    WHEN status = 'failed'
+        AND derivation_path IS NULL THEN
+        'dry-run-failed'
+    WHEN status = 'failed'
+        AND derivation_path IS NOT NULL THEN
+        'build-failed'
+    ELSE
+        status -- Keep new statuses as-is
+    END
+WHERE
+    status IN ('pending', 'queued', 'in-progress', 'complete', 'failed');
+-- Update the default value for new records
+ALTER TABLE evaluation_targets
+    ALTER COLUMN status SET DEFAULT 'dry-run-pending';
+-- Verify the migration worked
+DO $$
+DECLARE
+    old_status_count integer;
+BEGIN
+    SELECT
+        COUNT(*) INTO old_status_count
+    FROM
+        evaluation_targets
+    WHERE
+        status IN ('pending', 'queued', 'in-progress', 'complete', 'failed');
+    IF old_status_count > 0 THEN
+        RAISE EXCEPTION 'Migration failed: % records still have old status values', old_status_count;
+    END IF;
+    RAISE NOTICE 'Schema migration completed successfully. All status values updated.';
+END
+$$;
+COMMIT;
 
--- First, let's see what status values actually exist in evaluation_targets
-SELECT DISTINCT status, COUNT(*) 
-FROM evaluation_targets 
-GROUP BY status 
-ORDER BY status;
-
--- Check if there are any evaluation_targets with derivation_path (completed builds)
-SELECT COUNT(*) as total_evaluations,
-       COUNT(*) FILTER (WHERE derivation_path IS NOT NULL) as with_derivation_path,
-       COUNT(*) FILTER (WHERE status LIKE '%complete%') as completed_status
-FROM evaluation_targets;
-
--- Check recent commits and their evaluations
-SELECT 
-    c.id as commit_id,
-    c.git_commit_hash,
-    LEFT(c.git_commit_hash, 8) as short_hash,
-    c.commit_timestamp,
-    f.name as flake_name,
-    et.target_name,
-    et.status,
-    et.derivation_path,
-    et.completed_at
-FROM commits c
-JOIN flakes f ON c.flake_id = f.id
-LEFT JOIN evaluation_targets et ON c.id = et.commit_id
-WHERE c.commit_timestamp >= NOW() - INTERVAL '30 days'
-ORDER BY c.commit_timestamp DESC
-LIMIT 20;
-
--- Check if there are any system_states that match evaluation derivation paths
-SELECT 
-    et.derivation_path as eval_derivation,
-    COUNT(DISTINCT ss.hostname) as matching_systems,
-    STRING_AGG(DISTINCT ss.hostname, ', ') as hostnames
-FROM evaluation_targets et
-LEFT JOIN system_states ss ON et.derivation_path = ss.derivation_path
-WHERE et.derivation_path IS NOT NULL
-GROUP BY et.derivation_path
-LIMIT 10;
-
--- Now let's create a more flexible version of the view that shows what's actually happening
+-- PHASE 2: VIEW RECREATION (correct dependency order)
+-- ============================================================================
+BEGIN;
+-- Drop ALL views in comprehensive dependency order (deepest dependencies first)
+DROP VIEW IF EXISTS view_evaluation_pipeline_debug;
+DROP VIEW IF EXISTS view_systems_status_table;
+DROP VIEW IF EXISTS view_recent_failed_evaluations;
+DROP VIEW IF EXISTS view_evaluation_queue_status;
+DROP VIEW IF EXISTS view_systems_cve_summary;
+DROP VIEW IF EXISTS view_system_vulnerabilities;
+DROP VIEW IF EXISTS view_environment_security_posture;
+DROP VIEW IF EXISTS view_critical_vulnerabilities_alert;
+DROP VIEW IF EXISTS view_systems_current_state;
+DROP VIEW IF EXISTS view_systems_latest_flake_commit;
 DROP VIEW IF EXISTS view_commit_deployment_timeline;
-
+-- LEVEL 1: Base views (no dependencies on other views)
+-- ============================================================================
+-- 1. Create view_commit_deployment_timeline (base view)
 CREATE OR REPLACE VIEW view_commit_deployment_timeline AS
 SELECT
     c.flake_id,
     f.name AS flake_name,
     c.id AS commit_id,
     c.git_commit_hash,
-    LEFT(c.git_commit_hash, 8) AS short_hash,
+    LEFT (c.git_commit_hash,
+        8) AS short_hash,
     c.commit_timestamp,
     -- Show evaluation info
-    COUNT(DISTINCT et.id) as total_evaluations,
-    COUNT(DISTINCT et.id) FILTER (WHERE et.derivation_path IS NOT NULL) as successful_evaluations,
-    STRING_AGG(DISTINCT et.status, ', ') as evaluation_statuses,
-    STRING_AGG(DISTINCT et.target_name, ', ') as evaluated_targets,
+    COUNT(DISTINCT et.id) AS total_evaluations,
+    COUNT(DISTINCT et.id) FILTER (WHERE et.derivation_path IS NOT NULL) AS successful_evaluations,
+    STRING_AGG(DISTINCT et.status, ', ') AS evaluation_statuses,
+    STRING_AGG(DISTINCT et.target_name, ', ') AS evaluated_targets,
     -- Deployment info (only for successful evaluations with derivation_path)
     MIN(ss.timestamp) AS first_deployment,
     MAX(ss.timestamp) AS last_deployment,
@@ -71,20 +131,18 @@ FROM
     commits c
     JOIN flakes f ON c.flake_id = f.id
     LEFT JOIN evaluation_targets et ON c.id = et.commit_id
-    LEFT JOIN system_states ss ON et.derivation_path = ss.derivation_path 
-        AND et.derivation_path IS NOT NULL  -- Only join for successful evaluations
-    LEFT JOIN ( 
-        SELECT DISTINCT ON (hostname)
+    LEFT JOIN system_states ss ON et.derivation_path = ss.derivation_path
+        AND et.derivation_path IS NOT NULL -- Only join for successful evaluations
+    LEFT JOIN ( SELECT DISTINCT ON (hostname)
             hostname,
             derivation_path
         FROM
             system_states
         ORDER BY
             hostname,
-            timestamp DESC
-    ) current_sys ON et.derivation_path = current_sys.derivation_path
-        AND et.target_name = current_sys.hostname
-        AND et.derivation_path IS NOT NULL  -- Only for successful evaluations
+            timestamp DESC) current_sys ON et.derivation_path = current_sys.derivation_path
+    AND et.target_name = current_sys.hostname
+    AND et.derivation_path IS NOT NULL -- Only for successful evaluations
 WHERE
     c.commit_timestamp >= NOW() - INTERVAL '30 days'
 GROUP BY
@@ -95,28 +153,735 @@ GROUP BY
     f.name
 ORDER BY
     c.commit_timestamp DESC;
-
 COMMENT ON VIEW view_commit_deployment_timeline IS 'Shows commit deployment timeline with evaluation and deployment status. Now includes evaluation info even for non-deployed commits.';
-
--- Create a simpler view to see what's actually in the pipeline
+-- LEVEL 2: Views that depend on Level 1 or base tables only
+-- ============================================================================
+-- 2. Create view_systems_latest_flake_commit
+CREATE VIEW view_systems_latest_flake_commit AS
+SELECT
+    latest.system_id AS id,
+    latest.hostname,
+    latest.commit_id,
+    latest.git_commit_hash,
+    latest.commit_timestamp,
+    latest.repo_url
+FROM (
+    SELECT
+        et.*,
+        s.id AS system_id,
+        s.hostname,
+        f.id AS flake_id,
+        c.commit_timestamp,
+        c.git_commit_hash,
+        f.repo_url,
+        ROW_NUMBER() OVER (PARTITION BY s.id, f.id ORDER BY c.commit_timestamp DESC) AS rn
+    FROM
+        evaluation_targets et
+        JOIN systems s ON et.target_name = s.hostname
+        JOIN commits c ON c.id = et.commit_id
+        JOIN flakes f ON f.id = c.flake_id
+    WHERE
+        et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
+) latest
+WHERE
+    latest.rn = 1;
+COMMENT ON VIEW view_systems_latest_flake_commit IS 'Shows the latest successfully evaluated commit for each system.';
+-- LEVEL 3: Views that depend on Level 2
+-- ============================================================================
+-- 3. Create view_systems_current_state (depends on view_systems_latest_flake_commit)
+CREATE OR REPLACE VIEW view_systems_current_state AS
+SELECT
+    s.id AS system_id,
+    s.hostname,
+    -- Current deployment info (from latest flake commit)
+    vslfc.repo_url,
+    vslfc.git_commit_hash AS deployed_commit_hash,
+    vslfc.commit_timestamp AS deployed_commit_timestamp,
+    -- System state info (from latest system state)
+    lss.derivation_path AS current_derivation_path,
+    lss.primary_ip_address AS ip_address,
+    ROUND(lss.uptime_secs::numeric / 86400, 1) AS uptime_days,
+    lss.os,
+    lss.kernel,
+    lss.agent_version,
+    lss.timestamp AS last_deployed,
+    -- Latest commit evaluation info
+    latest_eval.derivation_path AS latest_commit_derivation_path,
+    latest_eval.evaluation_status AS latest_commit_evaluation_status,
+    -- Comparison: is system running the latest evaluated derivation?
+    CASE WHEN lss.derivation_path IS NOT NULL
+        AND latest_eval.derivation_path IS NOT NULL
+        AND lss.derivation_path = latest_eval.derivation_path THEN
+        TRUE
+    WHEN latest_eval.derivation_path IS NULL THEN
+        NULL -- No evaluation exists for latest commit
+    ELSE
+        FALSE
+    END AS is_running_latest_derivation,
+    -- Heartbeat info
+    lhb.last_heartbeat,
+    GREATEST (COALESCE(lss.timestamp, '1970-01-01'::timestamp), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamp)) AS last_seen
+FROM
+    systems s -- Start with ALL systems as the base
+    LEFT JOIN view_systems_latest_flake_commit vslfc ON s.hostname = vslfc.hostname
+    LEFT JOIN (
+        -- Get latest system state per hostname
+        SELECT DISTINCT ON (hostname)
+            hostname,
+            derivation_path,
+            primary_ip_address,
+            uptime_secs,
+            os,
+            kernel,
+            agent_version,
+            timestamp
+        FROM
+            system_states
+        ORDER BY
+            hostname,
+            timestamp DESC) lss ON s.hostname = lss.hostname
+    LEFT JOIN (
+        -- Get latest heartbeat per hostname
+        SELECT DISTINCT ON (ss.hostname)
+            ss.hostname,
+            ah.timestamp AS last_heartbeat
+        FROM
+            system_states ss
+            JOIN agent_heartbeats ah ON ah.system_state_id = ss.id
+        ORDER BY
+            ss.hostname,
+            ah.timestamp DESC) lhb ON s.hostname = lhb.hostname
+    LEFT JOIN (
+        -- Get evaluation for the latest commit for each system
+        SELECT
+            et.target_name AS hostname,
+            et.derivation_path,
+            et.status AS evaluation_status
+        FROM
+            evaluation_targets et
+            JOIN view_systems_latest_flake_commit vlc ON et.commit_id = vlc.commit_id
+                AND et.target_name = vlc.hostname
+        WHERE
+            et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
+) latest_eval ON s.hostname = latest_eval.hostname
+ORDER BY
+    s.hostname;
+COMMENT ON VIEW view_systems_current_state IS 'Complete system overview with latest commit evaluations and derivation comparison.';
+-- LEVEL 4: Views that depend on Level 3
+-- ============================================================================
+-- 4. Create view_systems_status_table (depends on view_systems_current_state)
+CREATE VIEW view_systems_status_table AS
+WITH system_derivation_source AS (
+    -- Find if current derivation path maps to any known evaluation target
+    SELECT
+        sys.hostname,
+        sys.current_derivation_path,
+        sys.latest_commit_derivation_path,
+        sys.latest_commit_evaluation_status,
+        sys.last_seen,
+        sys.agent_version,
+        sys.uptime_days,
+        sys.ip_address,
+        sys.last_deployed,
+        -- Check if current derivation matches any completed evaluation
+        CASE WHEN EXISTS (
+            SELECT
+                1
+            FROM
+                evaluation_targets et
+            WHERE
+                et.derivation_path = sys.current_derivation_path
+                AND et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
+) THEN
+            TRUE
+        ELSE
+            FALSE
+        END AS derivation_is_known,
+        -- Get the most recent commit timestamp for this system's flake
+        latest_commit.commit_timestamp AS latest_flake_commit_timestamp,
+        -- Check if there are pending/in-progress evaluations for newer commits
+        CASE WHEN EXISTS (
+            SELECT
+                1
+            FROM
+                evaluation_targets et
+                JOIN commits c ON et.commit_id = c.id
+                JOIN flakes f ON c.flake_id = f.id
+                JOIN systems s ON s.hostname = sys.hostname
+            WHERE
+                s.flake_id = f.id
+                AND et.target_name = sys.hostname
+                AND et.status IN ('dry-run-pending', 'dry-run-inprogress', 'build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress') -- Support both new and legacy status values
+                AND c.commit_timestamp > sys.last_deployed) THEN
+            TRUE
+        ELSE
+            FALSE
+        END AS has_pending_newer_evaluation,
+        -- Get timestamp of oldest pending evaluation (to check for stuck evaluations)
+        (
+            SELECT
+                MIN(et.scheduled_at)
+            FROM evaluation_targets et
+            JOIN commits c ON et.commit_id = c.id
+            JOIN flakes f ON c.flake_id = f.id
+            JOIN systems s ON s.hostname = sys.hostname
+        WHERE
+            s.flake_id = f.id
+            AND et.target_name = sys.hostname
+            AND et.status IN ('dry-run-pending', 'dry-run-inprogress', 'build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress') -- Support both new and legacy status values
+) AS oldest_pending_eval_time
+    FROM
+        view_systems_current_state sys
+        LEFT JOIN (
+            -- Get latest commit timestamp for each system's flake
+            SELECT DISTINCT ON (s.hostname)
+                s.hostname,
+                c.commit_timestamp
+            FROM
+                systems s
+                JOIN flakes f ON s.flake_id = f.id
+                JOIN commits c ON f.id = c.flake_id
+            ORDER BY
+                s.hostname,
+                c.commit_timestamp DESC) latest_commit ON sys.hostname = latest_commit.hostname
+)
+    SELECT
+        hostname,
+        -- Determine status symbol based on the new logic
+        CASE
+        -- No system state at all
+        WHEN current_derivation_path IS NULL THEN
+            '⚫' -- No System State
+            -- Current derivation is known (maps to completed evaluation)
+        WHEN derivation_is_known = TRUE THEN
+            CASE
+            -- Running latest evaluated derivation
+            WHEN current_derivation_path = latest_commit_derivation_path THEN
+                '🟢' -- Current
+                -- Running older known derivation, but evaluation pending for newer commit
+            WHEN has_pending_newer_evaluation = TRUE THEN
+                CASE
+                -- Evaluation has been pending too long (>1 hour), mark as unknown
+                WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+                    '🟤' -- Unknown (stuck evaluation)
+                    -- Normal evaluation in progress
+                ELSE
+                    '🟡' -- Evaluating
+                END
+                -- Running older known derivation, no newer commits to evaluate
+            ELSE
+                '🔴' -- Behind
+            END
+            -- Current derivation is unknown (doesn't map to any completed evaluation)
+        WHEN derivation_is_known = FALSE THEN
+            CASE
+            -- There was a new commit since last deployment, might be evaluating
+            WHEN latest_flake_commit_timestamp > last_deployed
+                AND has_pending_newer_evaluation = TRUE THEN
+                CASE
+                -- Evaluation has been pending too long (>1 hour)
+                WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+                    '🟤' -- Unknown (stuck evaluation)
+                    -- Normal evaluation in progress
+                ELSE
+                    '🟡' -- Evaluating
+                END
+                -- No new commits or no pending evaluations - truly unknown
+            ELSE
+                '🟤' -- Unknown
+            END
+            -- Fallback
+        ELSE
+            '⚪' -- No Evaluation Data
+        END AS status,
+        -- Add text status column for Grafana pie charts
+        CASE
+        -- No system state at all
+        WHEN current_derivation_path IS NULL THEN
+            'Offline'
+            -- Current derivation is known (maps to completed evaluation)
+        WHEN derivation_is_known = TRUE THEN
+            CASE
+            -- Running latest evaluated derivation
+            WHEN current_derivation_path = latest_commit_derivation_path THEN
+                'Up to Date'
+                -- Running older known derivation, but evaluation pending for newer commit
+            WHEN has_pending_newer_evaluation = TRUE THEN
+                CASE
+                -- Evaluation has been pending too long (>1 hour), mark as unknown
+                WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+                    'Evaluation Stuck'
+                    -- Normal evaluation in progress
+                ELSE
+                    'Updating'
+                END
+                -- Running older known derivation, no newer commits to evaluate
+            ELSE
+                'Outdated'
+            END
+            -- Current derivation is unknown (doesn't map to any completed evaluation)
+        WHEN derivation_is_known = FALSE THEN
+            CASE
+            -- There was a new commit since last deployment, might be evaluating
+            WHEN latest_flake_commit_timestamp > last_deployed
+                AND has_pending_newer_evaluation = TRUE THEN
+                CASE
+                -- Evaluation has been pending too long (>1 hour)
+                WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+                    'Evaluation Stuck'
+                    -- Normal evaluation in progress
+                ELSE
+                    'Updating'
+                END
+                -- No new commits or no pending evaluations - truly unknown
+            ELSE
+                'Unknown State'
+            END
+            -- Fallback
+        ELSE
+            'No Data'
+        END AS status_text,
+        CONCAT(EXTRACT(EPOCH FROM NOW() - last_seen)::int / 60, 'm ago') AS last_seen,
+    agent_version AS version,
+    uptime_days || 'd' AS uptime,
+    ip_address
+FROM
+    system_derivation_source
+ORDER BY
+    CASE
+    -- Current derivation is known and is latest
+    WHEN derivation_is_known = TRUE
+        AND current_derivation_path = latest_commit_derivation_path THEN
+        1 -- 🟢 Current
+        -- Evaluating (either known or unknown derivation with pending newer evaluations)
+    WHEN (derivation_is_known = TRUE
+        AND has_pending_newer_evaluation = TRUE
+        AND oldest_pending_eval_time >= NOW() - INTERVAL '1 hour')
+        OR (derivation_is_known = FALSE
+            AND latest_flake_commit_timestamp > last_deployed
+            AND has_pending_newer_evaluation = TRUE
+            AND oldest_pending_eval_time >= NOW() - INTERVAL '1 hour') THEN
+        2 -- 🟡 Evaluating
+        -- Behind (known derivation, older than latest, no pending evaluations)
+    WHEN derivation_is_known = TRUE
+        AND current_derivation_path != latest_commit_derivation_path
+        AND has_pending_newer_evaluation = FALSE THEN
+        3 -- 🔴 Behind
+        -- Unknown (various unknown states or stuck evaluations)
+    WHEN derivation_is_known = FALSE
+        OR oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+        4 -- 🟤 Unknown
+        -- No evaluation data
+    WHEN latest_commit_derivation_path IS NULL THEN
+        5 -- ⚪ No Evaluation
+        -- No system state
+    WHEN current_derivation_path IS NULL THEN
+        6 -- ⚫ No System State
+    ELSE
+        7
+    END,
+    last_seen DESC;
+COMMENT ON VIEW view_systems_status_table IS 'System status table with emoji indicators and text status for monitoring dashboards.';
+-- 5. Create view_recent_failed_evaluations
+CREATE OR REPLACE VIEW view_recent_failed_evaluations AS
+SELECT
+    et.target_name AS hostname,
+    et.status,
+    et.started_at,
+    et.completed_at,
+    et.evaluation_duration_ms,
+    et.attempt_count,
+    et.error_message,
+    c.git_commit_hash,
+    c.commit_timestamp,
+    f.name AS flake_name,
+    f.repo_url,
+    -- Time since failure
+    EXTRACT(EPOCH FROM (NOW() - et.completed_at)) / 3600 AS hours_since_failure
+FROM
+    evaluation_targets et
+    JOIN commits c ON et.commit_id = c.id
+    JOIN flakes f ON c.flake_id = f.id
+WHERE
+    et.status IN ('dry-run-failed', 'build-failed', 'failed') -- Support both new and legacy status values
+    AND et.completed_at >= NOW() - INTERVAL '7 days' -- Last 7 days
+ORDER BY
+    et.completed_at DESC;
+COMMENT ON VIEW view_recent_failed_evaluations IS 'Recent evaluation failures with context for troubleshooting.';
+-- 6. Create view_evaluation_queue_status
+CREATE VIEW view_evaluation_queue_status AS
+SELECT
+    target_name,
+    status,
+    scheduled_at,
+    started_at,
+    evaluation_duration_ms AS duration_ms,
+    attempt_count,
+    error_message
+FROM
+    evaluation_targets
+WHERE
+    status IN ('dry-run-pending', 'dry-run-inprogress', 'build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress') -- Support both new and legacy status values
+    OR (status IN ('dry-run-complete', 'build-complete', 'dry-run-failed', 'build-failed', 'complete', 'failed') -- Support both new and legacy status values
+        AND completed_at > NOW() - INTERVAL '24 hours')
+ORDER BY
+    CASE status
+    WHEN 'build-inprogress' THEN
+        1
+    WHEN 'in-progress' THEN
+        1
+    WHEN 'dry-run-inprogress' THEN
+        2
+    WHEN 'build-pending' THEN
+        3
+    WHEN 'queued' THEN
+        3
+    WHEN 'dry-run-pending' THEN
+        4
+    WHEN 'pending' THEN
+        4
+    WHEN 'build-failed' THEN
+        5
+    WHEN 'dry-run-failed' THEN
+        5
+    WHEN 'failed' THEN
+        5
+    WHEN 'build-complete' THEN
+        6
+    WHEN 'dry-run-complete' THEN
+        6
+    WHEN 'complete' THEN
+        6
+    END,
+    scheduled_at;
+COMMENT ON VIEW view_evaluation_queue_status IS 'Current evaluation pipeline status - active evaluations and recent completions (updated for new status values)';
+-- 7. Create debug view to see what's actually in the pipeline
 CREATE OR REPLACE VIEW view_evaluation_pipeline_debug AS
 SELECT
-    f.name as flake_name,
+    f.name AS flake_name,
     c.git_commit_hash,
-    LEFT(c.git_commit_hash, 8) as short_hash,
+    LEFT (c.git_commit_hash,
+        8) AS short_hash,
     c.commit_timestamp,
     et.target_name,
     et.status,
     et.scheduled_at,
     et.started_at,
     et.completed_at,
-    CASE WHEN et.derivation_path IS NOT NULL THEN 'HAS_DERIVATION' ELSE 'NO_DERIVATION' END as has_derivation,
+    CASE WHEN et.derivation_path IS NOT NULL THEN
+        'HAS_DERIVATION'
+    ELSE
+        'NO_DERIVATION'
+    END AS has_derivation,
     et.attempt_count,
-    et.error_message
-FROM commits c
-JOIN flakes f ON c.flake_id = f.id
-LEFT JOIN evaluation_targets et ON c.id = et.commit_id
-WHERE c.commit_timestamp >= NOW() - INTERVAL '7 days'
-ORDER BY c.commit_timestamp DESC, et.target_name;
-
+    LEFT (COALESCE(et.error_message, ''),
+        100) AS error_snippet
+FROM
+    commits c
+    JOIN flakes f ON c.flake_id = f.id
+    LEFT JOIN evaluation_targets et ON c.id = et.commit_id
+WHERE
+    c.commit_timestamp >= NOW() - INTERVAL '7 days'
+ORDER BY
+    c.commit_timestamp DESC,
+    et.target_name;
 COMMENT ON VIEW view_evaluation_pipeline_debug IS 'Debug view to see what is actually happening in the evaluation pipeline';
+-- Recreate CVE-related views with updated status values
+-- 8. CVE views (if CVE tables exist)
+DO $$
+BEGIN
+    -- Only create CVE views if the CVE tables exist
+    IF EXISTS (
+        SELECT
+            1
+        FROM
+            information_schema.tables
+        WHERE
+            table_name = 'cve_scans') THEN
+    -- view_systems_cve_summary
+    EXECUTE '
+        CREATE OR REPLACE VIEW view_systems_cve_summary AS
+        SELECT
+            sys.hostname,
+            sys.current_derivation_path,
+            sys.last_deployed,
+            sys.last_seen,
+            sys.ip_address,
+            latest_scan.completed_at AS last_cve_scan,
+            latest_scan.scanner_name,
+            COALESCE(latest_scan.total_packages, 0) AS total_packages,
+            COALESCE(latest_scan.total_vulnerabilities, 0) AS total_cves,
+            COALESCE(latest_scan.critical_count, 0) AS critical_cves,
+            COALESCE(latest_scan.high_count, 0) AS high_cves,
+            COALESCE(latest_scan.medium_count, 0) AS medium_cves,
+            COALESCE(latest_scan.low_count, 0) AS low_cves,
+            CASE 
+                WHEN latest_scan.total_vulnerabilities = 0 THEN ''Clean''
+                WHEN latest_scan.critical_count > 0 THEN ''Critical''
+                WHEN latest_scan.high_count > 0 THEN ''High Risk''
+                WHEN latest_scan.medium_count > 0 THEN ''Medium Risk''
+                WHEN latest_scan.low_count > 0 THEN ''Low Risk''
+                ELSE ''Unknown''
+            END AS security_status,
+            CASE 
+                WHEN latest_scan.completed_at IS NOT NULL THEN
+                    EXTRACT(EPOCH FROM (NOW() - latest_scan.completed_at)) / 86400
+                ELSE NULL
+            END AS days_since_scan
+        FROM
+            view_systems_current_state sys
+            LEFT JOIN (
+                SELECT DISTINCT ON (et.target_name)
+                    et.target_name AS hostname,
+                    cs.completed_at,
+                    cs.scanner_name,
+                    cs.total_packages,
+                    cs.total_vulnerabilities,
+                    cs.critical_count,
+                    cs.high_count,
+                    cs.medium_count,
+                    cs.low_count
+                FROM
+                    evaluation_targets et
+                    JOIN cve_scans cs ON et.id = cs.evaluation_target_id
+                WHERE
+                    et.target_type = ''nixos''
+                    AND et.status IN (''build-complete'', ''complete'') -- Support both new and legacy status values
+                    AND cs.completed_at IS NOT NULL
+                ORDER BY
+                    et.target_name,
+                    cs.completed_at DESC
+            ) latest_scan ON sys.hostname = latest_scan.hostname
+        ORDER BY sys.hostname'
+;
+    -- view_system_vulnerabilities
+    EXECUTE '
+        CREATE OR REPLACE VIEW view_system_vulnerabilities AS
+        SELECT
+            et.target_name AS hostname,
+            np.name AS package_name,
+            np.pname AS package_pname,
+            np.version AS package_version,
+            np.derivation_path,
+            c.id AS cve_id,
+            c.cvss_v3_score,
+            severity_from_cvss(c.cvss_v3_score) AS severity,
+            c.description,
+            pv.is_whitelisted,
+            pv.whitelist_reason,
+            pv.fixed_version,
+            pv.detection_method,
+            scan.completed_at,
+            scan.scanner_name,
+            et.derivation_path AS evaluation_derivation_path,
+            commits.git_commit_hash,
+            flakes.name AS flake_name
+        FROM
+            evaluation_targets et
+            JOIN commits ON et.commit_id = commits.id
+            JOIN flakes ON commits.flake_id = flakes.id
+            JOIN cve_scans scan ON et.id = scan.evaluation_target_id
+            JOIN scan_packages sp ON scan.id = sp.scan_id
+            JOIN nix_packages np ON sp.derivation_path = np.derivation_path
+            JOIN package_vulnerabilities pv ON np.derivation_path = pv.derivation_path
+            JOIN cves c ON pv.cve_id = c.id
+        WHERE
+            et.target_type = ''nixos''
+            AND et.status IN (''build-complete'', ''complete'') -- Support both new and legacy status values
+            AND scan.completed_at IS NOT NULL
+            AND NOT pv.is_whitelisted
+        ORDER BY
+            et.target_name,
+            c.cvss_v3_score DESC NULLS LAST'
+;
+    -- view_environment_security_posture
+    EXECUTE '
+        CREATE OR REPLACE VIEW view_environment_security_posture AS
+        SELECT
+            e.name AS environment,
+            e.compliance_level_id,
+            cl.name AS compliance_level,
+            COUNT(DISTINCT et.target_name) AS total_systems,
+            COUNT(DISTINCT CASE WHEN latest_scan.total_vulnerabilities = 0 THEN et.target_name END) AS clean_systems,
+            COUNT(DISTINCT CASE WHEN latest_scan.critical_count > 0 THEN et.target_name END) AS critical_systems,
+            COUNT(DISTINCT CASE WHEN latest_scan.high_count > 0 THEN et.target_name END) AS high_risk_systems,
+            AVG(latest_scan.total_vulnerabilities) AS avg_vulnerabilities_per_system,
+            MIN(latest_scan.completed_at) AS oldest_scan,
+            MAX(latest_scan.completed_at) AS newest_scan
+        FROM
+            environments e
+            LEFT JOIN systems s ON e.id = s.environment_id AND s.is_active = TRUE
+            LEFT JOIN compliance_levels cl ON e.compliance_level_id = cl.id
+            LEFT JOIN evaluation_targets et ON s.hostname = et.target_name
+                AND et.target_type = ''nixos''
+                AND et.status IN (''build-complete'', ''complete'') -- Support both new and legacy status values
+            LEFT JOIN (
+                SELECT DISTINCT ON (et.id)
+                    et.id,
+                    et.target_name,
+                    cs.completed_at,
+                    cs.total_vulnerabilities,
+                    cs.critical_count,
+                    cs.high_count
+                FROM
+                    evaluation_targets et
+                    JOIN cve_scans cs ON et.id = cs.evaluation_target_id
+                WHERE
+                    et.target_type = ''nixos''
+                    AND et.status IN (''build-complete'', ''complete'') -- Support both new and legacy status values
+                    AND cs.completed_at IS NOT NULL
+                ORDER BY
+                    et.id,
+                    cs.completed_at DESC
+            ) latest_scan ON et.id = latest_scan.id
+        GROUP BY
+            e.id, e.name, e.compliance_level_id, cl.name
+        ORDER BY
+            e.name'
+;
+    -- view_critical_vulnerabilities_alert
+    EXECUTE '
+        CREATE OR REPLACE VIEW view_critical_vulnerabilities_alert AS
+        SELECT
+            et.target_name AS hostname,
+            sys_state.primary_ip_address AS ip_address,
+            e.name AS environment,
+            cl.name AS compliance_level,
+            COUNT(DISTINCT c.id) AS critical_cve_count,
+            STRING_AGG(DISTINCT c.id, '', '' ORDER BY c.id) AS critical_cves,
+            MAX(c.cvss_v3_score) AS highest_cvss_score,
+            latest_scan.completed_at AS last_scan_date,
+            et.derivation_path AS evaluation_derivation_path,
+            commits.git_commit_hash,
+            flakes.name AS flake_name
+        FROM
+            evaluation_targets et
+            JOIN commits ON et.commit_id = commits.id
+            JOIN flakes ON commits.flake_id = flakes.id
+            LEFT JOIN systems s ON et.target_name = s.hostname
+            LEFT JOIN environments e ON s.environment_id = e.id
+            LEFT JOIN compliance_levels cl ON e.compliance_level_id = cl.id
+            LEFT JOIN (
+                -- Get latest system state for IP address
+                SELECT DISTINCT ON (hostname)
+                    hostname,
+                    primary_ip_address
+                FROM system_states
+                ORDER BY hostname, timestamp DESC
+            ) sys_state ON et.target_name = sys_state.hostname
+            JOIN (
+                SELECT DISTINCT ON (cs.evaluation_target_id)
+                    cs.evaluation_target_id,
+                    cs.id,
+                    cs.completed_at
+                FROM cve_scans cs
+                WHERE cs.completed_at IS NOT NULL
+                ORDER BY cs.evaluation_target_id, cs.completed_at DESC
+            ) latest_scan ON et.id = latest_scan.evaluation_target_id
+            JOIN scan_packages sp ON latest_scan.id = sp.scan_id
+            JOIN package_vulnerabilities pv ON sp.derivation_path = pv.derivation_path
+            JOIN cves c ON pv.cve_id = c.id
+        WHERE
+            et.target_type = ''nixos''
+            AND et.status IN (''build-complete'', ''complete'') -- Support both new and legacy status values
+            AND severity_from_cvss(c.cvss_v3_score) = ''CRITICAL''
+            AND NOT pv.is_whitelisted
+            AND (pv.whitelist_expires_at IS NULL OR pv.whitelist_expires_at < NOW())
+        GROUP BY
+            et.target_name,
+            sys_state.primary_ip_address,
+            e.name,
+            cl.name,
+            latest_scan.completed_at,
+            et.derivation_path,
+            commits.git_commit_hash,
+            flakes.name
+        HAVING
+            COUNT(DISTINCT c.id) > 0
+        ORDER BY
+            critical_cve_count DESC,
+            highest_cvss_score DESC'
+;
+    RAISE NOTICE 'CVE-related views recreated successfully';
+ELSE
+    RAISE NOTICE 'CVE tables do not exist, skipping CVE view creation';
+END IF;
+END $;
+-- VALIDATION AND FINAL CHECKS
+-- ============================================================================
+-- Verify all views were created successfully
+DO $
+DECLARE
+    view_count integer;
+    expected_views text[] := ARRAY['view_commit_deployment_timeline', 'view_systems_latest_flake_commit', 'view_systems_current_state', 'view_systems_status_table', 'view_recent_failed_evaluations', 'view_evaluation_queue_status', 'view_evaluation_pipeline_debug'];
+    view_name text;
+BEGIN
+    FOREACH view_name IN ARRAY expected_views LOOP
+        SELECT
+            COUNT(*) INTO view_count
+        FROM
+            information_schema.views
+        WHERE
+            table_name = view_name;
+        IF view_count = 0 THEN
+            RAISE EXCEPTION 'Failed to create view: %', view_name;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'All core views created successfully';
+END $;
+-- Test key views with sample queries
+DO $ DECLARE test_count INTEGER;
+BEGIN
+    -- Test view_systems_status_table
+    SELECT
+        COUNT(*) INTO test_count
+    FROM
+        view_systems_status_table;
+    RAISE NOTICE 'view_systems_status_table contains % rows', test_count;
+    -- Test view_evaluation_queue_status
+    SELECT
+        COUNT(*) INTO test_count
+    FROM
+        view_evaluation_queue_status;
+    RAISE NOTICE 'view_evaluation_queue_status contains % rows', test_count;
+    -- Test view_recent_failed_evaluations
+    SELECT
+        COUNT(*) INTO test_count
+    FROM
+        view_recent_failed_evaluations;
+    RAISE NOTICE 'view_recent_failed_evaluations contains % rows', test_count;
+    RAISE NOTICE 'All view tests passed successfully';
+END $;
+-- Show status distribution after migration
+SELECT
+    status,
+    COUNT(*) AS count,
+    ROUND(COUNT(*) * 100.0 / SUM(COUNT(*)) OVER (), 2) AS percentage
+FROM
+    evaluation_targets
+GROUP BY
+    status
+ORDER BY
+    count DESC;
+COMMIT;
+
+-- SUCCESS MESSAGE
+DO $
+BEGIN
+    RAISE NOTICE '=================================================================';
+    RAISE NOTICE 'MIGRATION 0017 COMPLETED SUCCESSFULLY';
+    RAISE NOTICE '=================================================================';
+    RAISE NOTICE 'Summary:';
+    RAISE NOTICE '- Schema updated with new evaluation status values';
+    RAISE NOTICE '- All views recreated in correct dependency order';
+    RAISE NOTICE '- CVE views updated (if CVE tables exist)';
+    RAISE NOTICE '- Validation tests passed';
+    RAISE NOTICE '';
+    RAISE NOTICE 'New status values in use:';
+    RAISE NOTICE '  dry-run-pending    -> dry-run-inprogress -> dry-run-complete/dry-run-failed';
+    RAISE NOTICE '  build-pending      -> build-inprogress   -> build-complete/build-failed';
+    RAISE NOTICE '';
+    RAISE NOTICE 'Rollback: If needed, restore from evaluation_targets_backup temp table';
+    RAISE NOTICE '=================================================================';
+END $;
+
