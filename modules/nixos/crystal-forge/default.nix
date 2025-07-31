@@ -498,18 +498,18 @@ in {
       allowed-users = ["root" "crystal-forge"];
       trusted-users = ["root" "crystal-forge"]; # Add if you want to allow substitutes
 
-      # Build settings that match your Crystal Forge config
-      cores = lib.mkDefault cfg.build.cores;
-      max-jobs = lib.mkDefault cfg.build.max_jobs;
-
-      # Ensure build isolation
-      sandbox = lib.mkDefault true;
-
-      # Add binary caches if you're using them
-      substituters = lib.mkIf cfg.build.use_substitutes [
-        "https://cache.nixos.org/"
-        # Add your custom caches here
-      ];
+      # # Build settings that match your Crystal Forge config
+      # cores = lib.mkDefault cfg.build.cores;
+      # max-jobs = lib.mkDefault cfg.build.max_jobs;
+      #
+      # # Ensure build isolation
+      # sandbox = lib.mkDefault true;
+      #
+      # # Add binary caches if you're using them
+      # substituters = lib.mkIf cfg.build.use_substitutes [
+      #   "https://cache.nixos.org/"
+      #   # Add your custom caches here
+      # ];
     };
 
     # Grant crystal-forge user access to nix commands
