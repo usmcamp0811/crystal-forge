@@ -18,6 +18,17 @@ DROP VIEW IF EXISTS view_environment_security_posture;
 
 DROP VIEW IF EXISTS view_critical_vulnerabilities_alert;
 
+DROP VIEW IF EXISTS view_evaluation_pipeline_debug;
+
+-- Drop views that depend on view_systems_current_state (found from error message)
+DROP VIEW IF EXISTS view_systems_summary;
+
+DROP VIEW IF EXISTS view_systems_drift_time;
+
+DROP VIEW IF EXISTS view_systems_convergence_lag;
+
+DROP VIEW IF EXISTS view_system_heartbeat_health;
+
 -- Drop views that depend on view_systems_current_state
 DROP VIEW IF EXISTS view_systems_current_state;
 
@@ -38,20 +49,28 @@ SELECT
     LEFT (c.git_commit_hash,
         8) AS short_hash,
     c.commit_timestamp,
+    -- Show evaluation info
+    COUNT(DISTINCT et.id) AS total_evaluations,
+    COUNT(DISTINCT et.id) FILTER (WHERE et.derivation_path IS NOT NULL) AS successful_evaluations,
+    STRING_AGG(DISTINCT et.status ORDER BY et.status, ', ') AS evaluation_statuses,
+    STRING_AGG(DISTINCT et.target_name ORDER BY et.target_name, ', ') AS evaluated_targets,
+    -- Deployment info (only for successful evaluations with derivation_path)
     MIN(ss.timestamp) AS first_deployment,
     MAX(ss.timestamp) AS last_deployment,
     COUNT(DISTINCT ss.hostname) AS total_systems_deployed,
     COUNT(DISTINCT current_sys.hostname) AS currently_deployed_systems,
-    STRING_AGG(DISTINCT ss.hostname, ', ') AS deployed_systems,
+    STRING_AGG(DISTINCT ss.hostname ORDER BY ss.hostname, ', ') AS deployed_systems,
     STRING_AGG(DISTINCT CASE WHEN current_sys.hostname IS NOT NULL THEN
             current_sys.hostname
-        END, ', ') AS currently_deployed_systems_list
+        END ORDER BY current_sys.hostname, ', ') AS currently_deployed_systems_list
 FROM
     commits c
     JOIN flakes f ON c.flake_id = f.id
-    JOIN evaluation_targets et ON c.id = et.commit_id
-        AND et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
+    LEFT JOIN evaluation_targets et ON c.id = et.commit_id
+        AND et.target_type = 'nixos'
+        AND et.status IN ('build-complete', 'complete') -- Only successful evaluations
     LEFT JOIN system_states ss ON et.derivation_path = ss.derivation_path
+        AND et.derivation_path IS NOT NULL -- Only join for successful evaluations
     LEFT JOIN ( SELECT DISTINCT ON (hostname)
             hostname,
             derivation_path
@@ -61,6 +80,7 @@ FROM
             hostname,
             timestamp DESC) current_sys ON et.derivation_path = current_sys.derivation_path
     AND et.target_name = current_sys.hostname
+    AND et.derivation_path IS NOT NULL -- Only for successful evaluations
 WHERE
     c.commit_timestamp >= NOW() - INTERVAL '30 days'
 GROUP BY
@@ -71,6 +91,8 @@ GROUP BY
     f.name
 ORDER BY
     c.commit_timestamp DESC;
+
+COMMENT ON VIEW view_commit_deployment_timeline IS 'Shows commit deployment timeline for successfully evaluated commits that have been deployed to systems.';
 
 -- 2. Recreate view_systems_latest_flake_commit
 CREATE VIEW view_systems_latest_flake_commit AS
@@ -97,7 +119,8 @@ FROM (
         JOIN commits c ON c.id = et.commit_id
         JOIN flakes f ON f.id = c.flake_id
     WHERE
-        et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
+        et.target_type = 'nixos'
+        AND et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
 ) latest
 WHERE
     latest.rn = 1;
@@ -176,74 +199,36 @@ FROM
             JOIN view_systems_latest_flake_commit vlc ON et.commit_id = vlc.commit_id
                 AND et.target_name = vlc.hostname
         WHERE
-            et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
+            et.target_type = 'nixos'
+            AND et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
 ) latest_eval ON s.hostname = latest_eval.hostname
 ORDER BY
     s.hostname;
 
--- 4. Recreate view_systems_status_table
+-- 4. Recreate view_systems_status_table with optimized queries
 CREATE VIEW view_systems_status_table AS
-WITH system_derivation_source AS (
-    -- Find if current derivation path maps to any known evaluation target
+WITH system_evaluation_info AS (
+    -- Pre-compute evaluation information for each system
     SELECT
-        sys.hostname,
-        sys.current_derivation_path,
-        sys.latest_commit_derivation_path,
-        sys.latest_commit_evaluation_status,
-        sys.last_seen,
-        sys.agent_version,
-        sys.uptime_days,
-        sys.ip_address,
-        sys.last_deployed,
+        s.hostname,
+        -- Get latest flake commit timestamp
+        latest_commit.commit_timestamp AS latest_flake_commit_timestamp,
         -- Check if current derivation matches any completed evaluation
-        CASE WHEN EXISTS (
-            SELECT
-                1
-            FROM
-                evaluation_targets et
-            WHERE
-                et.derivation_path = sys.current_derivation_path
-                AND et.status IN ('build-complete', 'complete') -- Support both new and legacy status values
-) THEN
+        CASE WHEN completed_evals.derivation_path IS NOT NULL THEN
             TRUE
         ELSE
             FALSE
         END AS derivation_is_known,
-        -- Get the most recent commit timestamp for this system's flake
-        latest_commit.commit_timestamp AS latest_flake_commit_timestamp,
-        -- Check if there are pending/in-progress evaluations for newer commits
-        CASE WHEN EXISTS (
-            SELECT
-                1
-            FROM
-                evaluation_targets et
-                JOIN commits c ON et.commit_id = c.id
-                JOIN flakes f ON c.flake_id = f.id
-                JOIN systems s ON s.hostname = sys.hostname
-            WHERE
-                s.flake_id = f.id
-                AND et.target_name = sys.hostname
-                AND et.status IN ('dry-run-pending', 'dry-run-inprogress', 'build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress') -- Support both new and legacy status values
-                AND c.commit_timestamp > sys.last_deployed) THEN
+        -- Check for pending evaluations for newer commits
+        CASE WHEN pending_evals.min_scheduled_at IS NOT NULL THEN
             TRUE
         ELSE
             FALSE
         END AS has_pending_newer_evaluation,
-        -- Get timestamp of oldest pending evaluation (to check for stuck evaluations)
-        (
-            SELECT
-                MIN(et.scheduled_at)
-            FROM evaluation_targets et
-            JOIN commits c ON et.commit_id = c.id
-            JOIN flakes f ON c.flake_id = f.id
-            JOIN systems s ON s.hostname = sys.hostname
-        WHERE
-            s.flake_id = f.id
-            AND et.target_name = sys.hostname
-            AND et.status IN ('dry-run-pending', 'dry-run-inprogress', 'build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress') -- Support both new and legacy status values
-) AS oldest_pending_eval_time
+        -- Get oldest pending evaluation time
+        pending_evals.min_scheduled_at AS oldest_pending_eval_time
     FROM
-        view_systems_current_state sys
+        systems s
         LEFT JOIN (
             -- Get latest commit timestamp for each system's flake
             SELECT DISTINCT ON (s.hostname)
@@ -255,105 +240,156 @@ WITH system_derivation_source AS (
                 JOIN commits c ON f.id = c.flake_id
             ORDER BY
                 s.hostname,
-                c.commit_timestamp DESC) latest_commit ON sys.hostname = latest_commit.hostname
-)
+                c.commit_timestamp DESC) latest_commit ON s.hostname = latest_commit.hostname
+        LEFT JOIN view_systems_current_state sys_state ON s.hostname = sys_state.hostname
+        LEFT JOIN (
+            -- Check if current derivation path maps to any completed evaluation
+            SELECT DISTINCT
+                et.derivation_path,
+                s.hostname
+            FROM
+                evaluation_targets et
+                JOIN systems s ON et.target_name = s.hostname
+                JOIN view_systems_current_state sys ON s.hostname = sys.hostname
+                    AND et.derivation_path = sys.current_derivation_path
+            WHERE
+                et.target_type = 'nixos'
+                AND et.status IN ('build-complete', 'complete')) completed_evals ON s.hostname = completed_evals.hostname
+        LEFT JOIN (
+            -- Get pending evaluations for newer commits
+            SELECT
+                s.hostname,
+                MIN(et.scheduled_at) AS min_scheduled_at
+            FROM
+                evaluation_targets et
+                JOIN commits c ON et.commit_id = c.id
+                JOIN flakes f ON c.flake_id = f.id
+                JOIN systems s ON s.hostname = et.target_name
+                    AND s.flake_id = f.id
+                JOIN view_systems_current_state sys ON s.hostname = sys.hostname
+            WHERE
+                et.target_type = 'nixos'
+                AND et.status IN ('dry-run-pending', 'dry-run-inprogress', 'build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress')
+                AND c.commit_timestamp > sys.last_deployed
+            GROUP BY
+                s.hostname) pending_evals ON s.hostname = pending_evals.hostname
+),
+system_derivation_source AS (
     SELECT
-        hostname,
-        -- Determine status symbol based on the new logic
+        sys.hostname,
+        sys.current_derivation_path,
+        sys.latest_commit_derivation_path,
+        sys.latest_commit_evaluation_status,
+        sys.last_seen,
+        sys.agent_version,
+        sys.uptime_days,
+        sys.ip_address,
+        sys.last_deployed,
+        eval_info.derivation_is_known,
+        eval_info.latest_flake_commit_timestamp,
+        eval_info.has_pending_newer_evaluation,
+        eval_info.oldest_pending_eval_time
+    FROM
+        view_systems_current_state sys
+        LEFT JOIN system_evaluation_info eval_info ON sys.hostname = eval_info.hostname
+)
+SELECT
+    hostname,
+    -- Determine status symbol based on the logic
+    CASE
+    -- No system state at all
+    WHEN current_derivation_path IS NULL THEN
+        '⚫' -- No System State
+        -- Current derivation is known (maps to completed evaluation)
+    WHEN derivation_is_known = TRUE THEN
         CASE
-        -- No system state at all
-        WHEN current_derivation_path IS NULL THEN
-            '⚫' -- No System State
-            -- Current derivation is known (maps to completed evaluation)
-        WHEN derivation_is_known = TRUE THEN
+        -- Running latest evaluated derivation
+        WHEN current_derivation_path = latest_commit_derivation_path THEN
+            '🟢' -- Current
+            -- Running older known derivation, but evaluation pending for newer commit
+        WHEN has_pending_newer_evaluation = TRUE THEN
             CASE
-            -- Running latest evaluated derivation
-            WHEN current_derivation_path = latest_commit_derivation_path THEN
-                '🟢' -- Current
-                -- Running older known derivation, but evaluation pending for newer commit
-            WHEN has_pending_newer_evaluation = TRUE THEN
-                CASE
-                -- Evaluation has been pending too long (>1 hour), mark as unknown
-                WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
-                    '🟤' -- Unknown (stuck evaluation)
-                    -- Normal evaluation in progress
-                ELSE
-                    '🟡' -- Evaluating
-                END
-                -- Running older known derivation, no newer commits to evaluate
+            -- Evaluation has been pending too long (>1 hour), mark as unknown
+            WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+                '🟤' -- Unknown (stuck evaluation)
+                -- Normal evaluation in progress
             ELSE
-                '🔴' -- Behind
+                '🟡' -- Evaluating
             END
-            -- Current derivation is unknown (doesn't map to any completed evaluation)
-        WHEN derivation_is_known = FALSE THEN
-            CASE
-            -- There was a new commit since last deployment, might be evaluating
-            WHEN latest_flake_commit_timestamp > last_deployed
-                AND has_pending_newer_evaluation = TRUE THEN
-                CASE
-                -- Evaluation has been pending too long (>1 hour)
-                WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
-                    '🟤' -- Unknown (stuck evaluation)
-                    -- Normal evaluation in progress
-                ELSE
-                    '🟡' -- Evaluating
-                END
-                -- No new commits or no pending evaluations - truly unknown
-            ELSE
-                '🟤' -- Unknown
-            END
-            -- Fallback
+            -- Running older known derivation, no newer commits to evaluate
         ELSE
-            '⚪' -- No Evaluation Data
-        END AS status,
-        -- Add text status column for Grafana pie charts
+            '🔴' -- Behind
+        END
+        -- Current derivation is unknown (doesn't map to any completed evaluation)
+    WHEN derivation_is_known = FALSE THEN
         CASE
-        -- No system state at all
-        WHEN current_derivation_path IS NULL THEN
-            'Offline'
-            -- Current derivation is known (maps to completed evaluation)
-        WHEN derivation_is_known = TRUE THEN
+        -- There was a new commit since last deployment, might be evaluating
+        WHEN latest_flake_commit_timestamp > last_deployed
+            AND has_pending_newer_evaluation = TRUE THEN
             CASE
-            -- Running latest evaluated derivation
-            WHEN current_derivation_path = latest_commit_derivation_path THEN
-                'Up to Date'
-                -- Running older known derivation, but evaluation pending for newer commit
-            WHEN has_pending_newer_evaluation = TRUE THEN
-                CASE
-                -- Evaluation has been pending too long (>1 hour), mark as unknown
-                WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
-                    'Evaluation Stuck'
-                    -- Normal evaluation in progress
-                ELSE
-                    'Updating'
-                END
-                -- Running older known derivation, no newer commits to evaluate
+            -- Evaluation has been pending too long (>1 hour)
+            WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+                '🟤' -- Unknown (stuck evaluation)
+                -- Normal evaluation in progress
             ELSE
-                'Outdated'
+                '🟡' -- Evaluating
             END
-            -- Current derivation is unknown (doesn't map to any completed evaluation)
-        WHEN derivation_is_known = FALSE THEN
-            CASE
-            -- There was a new commit since last deployment, might be evaluating
-            WHEN latest_flake_commit_timestamp > last_deployed
-                AND has_pending_newer_evaluation = TRUE THEN
-                CASE
-                -- Evaluation has been pending too long (>1 hour)
-                WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
-                    'Evaluation Stuck'
-                    -- Normal evaluation in progress
-                ELSE
-                    'Updating'
-                END
-                -- No new commits or no pending evaluations - truly unknown
-            ELSE
-                'Unknown State'
-            END
-            -- Fallback
+            -- No new commits or no pending evaluations - truly unknown
         ELSE
-            'No Data'
-        END AS status_text,
-        CONCAT(EXTRACT(EPOCH FROM NOW() - last_seen)::int / 60, 'm ago') AS last_seen,
+            '🟤' -- Unknown
+        END
+        -- Fallback
+    ELSE
+        '⚪' -- No Evaluation Data
+    END AS status,
+    -- Add text status column for Grafana pie charts
+    CASE
+    -- No system state at all
+    WHEN current_derivation_path IS NULL THEN
+        'Offline'
+        -- Current derivation is known (maps to completed evaluation)
+    WHEN derivation_is_known = TRUE THEN
+        CASE
+        -- Running latest evaluated derivation
+        WHEN current_derivation_path = latest_commit_derivation_path THEN
+            'Up to Date'
+            -- Running older known derivation, but evaluation pending for newer commit
+        WHEN has_pending_newer_evaluation = TRUE THEN
+            CASE
+            -- Evaluation has been pending too long (>1 hour), mark as unknown
+            WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+                'Evaluation Stuck'
+                -- Normal evaluation in progress
+            ELSE
+                'Updating'
+            END
+            -- Running older known derivation, no newer commits to evaluate
+        ELSE
+            'Outdated'
+        END
+        -- Current derivation is unknown (doesn't map to any completed evaluation)
+    WHEN derivation_is_known = FALSE THEN
+        CASE
+        -- There was a new commit since last deployment, might be evaluating
+        WHEN latest_flake_commit_timestamp > last_deployed
+            AND has_pending_newer_evaluation = TRUE THEN
+            CASE
+            -- Evaluation has been pending too long (>1 hour)
+            WHEN oldest_pending_eval_time < NOW() - INTERVAL '1 hour' THEN
+                'Evaluation Stuck'
+                -- Normal evaluation in progress
+            ELSE
+                'Updating'
+            END
+            -- No new commits or no pending evaluations - truly unknown
+        ELSE
+            'Unknown State'
+        END
+        -- Fallback
+    ELSE
+        'No Data'
+    END AS status_text,
+    CONCAT(EXTRACT(EPOCH FROM NOW() - last_seen)::int / 60, 'm ago') AS last_seen,
     agent_version AS version,
     uptime_days || 'd' AS uptime,
     ip_address
@@ -414,7 +450,8 @@ FROM
     JOIN commits c ON et.commit_id = c.id
     JOIN flakes f ON c.flake_id = f.id
 WHERE
-    et.status IN ('dry-run-failed', 'build-failed', 'failed') -- Support both new and legacy status values
+    et.target_type = 'nixos'
+    AND et.status IN ('dry-run-failed', 'build-failed', 'failed') -- Support both new and legacy status values
     AND et.completed_at >= NOW() - INTERVAL '7 days' -- Last 7 days
 ORDER BY
     et.completed_at DESC;
@@ -431,9 +468,10 @@ SELECT
 FROM
     evaluation_targets
 WHERE
-    status IN ('dry-run-pending', 'dry-run-inprogress', 'build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress') -- Support both new and legacy status values
-    OR (status IN ('dry-run-complete', 'build-complete', 'dry-run-failed', 'build-failed', 'complete', 'failed') -- Support both new and legacy status values
-        AND completed_at > NOW() - INTERVAL '24 hours')
+    target_type = 'nixos'
+    AND (status IN ('dry-run-pending', 'dry-run-inprogress', 'build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress') -- Support both new and legacy status values
+        OR (status IN ('dry-run-complete', 'build-complete', 'dry-run-failed', 'build-failed', 'complete', 'failed') -- Support both new and legacy status values
+            AND completed_at > NOW() - INTERVAL '24 hours'))
 ORDER BY
     CASE status
     WHEN 'build-inprogress' THEN
@@ -622,7 +660,7 @@ SELECT
     e.name AS environment,
     cl.name AS compliance_level,
     COUNT(DISTINCT c.id) AS critical_cve_count,
-    STRING_AGG(DISTINCT c.id, ', ' ORDER BY c.id) AS critical_cves,
+    STRING_AGG(DISTINCT c.id ORDER BY c.id, ', ') AS critical_cves,
     MAX(c.cvss_v3_score) AS highest_cvss_score,
     latest_scan.completed_at AS last_scan_date,
     et.derivation_path AS evaluation_derivation_path,
@@ -681,62 +719,7 @@ ORDER BY
     critical_cve_count DESC,
     highest_cvss_score DESC;
 
--- Now let's create a more flexible version of the view that shows what's actually happening
-DROP VIEW IF EXISTS view_commit_deployment_timeline;
-
-CREATE OR REPLACE VIEW view_commit_deployment_timeline AS
-SELECT
-    c.flake_id,
-    f.name AS flake_name,
-    c.id AS commit_id,
-    c.git_commit_hash,
-    LEFT (c.git_commit_hash,
-        8) AS short_hash,
-    c.commit_timestamp,
-    -- Show evaluation info
-    COUNT(DISTINCT et.id) AS total_evaluations,
-    COUNT(DISTINCT et.id) FILTER (WHERE et.derivation_path IS NOT NULL) AS successful_evaluations,
-    STRING_AGG(DISTINCT et.status, ', ') AS evaluation_statuses,
-    STRING_AGG(DISTINCT et.target_name, ', ') AS evaluated_targets,
-    -- Deployment info (only for successful evaluations with derivation_path)
-    MIN(ss.timestamp) AS first_deployment,
-    MAX(ss.timestamp) AS last_deployment,
-    COUNT(DISTINCT ss.hostname) AS total_systems_deployed,
-    COUNT(DISTINCT current_sys.hostname) AS currently_deployed_systems,
-    STRING_AGG(DISTINCT ss.hostname, ', ') AS deployed_systems,
-    STRING_AGG(DISTINCT CASE WHEN current_sys.hostname IS NOT NULL THEN
-            current_sys.hostname
-        END, ', ') AS currently_deployed_systems_list
-FROM
-    commits c
-    JOIN flakes f ON c.flake_id = f.id
-    LEFT JOIN evaluation_targets et ON c.id = et.commit_id
-    LEFT JOIN system_states ss ON et.derivation_path = ss.derivation_path
-        AND et.derivation_path IS NOT NULL -- Only join for successful evaluations
-    LEFT JOIN ( SELECT DISTINCT ON (hostname)
-            hostname,
-            derivation_path
-        FROM
-            system_states
-        ORDER BY
-            hostname,
-            timestamp DESC) current_sys ON et.derivation_path = current_sys.derivation_path
-    AND et.target_name = current_sys.hostname
-    AND et.derivation_path IS NOT NULL -- Only for successful evaluations
-WHERE
-    c.commit_timestamp >= NOW() - INTERVAL '30 days'
-GROUP BY
-    c.flake_id,
-    c.id,
-    c.git_commit_hash,
-    c.commit_timestamp,
-    f.name
-ORDER BY
-    c.commit_timestamp DESC;
-
-COMMENT ON VIEW view_commit_deployment_timeline IS 'Shows commit deployment timeline with evaluation and deployment status. Now includes evaluation info even for non-deployed commits.';
-
--- Create a simpler view to see what's actually in the pipeline
+-- Create a debug view to see what's actually in the pipeline
 CREATE OR REPLACE VIEW view_evaluation_pipeline_debug AS
 SELECT
     f.name AS flake_name,
@@ -745,6 +728,7 @@ SELECT
         8) AS short_hash,
     c.commit_timestamp,
     et.target_name,
+    et.target_type,
     et.status,
     et.scheduled_at,
     et.started_at,
@@ -767,4 +751,195 @@ ORDER BY
     et.target_name;
 
 COMMENT ON VIEW view_evaluation_pipeline_debug IS 'Debug view to see what is actually happening in the evaluation pipeline';
+
+-- Recreate the missing views that depend on view_systems_current_state
+CREATE OR REPLACE VIEW view_systems_summary AS
+SELECT
+    (
+        SELECT
+            COUNT(*)
+        FROM
+            view_systems_current_state) AS "Total Systems",
+    (
+        SELECT
+            COUNT(*)
+        FROM
+            view_systems_current_state
+        WHERE
+            is_running_latest_derivation = TRUE) AS "Up to Date",
+    (
+        SELECT
+            COUNT(*)
+        FROM
+            view_systems_current_state
+        WHERE
+            is_running_latest_derivation = FALSE) AS "Behind Latest",
+    (
+        SELECT
+            COUNT(*)
+        FROM
+            view_systems_current_state
+        WHERE
+            last_seen < NOW() - INTERVAL '15 minutes') AS "No Recent Heartbeat";
+
+COMMENT ON VIEW view_systems_summary IS 'Summary view providing key system metrics:
+- "Total Systems": total systems reporting
+- "Up to Date": systems running latest derivation
+- "Behind Latest": systems not on latest derivation
+- "No Recent Heartbeat": systems without heartbeat in last 15 minutes.';
+
+CREATE OR REPLACE VIEW view_systems_drift_time AS
+SELECT
+    hostname,
+    current_derivation_path,
+    latest_commit_derivation_path,
+    deployed_commit_timestamp,
+    -- Calculate how long system has been drifted
+    CASE WHEN is_running_latest_derivation = FALSE
+        AND deployed_commit_timestamp IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (NOW() - deployed_commit_timestamp)) / 3600 -- hours
+    ELSE
+        0 -- Up-to-date systems show 0 drift
+    END AS drift_hours,
+    CASE WHEN is_running_latest_derivation = FALSE
+        AND deployed_commit_timestamp IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (NOW() - deployed_commit_timestamp)) / 86400 -- days
+    ELSE
+        0 -- Up-to-date systems show 0 drift
+    END AS drift_days,
+    is_running_latest_derivation,
+    last_seen
+FROM
+    view_systems_current_state
+ORDER BY
+    drift_hours DESC;
+
+COMMENT ON VIEW view_systems_drift_time IS 'All systems with drift time calculations. 
+Up-to-date systems show 0 drift hours/days, behind systems show actual drift.
+Used for "Top N Systems with Most Drift Time" Grafana panel and daily_drift_snapshots job.';
+
+CREATE OR REPLACE VIEW view_systems_convergence_lag AS
+WITH system_last_convergence AS (
+    SELECT
+        ss.hostname,
+        MAX(ss.timestamp) AS last_converged_at,
+        MAX(ss.timestamp) FILTER (WHERE ss.change_reason = 'config_change') AS last_config_change_at
+    FROM
+        system_states ss
+    WHERE
+        ss.timestamp >= NOW() - INTERVAL '90 days' -- Look back 90 days max
+    GROUP BY
+        ss.hostname
+),
+current_target_info AS (
+    SELECT
+        hostname,
+        deployed_commit_timestamp,
+        is_running_latest_derivation,
+        last_seen
+    FROM
+        view_systems_current_state
+)
+SELECT
+    slc.hostname,
+    slc.last_converged_at,
+    slc.last_config_change_at,
+    cti.deployed_commit_timestamp,
+    cti.is_running_latest_derivation,
+    cti.last_seen,
+    -- Time since last convergence (in hours)
+    CASE WHEN slc.last_converged_at IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (NOW() - slc.last_converged_at)) / 3600
+    ELSE
+        NULL
+    END AS hours_since_converged,
+    -- Time since last config change (in hours)
+    CASE WHEN slc.last_config_change_at IS NOT NULL THEN
+        EXTRACT(EPOCH FROM (NOW() - slc.last_config_change_at)) / 3600
+    ELSE
+        NULL
+    END AS hours_since_config_change,
+    -- Status classification
+    CASE WHEN cti.last_seen < NOW() - INTERVAL '4 hours' THEN
+        'Offline'
+    WHEN cti.is_running_latest_derivation = TRUE THEN
+        'Current'
+    WHEN slc.last_converged_at IS NULL THEN
+        'Never Converged'
+    WHEN slc.last_converged_at < NOW() - INTERVAL '7 days' THEN
+        'Stale'
+    ELSE
+        'Behind'
+    END AS convergence_status
+FROM
+    system_last_convergence slc
+    FULL OUTER JOIN current_target_info cti ON slc.hostname = cti.hostname
+ORDER BY
+    hours_since_converged DESC NULLS LAST;
+
+COMMENT ON VIEW view_systems_convergence_lag IS 'Systems ranked by time since last successful convergence to any target.
+Used for "Longest Time Since Last Converged" Grafana panel.';
+
+CREATE OR REPLACE VIEW view_system_heartbeat_health AS
+SELECT
+    sys.hostname,
+    latest_hb.last_heartbeat,
+    sys.last_deployed AS last_state_change,
+    hb_stats.heartbeat_count_24h,
+    CASE WHEN hb_stats.heartbeat_count_24h > 0 THEN
+        ROUND(86400.0 / hb_stats.heartbeat_count_24h, 0)::integer
+    ELSE
+        NULL
+    END AS avg_heartbeat_interval_seconds,
+    CASE WHEN latest_hb.last_heartbeat IS NULL THEN
+        'No Heartbeats'
+    WHEN latest_hb.last_heartbeat > NOW() - INTERVAL '15 minutes' THEN
+        'Healthy'
+    WHEN latest_hb.last_heartbeat > NOW() - INTERVAL '1 hour' THEN
+        'Warning'
+    WHEN latest_hb.last_heartbeat > NOW() - INTERVAL '4 hours' THEN
+        'Critical'
+    ELSE
+        'Offline'
+    END AS status
+FROM
+    view_systems_current_state sys
+    LEFT JOIN (
+        -- Get the most recent heartbeat per system
+        SELECT DISTINCT ON (ss.hostname)
+            ss.hostname,
+            ah.timestamp AS last_heartbeat
+        FROM
+            system_states ss
+            JOIN agent_heartbeats ah ON ah.system_state_id = ss.id
+        ORDER BY
+            ss.hostname,
+            ah.timestamp DESC) latest_hb ON sys.hostname = latest_hb.hostname
+    LEFT JOIN (
+        -- Calculate heartbeat frequency over last 24 hours
+        SELECT
+            ss.hostname,
+            COUNT(ah.id) AS heartbeat_count_24h
+        FROM
+            system_states ss
+            JOIN agent_heartbeats ah ON ah.system_state_id = ss.id
+        WHERE
+            ah.timestamp > NOW() - INTERVAL '24 hours'
+        GROUP BY
+            ss.hostname) hb_stats ON sys.hostname = hb_stats.hostname
+ORDER BY
+    CASE WHEN latest_hb.last_heartbeat IS NULL THEN
+        1
+    WHEN latest_hb.last_heartbeat <= NOW() - INTERVAL '4 hours' THEN
+        2
+    WHEN latest_hb.last_heartbeat <= NOW() - INTERVAL '1 hour' THEN
+        3
+    WHEN latest_hb.last_heartbeat <= NOW() - INTERVAL '15 minutes' THEN
+        4
+    ELSE
+        5
+    END,
+    latest_hb.last_heartbeat DESC NULLS LAST;
+
+COMMENT ON VIEW view_system_heartbeat_health IS 'System liveness monitoring with health status based on heartbeat patterns';
 
