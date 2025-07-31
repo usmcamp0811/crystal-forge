@@ -29,6 +29,23 @@ DROP VIEW IF EXISTS view_systems_convergence_lag;
 
 DROP VIEW IF EXISTS view_system_heartbeat_health;
 
+-- Drop additional views that may depend on the core views
+DROP VIEW IF EXISTS view_systems_deployment_status;
+
+DROP VIEW IF EXISTS view_systems_behind;
+
+DROP VIEW IF EXISTS view_systems_inventory;
+
+DROP VIEW IF EXISTS view_systems_attention;
+
+DROP VIEW IF EXISTS view_evaluation_pipeline;
+
+DROP VIEW IF EXISTS view_systems_latest_commit;
+
+DROP VIEW IF EXISTS view_current_commit;
+
+DROP VIEW IF EXISTS view_monitored_flake_commits;
+
 -- Drop views that depend on view_systems_current_state
 DROP VIEW IF EXISTS view_systems_current_state;
 
@@ -52,17 +69,17 @@ SELECT
     -- Show evaluation info
     COUNT(DISTINCT et.id) AS total_evaluations,
     COUNT(DISTINCT et.id) FILTER (WHERE et.derivation_path IS NOT NULL) AS successful_evaluations,
-    STRING_AGG(DISTINCT et.status ORDER BY et.status, ', ') AS evaluation_statuses,
-    STRING_AGG(DISTINCT et.target_name ORDER BY et.target_name, ', ') AS evaluated_targets,
+    STRING_AGG(DISTINCT et.status, ', ') AS evaluation_statuses,
+    STRING_AGG(DISTINCT et.target_name, ', ') AS evaluated_targets,
     -- Deployment info (only for successful evaluations with derivation_path)
     MIN(ss.timestamp) AS first_deployment,
     MAX(ss.timestamp) AS last_deployment,
     COUNT(DISTINCT ss.hostname) AS total_systems_deployed,
     COUNT(DISTINCT current_sys.hostname) AS currently_deployed_systems,
-    STRING_AGG(DISTINCT ss.hostname ORDER BY ss.hostname, ', ') AS deployed_systems,
+    STRING_AGG(DISTINCT ss.hostname, ', ') AS deployed_systems,
     STRING_AGG(DISTINCT CASE WHEN current_sys.hostname IS NOT NULL THEN
             current_sys.hostname
-        END ORDER BY current_sys.hostname, ', ') AS currently_deployed_systems_list
+        END, ', ') AS currently_deployed_systems_list
 FROM
     commits c
     JOIN flakes f ON c.flake_id = f.id
@@ -660,7 +677,7 @@ SELECT
     e.name AS environment,
     cl.name AS compliance_level,
     COUNT(DISTINCT c.id) AS critical_cve_count,
-    STRING_AGG(DISTINCT c.id ORDER BY c.id, ', ') AS critical_cves,
+    STRING_AGG(DISTINCT c.id, ', ') AS critical_cves,
     MAX(c.cvss_v3_score) AS highest_cvss_score,
     latest_scan.completed_at AS last_scan_date,
     et.derivation_path AS evaluation_derivation_path,
