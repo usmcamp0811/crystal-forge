@@ -31,6 +31,7 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::env;
+use std::time::Duration;
 use tokio_postgres::NoTls;
 use tracing::{debug, info};
 
