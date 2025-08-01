@@ -17,7 +17,9 @@ use crystal_forge::{
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
-use tracing::{debug, info};
+
+use tokio::time::{Duration, interval};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -25,6 +27,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env()) // uses RUST_LOG
         .init();
+    tokio::spawn(memory_monitor_task());
+
     println!("Crystal Forge: Starting...");
 
     // Load and validate config
@@ -89,4 +93,28 @@ fn parse_authorized_keys(
     }
 
     Ok(map)
+}
+
+async fn memory_monitor_task() {
+    let mut interval = interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        log_memory_usage().await;
+    }
+}
+
+async fn log_memory_usage() {
+    if let Ok(contents) = tokio::fs::read_to_string("/proc/self/status").await {
+        for line in contents.lines() {
+            if line.starts_with("VmRSS:")
+                || line.starts_with("VmSize:")
+                || line.starts_with("VmPeak:")
+            {
+                info!("📊 Memory: {}", line);
+            }
+        }
+    }
+
+    // Log database connection pool stats
+    info!("📊 DB Pool: active connections, idle connections, etc.");
 }

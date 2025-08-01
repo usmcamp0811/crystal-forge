@@ -114,9 +114,13 @@ impl CrystalForgeConfig {
     pub async fn db_pool() -> Result<PgPool> {
         let cfg = Self::load()?;
         let db_url = cfg.database.to_url();
-
         PgPoolOptions::new()
             .max_connections(5)
+            .min_connections(1) // Keep minimum connections alive
+            .acquire_timeout(Duration::from_secs(30)) // Timeout acquiring connections
+            .idle_timeout(Some(Duration::from_secs(600))) // Close idle connections after 10min
+            .max_lifetime(Some(Duration::from_secs(1800))) // Rotate connections after 30min
+            .test_before_acquire(true) // Test connections before use
             .connect(&db_url)
             .await
             .context("connecting to database")
