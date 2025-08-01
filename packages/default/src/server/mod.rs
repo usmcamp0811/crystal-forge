@@ -210,7 +210,7 @@ async fn log_memory_usage(pool: &PgPool) {
     let pool_size = pool.size() as usize;
     let idle_count = pool.num_idle();
 
-    info!(
+    debug!(
         "📊 DB Pool - Total: {}, Idle: {}, Active: {}",
         pool_size,
         idle_count,
@@ -220,7 +220,7 @@ async fn log_memory_usage(pool: &PgPool) {
     // Task/thread count
     if let Ok(contents) = tokio::fs::read_to_string("/proc/self/stat").await {
         if let Some(num_threads) = contents.split_whitespace().nth(19) {
-            info!("📊 Threads: {}", num_threads);
+            debug!("📊 Threads: {}", num_threads);
         }
     }
 }
