@@ -198,7 +198,7 @@ async fn log_memory_usage(pool: &PgPool) {
             }
         }
 
-        info!(
+        debug!(
             "📊 Memory - RSS: {} kB, Size: {} kB, Peak: {} kB",
             vm_rss.unwrap_or("?"),
             vm_size.unwrap_or("?"),
