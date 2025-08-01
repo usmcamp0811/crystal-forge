@@ -510,7 +510,7 @@ in {
     nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable) {
       experimental-features = ["nix-command" "flakes"];
       allowed-users = ["root" "crystal-forge"];
-      trusted-users = ["root" "crystal-forge"]; 
+      trusted-users = ["root" "crystal-forge"];
     };
 
     # Grant crystal-forge user access to nix commands
