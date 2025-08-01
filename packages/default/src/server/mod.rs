@@ -11,6 +11,7 @@ use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use futures::stream;
 use futures::stream::{FuturesUnordered, StreamExt};
+use tokio::time::interval;
 
 use sqlx::PgPool;
 use tokio::time::{Duration, sleep};
@@ -170,4 +171,56 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
         Err(e) => error!("❌ Failed to get pending targets: {e}"),
     }
     Ok(())
+}
+
+pub async fn memory_monitor_task(pool: PgPool) {
+    let mut interval = interval(Duration::from_secs(30));
+    loop {
+        interval.tick().await;
+        log_memory_usage(&pool).await;
+    }
+}
+
+async fn log_memory_usage(pool: &PgPool) {
+    // Memory stats from /proc/self/status
+    if let Ok(contents) = tokio::fs::read_to_string("/proc/self/status").await {
+        let mut vm_rss = None;
+        let mut vm_size = None;
+        let mut vm_peak = None;
+
+        for line in contents.lines() {
+            if line.starts_with("VmRSS:") {
+                vm_rss = line.split_whitespace().nth(1);
+            } else if line.starts_with("VmSize:") {
+                vm_size = line.split_whitespace().nth(1);
+            } else if line.starts_with("VmPeak:") {
+                vm_peak = line.split_whitespace().nth(1);
+            }
+        }
+
+        info!(
+            "📊 Memory - RSS: {} kB, Size: {} kB, Peak: {} kB",
+            vm_rss.unwrap_or("?"),
+            vm_size.unwrap_or("?"),
+            vm_peak.unwrap_or("?")
+        );
+    }
+
+    // Database pool statistics
+    let pool_size = pool.size() as usize;
+    let idle_count = pool.num_idle();
+
+    info!(
+        "📊 DB Pool - Total: {}, Idle: {}, Active: {}",
+        pool_size,
+        idle_count,
+        pool_size - idle_count
+    );
+
+    // Task/thread count
+    if let Ok(contents) = tokio::fs::read_to_string("/proc/self/stat").await {
+        if let Some(num_threads) = contents.split_whitespace().nth(19) {
+            info!("📊 Threads: {}", num_threads);
+        }
+    }
 }

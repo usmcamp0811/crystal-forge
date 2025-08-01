@@ -12,6 +12,7 @@ use crystal_forge::{
     queries::{
         commits::get_commits_pending_evaluation, evaluation_targets::reset_non_terminal_targets,
     },
+    server::memory_monitor_task,
     server::spawn_background_tasks,
 };
 use ed25519_dalek::VerifyingKey;
@@ -27,7 +28,6 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env()) // uses RUST_LOG
         .init();
-    tokio::spawn(memory_monitor_task());
 
     println!("Crystal Forge: Starting...");
 
@@ -37,6 +37,7 @@ async fn main() -> anyhow::Result<()> {
 
     debug!("======== INITIALIZING DATABASE ========");
     let pool = CrystalForgeConfig::db_pool().await?;
+    tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
     let background_pool = pool.clone();
@@ -93,28 +94,4 @@ fn parse_authorized_keys(
     }
 
     Ok(map)
-}
-
-async fn memory_monitor_task() {
-    let mut interval = interval(Duration::from_secs(30));
-    loop {
-        interval.tick().await;
-        log_memory_usage().await;
-    }
-}
-
-async fn log_memory_usage() {
-    if let Ok(contents) = tokio::fs::read_to_string("/proc/self/status").await {
-        for line in contents.lines() {
-            if line.starts_with("VmRSS:")
-                || line.starts_with("VmSize:")
-                || line.starts_with("VmPeak:")
-            {
-                info!("📊 Memory: {}", line);
-            }
-        }
-    }
-
-    // Log database connection pool stats
-    info!("📊 DB Pool: active connections, idle connections, etc.");
 }
