@@ -368,6 +368,7 @@ pub async fn increment_evaluation_target_attempt_count(
 }
 
 pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
+    info!("💡 Reseting non-terminal Targets.");
     sqlx::query!(
         r#"
         UPDATE evaluation_targets 
