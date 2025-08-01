@@ -1,19 +1,21 @@
+use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
+use crate::queries::commits::get_commits_pending_evaluation;
 use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
     save_scan_results,
 };
+use crate::queries::evaluation_targets::update_evaluation_target_status;
 use crate::queries::evaluation_targets::{
-    get_targets_ready_for_build, mark_target_build_in_progress, mark_target_failed,
+    EvaluationStatus, get_targets_ready_for_build, mark_target_build_in_progress,
+    mark_target_failed,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use sqlx::PgPool;
+use tokio::fs;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-
-use crate::flake::eval::list_nixos_configurations_from_commit;
-use crate::queries::commits::get_commits_pending_evaluation;
 
 /// Runs the periodic build and cache push loop
 pub async fn run_build_loop(pool: PgPool) {
@@ -160,7 +162,7 @@ async fn scan_targets(
     vulnix_version: Option<String>,
 ) -> Result<()> {
     // Get targets that need CVE scanning (those with build-complete status)
-    match get_targets_needing_cve_scan(pool, Some(20)).await {
+    match get_targets_needing_cve_scan(pool, Some(1)).await {
         Ok(targets) => {
             if targets.is_empty() {
                 info!("🔍 No targets need CVE scanning");
@@ -168,43 +170,75 @@ async fn scan_targets(
             }
 
             let target = &targets[0];
-            info!("🔍 Starting CVE scan for target: {}", target.target_name);
 
-            // Create a new scan record before starting
-            let scan_id =
-                create_cve_scan(pool, target.id.into(), "vulnix", vulnix_version.clone()).await?;
+            // Check if the derivation path exists
+            if let Some(ref path) = target.derivation_path {
+                match fs::try_exists(path).await {
+                    Ok(true) => {
+                        info!("🔍 Starting CVE scan for target: {}", target.target_name);
 
-            // Mark scan as in progress
-            mark_scan_in_progress(pool, scan_id).await?;
+                        // Create a new scan record before starting
+                        let scan_id = create_cve_scan(
+                            pool,
+                            target.id.into(),
+                            "vulnix",
+                            vulnix_version.clone(),
+                        )
+                        .await?;
 
-            let start_time = std::time::Instant::now();
+                        // Mark scan as in progress
+                        mark_scan_in_progress(pool, scan_id).await?;
 
-            // Run CVE scan using the vulnix runner
-            match vulnix_runner
-                .scan_target(&pool, target.id, vulnix_version)
-                .await
-            {
-                Ok(vulnix_entries) => {
-                    let scan_duration_ms = Some(start_time.elapsed().as_millis() as i32);
-                    let stats = crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(
-                        &vulnix_entries,
-                    );
+                        let start_time = std::time::Instant::now();
 
-                    // Save the detailed scan results to database
-                    save_scan_results(pool, scan_id, &vulnix_entries, scan_duration_ms).await?;
+                        // Run CVE scan using the vulnix runner
+                        match vulnix_runner
+                            .scan_target(&pool, target.id, vulnix_version)
+                            .await
+                        {
+                            Ok(vulnix_entries) => {
+                                let scan_duration_ms =
+                                    Some(start_time.elapsed().as_millis() as i32);
+                                let stats =
+                                    crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(
+                                        &vulnix_entries,
+                                    );
 
-                    info!(
-                        "✅ CVE scan completed for {}: {}",
-                        target.target_name, stats
-                    );
-                }
-                Err(e) => {
-                    error!("❌ CVE scan failed for {}: {}", target.target_name, e);
-                    if let Err(save_err) = mark_cve_scan_failed(pool, target, &e.to_string()).await
-                    {
-                        error!("❌ Failed to mark CVE scan as failed: {save_err}");
+                                // Save the detailed scan results to database
+                                save_scan_results(pool, scan_id, &vulnix_entries, scan_duration_ms)
+                                    .await?;
+
+                                info!(
+                                    "✅ CVE scan completed for {}: {}",
+                                    target.target_name, stats
+                                );
+                            }
+                            Err(e) => {
+                                error!("❌ CVE scan failed for {}: {}", target.target_name, e);
+                                if let Err(save_err) =
+                                    mark_cve_scan_failed(pool, target, &e.to_string()).await
+                                {
+                                    error!("❌ Failed to mark CVE scan as failed: {save_err}");
+                                }
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        warn!("❌ Derivation path does not exist: {}", path);
+                        update_evaluation_target_status(
+                            &pool,
+                            target.id,
+                            EvaluationStatus::DryRunComplete,
+                            target.derivation_path.as_deref(),
+                            Some("Missing Nix Store Path"),
+                        );
+                    }
+                    Err(e) => {
+                        error!("❌ Error checking derivation path {}: {}", path, e);
                     }
                 }
+            } else {
+                warn!("❌ No derivation path set for target");
             }
         }
         Err(e) => error!("❌ Failed to get targets needing CVE scan: {e}"),

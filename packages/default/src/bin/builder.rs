@@ -1,5 +1,6 @@
 use crystal_forge::builder::{run_build_loop, run_cve_scan_loop};
 use crystal_forge::models::config::CrystalForgeConfig;
+use crystal_forge::server::memory_monitor_task;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -16,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Starting Crystal Forge Builder...");
 
     let pool = CrystalForgeConfig::db_pool().await?;
+    tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
 
     // Spawn both loops

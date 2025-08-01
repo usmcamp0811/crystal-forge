@@ -240,5 +240,165 @@ in
           pytest.fail("postgres jobs are not idempotent - failed on second run")
 
       server.log("=== postgres jobs validation completed ===")
+
+      # =============================================
+      # BUILDER SERVICE TESTS
+      # =============================================
+
+      # 1. Enable builder service on server node
+      server.succeed("systemctl enable crystal-forge-builder.service")
+      server.succeed("systemctl start crystal-forge-builder.service")
+
+      # 2. Wait for builder service to start
+      try:
+          server.wait_for_unit("crystal-forge-builder.service")
+      except Exception:
+          pytest.fail("crystal-forge-builder.service failed to start")
+
+      # 3. Check builder service is active and running
+      try:
+          server.succeed("systemctl is-active crystal-forge-builder.service")
+      except Exception:
+          pytest.fail("crystal-forge-builder.service is not active")
+
+      # 4. Verify builder can access Nix
+      try:
+          server.succeed("sudo -u crystal-forge nix --version")
+      except Exception:
+          pytest.fail("crystal-forge user cannot access nix command")
+
+      # 5. Check builder working directory exists with correct permissions
+      try:
+          server.succeed("test -d /var/lib/crystal-forge/workdir")
+          server.succeed("stat -c '%U' /var/lib/crystal-forge/workdir | grep -q crystal-forge")
+      except Exception:
+          pytest.fail("Builder working directory not properly set up")
+
+      # 6. Check builder cache directory exists
+      try:
+          server.succeed("test -d /var/lib/crystal-forge/.cache/nix")
+          server.succeed("stat -c '%U' /var/lib/crystal-forge/.cache/nix | grep -q crystal-forge")
+      except Exception:
+          pytest.fail("Builder cache directory not properly set up")
+
+      # 7. Test that builder logs are being generated
+      try:
+          server.wait_until_succeeds("journalctl -u crystal-forge-builder.service | grep 'Starting Build loop'", timeout=30)
+      except Exception:
+          pytest.fail("Builder service not logging startup messages")
+
+      # 8. Insert a test evaluation target that builder can process
+      commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"  # Define commit hash for builder tests
+
+      server.succeed(f"""
+          psql -U crystal_forge -d crystal_forge -c "
+          INSERT INTO evaluation_targets (commit_id, target_type, target_name, status)
+          SELECT
+              c.id,
+              'nixos',
+              'testSystem',
+              'dry-run-pending'
+          FROM commits c
+          WHERE c.git_commit_hash = '{commit_hash}'
+          LIMIT 1;
+          "
+      """)
+
+      # 10. Check that evaluation target status changed from pending
+      try:
+          server.wait_until_succeeds("""
+              psql -U crystal_forge -d crystal_forge -c "
+              SELECT status FROM evaluation_targets
+              WHERE target_name = 'testSystem' AND status != 'dry-run-pending'
+              " | grep -v 'dry-run-pending'
+          """, timeout=120)
+      except Exception:
+          pytest.fail("Evaluation target status did not change from pending")
+
+      # 11. Check builder memory usage is reasonable
+      try:
+          memory_usage = server.succeed("systemctl show crystal-forge-builder.service --property=MemoryCurrent")
+          server.log(f"Builder memory usage: {memory_usage}")
+          # Extract numeric value and check it's not excessive (less than 4GB)
+          if "MemoryCurrent=" in memory_usage:
+              mem_bytes = int(memory_usage.split("=")[1].strip())
+              if mem_bytes > 4 * 1024 * 1024 * 1024:  # 4GB in bytes
+                  pytest.fail(f"Builder using excessive memory: {mem_bytes} bytes")
+      except Exception as e:
+          server.log(f"Warning: Could not check builder memory usage: {e}")
+
+      # 12. Test builder resource limits are applied
+      try:
+          # Check systemd limits are in place
+          server.succeed("systemctl show crystal-forge-builder.service --property=MemoryMax | grep -v infinity")
+          server.succeed("systemctl show crystal-forge-builder.service --property=TasksMax | grep -v infinity")
+      except Exception:
+          pytest.fail("Builder resource limits not properly configured")
+
+      # 13. Check builder can handle configuration reload
+      try:
+          server.succeed("systemctl reload-or-restart crystal-forge-builder.service")
+          server.wait_for_unit("crystal-forge-builder.service")
+          server.wait_until_succeeds("journalctl -u crystal-forge-builder.service | grep 'Starting Build loop'", timeout=30)
+      except Exception:
+          pytest.fail("Builder service cannot handle reload/restart")
+
+      # 14. Test builder cleanup functionality
+      try:
+          # Create some test symlinks that builder should clean up
+          server.succeed("sudo -u crystal-forge touch /var/lib/crystal-forge/workdir/result-test")
+          server.succeed("sudo -u crystal-forge ln -sf /nix/store/fake /var/lib/crystal-forge/workdir/result-old")
+
+          # Restart builder to trigger cleanup
+          server.succeed("systemctl restart crystal-forge-builder.service")
+          server.wait_for_unit("crystal-forge-builder.service")
+
+          # Check cleanup occurred (this might take a moment)
+          server.wait_until_fails("test -L /var/lib/crystal-forge/workdir/result-old", timeout=30)
+      except Exception as e:
+          server.log(f"Warning: Builder cleanup test failed: {e}")
+
+      # 15. Verify builder and server are not conflicting
+      try:
+          server_status = server.succeed("systemctl is-active crystal-forge-server.service")
+          builder_status = server.succeed("systemctl is-active crystal-forge-builder.service")
+          if "active" not in server_status or "active" not in builder_status:
+              pytest.fail("Server and builder services are conflicting")
+      except Exception:
+          pytest.fail("Cannot verify server and builder coexistence")
+
+
+      # =============================================
+      # CVE SCAN TESTS (if vulnix is available)
+      # =============================================
+
+      # 19. Check if vulnix is available for CVE scanning
+      try:
+          server.succeed("which vulnix")
+          vulnix_available = True
+      except Exception:
+          server.log("Warning: vulnix not available for CVE scanning tests")
+          vulnix_available = False
+
+      if vulnix_available:
+          # 20. Check CVE scan loop is running
+          try:
+              server.wait_until_succeeds(
+                  "journalctl -u crystal-forge-builder.service | grep 'Starting CVE Scan loop'",
+                  timeout=30
+              )
+          except Exception:
+              pytest.fail("CVE scan loop not starting")
+
+          # 21. Wait for CVE scan processing (this may take time)
+          try:
+              server.wait_until_succeeds(
+                  "journalctl -u crystal-forge-builder.service | grep -E '(CVE scan|vulnix)'",
+                  timeout=120
+              )
+          except Exception:
+              server.log("Warning: CVE scan did not run within timeout")
+
+      server.log("=== CVE scan validation completed ===")
     '';
   }
