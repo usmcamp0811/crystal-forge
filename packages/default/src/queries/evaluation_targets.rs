@@ -2,7 +2,7 @@ use crate::models::commits::Commit;
 use crate::models::evaluation_targets::{EvaluationTarget, TargetType};
 use anyhow::Result;
 use sqlx::PgPool;
-use tracing::error;
+use tracing::{error, info};
 
 // Enum to represent the different phases and statuses
 #[derive(Debug, Clone)]
@@ -368,7 +368,7 @@ pub async fn increment_evaluation_target_attempt_count(
 }
 
 pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
-    sqlx::query!(
+    let result = sqlx::query!(
         r#"
         UPDATE evaluation_targets 
         SET status = CASE 
@@ -388,5 +388,9 @@ pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    let rows_affected = result.rows_affected();
+    info!("💡 Reset {} non-terminal targets.", rows_affected);
+
     Ok(())
 }

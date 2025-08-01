@@ -27,7 +27,7 @@ pub async fn get_targets_needing_cve_scan(
               et.completed_at,
               et.status
           FROM evaluation_targets et
-          WHERE et.status IN ('dry-run-complete', 'build-complete')
+          WHERE et.status IN ('build-complete')
               AND et.derivation_path IS NOT NULL
               AND NOT EXISTS (
                   SELECT 1 

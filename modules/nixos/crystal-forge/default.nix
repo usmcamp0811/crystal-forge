@@ -136,15 +136,28 @@
     export TMPDIR="/var/lib/crystal-forge/tmp"
     export HOME="/var/lib/crystal-forge"
 
+    # CRITICAL: Clean up build artifacts periodically
+    cleanup_old_builds() {
+      echo "🧹 Cleaning up old build artifacts..."
+      find /var/lib/crystal-forge/workdir -name "result*" -type l -mtime +1 -delete 2>/dev/null || true
+      find /var/lib/crystal-forge/tmp -type f -mtime +1 -delete 2>/dev/null || true
+    }
+
+    # Set up signal handlers for cleanup
+    trap cleanup_old_builds EXIT INT TERM
+
     # Ensure we're in a writable directory
     cd /var/lib/crystal-forge/workdir
 
     # Clean up any stale symlinks
-    find . -name "result*" -type l -delete 2>/dev/null || true
+    cleanup_old_builds
 
-    # Set NIX_BUILD_CORES if not already set
+    # Set resource limits
     export NIX_BUILD_CORES="${toString cfg.build.cores}"
     export NIX_MAX_JOBS="${toString cfg.build.max_jobs}"
+
+    # CRITICAL: Limit memory per Nix build
+    ulimit -v $((4 * 1024 * 1024))  # 4GB virtual memory limit
 
     echo "Crystal Forge Builder starting..."
     echo "Working directory: $(pwd)"
@@ -495,21 +508,9 @@ in {
   config = lib.mkIf cfg.enable {
     # Allow crystal-forge user to build
     nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable) {
+      experimental-features = ["nix-command" "flakes"];
       allowed-users = ["root" "crystal-forge"];
-      trusted-users = ["root" "crystal-forge"]; # Add if you want to allow substitutes
-
-      # # Build settings that match your Crystal Forge config
-      # cores = lib.mkDefault cfg.build.cores;
-      # max-jobs = lib.mkDefault cfg.build.max_jobs;
-      #
-      # # Ensure build isolation
-      # sandbox = lib.mkDefault true;
-      #
-      # # Add binary caches if you're using them
-      # substituters = lib.mkIf cfg.build.use_substitutes [
-      #   "https://cache.nixos.org/"
-      #   # Add your custom caches here
-      # ];
+      trusted-users = ["root" "crystal-forge"]; 
     };
 
     # Grant crystal-forge user access to nix commands
@@ -535,6 +536,7 @@ in {
       "d /var/lib/crystal-forge/tmp 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/builds 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
+      "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
     ];
     # PostgreSQL setup when using local database
     services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
@@ -594,7 +596,6 @@ in {
         Persistent = true;
       };
     };
-
     systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
@@ -616,14 +617,6 @@ in {
         echo "Starting Crystal Forge Builder configuration generation..."
         ${configScript}
         echo "Configuration generation complete"
-
-        echo "Ensuring directory structure exists with correct ownership..."
-        mkdir -p /var/lib/crystal-forge/.cache/nix
-        mkdir -p /var/lib/crystal-forge/tmp
-        mkdir -p /var/lib/crystal-forge/builds
-        mkdir -p /var/lib/crystal-forge/workdir
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/
-        chmod -R 755 /var/lib/crystal-forge/
       '';
 
       serviceConfig = {
