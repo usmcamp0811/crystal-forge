@@ -368,8 +368,7 @@ pub async fn increment_evaluation_target_attempt_count(
 }
 
 pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
-    info!("💡 Reseting non-terminal Targets.");
-    sqlx::query!(
+    let result = sqlx::query!(
         r#"
         UPDATE evaluation_targets 
         SET status = CASE 
@@ -389,5 +388,9 @@ pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+
+    let rows_affected = result.rows_affected();
+    info!("💡 Reset {} non-terminal targets.", rows_affected);
+
     Ok(())
 }
