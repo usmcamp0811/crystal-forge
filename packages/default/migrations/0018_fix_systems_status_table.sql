@@ -348,3 +348,57 @@ WHERE
 ORDER BY
     c.commit_timestamp DESC;
 
+CREATE OR REPLACE VIEW view_commit_deployment_timeline AS
+SELECT
+    c.flake_id,
+    f.name AS flake_name,
+    c.id AS commit_id,
+    c.git_commit_hash,
+    LEFT (c.git_commit_hash,
+        8) AS short_hash,
+    c.commit_timestamp,
+    -- Show evaluation info
+    COUNT(DISTINCT et.id) AS total_evaluations,
+    COUNT(DISTINCT et.id) FILTER (WHERE et.derivation_path IS NOT NULL) AS successful_evaluations,
+    STRING_AGG(DISTINCT et.status, ', ') AS evaluation_statuses,
+    STRING_AGG(DISTINCT et.target_name, ', ') AS evaluated_targets,
+    -- Deployment info (only for successful evaluations with derivation_path)
+    MIN(ss.timestamp) AS first_deployment,
+    MAX(ss.timestamp) AS last_deployment,
+    COUNT(DISTINCT ss.hostname) AS total_systems_deployed,
+    COUNT(DISTINCT current_sys.hostname) AS currently_deployed_systems,
+    STRING_AGG(DISTINCT ss.hostname, ', ') AS deployed_systems,
+    STRING_AGG(DISTINCT CASE WHEN current_sys.hostname IS NOT NULL THEN
+            current_sys.hostname
+        END, ', ') AS currently_deployed_systems_list
+FROM
+    commits c
+    JOIN flakes f ON c.flake_id = f.id
+    LEFT JOIN evaluation_targets et ON c.id = et.commit_id
+        AND et.target_type = 'nixos'
+        AND et.status IN ('build-failed', 'build-complete', 'dry-run-complete', 'build-pending', 'build-inprogress') -- Only successful evaluations
+    LEFT JOIN system_states ss ON et.derivation_path = ss.derivation_path
+        AND et.derivation_path IS NOT NULL -- Only join for successful evaluations
+    LEFT JOIN ( SELECT DISTINCT ON (hostname)
+            hostname,
+            derivation_path
+        FROM
+            system_states
+        ORDER BY
+            hostname,
+            timestamp DESC) current_sys ON et.derivation_path = current_sys.derivation_path
+    AND et.target_name = current_sys.hostname
+    AND et.derivation_path IS NOT NULL -- Only for successful evaluations
+WHERE
+    c.commit_timestamp >= NOW() - INTERVAL '30 days'
+GROUP BY
+    c.flake_id,
+    c.id,
+    c.git_commit_hash,
+    c.commit_timestamp,
+    f.name
+ORDER BY
+    c.commit_timestamp DESC;
+
+COMMENT ON VIEW view_commit_deployment_timeline IS 'Shows commit deployment timeline for successfully evaluated commits that have been deployed to systems.';
+
