@@ -1,5 +1,3 @@
-DROP VIEW IF EXISTS view_systems_status_table;
-
 CREATE OR REPLACE VIEW view_systems_status_table AS
 WITH current_state AS (
     SELECT DISTINCT ON (hostname)
@@ -111,4 +109,242 @@ ORDER BY
         3
     END,
     last_seen DESC;
+
+CREATE OR REPLACE VIEW view_current_dry_runs AS
+SELECT
+    et.id,
+    et.target_name AS hostname,
+    et.derivation_path,
+    et.status,
+    et.attempt_count,
+    et.scheduled_at,
+    et.completed_at,
+    c.git_commit_hash,
+    c.commit_timestamp
+FROM
+    evaluation_targets et
+    JOIN commits c ON et.commit_id = c.id
+WHERE
+    et.target_type = 'nixos'
+    AND et.status IN ('dry-run-pending', 'dry-run-inprogress')
+ORDER BY
+    et.scheduled_at DESC;
+
+CREATE OR REPLACE VIEW view_current_builds AS
+SELECT
+    et.id,
+    et.target_name AS hostname,
+    et.derivation_path,
+    et.status,
+    et.attempt_count,
+    et.scheduled_at,
+    et.completed_at,
+    c.git_commit_hash,
+    c.commit_timestamp
+FROM
+    evaluation_targets et
+    JOIN commits c ON et.commit_id = c.id
+WHERE
+    et.target_type = 'nixos'
+    AND et.status IN ('build-pending', 'build-inprogress', 'pending', 'queued', 'in-progress')
+ORDER BY
+    et.scheduled_at DESC;
+
+CREATE OR REPLACE VIEW view_current_scans AS
+SELECT
+    et.id,
+    et.target_name AS hostname,
+    et.derivation_path,
+    et.status,
+    et.attempt_count,
+    et.scheduled_at,
+    et.completed_at,
+    c.git_commit_hash,
+    c.commit_timestamp
+FROM
+    evaluation_targets et
+    JOIN commits c ON et.commit_id = c.id
+WHERE
+    et.target_type = 'nixos'
+    AND et.status IN ('scan-pending', 'scan-inprogress')
+ORDER BY
+    et.scheduled_at DESC;
+
+CREATE OR REPLACE VIEW view_current_commits AS
+WITH latest_commits AS (
+    SELECT DISTINCT ON (flake_id)
+        c.id,
+        c.flake_id,
+        f.name AS flake_name,
+        c.git_commit_hash,
+        c.commit_timestamp,
+        c.attempt_count
+    FROM
+        commits c
+        JOIN flakes f ON c.flake_id = f.id
+    ORDER BY
+        c.flake_id,
+        c.commit_timestamp DESC
+),
+eval_progress AS (
+    SELECT
+        et.commit_id,
+        COUNT(*) AS total_systems,
+    -- Progress counts
+    COUNT(*) FILTER (WHERE et.status IN ('dry-run-complete', 'dry-run-failed', 'build-pending', 'build-inprogress', 'build-complete', 'build-failed')) AS completed_dry_run,
+    COUNT(*) FILTER (WHERE et.status = 'build-complete') AS build_completed,
+    -- Raw status counts (no assumptions)
+    COUNT(*) FILTER (WHERE et.status = 'dry-run-pending') AS dry_run_pending,
+    COUNT(*) FILTER (WHERE et.status = 'dry-run-inprogress') AS dry_run_inprogress,
+    COUNT(*) FILTER (WHERE et.status = 'dry-run-complete') AS dry_run_complete,
+    COUNT(*) FILTER (WHERE et.status = 'dry-run-failed') AS dry_run_failed,
+    COUNT(*) FILTER (WHERE et.status = 'build-pending') AS build_pending,
+    COUNT(*) FILTER (WHERE et.status = 'build-inprogress') AS build_inprogress,
+    COUNT(*) FILTER (WHERE et.status = 'build-complete') AS build_complete,
+    COUNT(*) FILTER (WHERE et.status = 'build-failed') AS build_failed
+FROM
+    evaluation_targets et
+GROUP BY
+    et.commit_id
+)
+SELECT
+    lc.id,
+    lc.flake_name,
+    lc.git_commit_hash,
+    LEFT (lc.git_commit_hash,
+        8) AS short_hash,
+    lc.commit_timestamp,
+    lc.attempt_count,
+    -- Progress summaries
+    CASE WHEN ep.total_systems IS NULL THEN
+        'N/A'
+    ELSE
+        CONCAT(ep.completed_dry_run, '/', ep.total_systems)
+    END AS dry_run_completed,
+    CASE WHEN ep.total_systems IS NULL THEN
+        'N/A'
+    ELSE
+        CONCAT(ep.build_completed, '/', ep.total_systems)
+    END AS build_completed,
+    -- Full breakdown
+    ep.total_systems,
+    ep.dry_run_pending,
+    ep.dry_run_inprogress,
+    ep.dry_run_complete,
+    ep.dry_run_failed,
+    ep.build_pending,
+    ep.build_inprogress,
+    ep.build_complete,
+    ep.build_failed
+FROM
+    latest_commits lc
+    LEFT JOIN eval_progress ep ON lc.id = ep.commit_id
+ORDER BY
+    lc.commit_timestamp DESC;
+
+CREATE OR REPLACE VIEW view_failed_evaluations AS
+SELECT
+    et.id,
+    et.target_name AS hostname,
+    et.derivation_path,
+    et.status,
+    et.attempt_count,
+    et.scheduled_at,
+    et.completed_at,
+    c.git_commit_hash,
+    c.commit_timestamp,
+    f.name AS flake_name
+FROM
+    evaluation_targets et
+    JOIN commits c ON et.commit_id = c.id
+    JOIN flakes f ON c.flake_id = f.id
+WHERE
+    et.status IN ('dry-run-failed', 'build-failed')
+ORDER BY
+    et.completed_at DESC NULLS LAST;
+
+CREATE OR REPLACE VIEW view_failed_cve_scan_status AS
+SELECT
+    cs.id AS scan_id,
+    et.id AS evaluation_target_id,
+    et.target_name AS evaluation_target_name,
+    f.name AS flake_name,
+    c.git_commit_hash,
+    et.derivation_path,
+    cs.status,
+    cs.attempts,
+    cs.scanner_name,
+    cs.scanner_version,
+    cs.scheduled_at,
+    cs.completed_at
+FROM
+    cve_scans cs
+    JOIN evaluation_targets et ON cs.evaluation_target_id = et.id
+    JOIN commits c ON et.commit_id = c.id
+    JOIN flakes f ON c.flake_id = f.id
+WHERE
+    cs.status = 'failed'
+ORDER BY
+    cs.completed_at DESC NULLS LAST;
+
+CREATE OR REPLACE VIEW view_failed_build_commits AS
+SELECT
+    c.id AS commit_id,
+    f.name AS flake_name,
+    c.git_commit_hash,
+    c.commit_timestamp,
+    COUNT(et.id) FILTER (WHERE et.status = 'build-failed') AS failed_targets,
+    COUNT(et.id) AS total_targets,
+    ARRAY_AGG(DISTINCT et.target_name ORDER BY et.target_name) FILTER (WHERE et.status = 'build-failed') AS failed_hostnames
+FROM
+    commits c
+    JOIN flakes f ON c.flake_id = f.id
+    JOIN evaluation_targets et ON et.commit_id = c.id
+WHERE
+    et.status = 'build-failed'
+GROUP BY
+    c.id,
+    f.name,
+    c.git_commit_hash,
+    c.commit_timestamp
+ORDER BY
+    c.commit_timestamp DESC;
+
+CREATE OR REPLACE VIEW view_failed_dry_run_commits AS
+SELECT
+    c.id AS commit_id,
+    f.name AS flake_name,
+    c.git_commit_hash,
+    c.commit_timestamp,
+    COUNT(et.id) FILTER (WHERE et.status = 'dry-run-failed') AS failed_targets,
+    COUNT(et.id) AS total_targets,
+    ARRAY_AGG(DISTINCT et.target_name ORDER BY et.target_name) FILTER (WHERE et.status = 'dry-run-failed') AS failed_hostnames
+FROM
+    commits c
+    JOIN flakes f ON c.flake_id = f.id
+    JOIN evaluation_targets et ON et.commit_id = c.id
+WHERE
+    et.status = 'dry-run-failed'
+GROUP BY
+    c.id,
+    f.name,
+    c.git_commit_hash,
+    c.commit_timestamp
+ORDER BY
+    c.commit_timestamp DESC;
+
+CREATE OR REPLACE VIEW view_commits_stuck_in_evaluation AS
+SELECT
+    c.id AS commit_id,
+    f.name AS flake_name,
+    c.git_commit_hash,
+    c.commit_timestamp,
+    c.attempt_count
+FROM
+    commits c
+    JOIN flakes f ON c.flake_id = f.id
+WHERE
+    c.attempt_count >= 5
+ORDER BY
+    c.commit_timestamp DESC;
 
