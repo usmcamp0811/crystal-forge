@@ -24,6 +24,122 @@
       mkdir -p $out
       cp -r $src/* $out/
     '';
+  # Add SQL test file as a derivation
+  sqlTests = pkgs.writeText "crystal-forge-view-tests.sql" ''
+    -- Crystal Forge Views Test Suite
+    -- Run these tests to validate view structure and logic
+
+    BEGIN;
+
+    -- Test 1: Core Views Existence
+    SELECT 'TEST 1: Core Views Existence' as test_name;
+
+    DO $$
+    DECLARE
+        view_name text;
+        expected_views text[] := ARRAY[
+            'view_commit_deployment_timeline',
+            'view_systems_latest_flake_commit',
+            'view_systems_current_state',
+            'view_systems_status_table',
+            'view_recent_failed_evaluations',
+            'view_evaluation_queue_status',
+            'view_systems_cve_summary',
+            'view_system_vulnerabilities',
+            'view_environment_security_posture',
+            'view_critical_vulnerabilities_alert',
+            'view_evaluation_pipeline_debug',
+            'view_systems_summary',
+            'view_systems_drift_time',
+            'view_systems_convergence_lag',
+            'view_system_heartbeat_health'
+        ];
+    BEGIN
+        FOREACH view_name IN ARRAY expected_views
+        LOOP
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.views
+                WHERE table_name = view_name AND table_schema = 'public'
+            ) THEN
+                RAISE EXCEPTION 'FAIL: View % does not exist', view_name;
+            END IF;
+            RAISE NOTICE 'PASS: View % exists', view_name;
+        END LOOP;
+    END $$;
+
+    -- Test 2: Status Symbol Logic
+    SELECT 'TEST 2: Status Symbol Logic' as test_name;
+
+    WITH status_symbols AS (
+        SELECT DISTINCT status
+        FROM view_systems_status_table
+        WHERE status IS NOT NULL
+    ),
+    expected_symbols AS (
+        SELECT unnest(ARRAY['🟢', '🟡', '🔴', '🟤', '⚪', '⚫']) as symbol
+    )
+    SELECT
+        CASE
+            WHEN NOT EXISTS (
+                SELECT 1 FROM status_symbols s
+                LEFT JOIN expected_symbols e ON s.status = e.symbol
+                WHERE e.symbol IS NULL
+            ) THEN 'PASS: All status symbols are valid'
+            ELSE 'FAIL: Invalid status symbols found'
+        END as result;
+
+    -- Test 3: Systems Summary Totals
+    SELECT 'TEST 3: Systems Summary Totals' as test_name;
+
+    WITH summary AS (
+        SELECT * FROM view_systems_summary
+    ),
+    individual_counts AS (
+        SELECT
+            COUNT(*) as total_systems_check,
+            COUNT(*) FILTER (WHERE is_running_latest_derivation = TRUE) as up_to_date_check,
+            COUNT(*) FILTER (WHERE is_running_latest_derivation = FALSE) as behind_check,
+            COUNT(*) FILTER (WHERE last_seen < NOW() - INTERVAL '15 minutes') as no_heartbeat_check
+        FROM view_systems_current_state
+    )
+    SELECT
+        CASE
+            WHEN s."Total Systems" = i.total_systems_check
+            AND s."Up to Date" = i.up_to_date_check
+            AND s."Behind Latest" = i.behind_check
+            AND s."No Recent Heartbeat" = i.no_heartbeat_check
+            THEN 'PASS: Systems summary totals match individual counts'
+            ELSE 'FAIL: Systems summary totals do not match'
+        END as result
+    FROM summary s, individual_counts i;
+
+    -- Test 4: View Performance
+    SELECT 'TEST 4: View Performance' as test_name;
+
+    -- Test that views execute without errors
+    SELECT COUNT(*) as commit_timeline_count FROM view_commit_deployment_timeline;
+    SELECT COUNT(*) as current_state_count FROM view_systems_current_state;
+    SELECT COUNT(*) as status_table_count FROM view_systems_status_table;
+    SELECT COUNT(*) as queue_status_count FROM view_evaluation_queue_status;
+
+    SELECT 'PASS: All views executed without errors' as result;
+
+    -- Test 5: Data Integrity
+    SELECT 'TEST 5: Data Integrity' as test_name;
+
+    SELECT
+        CASE
+            WHEN NOT EXISTS (
+                SELECT 1 FROM view_systems_status_table
+                WHERE hostname IS NULL
+            ) THEN 'PASS: No NULL hostnames in status table'
+            ELSE 'FAIL: Found NULL hostnames in status table'
+        END as result;
+
+    SELECT 'SQL TESTS COMPLETED - Check output above for any FAIL results' as summary;
+
+    ROLLBACK;
+  '';
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
@@ -39,6 +155,7 @@ in
         networking.useDHCP = true;
         networking.firewall.allowedTCPPorts = [3000];
 
+        environment.etc."crystal-forge-tests.sql".source = "${sqlTests}";
         environment.etc."agent.key".source = "${key}/agent.key";
         environment.etc."agent.pub".source = "${pub}/agent.pub";
         environment.etc."cf_flake".source = "${cf_flake}";
@@ -400,5 +517,77 @@ in
               server.log("Warning: CVE scan did not run within timeout")
 
       server.log("=== CVE scan validation completed ===")
+
+      # =============================================
+      # SQL VIEW TESTS
+      # =============================================
+
+      # Wait for all services to be fully operational
+      server.wait_for_unit("postgresql")
+      server.wait_for_unit("crystal-forge-server.service")
+
+      # Give some time for views to be created and data to populate
+      import time
+      time.sleep(10)
+
+      server.log("=== Running SQL View Tests ===")
+
+      try:
+          # Run the SQL test suite
+          test_output = server.succeed("psql -U crystal_forge -d crystal_forge -f /etc/crystal-forge-tests.sql")
+          server.log("SQL Test Results:\\n" + test_output)
+
+          # Check for any FAIL results
+          if "FAIL:" in test_output:
+              pytest.fail("One or more SQL view tests failed. Check logs above.")
+          else:
+              server.log("✅ All SQL view tests passed")
+
+      except Exception as e:
+          pytest.fail(f"SQL view tests failed to execute: {e}")
+
+      # Additional specific view tests after data is populated
+      try:
+          # Test that agent appears in views after registration
+          view_check = server.succeed("""
+              psql -U crystal_forge -d crystal_forge -c "
+              SELECT hostname, status, status_text
+              FROM view_systems_status_table
+              WHERE hostname = 'agent';
+              "
+          """)
+          server.log("Agent in status table:\\n" + view_check)
+
+          if "agent" not in view_check:
+              pytest.fail("Agent hostname not found in view_systems_status_table")
+
+      except Exception as e:
+          pytest.fail(f"Failed to verify agent in views: {e}")
+
+      # Test view performance under load
+      try:
+          import time
+          start_time = time.time()
+
+          server.succeed("""
+              psql -U crystal_forge -d crystal_forge -c "
+              SELECT COUNT(*) FROM view_systems_current_state;
+              SELECT COUNT(*) FROM view_systems_status_table;
+              SELECT COUNT(*) FROM view_commit_deployment_timeline;
+              "
+          """)
+
+          end_time = time.time()
+          query_time = end_time - start_time
+
+          server.log(f"View query performance: {query_time:.2f} seconds")
+
+          if query_time > 5.0:  # 5 second threshold
+              pytest.fail(f"Views are too slow: {query_time:.2f} seconds")
+
+      except Exception as e:
+          pytest.fail(f"View performance test failed: {e}")
+
+      server.log("=== SQL View Tests Completed ===")
     '';
   }
