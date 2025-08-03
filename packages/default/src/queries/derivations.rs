@@ -871,7 +871,7 @@ pub async fn discover_and_insert_packages(
                 drv_path,                             // derivation_path (the actual .drv path)
                 package_info.pname.as_deref(),       // pname
                 package_info.version.as_deref(),     // version
-                EvaluationStatus::DryRunComplete.as_id()   // status_id - discovered packages are "complete"
+                EvaluationStatus::DryRunComplete.as_id()   
             )
             .fetch_one(pool)
             .await;
