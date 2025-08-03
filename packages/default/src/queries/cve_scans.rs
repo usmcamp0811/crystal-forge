@@ -266,21 +266,20 @@ pub async fn save_scan_results(
 
     // Insert packages and vulnerabilities found during scan
     for entry in vulnix_results {
-        // Insert package as a derivation with type 'package'
+        // Insert package as a derivation with type 'package' and NULL commit_id
         let package_derivation_id = sqlx::query!(
             r#"
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path, 
-                pname, version, status_id, attempt_count
+                commit_id,        -- NULL for packages
+                derivation_type, 
+                derivation_name, 
+                derivation_path, 
+                pname, 
+                version, 
+                status_id, 
+                attempt_count
             )
-            VALUES (
-                (SELECT commit_id FROM cve_scans cs 
-                 JOIN derivations d ON cs.derivation_id = d.id 
-                 WHERE cs.id = $1), 
-                'package', $2, $3, $4, $5, 
-                (SELECT id FROM derivation_statuses WHERE name = 'complete'), 
-                0
-            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
             ON CONFLICT (derivation_path) DO UPDATE SET
                 derivation_name = EXCLUDED.derivation_name,
                 pname = EXCLUDED.pname,
@@ -288,11 +287,13 @@ pub async fn save_scan_results(
                 status_id = EXCLUDED.status_id
             RETURNING id
             "#,
-            scan_id,
+            None::<i32>,      // commit_id is NULL for packages
+            "package",
             entry.name,
             entry.derivation, // This is the derivation path from vulnix
             entry.pname,
-            entry.version
+            entry.version,
+            (SELECT id FROM derivation_statuses WHERE name = 'complete'), 
         )
         .fetch_one(&mut *tx)
         .await?
