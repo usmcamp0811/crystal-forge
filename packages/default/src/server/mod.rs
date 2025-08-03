@@ -2,7 +2,7 @@ use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
-use crate::queries::evaluation_targets::{
+use crate::queries::derivations::{
     get_pending_dry_run_targets, increment_evaluation_target_attempt_count,
     insert_evaluation_target, mark_target_dry_run_complete, mark_target_dry_run_in_progress,
     mark_target_failed, update_evaluation_target_path, update_scheduled_at,

@@ -1,5 +1,5 @@
 use crate::models::commits::Commit;
-use crate::models::evaluation_targets::{Derivation, DerivationType};
+use crate::models::derivations::{Derivation, DerivationType};
 use anyhow::Result;
 use sqlx::PgPool;
 use tracing::{error, info};
