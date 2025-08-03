@@ -289,7 +289,7 @@ pub async fn save_scan_results(
             "#,
             None::<i32>, // commit_id is NULL for packages
             "package",
-            entry.name,
+            entry.derivation, // Use derivation path as name to ensure uniqueness
             entry.derivation, // This is the derivation path from vulnix
             entry.pname,
             entry.version,
@@ -300,19 +300,32 @@ pub async fn save_scan_results(
         .id;
 
         // Link package to scan using the new derivation_id
-        sqlx::query!(
+        // First check if it already exists
+        let existing = sqlx::query!(
             r#"
-            INSERT INTO scan_packages (scan_id, derivation_id, is_runtime_dependency, dependency_depth)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT (scan_id, derivation_id) DO NOTHING
+            SELECT id FROM scan_packages 
+            WHERE scan_id = $1 AND derivation_id = $2
             "#,
             scan_id,
-            package_derivation_id,
-            true,  // Assume runtime dependency for now
-            0i32   // Assume direct dependency for now
+            package_derivation_id
         )
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await?;
+
+        if existing.is_none() {
+            sqlx::query!(
+                r#"
+                INSERT INTO scan_packages (scan_id, derivation_id, is_runtime_dependency, dependency_depth)
+                VALUES ($1, $2, $3, $4)
+                "#,
+                scan_id,
+                package_derivation_id,
+                true,  // Assume runtime dependency for now
+                0i32   // Assume direct dependency for now
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
 
         // Insert CVEs from this entry
         for cve_id in &entry.affected_by {
