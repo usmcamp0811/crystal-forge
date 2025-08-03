@@ -33,7 +33,7 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
         commit_pool,
         flake_config.commit_evaluation_interval,
     ));
-    tokio::spawn(run_target_evaluation_loop(
+    tokio::spawn(run_derivation_evaluation_loop(
         target_pool,
         flake_config.build_processing_interval,
     ));
@@ -68,7 +68,7 @@ async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
 }
 
 /// Runs the periodic evaluation target resolution loop  
-async fn run_target_evaluation_loop(pool: PgPool, interval: Duration) {
+async fn run_derivation_evaluation_loop(pool: PgPool, interval: Duration) {
     info!(
         "🔍 Starting periodic evaluation target check loop (every {:?})...",
         interval
@@ -133,7 +133,7 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
     match get_pending_dry_run_derivations(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
-            let concurrency_limit = 4; // adjust as needed
+            let concurrency_limit = 1; // adjust as needed
             stream::iter(pending_targets.into_iter().map(|mut target| {
                 let pool = pool.clone();
                 async move {

@@ -182,7 +182,6 @@ impl Derivation {
         let commit = crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;
         let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
         let flake_url = &flake.repo_url;
-        let commit_hash = &commit.git_commit_hash;
         let system = &self.derivation_name;
         let is_path = Path::new(flake_url).exists();
         debug!("📁 Is local path: {is_path}");
@@ -234,8 +233,12 @@ impl Derivation {
         build_config.apply_to_command(&mut cmd);
 
         let output = cmd.output().await?;
+
+        // Always capture both stdout and stderr for debugging
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
             error!("❌ nix build failed: {}", stderr.trim());
             anyhow::bail!("nix build failed: {}", stderr.trim());
         }
@@ -250,44 +253,90 @@ impl Derivation {
                 .to_string()
         } else {
             // Dry run: parse text output for derivation paths
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            info!("🔍 Dry-run output:\n{}", stdout);
+            info!("🔍 Full dry-run stdout:\n{}", stdout);
+            info!("🔍 Full dry-run stderr:\n{}", stderr);
 
-            // Parse the output: first collect all derivation paths from the "these X derivations will be built:" section
+            // Parse the stderr output: collect all derivation paths (Nix outputs the build list to stderr)
             let mut derivation_paths = Vec::new();
-            let mut in_derivation_list = false;
+            let mut collecting_derivations = false;
 
-            for line in stdout.lines() {
+            for line in stderr.lines() {
                 let trimmed = line.trim();
 
+                // Look for the start of derivation list
                 if trimmed.starts_with("these ") && trimmed.contains("derivations will be built:") {
-                    in_derivation_list = true;
+                    collecting_derivations = true;
+                    debug!("🔍 Found derivation list header: {}", trimmed);
                     continue;
                 }
 
-                // If we're in the derivation list and find a line that starts with /nix/store/ and ends with .drv
-                if in_derivation_list
-                    && trimmed.starts_with("/nix/store/")
-                    && trimmed.ends_with(".drv")
-                {
-                    derivation_paths.push(trimmed);
-                }
-
-                // Stop collecting when we hit an empty line or the JSON output section
-                if in_derivation_list && (trimmed.is_empty() || trimmed.starts_with("[{")) {
-                    in_derivation_list = false;
+                // If we're collecting and find a derivation path
+                if collecting_derivations {
+                    if trimmed.starts_with("/nix/store/") && trimmed.ends_with(".drv") {
+                        derivation_paths.push(trimmed);
+                        debug!("🔍 Found derivation: {}", trimmed);
+                    } else if trimmed.is_empty() || trimmed.starts_with("[{") {
+                        // Stop when we hit empty line or JSON section
+                        collecting_derivations = false;
+                        debug!("🔍 Stopped collecting derivations at: '{}'", trimmed);
+                    }
                 }
             }
 
             info!("🔍 Found {} derivation paths", derivation_paths.len());
 
-            // The main system derivation should be the one that contains "nixos-system" or the system name
+            if derivation_paths.is_empty() {
+                // If no derivations found, this means everything is already built/cached
+                // We need to get the actual store path instead
+                info!("📦 No new derivations needed - everything already available");
+
+                // Run without --dry-run but still with --print-out-paths to get the store path
+                let mut store_cmd = Command::new("nix");
+                store_cmd.args(["build", &flake_target, "--print-out-paths"]);
+                build_config.apply_to_command(&mut store_cmd);
+
+                let store_output = store_cmd.output().await?;
+                if !store_output.status.success() {
+                    let store_stderr = String::from_utf8_lossy(&store_output.stderr);
+                    error!(
+                        "❌ nix build for store path failed: {}",
+                        store_stderr.trim()
+                    );
+                    anyhow::bail!("nix build for store path failed: {}", store_stderr.trim());
+                }
+
+                let store_stdout = String::from_utf8_lossy(&store_output.stdout);
+                let store_path = store_stdout.trim();
+
+                if store_path.is_empty() {
+                    anyhow::bail!("No store path returned from nix build");
+                }
+
+                info!("✅ Using existing store path: {}", store_path);
+                return Ok(store_path.to_string());
+            }
+
+            // Look for the main system derivation
             let main_path = derivation_paths
                 .iter()
-                .find(|path| path.contains("nixos-system") || path.contains(&self.derivation_name))
+                .find(|path| {
+                    let contains_nixos_system = path.contains("nixos-system");
+                    let contains_system_name = path.contains(&self.derivation_name);
+                    debug!(
+                        "🔍 Checking path {}: nixos-system={}, system-name={}",
+                        path, contains_nixos_system, contains_system_name
+                    );
+                    contains_nixos_system || contains_system_name
+                })
                 .ok_or_else(|| {
+                    error!("❌ Could not find main system derivation. Available paths:");
+                    for path in &derivation_paths {
+                        error!("  - {}", path);
+                    }
                     anyhow::anyhow!("Could not find main system derivation in dry-run output")
                 })?;
+
+            info!("🔍 Selected main derivation: {}", main_path);
 
             // Insert discovered packages into the database
             if !derivation_paths.is_empty() {
