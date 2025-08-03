@@ -791,7 +791,20 @@ pub async fn discover_and_insert_packages(
     for &drv_path in derivation_paths {
         // Parse derivation path to extract package information
         if let Some(package_info) = parse_derivation_path(drv_path) {
-            // Insert package derivation (without parent_derivation_id)
+            // Use the parsed package name as the derivation_name, fallback to derivation path
+            let derivation_name = package_info
+                .pname
+                .as_ref()
+                .map(|name| {
+                    // Include version in the name if available for better identification
+                    match &package_info.version {
+                        Some(version) => format!("{}-{}", name, version),
+                        None => name.clone(),
+                    }
+                })
+                .unwrap_or_else(|| drv_path.to_string());
+
+            // Insert package derivation
             let package_derivation = sqlx::query_as!(
                 Derivation,
                 r#"
@@ -826,13 +839,13 @@ pub async fn discover_and_insert_packages(
                     version,
                     status_id
                 "#,
-                None::<i32>, // commit_id is NULL for discovered packages
-                "package",
-                drv_path, // Use derivation path as name for uniqueness
-                drv_path,
-                package_info.pname.as_deref(),
-                package_info.version.as_deref(),
-                EvaluationStatus::Complete.as_id() // Discovered packages are "complete"
+                None::<i32>,     // commit_id is NULL for discovered packages
+                "package",       // derivation_type
+                derivation_name, // derivation_name (fixed - now uses parsed package name)
+                drv_path,        // derivation_path (the actual .drv path)
+                package_info.pname.as_deref(), // pname
+                package_info.version.as_deref(), // version
+                EvaluationStatus::Complete.as_id()  // status_id - discovered packages are "complete"
             )
             .fetch_one(pool)
             .await;
