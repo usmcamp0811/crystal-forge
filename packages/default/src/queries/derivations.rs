@@ -77,7 +77,10 @@ pub async fn insert_derivation(
         VALUES ($1, $2, $3, $4, 0)
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) 
         DO UPDATE SET
-            status_id = derivations.status_id
+            status_id = CASE 
+                WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.status_id  -- Keep terminal states
+                ELSE EXCLUDED.status_id  -- Reset non-terminal states to pending
+            END
         RETURNING 
             id,
             commit_id,
@@ -804,7 +807,7 @@ pub async fn discover_and_insert_packages(
                 })
                 .unwrap_or_else(|| drv_path.to_string());
 
-            // Insert package derivation
+            // Insert package derivation with better conflict handling
             let package_derivation = sqlx::query_as!(
                 Derivation,
                 r#"
@@ -822,7 +825,15 @@ pub async fn discover_and_insert_packages(
                 ON CONFLICT (derivation_path) DO UPDATE SET
                     derivation_name = EXCLUDED.derivation_name,
                     pname = EXCLUDED.pname,
-                    version = EXCLUDED.version
+                    version = EXCLUDED.version,
+                    status_id = CASE 
+                        WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.status_id  -- Keep terminal states
+                        ELSE EXCLUDED.status_id  -- Update to new status if not terminal
+                    END,
+                    scheduled_at = CASE 
+                        WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.scheduled_at  -- Keep terminal timestamps
+                        ELSE NOW()  -- Update timestamp for non-terminal
+                    END
                 RETURNING 
                     id,
                     commit_id,
@@ -839,13 +850,13 @@ pub async fn discover_and_insert_packages(
                     version,
                     status_id
                 "#,
-                None::<i32>,     // commit_id is NULL for discovered packages
-                "package",       // derivation_type
-                derivation_name, // derivation_name (fixed - now uses parsed package name)
-                drv_path,        // derivation_path (the actual .drv path)
-                package_info.pname.as_deref(), // pname
-                package_info.version.as_deref(), // version
-                EvaluationStatus::Complete.as_id()  // status_id - discovered packages are "complete"
+                None::<i32>,                           // commit_id is NULL for discovered packages
+                "package",                             // derivation_type
+                derivation_name,                       // derivation_name (uses parsed package name)
+                drv_path,                             // derivation_path (the actual .drv path)
+                package_info.pname.as_deref(),       // pname
+                package_info.version.as_deref(),     // version
+                EvaluationStatus::Complete.as_id()   // status_id - discovered packages are "complete"
             )
             .fetch_one(pool)
             .await;

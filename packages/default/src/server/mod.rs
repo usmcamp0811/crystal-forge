@@ -86,7 +86,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
             for commit in pending_commits {
-                let target_type = "nixos";
+                let target_type = "nixos"; // This correctly sets the type to "nixos"
                 match list_nixos_configurations_from_commit(&pool, &commit).await {
                     Ok(nixos_targets) => {
                         info!(
@@ -94,22 +94,23 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             commit.git_commit_hash,
                             nixos_targets.len()
                         );
-                        for mut derivation_name in nixos_targets {
+                        for derivation_name in nixos_targets {
+                            // Removed 'mut' - not needed
                             match insert_derivation(
                                 &pool,
                                 Some(&commit),
                                 &derivation_name,
-                                target_type,
+                                target_type, // This will be "nixos"
                             )
                             .await
                             {
                                 Ok(_) => info!(
-                                    "✅ Inserted evaluation target: {} (commit {})",
+                                    "✅ Inserted NixOS derivation: {} (commit {})",
                                     derivation_name, commit.git_commit_hash
                                 ),
                                 Err(e) => {
                                     error!(
-                                        "❌ Failed to insert target for {}: {}",
+                                        "❌ Failed to insert NixOS derivation for {}: {}",
                                         derivation_name, e
                                     )
                                 }
