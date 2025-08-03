@@ -6,8 +6,8 @@ use crate::queries::cve_scans::{
     save_scan_results,
 };
 use crate::queries::derivations::{
-    EvaluationStatus, get_targets_ready_for_build, mark_target_build_in_progress,
-    mark_target_failed, update_evaluation_target_status,
+    EvaluationStatus, get_derivations_ready_for_build, mark_target_build_in_progress,
+    mark_target_failed, update_derivation_status,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
@@ -97,7 +97,7 @@ async fn build_derivations(
     cache_config: &CacheConfig,
 ) -> Result<()> {
     // Get derivations ready for building (those with dry-run-complete status)
-    match get_targets_ready_for_build(pool).await {
+    match get_derivations_ready_for_build(pool).await {
         Ok(derivations) => {
             if derivations.is_empty() {
                 info!("🔍 No derivations need building");
@@ -238,7 +238,7 @@ async fn scan_derivations(
                     }
                     Ok(false) => {
                         warn!("❌ Derivation path does not exist: {}", path);
-                        update_evaluation_target_status(
+                        update_derivation_status(
                             &pool,
                             derivation.id,
                             EvaluationStatus::DryRunComplete,

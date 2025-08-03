@@ -50,7 +50,7 @@ impl EvaluationStatus {
     }
 }
 
-pub async fn insert_evaluation_target(
+pub async fn insert_derivation(
     pool: &PgPool,
     commit: &Commit,
     target_name: &str,
@@ -73,7 +73,10 @@ pub async fn insert_evaluation_target(
             attempt_count
         )
         VALUES ($1, $2, $3, $4, 0)
-        ON CONFLICT (derivation_path) DO NOTHING
+        ON CONFLICT (commit_id, derivation_name, derivation_type) 
+        DO UPDATE SET
+            status_id = EXCLUDED.status_id,
+            attempt_count = derivations.attempt_count
         RETURNING 
             id,
             commit_id,
@@ -103,7 +106,7 @@ pub async fn insert_evaluation_target(
 }
 
 /// Unified function to update derivation status with optional additional fields
-pub async fn update_evaluation_target_status(
+pub async fn update_derivation_status(
     pool: &PgPool,
     target_id: i32,
     status: EvaluationStatus,
@@ -211,7 +214,7 @@ pub async fn mark_derivation_dry_run_in_progress(
     pool: &PgPool,
     derivation_id: i32,
 ) -> Result<Derivation> {
-    update_evaluation_target_status(
+    update_derivation_status(
         pool,
         derivation_id,
         EvaluationStatus::DryRunInProgress,
@@ -226,7 +229,7 @@ pub async fn mark_derivation_dry_run_complete(
     derivation_id: i32,
     derivation_path: &str,
 ) -> Result<Derivation> {
-    update_evaluation_target_status(
+    update_derivation_status(
         pool,
         derivation_id,
         EvaluationStatus::DryRunComplete,
@@ -240,7 +243,7 @@ pub async fn mark_derivation_build_in_progress(
     pool: &PgPool,
     derivation_id: i32,
 ) -> Result<Derivation> {
-    update_evaluation_target_status(
+    update_derivation_status(
         pool,
         derivation_id,
         EvaluationStatus::BuildInProgress,
@@ -254,7 +257,7 @@ pub async fn mark_derivation_build_complete(
     pool: &PgPool,
     derivation_id: i32,
 ) -> Result<Derivation> {
-    update_evaluation_target_status(
+    update_derivation_status(
         pool,
         derivation_id,
         EvaluationStatus::BuildComplete,
@@ -276,16 +279,16 @@ pub async fn mark_derivation_failed(
         _ => return Err(anyhow::anyhow!("Invalid phase: {}", phase)),
     };
 
-    update_evaluation_target_status(pool, derivation_id, status, None, Some(error_message)).await
+    update_derivation_status(pool, derivation_id, status, None, Some(error_message)).await
 }
 
 // Keeping the original function but updating it to use the new status
-pub async fn update_evaluation_target_path(
+pub async fn update_derivation_path(
     pool: &PgPool,
     target: &Derivation,
     path: &str,
 ) -> Result<Derivation> {
-    update_evaluation_target_status(
+    update_derivation_status(
         pool,
         target.id,
         EvaluationStatus::DryRunComplete,
@@ -295,7 +298,7 @@ pub async fn update_evaluation_target_path(
     .await
 }
 
-pub async fn get_target_by_id(pool: &PgPool, target_id: i32) -> Result<Derivation> {
+pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Derivation> {
     let target = sqlx::query_as!(
         Derivation,
         r#"
@@ -327,7 +330,7 @@ pub async fn get_target_by_id(pool: &PgPool, target_id: i32) -> Result<Derivatio
 }
 
 // Updated to get targets ready for dry-run
-pub async fn get_pending_dry_run_targets(pool: &PgPool) -> Result<Vec<Derivation>> {
+pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Derivation>> {
     let rows = sqlx::query_as!(
         Derivation,
         r#"
@@ -361,7 +364,7 @@ pub async fn get_pending_dry_run_targets(pool: &PgPool) -> Result<Vec<Derivation
 }
 
 // New function to get targets ready for building
-pub async fn get_targets_ready_for_build(pool: &PgPool) -> Result<Vec<Derivation>> {
+pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Derivation>> {
     let rows = sqlx::query_as!(
         Derivation,
         r#"
@@ -430,7 +433,7 @@ pub async fn increment_derivation_attempt_count(
     Ok(())
 }
 
-pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
+pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
     let result = sqlx::query!(
         r#"
         UPDATE derivations 

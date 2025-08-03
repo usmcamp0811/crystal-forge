@@ -54,7 +54,7 @@ impl VulnixRunner {
     }
 
     /// Scan a specific derivation path
-    pub async fn scan_target(
+    pub async fn scan_derivation(
         &self,
         pool: &PgPool,
         evaluation_target_id: i32,
@@ -62,7 +62,7 @@ impl VulnixRunner {
     ) -> Result<VulnixScanOutput> {
         // Get the evaluation target and extract derivation path
         let target =
-            crate::queries::derivations::get_target_by_id(pool, evaluation_target_id).await?;
+            crate::queries::derivations::get_derivation_by_id(pool, evaluation_target_id).await?;
         let derivation_path = target.derivation_path.ok_or_else(|| {
             anyhow!(
                 "Evaluation target {} has no derivation path",

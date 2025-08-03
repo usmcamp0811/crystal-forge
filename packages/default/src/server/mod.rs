@@ -3,9 +3,9 @@ use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::derivations::{
-    get_pending_dry_run_targets, increment_evaluation_target_attempt_count,
-    insert_evaluation_target, mark_target_dry_run_complete, mark_target_dry_run_in_progress,
-    mark_target_failed, update_evaluation_target_path, update_scheduled_at,
+    get_pending_dry_run_derivations, increment_derivation_attempt_count, insert_derivation,
+    mark_target_dry_run_complete, mark_derivation_dry_run_in_progress, mark_target_failed,
+    update_derivation_path, update_scheduled_at,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
@@ -74,7 +74,7 @@ async fn run_target_evaluation_loop(pool: PgPool, interval: Duration) {
         interval
     );
     loop {
-        if let Err(e) = process_pending_targets(&pool).await {
+        if let Err(e) = process_pending_derivations(&pool).await {
             error!("❌ Error in target evaluation cycle: {e}");
         }
         tokio::time::sleep(interval).await;
@@ -95,13 +95,8 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             nixos_targets.len()
                         );
                         for mut derivation_name in nixos_targets {
-                            match insert_evaluation_target(
-                                &pool,
-                                &commit,
-                                &derivation_name,
-                                target_type,
-                            )
-                            .await
+                            match insert_derivation(&pool, &commit, &derivation_name, target_type)
+                                .await
                             {
                                 Ok(_) => info!(
                                     "✅ Inserted evaluation target: {} (commit {})",
@@ -128,29 +123,27 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn process_pending_targets(pool: &PgPool) -> Result<()> {
+async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
     update_scheduled_at(pool).await?;
-    match get_pending_dry_run_targets(pool).await {
+    match get_pending_dry_run_derivations(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
             let concurrency_limit = 4; // adjust as needed
             stream::iter(pending_targets.into_iter().map(|mut target| {
                 let pool = pool.clone();
                 async move {
-                    if let Err(e) = mark_target_dry_run_in_progress(&pool, target.id).await {
+                    if let Err(e) = mark_derivation_dry_run_in_progress(&pool, target.id).await {
                         error!("❌ Failed to mark target in-progress: {e}");
                         return;
                     }
                     match target.resolve_derivation_path(&pool).await {
-                        Ok(path) => {
-                            match update_evaluation_target_path(&pool, &target, &path).await {
-                                Ok(updated) => info!("✅ Updated: {:?}", updated),
-                                Err(e) => error!("❌ Failed to update path: {e}"),
-                            }
-                        }
+                        Ok(path) => match update_derivation_path(&pool, &target, &path).await {
+                            Ok(updated) => info!("✅ Updated: {:?}", updated),
+                            Err(e) => error!("❌ Failed to update path: {e}"),
+                        },
                         Err(e) => {
                             if let Err(inc_err) =
-                                increment_evaluation_target_attempt_count(&pool, &target, &e).await
+                                increment_derivation_attempt_count(&pool, &target, &e).await
                             {
                                 error!("❌ Failed to increment attempt count: {inc_err}");
                             }
