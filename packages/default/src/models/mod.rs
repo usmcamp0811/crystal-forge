@@ -7,7 +7,6 @@ pub mod environments;
 pub mod evaluation_targets;
 pub mod flakes;
 pub mod network_interfaces;
-pub mod nix_packages;
 pub mod package_vulnerabilities;
 pub mod public_key;
 pub mod scan_packages;
