@@ -1,0 +1,100 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id\n        FROM derivations\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "derivation_type: DerivationType",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "derivation_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "derivation_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "attempt_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "evaluation_duration_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "pname",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 12,
+        "name": "version",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "status_id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "425fea44dbd5ced03e719505d6af2ce81de5ac5460d116e9a1e6e9ad7abe2f3c"
+}

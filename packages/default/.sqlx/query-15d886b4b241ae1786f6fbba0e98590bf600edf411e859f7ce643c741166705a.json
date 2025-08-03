@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        derivation_path = $2\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        parent_derivation_id,\n                        pname,\n                        version,\n                        status_id\n                    ",
+  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        derivation_path = $2,\n                        error_message = $3\n                    WHERE id = $4\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id\n                    ",
   "describe": {
     "columns": [
       {
@@ -60,21 +60,16 @@
       },
       {
         "ordinal": 11,
-        "name": "parent_derivation_id",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "status_id",
         "type_info": "Int4"
       }
@@ -82,6 +77,7 @@
     "parameters": {
       "Left": [
         "Int4",
+        "Text",
         "Text",
         "Int4"
       ]
@@ -100,9 +96,8 @@
       true,
       true,
       true,
-      true,
       false
     ]
   },
-  "hash": "c3d10a08aea19ddae62d366aa8bd0713406c6ea93318e03d97aacef77d79258a"
+  "hash": "15d886b4b241ae1786f6fbba0e98590bf600edf411e859f7ce643c741166705a"
 }

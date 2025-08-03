@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                INSERT INTO derivations (\n                    commit_id,\n                    derivation_type, \n                    derivation_name, \n                    derivation_path, \n                    pname, \n                    version, \n                    status_id, \n                    attempt_count,\n                    parent_derivation_id\n                )\n                VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8)\n                ON CONFLICT (derivation_path) DO UPDATE SET\n                    derivation_name = EXCLUDED.derivation_name,\n                    pname = EXCLUDED.pname,\n                    version = EXCLUDED.version,\n                    parent_derivation_id = EXCLUDED.parent_derivation_id\n                RETURNING \n                    id,\n                    commit_id,\n                    derivation_type as \"derivation_type: DerivationType\",\n                    derivation_name,\n                    derivation_path,\n                    scheduled_at,\n                    completed_at,\n                    started_at,\n                    attempt_count,\n                    evaluation_duration_ms,\n                    error_message,\n                    parent_derivation_id,\n                    pname,\n                    version,\n                    status_id\n                ",
+  "query": "\n        INSERT INTO derivations (\n            commit_id, \n            derivation_type, \n            derivation_name, \n            status_id,\n            attempt_count\n        )\n        VALUES ($1, $2, $3, $4, 0)\n        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) \n        DO UPDATE SET\n            status_id = derivations.status_id\n        RETURNING \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id\n        ",
   "describe": {
     "columns": [
       {
@@ -60,21 +60,16 @@
       },
       {
         "ordinal": 11,
-        "name": "parent_derivation_id",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "status_id",
         "type_info": "Int4"
       }
@@ -84,10 +79,6 @@
         "Int4",
         "Text",
         "Text",
-        "Text",
-        "Varchar",
-        "Varchar",
-        "Int4",
         "Int4"
       ]
     },
@@ -105,9 +96,8 @@
       true,
       true,
       true,
-      true,
       false
     ]
   },
-  "hash": "8b6ef6b74e6b25ab3b63c05d071c7aa324acfab40c56a687514d21f92b4dd804"
+  "hash": "7c7a9a1f029989705557e487ca2ae7fb0fd0c834098da80bd11710ff26284de6"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            parent_derivation_id,\n            pname,\n            version,\n            status_id\n        FROM derivations\n        WHERE id = $1\n        ",
+  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW()\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id\n                    ",
   "describe": {
     "columns": [
       {
@@ -60,27 +60,23 @@
       },
       {
         "ordinal": 11,
-        "name": "parent_derivation_id",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "status_id",
         "type_info": "Int4"
       }
     ],
     "parameters": {
       "Left": [
+        "Int4",
         "Int4"
       ]
     },
@@ -98,9 +94,8 @@
       true,
       true,
       true,
-      true,
       false
     ]
   },
-  "hash": "acb97a33804ff851430f5f56387ba75724058bf3f4a3c41c8e93b0aafa70833e"
+  "hash": "1e2cda2585292810b4b2aca4e3c4de21fafe891ad3cadfb919134c8a9304b46b"
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        error_message = $2\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        parent_derivation_id,\n                        pname,\n                        version,\n                        status_id\n                    ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id\n        FROM derivations\n        WHERE status_id = $1\n        ORDER BY completed_at ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -60,29 +60,22 @@
       },
       {
         "ordinal": 11,
-        "name": "parent_derivation_id",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "status_id",
         "type_info": "Int4"
       }
     ],
     "parameters": {
       "Left": [
-        "Int4",
-        "Text",
         "Int4"
       ]
     },
@@ -100,9 +93,8 @@
       true,
       true,
       true,
-      true,
       false
     ]
   },
-  "hash": "45112182e7960cb66ca5919b3da85e471b0644b81b0beb6256c29a008b970207"
+  "hash": "bafaf150fd165f303dfc6a401ccb6cbe42b6e3dd8b5556b074a9549f45666922"
 }

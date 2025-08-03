@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        completed_at = NOW(),\n                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        parent_derivation_id,\n                        pname,\n                        version,\n                        status_id\n                    ",
+  "query": "\n        SELECT \n            d.id,\n            d.commit_id,\n            d.derivation_type as \"derivation_type: DerivationType\",\n            d.derivation_name,\n            d.derivation_path,\n            d.scheduled_at,\n            d.completed_at,\n            d.started_at,\n            d.attempt_count,\n            d.evaluation_duration_ms,\n            d.error_message,\n            d.pname,\n            d.version,\n            d.status_id\n        FROM derivations d\n        JOIN derivation_statuses ds ON d.status_id = ds.id\n        WHERE ds.name IN ('build-complete', 'complete')\n            AND d.derivation_path IS NOT NULL\n            AND d.derivation_type = 'nixos'\n            AND NOT EXISTS (\n                SELECT 1 \n                FROM cve_scans cs \n                WHERE cs.derivation_id = d.id \n                    AND cs.status = 'completed'\n            )\n            AND (\n                -- Either no scan exists, or only failed scans with < 5 attempts\n                NOT EXISTS (\n                    SELECT 1 \n                    FROM cve_scans cs2 \n                    WHERE cs2.derivation_id = d.id\n                )\n                OR EXISTS (\n                    SELECT 1 \n                    FROM cve_scans cs3 \n                    WHERE cs3.derivation_id = d.id \n                        AND cs3.status = 'failed' \n                        AND cs3.attempts < 5\n                )\n            )\n        ORDER BY d.completed_at ASC\n        LIMIT $1\n        ",
   "describe": {
     "columns": [
       {
@@ -60,29 +60,23 @@
       },
       {
         "ordinal": 11,
-        "name": "parent_derivation_id",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "status_id",
         "type_info": "Int4"
       }
     ],
     "parameters": {
       "Left": [
-        "Int4",
-        "Int4"
+        "Int8"
       ]
     },
     "nullable": [
@@ -99,9 +93,8 @@
       true,
       true,
       true,
-      true,
       false
     ]
   },
-  "hash": "9ad7a5078f87dd541f00cb61a47020b394924674f715896b956c723300dbecfa"
+  "hash": "1e03b837cb267500b3c39a819b05c14b58f28a3e1e90dfdbd6c0957066b002ca"
 }

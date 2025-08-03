@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        completed_at = NOW(),\n                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,\n                        derivation_path = $2,\n                        error_message = $3\n                    WHERE id = $4\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        parent_derivation_id,\n                        pname,\n                        version,\n                        status_id\n                    ",
+  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        completed_at = NOW(),\n                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,\n                        derivation_path = $2,\n                        error_message = $3\n                    WHERE id = $4\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id\n                    ",
   "describe": {
     "columns": [
       {
@@ -60,21 +60,16 @@
       },
       {
         "ordinal": 11,
-        "name": "parent_derivation_id",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "status_id",
         "type_info": "Int4"
       }
@@ -101,9 +96,8 @@
       true,
       true,
       true,
-      true,
       false
     ]
   },
-  "hash": "badecff8f1dfd2a22f12e1c6d5293c67ed8a3a318c8ff2c2f1a97e77909f5c7e"
+  "hash": "57bdad74a0596ad5cf79cf0cb102e52961aaf2edc4367bf80ce64ec465fe4538"
 }

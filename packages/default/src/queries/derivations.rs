@@ -90,7 +90,6 @@ pub async fn insert_derivation(
             attempt_count,
             evaluation_duration_ms,
             error_message,
-            parent_derivation_id,
             pname,
             version,
             status_id
@@ -152,7 +151,6 @@ pub async fn insert_package_derivation(
             attempt_count,
             evaluation_duration_ms,
             error_message,
-            parent_derivation_id,
             pname,
             version,
             status_id
@@ -206,7 +204,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -240,7 +237,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -277,7 +273,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -309,7 +304,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -345,7 +339,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -377,7 +370,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -411,7 +403,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -442,7 +433,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -470,7 +460,6 @@ pub async fn update_derivation_status(
                         attempt_count,
                         evaluation_duration_ms,
                         error_message,
-                        parent_derivation_id,
                         pname,
                         version,
                         status_id
@@ -592,7 +581,6 @@ pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Deriv
             attempt_count,
             evaluation_duration_ms,
             error_message,
-            parent_derivation_id,
             pname,
             version,
             status_id
@@ -624,7 +612,6 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
             attempt_count,
             evaluation_duration_ms,
             error_message,
-            parent_derivation_id,
             pname,
             version,
             status_id
@@ -658,7 +645,6 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             attempt_count,
             evaluation_duration_ms,
             error_message,
-            parent_derivation_id,
             pname,
             version,
             status_id
@@ -805,8 +791,8 @@ pub async fn discover_and_insert_packages(
     for &drv_path in derivation_paths {
         // Parse derivation path to extract package information
         if let Some(package_info) = parse_derivation_path(drv_path) {
-            // Insert package derivation
-            let _package_derivation = sqlx::query_as!(
+            // Insert package derivation (without parent_derivation_id)
+            let package_derivation = sqlx::query_as!(
                 Derivation,
                 r#"
                 INSERT INTO derivations (
@@ -817,15 +803,13 @@ pub async fn discover_and_insert_packages(
                     pname, 
                     version, 
                     status_id, 
-                    attempt_count,
-                    parent_derivation_id
+                    attempt_count
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
                 ON CONFLICT (derivation_path) DO UPDATE SET
                     derivation_name = EXCLUDED.derivation_name,
                     pname = EXCLUDED.pname,
-                    version = EXCLUDED.version,
-                    parent_derivation_id = EXCLUDED.parent_derivation_id
+                    version = EXCLUDED.version
                 RETURNING 
                     id,
                     commit_id,
@@ -838,7 +822,6 @@ pub async fn discover_and_insert_packages(
                     attempt_count,
                     evaluation_duration_ms,
                     error_message,
-                    parent_derivation_id,
                     pname,
                     version,
                     status_id
@@ -849,14 +832,36 @@ pub async fn discover_and_insert_packages(
                 drv_path,
                 package_info.pname.as_deref(),
                 package_info.version.as_deref(),
-                EvaluationStatus::Complete.as_id(), // Discovered packages are "complete"
-                Some(parent_derivation_id)          // Set the NixOS derivation as the parent
+                EvaluationStatus::Complete.as_id() // Discovered packages are "complete"
             )
             .fetch_one(pool)
             .await;
 
-            if let Err(e) = _package_derivation {
-                warn!("⚠️ Failed to insert package derivation {}: {}", drv_path, e);
+            match package_derivation {
+                Ok(pkg_deriv) => {
+                    // Insert the dependency relationship in the junction table
+                    let dependency_result = sqlx::query!(
+                        r#"
+                        INSERT INTO derivation_dependencies (derivation_id, depends_on_id)
+                        VALUES ($1, $2)
+                        ON CONFLICT (derivation_id, depends_on_id) DO NOTHING
+                        "#,
+                        pkg_deriv.id,
+                        parent_derivation_id
+                    )
+                    .execute(pool)
+                    .await;
+
+                    if let Err(e) = dependency_result {
+                        warn!(
+                            "⚠️ Failed to insert dependency relationship for {}: {}",
+                            drv_path, e
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!("⚠️ Failed to insert package derivation {}: {}", drv_path, e);
+                }
             }
         }
     }

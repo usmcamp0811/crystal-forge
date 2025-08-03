@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            parent_derivation_id,\n            pname,\n            version,\n            status_id\n        FROM derivations\n        WHERE status_id = $1\n        ORDER BY completed_at ASC\n        ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id\n        FROM derivations\n        WHERE status_id = $1\n        AND attempt_count < 5\n        ORDER BY scheduled_at DESC\n        ",
   "describe": {
     "columns": [
       {
@@ -60,21 +60,16 @@
       },
       {
         "ordinal": 11,
-        "name": "parent_derivation_id",
-        "type_info": "Int4"
-      },
-      {
-        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 12,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 14,
+        "ordinal": 13,
         "name": "status_id",
         "type_info": "Int4"
       }
@@ -98,9 +93,8 @@
       true,
       true,
       true,
-      true,
       false
     ]
   },
-  "hash": "2315c4842dbedeb4b1101479409038086a8b5d77e3ca33274981af7852b92ece"
+  "hash": "bb621d22dcff3af7d974f342f41ac68dfaec619c3c3adf86fd053440b4588cd1"
 }

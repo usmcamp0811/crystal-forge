@@ -25,10 +25,10 @@ pub struct Derivation {
     pub attempt_count: i32,
     pub evaluation_duration_ms: Option<i32>,
     pub error_message: Option<String>,
-    pub parent_derivation_id: Option<i32>, // for hierarchical relationships (packages → systems)
-    pub pname: Option<String>,             // Nix package name (for packages)
-    pub version: Option<String>,           // package version (for packages)
-    pub status_id: i32,                    // foreign key to derivation_statuses table
+    // pub parent_derivation_id: Option<i32>, // for hierarchical relationships (packages → systems)
+    pub pname: Option<String>,   // Nix package name (for packages)
+    pub version: Option<String>, // package version (for packages)
+    pub status_id: i32,          // foreign key to derivation_statuses table
 }
 
 // Enum for derivation types (updated from TargetType)

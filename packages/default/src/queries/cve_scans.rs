@@ -28,7 +28,6 @@ pub async fn get_targets_needing_cve_scan(
             d.attempt_count,
             d.evaluation_duration_ms,
             d.error_message,
-            d.parent_derivation_id,
             d.pname,
             d.version,
             d.status_id
