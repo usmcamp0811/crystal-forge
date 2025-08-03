@@ -1,5 +1,4 @@
 use crate::models::cve_scans::{CveScan, ScanStatus};
-
 use crate::models::derivations::Derivation;
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
@@ -8,49 +7,58 @@ use bigdecimal::FromPrimitive;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-/// Get evaluation targets that need CVE scanning
+/// Get derivations that need CVE scanning
 pub async fn get_targets_needing_cve_scan(
     pool: &PgPool,
     limit: Option<i64>,
-) -> Result<Vec<EvaluationTarget>> {
+) -> Result<Vec<Derivation>> {
     let limit = limit.unwrap_or(10);
     let targets = sqlx::query_as!(
-        EvaluationTarget,
+        Derivation,
         r#"
-          SELECT 
-              et.id,
-              et.commit_id,
-              et.target_type,
-              et.target_name,
-              et.derivation_path,
-              et.scheduled_at,
-              et.completed_at,
-              et.status
-          FROM evaluation_targets et
-          WHERE et.status IN ('build-complete')
-              AND et.derivation_path IS NOT NULL
-              AND NOT EXISTS (
-                  SELECT 1 
-                  FROM cve_scans cs 
-                  WHERE cs.evaluation_target_id = et.id 
-                      AND cs.status = 'completed'
-              )
-              AND (
-                  -- Either no scan exists, or only failed scans with < 5 attempts
-                  NOT EXISTS (
-                      SELECT 1 
-                      FROM cve_scans cs2 
-                      WHERE cs2.evaluation_target_id = et.id
-                  )
-                  OR EXISTS (
-                      SELECT 1 
-                      FROM cve_scans cs3 
-                      WHERE cs3.evaluation_target_id = et.id 
-                          AND cs3.status = 'failed' 
-                          AND cs3.attempts < 5
-                  )
-              )
-          ORDER BY et.completed_at ASC
+        SELECT 
+            d.id,
+            d.commit_id,
+            d.derivation_type as "derivation_type: DerivationType",
+            d.derivation_name,
+            d.derivation_path,
+            d.scheduled_at,
+            d.completed_at,
+            d.started_at,
+            d.attempt_count,
+            d.evaluation_duration_ms,
+            d.error_message,
+            d.parent_derivation_id,
+            d.pname,
+            d.version,
+            d.status_id
+        FROM derivations d
+        JOIN derivation_statuses ds ON d.status_id = ds.id
+        WHERE ds.name IN ('build-complete', 'complete')
+            AND d.derivation_path IS NOT NULL
+            AND d.derivation_type = 'nixos'
+            AND NOT EXISTS (
+                SELECT 1 
+                FROM cve_scans cs 
+                WHERE cs.derivation_id = d.id 
+                    AND cs.status = 'completed'
+            )
+            AND (
+                -- Either no scan exists, or only failed scans with < 5 attempts
+                NOT EXISTS (
+                    SELECT 1 
+                    FROM cve_scans cs2 
+                    WHERE cs2.derivation_id = d.id
+                )
+                OR EXISTS (
+                    SELECT 1 
+                    FROM cve_scans cs3 
+                    WHERE cs3.derivation_id = d.id 
+                        AND cs3.status = 'failed' 
+                        AND cs3.attempts < 5
+                )
+            )
+        ORDER BY d.completed_at ASC
         LIMIT $1
         "#,
         limit
@@ -63,7 +71,7 @@ pub async fn get_targets_needing_cve_scan(
 /// Create a new CVE scan record
 pub async fn create_cve_scan(
     pool: &PgPool,
-    evaluation_target_id: i64,
+    derivation_id: i32,
     scanner_name: &str,
     scanner_version: Option<String>,
 ) -> Result<Uuid> {
@@ -72,14 +80,14 @@ pub async fn create_cve_scan(
     sqlx::query!(
         r#"
         INSERT INTO cve_scans (
-            id, evaluation_target_id, scanner_name, scanner_version,
+            id, derivation_id, scanner_name, scanner_version,
             status, total_packages, total_vulnerabilities,
             critical_count, high_count, medium_count, low_count,
             attempts
         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
         "#,
         scan_id,
-        evaluation_target_id as i32,
+        derivation_id,
         scanner_name,
         scanner_version,
         "pending" as &str,
@@ -163,14 +171,14 @@ pub async fn complete_cve_scan(
 /// Mark CVE scan as failed
 pub async fn mark_cve_scan_failed(
     pool: &PgPool,
-    target: &EvaluationTarget,
+    target: &Derivation,
     error_message: &str,
 ) -> Result<()> {
     // First try to find an existing pending/in-progress scan
     let existing_scan = sqlx::query!(
         r#"
         SELECT id FROM cve_scans 
-        WHERE evaluation_target_id = $1 
+        WHERE derivation_id = $1 
             AND status IN ('pending', 'in_progress')
         ORDER BY scheduled_at DESC
         LIMIT 1
@@ -184,13 +192,13 @@ pub async fn mark_cve_scan_failed(
         existing.id
     } else {
         // Create a new scan record to mark as failed
-        create_cve_scan(pool, target.id.into(), "vulnix", None).await?
+        create_cve_scan(pool, target.id, "vulnix", None).await?
     };
 
     // Create metadata with error details
     let metadata = serde_json::json!({
         "error": error_message,
-        "target_name": target.target_name,
+        "target_name": target.derivation_name,
         "derivation_path": target.derivation_path
     });
 
@@ -258,33 +266,47 @@ pub async fn save_scan_results(
 
     // Insert packages and vulnerabilities found during scan
     for entry in vulnix_results {
-        // Insert or update package
-        sqlx::query!(
+        // Insert package as a derivation with type 'package'
+        let package_derivation_id = sqlx::query!(
             r#"
-            INSERT INTO nix_packages (derivation_path, name, pname, version)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO derivations (
+                commit_id, derivation_type, derivation_name, derivation_path, 
+                pname, version, status_id, attempt_count
+            )
+            VALUES (
+                (SELECT commit_id FROM cve_scans cs 
+                 JOIN derivations d ON cs.derivation_id = d.id 
+                 WHERE cs.id = $1), 
+                'package', $2, $3, $4, $5, 
+                (SELECT id FROM derivation_statuses WHERE name = 'complete'), 
+                0
+            )
             ON CONFLICT (derivation_path) DO UPDATE SET
-                name = EXCLUDED.name,
+                derivation_name = EXCLUDED.derivation_name,
                 pname = EXCLUDED.pname,
-                version = EXCLUDED.version
+                version = EXCLUDED.version,
+                status_id = EXCLUDED.status_id
+            RETURNING id
             "#,
-            entry.derivation, // Note: this is the derivation path from vulnix
+            scan_id,
             entry.name,
+            entry.derivation, // This is the derivation path from vulnix
             entry.pname,
             entry.version
         )
-        .execute(&mut *tx)
-        .await?;
+        .fetch_one(&mut *tx)
+        .await?
+        .id;
 
-        // Link package to scan
+        // Link package to scan using the new derivation_id
         sqlx::query!(
             r#"
-            INSERT INTO scan_packages (scan_id, derivation_path, is_runtime_dependency, dependency_depth)
+            INSERT INTO scan_packages (scan_id, derivation_id, is_runtime_dependency, dependency_depth)
             VALUES ($1, $2, $3, $4)
-            ON CONFLICT (scan_id, derivation_path) DO NOTHING
+            ON CONFLICT (scan_id, derivation_id) DO NOTHING
             "#,
             scan_id,
-            entry.derivation,
+            package_derivation_id,
             true,  // Assume runtime dependency for now
             0i32   // Assume direct dependency for now
         )
@@ -311,18 +333,18 @@ pub async fn save_scan_results(
             .execute(&mut *tx)
             .await?;
 
-            // Insert package vulnerability relationship
+            // Insert package vulnerability relationship using derivation_id
             sqlx::query!(
                 r#"
                 INSERT INTO package_vulnerabilities (
-                    derivation_path, cve_id, detection_method, is_whitelisted
+                    derivation_id, cve_id, detection_method, is_whitelisted
                 )
                 VALUES ($1, $2, $3, $4)
-                ON CONFLICT (derivation_path, cve_id) DO UPDATE SET
+                ON CONFLICT (derivation_id, cve_id) DO UPDATE SET
                     detection_method = EXCLUDED.detection_method,
                     updated_at = NOW()
                 "#,
-                entry.derivation,
+                package_derivation_id,
                 cve_id,
                 "vulnix",
                 false // Not whitelisted by default
@@ -350,20 +372,20 @@ pub async fn save_scan_results(
             .execute(&mut *tx)
             .await?;
 
-            // Insert whitelisted vulnerability relationship
+            // Insert whitelisted vulnerability relationship using derivation_id
             sqlx::query!(
                 r#"
                 INSERT INTO package_vulnerabilities (
-                    derivation_path, cve_id, detection_method, is_whitelisted, whitelist_reason
+                    derivation_id, cve_id, detection_method, is_whitelisted, whitelist_reason
                 )
                 VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (derivation_path, cve_id) DO UPDATE SET
+                ON CONFLICT (derivation_id, cve_id) DO UPDATE SET
                     detection_method = EXCLUDED.detection_method,
                     is_whitelisted = EXCLUDED.is_whitelisted,
                     whitelist_reason = EXCLUDED.whitelist_reason,
                     updated_at = NOW()
                 "#,
-                entry.derivation,
+                package_derivation_id,
                 cve_id,
                 "vulnix",
                 true,
@@ -380,36 +402,35 @@ pub async fn save_scan_results(
     Ok(())
 }
 
-/// Get latest CVE scan for an evaluation target
-/// Get latest CVE scan for an evaluation target
-pub async fn get_latest_scan(pool: &PgPool, evaluation_target_id: i32) -> Result<Option<CveScan>> {
+/// Get latest CVE scan for a derivation
+pub async fn get_latest_scan(pool: &PgPool, derivation_id: i32) -> Result<Option<CveScan>> {
     let scan = sqlx::query_as!(
         CveScan,
         r#"
-    SELECT 
-        id,
-        evaluation_target_id as "evaluation_target_id!",
-        scheduled_at,
-        completed_at,
-        status as "status!: ScanStatus",
-        attempts as "attempts!",
-        scanner_name as "scanner_name!",
-        scanner_version,
-        total_packages as "total_packages!",
-        total_vulnerabilities as "total_vulnerabilities!",
-        critical_count as "critical_count!",
-        high_count as "high_count!",
-        medium_count as "medium_count!",
-        low_count as "low_count!",
-        scan_duration_ms,
-        scan_metadata,
-        created_at
-    FROM cve_scans
-    WHERE evaluation_target_id = $1
-    ORDER BY created_at DESC
-    LIMIT 1
-    "#,
-        evaluation_target_id
+        SELECT 
+            id,
+            derivation_id as "derivation_id!",
+            scheduled_at,
+            completed_at,
+            status as "status!: ScanStatus",
+            attempts as "attempts!",
+            scanner_name as "scanner_name!",
+            scanner_version,
+            total_packages as "total_packages!",
+            total_vulnerabilities as "total_vulnerabilities!",
+            critical_count as "critical_count!",
+            high_count as "high_count!",
+            medium_count as "medium_count!",
+            low_count as "low_count!",
+            scan_duration_ms,
+            scan_metadata,
+            created_at
+        FROM cve_scans
+        WHERE derivation_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+        derivation_id
     )
     .fetch_optional(pool)
     .await?;
