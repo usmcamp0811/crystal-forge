@@ -52,7 +52,7 @@ impl EvaluationStatus {
 
 pub async fn insert_derivation(
     pool: &PgPool,
-    commit: &Commit,
+    commit: Option<&Commit>,
     target_name: &str,
     target_type: &str,
 ) -> Result<Derivation> {
@@ -62,7 +62,9 @@ pub async fn insert_derivation(
         _ => "nixos", // default
     };
 
-    let inserted = sqlx::query_as!(
+    let commit_id = commit.map(|c| c.id);
+
+    let derivation = sqlx::query_as!(
         Derivation,
         r#"
         INSERT INTO derivations (
@@ -73,10 +75,9 @@ pub async fn insert_derivation(
             attempt_count
         )
         VALUES ($1, $2, $3, $4, 0)
-        ON CONFLICT (commit_id, derivation_name, derivation_type) 
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) 
         DO UPDATE SET
-            status_id = EXCLUDED.status_id,
-            attempt_count = derivations.attempt_count
+            status_id = derivations.status_id
         RETURNING 
             id,
             commit_id,
@@ -94,10 +95,74 @@ pub async fn insert_derivation(
             version,
             status_id
         "#,
-        commit.id,
+        commit_id,
         derivation_type,
         target_name,
         EvaluationStatus::DryRunPending.as_id()
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(derivation)
+}
+
+// Convenience function for the common case with a commit
+pub async fn insert_derivation_for_commit(
+    pool: &PgPool,
+    commit: &Commit,
+    target_name: &str,
+    target_type: &str,
+) -> Result<Derivation> {
+    insert_derivation(pool, Some(commit), target_name, target_type).await
+}
+
+// Convenience function for packages without a specific commit
+pub async fn insert_package_derivation(
+    pool: &PgPool,
+    package_name: &str,
+    pname: Option<&str>,
+    version: Option<&str>,
+) -> Result<Derivation> {
+    let inserted = sqlx::query_as!(
+        Derivation,
+        r#"
+        INSERT INTO derivations (
+            commit_id,
+            derivation_type, 
+            derivation_name,
+            pname,
+            version,
+            status_id,
+            attempt_count
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, 0)
+        ON CONFLICT (derivation_path) DO UPDATE SET
+            derivation_name = EXCLUDED.derivation_name,
+            pname = EXCLUDED.pname,
+            version = EXCLUDED.version
+        RETURNING 
+            id,
+            commit_id,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
+            derivation_path,
+            scheduled_at,
+            completed_at,
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            parent_derivation_id,
+            pname,
+            version,
+            status_id
+        "#,
+        None::<i32>, // commit_id is NULL for standalone packages
+        "package",
+        package_name,
+        pname,
+        version,
+        EvaluationStatus::Complete.as_id() // Packages found during scanning are already "complete"
     )
     .fetch_one(pool)
     .await?;
@@ -434,34 +499,49 @@ pub async fn increment_derivation_attempt_count(
 }
 
 pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
-    let result = sqlx::query!(
+    // Split into separate, simpler queries to avoid parameter type issues
+
+    // Reset derivations without paths to dry-run-pending
+    let result1 = sqlx::query!(
         r#"
         UPDATE derivations 
-        SET status_id = CASE 
-            WHEN derivation_path IS NULL THEN $1
-            WHEN derivation_path IS NOT NULL THEN $2
-            ELSE $1
-        END,
-        scheduled_at = NOW()
-        WHERE status_id NOT IN ($3, $4, $5, $6)
+        SET status_id = $1, scheduled_at = NOW()
+        WHERE derivation_path IS NULL 
+        AND status_id NOT IN ($2, $3, $4, $5)
         "#,
-        EvaluationStatus::DryRunPending.as_id(),  // $1 - i32
-        EvaluationStatus::BuildPending.as_id(),   // $2 - i32
-        EvaluationStatus::DryRunComplete.as_id(), // $3 - i32
-        EvaluationStatus::DryRunFailed.as_id(),   // $4 - i32
-        EvaluationStatus::BuildComplete.as_id(),  // $5 - i32
-        EvaluationStatus::BuildFailed.as_id()     // $6 - i32
+        EvaluationStatus::DryRunPending.as_id(),
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::DryRunFailed.as_id(),
+        EvaluationStatus::BuildComplete.as_id(),
+        EvaluationStatus::BuildFailed.as_id()
     )
     .execute(pool)
     .await?;
 
-    let rows_affected = result.rows_affected();
-    info!("💡 Reset {} non-terminal derivations.", rows_affected);
+    // Reset derivations with paths to build-pending
+    let result2 = sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1, scheduled_at = NOW()
+        WHERE derivation_path IS NOT NULL 
+        AND status_id NOT IN ($2, $3, $4, $5)
+        "#,
+        EvaluationStatus::BuildPending.as_id(),
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::DryRunFailed.as_id(),
+        EvaluationStatus::BuildComplete.as_id(),
+        EvaluationStatus::BuildFailed.as_id()
+    )
+    .execute(pool)
+    .await?;
+
+    let total_rows_affected = result1.rows_affected() + result2.rows_affected();
+    info!("💡 Reset {} non-terminal derivations.", total_rows_affected);
 
     Ok(())
 }
 
-// Keeping the original function names for backward compatibility but also adding the new ones
+// Keeping the original function names for backward compatibility
 pub async fn mark_target_dry_run_in_progress(pool: &PgPool, target_id: i32) -> Result<Derivation> {
     mark_derivation_dry_run_in_progress(pool, target_id).await
 }

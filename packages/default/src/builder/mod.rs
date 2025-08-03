@@ -203,7 +203,7 @@ async fn scan_derivations(
 
                         // Run CVE scan using the vulnix runner
                         match vulnix_runner
-                            .scan_target(&pool, derivation.id, vulnix_version)
+                            .scan_derivation(&pool, derivation.id, vulnix_version)
                             .await
                         {
                             Ok(vulnix_entries) => {
