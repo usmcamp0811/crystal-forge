@@ -252,31 +252,28 @@ impl Derivation {
                 .context("❌ Missing derivation output in nix build output")?
                 .to_string()
         } else {
-            // Dry run: parse text output for derivation paths
+            // Dry run: parse stderr output for derivation paths
             info!("🔍 Full dry-run stdout:\n{}", stdout);
             info!("🔍 Full dry-run stderr:\n{}", stderr);
 
-            // Parse the stderr output: collect all derivation paths (Nix outputs the build list to stderr)
+            // Parse the stderr output: collect all derivation paths
             let mut derivation_paths = Vec::new();
             let mut collecting_derivations = false;
 
             for line in stderr.lines() {
                 let trimmed = line.trim();
 
-                // Look for the start of derivation list
                 if trimmed.starts_with("these ") && trimmed.contains("derivations will be built:") {
                     collecting_derivations = true;
                     debug!("🔍 Found derivation list header: {}", trimmed);
                     continue;
                 }
 
-                // If we're collecting and find a derivation path
                 if collecting_derivations {
                     if trimmed.starts_with("/nix/store/") && trimmed.ends_with(".drv") {
                         derivation_paths.push(trimmed);
                         debug!("🔍 Found derivation: {}", trimmed);
                     } else if trimmed.is_empty() || trimmed.starts_with("[{") {
-                        // Stop when we hit empty line or JSON section
                         collecting_derivations = false;
                         debug!("🔍 Stopped collecting derivations at: '{}'", trimmed);
                     }
@@ -286,8 +283,6 @@ impl Derivation {
             info!("🔍 Found {} derivation paths", derivation_paths.len());
 
             if derivation_paths.is_empty() {
-                // If no derivations found, this means everything is already built/cached
-                // We need to get the actual store path instead
                 info!("📦 No new derivations needed - everything already available");
 
                 // Run without --dry-run but still with --print-out-paths to get the store path
@@ -339,15 +334,22 @@ impl Derivation {
             info!("🔍 Selected main derivation: {}", main_path);
 
             // Insert discovered packages into the database
-            if !derivation_paths.is_empty() {
+            // IMPORTANT: Only pass non-system derivations to avoid duplicating the main system
+            let package_paths: Vec<&str> = derivation_paths
+                .iter()
+                .filter(|path| !path.contains("nixos-system-"))
+                .copied()
+                .collect();
+
+            if !package_paths.is_empty() {
                 info!(
-                    "🔍 Discovering packages from {} derivations",
-                    derivation_paths.len()
+                    "🔍 Discovering {} packages (excluding main system derivation)",
+                    package_paths.len()
                 );
                 crate::queries::derivations::discover_and_insert_packages(
                     &pool,
                     self.id,
-                    &derivation_paths,
+                    &package_paths,
                 )
                 .await?;
             }
@@ -356,12 +358,13 @@ impl Derivation {
         };
 
         info!(
-            "✅ {} path for {system}: {main_derivation_path}",
+            "✅ {} path for {}: {main_derivation_path}",
             if full_build {
                 "Built output"
             } else {
                 "Derivation"
-            }
+            },
+            self.derivation_name
         );
 
         Ok(main_derivation_path)

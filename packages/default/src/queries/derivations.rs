@@ -2,7 +2,7 @@ use crate::models::commits::Commit;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
 use anyhow::Result;
 use sqlx::PgPool;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 // Status IDs from the derivation_statuses table
 // These should match the IDs you inserted in your migration
@@ -794,6 +794,12 @@ pub async fn discover_and_insert_packages(
     for &drv_path in derivation_paths {
         // Parse derivation path to extract package information
         if let Some(package_info) = parse_derivation_path(drv_path) {
+            // Skip the main NixOS system derivation - it should already exist as the parent
+            if drv_path.contains("nixos-system-") {
+                debug!("⏭️ Skipping NixOS system derivation: {}", drv_path);
+                continue;
+            }
+
             // Use the parsed package name as the derivation_name, fallback to derivation path
             let derivation_name = package_info
                 .pname
@@ -805,9 +811,18 @@ pub async fn discover_and_insert_packages(
                         None => name.clone(),
                     }
                 })
-                .unwrap_or_else(|| drv_path.to_string());
+                .unwrap_or_else(|| {
+                    // Extract a reasonable name from the derivation path if parsing fails
+                    drv_path
+                        .split('/')
+                        .last()
+                        .and_then(|s| s.strip_suffix(".drv"))
+                        .and_then(|s| s.split_once('-').map(|(_, name)| name))
+                        .unwrap_or(drv_path)
+                        .to_string()
+                });
 
-            // Insert package derivation with better conflict handling
+            // Insert package derivation
             let package_derivation = sqlx::query_as!(
                 Derivation,
                 r#"
@@ -851,7 +866,7 @@ pub async fn discover_and_insert_packages(
                     status_id
                 "#,
                 None::<i32>,                           // commit_id is NULL for discovered packages
-                "package",                             // derivation_type
+                "package",                             // derivation_type = "package"
                 derivation_name,                       // derivation_name (uses parsed package name)
                 drv_path,                             // derivation_path (the actual .drv path)
                 package_info.pname.as_deref(),       // pname
@@ -863,15 +878,15 @@ pub async fn discover_and_insert_packages(
 
             match package_derivation {
                 Ok(pkg_deriv) => {
-                    // Insert the dependency relationship in the junction table
+                    // CORRECT dependency relationship: The NixOS system (parent) depends on packages
                     let dependency_result = sqlx::query!(
                         r#"
                         INSERT INTO derivation_dependencies (derivation_id, depends_on_id)
                         VALUES ($1, $2)
                         ON CONFLICT (derivation_id, depends_on_id) DO NOTHING
                         "#,
-                        pkg_deriv.id,
-                        parent_derivation_id
+                        parent_derivation_id, // The NixOS system derivation
+                        pkg_deriv.id          // depends on this package
                     )
                     .execute(pool)
                     .await;
