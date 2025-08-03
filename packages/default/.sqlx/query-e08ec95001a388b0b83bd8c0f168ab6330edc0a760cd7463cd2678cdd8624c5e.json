@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO derivations (\n                commit_id, derivation_type, derivation_name, derivation_path, \n                pname, version, status_id, attempt_count\n            )\n            VALUES (\n                (SELECT commit_id FROM cve_scans cs \n                 JOIN derivations d ON cs.derivation_id = d.id \n                 WHERE cs.id = $1), \n                'package', $2, $3, $4, $5, \n                (SELECT id FROM derivation_statuses WHERE name = 'complete'), \n                0\n            )\n            ON CONFLICT (derivation_path) DO UPDATE SET\n                derivation_name = EXCLUDED.derivation_name,\n                pname = EXCLUDED.pname,\n                version = EXCLUDED.version,\n                status_id = EXCLUDED.status_id\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Varchar",
+        "Varchar"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "e08ec95001a388b0b83bd8c0f168ab6330edc0a760cd7463cd2678cdd8624c5e"
+}

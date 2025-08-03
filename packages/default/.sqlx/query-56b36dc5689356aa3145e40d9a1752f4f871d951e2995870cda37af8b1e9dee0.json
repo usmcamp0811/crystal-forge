@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n    SELECT \n        id,\n        evaluation_target_id as \"evaluation_target_id!\",\n        scheduled_at,\n        completed_at,\n        status as \"status!: ScanStatus\",\n        attempts as \"attempts!\",\n        scanner_name as \"scanner_name!\",\n        scanner_version,\n        total_packages as \"total_packages!\",\n        total_vulnerabilities as \"total_vulnerabilities!\",\n        critical_count as \"critical_count!\",\n        high_count as \"high_count!\",\n        medium_count as \"medium_count!\",\n        low_count as \"low_count!\",\n        scan_duration_ms,\n        scan_metadata,\n        created_at\n    FROM cve_scans\n    WHERE evaluation_target_id = $1\n    ORDER BY created_at DESC\n    LIMIT 1\n    ",
+  "query": "\n        SELECT \n            id,\n            derivation_id as \"derivation_id!\",\n            scheduled_at,\n            completed_at,\n            status as \"status!: ScanStatus\",\n            attempts as \"attempts!\",\n            scanner_name as \"scanner_name!\",\n            scanner_version,\n            total_packages as \"total_packages!\",\n            total_vulnerabilities as \"total_vulnerabilities!\",\n            critical_count as \"critical_count!\",\n            high_count as \"high_count!\",\n            medium_count as \"medium_count!\",\n            low_count as \"low_count!\",\n            scan_duration_ms,\n            scan_metadata,\n            created_at\n        FROM cve_scans\n        WHERE derivation_id = $1\n        ORDER BY created_at DESC\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -10,7 +10,7 @@
       },
       {
         "ordinal": 1,
-        "name": "evaluation_target_id!",
+        "name": "derivation_id!",
         "type_info": "Int4"
       },
       {
@@ -114,5 +114,5 @@
       true
     ]
   },
-  "hash": "946614869a0b98e256b16b5a9775415cd809b73ba5d7be48901b2378e8113e0b"
+  "hash": "56b36dc5689356aa3145e40d9a1752f4f871d951e2995870cda37af8b1e9dee0"
 }
