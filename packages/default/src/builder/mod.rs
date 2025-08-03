@@ -43,7 +43,7 @@ pub async fn run_build_loop(pool: PgPool) {
     );
 
     loop {
-        if let Err(e) = build_targets(&pool, &build_config, &cache_config).await {
+        if let Err(e) = build_derivations(&pool, &build_config, &cache_config).await {
             error!("❌ Error in build cycle: {e}");
         }
 
@@ -82,7 +82,7 @@ pub async fn run_cve_scan_loop(pool: PgPool) {
     let vulnix_runner = VulnixRunner::with_config(&vulnix_config);
 
     loop {
-        if let Err(e) = scan_targets(&pool, &vulnix_runner, vulnix_version.clone()).await {
+        if let Err(e) = scan_derivations(&pool, &vulnix_runner, vulnix_version.clone()).await {
             error!("❌ Error in CVE scan cycle: {e}");
         }
 
@@ -90,38 +90,44 @@ pub async fn run_cve_scan_loop(pool: PgPool) {
     }
 }
 
-/// Process targets that need building and cache pushing
-async fn build_targets(
+/// Process derivations that need building and cache pushing
+async fn build_derivations(
     pool: &PgPool,
     build_config: &BuildConfig,
     cache_config: &CacheConfig,
 ) -> Result<()> {
-    // Get targets ready for building (those with dry-run-complete status)
+    // Get derivations ready for building (those with dry-run-complete status)
     match get_targets_ready_for_build(pool).await {
-        Ok(targets) => {
-            if targets.is_empty() {
-                info!("🔍 No targets need building");
+        Ok(derivations) => {
+            if derivations.is_empty() {
+                info!("🔍 No derivations need building");
                 return Ok(());
             }
 
-            let target = &targets[0];
-            info!("🏗️ Starting build for target: {}", target.target_name);
+            let derivation = &derivations[0];
+            info!(
+                "🏗️ Starting build for derivation: {}",
+                derivation.derivation_name
+            );
 
-            mark_target_build_in_progress(pool, target.id).await?;
+            mark_target_build_in_progress(pool, derivation.id).await?;
 
-            // Build the target
-            let store_path = match target
+            // Build the derivation
+            let store_path = match derivation
                 .evaluate_nixos_system_with_build(true, build_config)
                 .await
             {
                 Ok(path) => {
-                    info!("✅ Build completed for {}: {}", target.target_name, path);
+                    info!(
+                        "✅ Build completed for {}: {}",
+                        derivation.derivation_name, path
+                    );
                     path
                 }
                 Err(e) => {
-                    error!("❌ Build failed for {}: {}", target.target_name, e);
+                    error!("❌ Build failed for {}: {}", derivation.derivation_name, e);
                     if let Err(save_err) =
-                        mark_target_failed(pool, target.id, "build", &e.to_string()).await
+                        mark_target_failed(pool, derivation.id, "build", &e.to_string()).await
                     {
                         error!("❌ Failed to mark build as failed: {save_err}");
                     }
@@ -131,13 +137,19 @@ async fn build_targets(
 
             // Push to cache if configured
             if cache_config.push_after_build {
-                info!("📤 Starting cache push for target: {}", target.target_name);
-                match target.push_to_cache(&store_path, cache_config).await {
+                info!(
+                    "📤 Starting cache push for derivation: {}",
+                    derivation.derivation_name
+                );
+                match derivation.push_to_cache(&store_path, cache_config).await {
                     Ok(_) => {
-                        info!("✅ Cache push completed for {}", target.target_name);
+                        info!("✅ Cache push completed for {}", derivation.derivation_name);
                     }
                     Err(e) => {
-                        warn!("⚠️ Cache push failed for {}: {}", target.target_name, e);
+                        warn!(
+                            "⚠️ Cache push failed for {}: {}",
+                            derivation.derivation_name, e
+                        );
                         // Cache push failures are non-fatal, just log and continue
                     }
                 }
@@ -147,43 +159,42 @@ async fn build_targets(
 
             // Mark as build complete (this will make it available for CVE scanning)
             use crate::queries::derivations::mark_target_build_complete;
-            mark_target_build_complete(pool, target.id).await?;
+            mark_target_build_complete(pool, derivation.id).await?;
         }
-        Err(e) => error!("❌ Failed to get targets ready for build: {e}"),
+        Err(e) => error!("❌ Failed to get derivations ready for build: {e}"),
     }
     Ok(())
 }
 
-/// Process targets that need CVE scanning
-async fn scan_targets(
+/// Process derivations that need CVE scanning
+async fn scan_derivations(
     pool: &PgPool,
     vulnix_runner: &VulnixRunner,
     vulnix_version: Option<String>,
 ) -> Result<()> {
-    // Get targets that need CVE scanning (those with build-complete status)
+    // Get derivations that need CVE scanning (those with build-complete status)
     match get_targets_needing_cve_scan(pool, Some(1)).await {
-        Ok(targets) => {
-            if targets.is_empty() {
-                info!("🔍 No targets need CVE scanning");
+        Ok(derivations) => {
+            if derivations.is_empty() {
+                info!("🔍 No derivations need CVE scanning");
                 return Ok(());
             }
 
-            let target = &targets[0];
+            let derivation = &derivations[0];
 
             // Check if the derivation path exists
-            if let Some(ref path) = target.derivation_path {
+            if let Some(ref path) = derivation.derivation_path {
                 match fs::try_exists(path).await {
                     Ok(true) => {
-                        info!("🔍 Starting CVE scan for target: {}", target.target_name);
+                        info!(
+                            "🔍 Starting CVE scan for derivation: {}",
+                            derivation.derivation_name
+                        );
 
                         // Create a new scan record before starting
-                        let scan_id = create_cve_scan(
-                            pool,
-                            target.id.into(),
-                            "vulnix",
-                            vulnix_version.clone(),
-                        )
-                        .await?;
+                        let scan_id =
+                            create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone())
+                                .await?;
 
                         // Mark scan as in progress
                         mark_scan_in_progress(pool, scan_id).await?;
@@ -192,7 +203,7 @@ async fn scan_targets(
 
                         // Run CVE scan using the vulnix runner
                         match vulnix_runner
-                            .scan_target(&pool, target.id, vulnix_version)
+                            .scan_target(&pool, derivation.id, vulnix_version)
                             .await
                         {
                             Ok(vulnix_entries) => {
@@ -209,13 +220,16 @@ async fn scan_targets(
 
                                 info!(
                                     "✅ CVE scan completed for {}: {}",
-                                    target.target_name, stats
+                                    derivation.derivation_name, stats
                                 );
                             }
                             Err(e) => {
-                                error!("❌ CVE scan failed for {}: {}", target.target_name, e);
+                                error!(
+                                    "❌ CVE scan failed for {}: {}",
+                                    derivation.derivation_name, e
+                                );
                                 if let Err(save_err) =
-                                    mark_cve_scan_failed(pool, target, &e.to_string()).await
+                                    mark_cve_scan_failed(pool, derivation, &e.to_string()).await
                                 {
                                     error!("❌ Failed to mark CVE scan as failed: {save_err}");
                                 }
@@ -226,21 +240,22 @@ async fn scan_targets(
                         warn!("❌ Derivation path does not exist: {}", path);
                         update_evaluation_target_status(
                             &pool,
-                            target.id,
+                            derivation.id,
                             EvaluationStatus::DryRunComplete,
-                            target.derivation_path.as_deref(),
+                            derivation.derivation_path.as_deref(),
                             Some("Missing Nix Store Path"),
-                        );
+                        )
+                        .await?;
                     }
                     Err(e) => {
                         error!("❌ Error checking derivation path {}: {}", path, e);
                     }
                 }
             } else {
-                warn!("❌ No derivation path set for target");
+                warn!("❌ No derivation path set for derivation");
             }
         }
-        Err(e) => error!("❌ Failed to get targets needing CVE scan: {e}"),
+        Err(e) => error!("❌ Failed to get derivations needing CVE scan: {e}"),
     }
     Ok(())
 }
