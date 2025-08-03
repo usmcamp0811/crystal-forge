@@ -25,7 +25,7 @@ pub enum EvaluationStatus {
 
 impl EvaluationStatus {
     pub fn as_id(&self) -> i32 {
-        *self as i32
+        self.clone() as i32
     }
 
     pub fn is_terminal(&self) -> bool {
