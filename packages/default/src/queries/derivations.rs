@@ -207,10 +207,13 @@ pub async fn update_evaluation_target_status(
 }
 
 // Simplified convenience functions that use the unified update function
-pub async fn mark_target_dry_run_in_progress(pool: &PgPool, target_id: i32) -> Result<Derivation> {
+pub async fn mark_derivation_dry_run_in_progress(
+    pool: &PgPool,
+    derivation_id: i32,
+) -> Result<Derivation> {
     update_evaluation_target_status(
         pool,
-        target_id,
+        derivation_id,
         EvaluationStatus::DryRunInProgress,
         None,
         None,
@@ -218,14 +221,14 @@ pub async fn mark_target_dry_run_in_progress(pool: &PgPool, target_id: i32) -> R
     .await
 }
 
-pub async fn mark_target_dry_run_complete(
+pub async fn mark_derivation_dry_run_complete(
     pool: &PgPool,
-    target_id: i32,
+    derivation_id: i32,
     derivation_path: &str,
 ) -> Result<Derivation> {
     update_evaluation_target_status(
         pool,
-        target_id,
+        derivation_id,
         EvaluationStatus::DryRunComplete,
         Some(derivation_path),
         None,
@@ -233,10 +236,13 @@ pub async fn mark_target_dry_run_complete(
     .await
 }
 
-pub async fn mark_target_build_in_progress(pool: &PgPool, target_id: i32) -> Result<Derivation> {
+pub async fn mark_derivation_build_in_progress(
+    pool: &PgPool,
+    derivation_id: i32,
+) -> Result<Derivation> {
     update_evaluation_target_status(
         pool,
-        target_id,
+        derivation_id,
         EvaluationStatus::BuildInProgress,
         None,
         None,
@@ -244,14 +250,23 @@ pub async fn mark_target_build_in_progress(pool: &PgPool, target_id: i32) -> Res
     .await
 }
 
-pub async fn mark_target_build_complete(pool: &PgPool, target_id: i32) -> Result<Derivation> {
-    update_evaluation_target_status(pool, target_id, EvaluationStatus::BuildComplete, None, None)
-        .await
+pub async fn mark_derivation_build_complete(
+    pool: &PgPool,
+    derivation_id: i32,
+) -> Result<Derivation> {
+    update_evaluation_target_status(
+        pool,
+        derivation_id,
+        EvaluationStatus::BuildComplete,
+        None,
+        None,
+    )
+    .await
 }
 
-pub async fn mark_target_failed(
+pub async fn mark_derivation_failed(
     pool: &PgPool,
-    target_id: i32,
+    derivation_id: i32,
     phase: &str, // "dry-run" or "build"
     error_message: &str,
 ) -> Result<Derivation> {
@@ -261,7 +276,7 @@ pub async fn mark_target_failed(
         _ => return Err(anyhow::anyhow!("Invalid phase: {}", phase)),
     };
 
-    update_evaluation_target_status(pool, target_id, status, None, Some(error_message)).await
+    update_evaluation_target_status(pool, derivation_id, status, None, Some(error_message)).await
 }
 
 // Keeping the original function but updating it to use the new status
@@ -396,19 +411,19 @@ pub async fn update_scheduled_at(pool: &PgPool) -> Result<()> {
 }
 
 /// Increment the number of attempts for failed operations
-pub async fn increment_evaluation_target_attempt_count(
+pub async fn increment_derivation_attempt_count(
     pool: &PgPool,
-    target: &Derivation,
+    derivation: &Derivation,
     error: &anyhow::Error,
 ) -> Result<()> {
-    error!("❌ Failed to process target: {}", error);
+    error!("❌ Failed to process derivation: {}", error);
     sqlx::query!(
         r#"
         UPDATE derivations
         SET attempt_count = attempt_count + 1
         WHERE id = $1
         "#,
-        target.id
+        derivation.id
     )
     .execute(pool)
     .await?;
@@ -427,18 +442,48 @@ pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
         scheduled_at = NOW()
         WHERE status_id NOT IN ($3, $4, $5, $6)
         "#,
-        EvaluationStatus::DryRunPending.as_id(),  // $1
-        EvaluationStatus::BuildPending.as_id(),   // $2
-        EvaluationStatus::DryRunComplete.as_id(), // $3
-        EvaluationStatus::DryRunFailed.as_id(),   // $4
-        EvaluationStatus::BuildComplete.as_id(),  // $5
-        EvaluationStatus::BuildFailed.as_id()     // $6
+        EvaluationStatus::DryRunPending.as_id(),  // $1 - i32
+        EvaluationStatus::BuildPending.as_id(),   // $2 - i32
+        EvaluationStatus::DryRunComplete.as_id(), // $3 - i32
+        EvaluationStatus::DryRunFailed.as_id(),   // $4 - i32
+        EvaluationStatus::BuildComplete.as_id(),  // $5 - i32
+        EvaluationStatus::BuildFailed.as_id()     // $6 - i32
     )
     .execute(pool)
     .await?;
 
     let rows_affected = result.rows_affected();
-    info!("💡 Reset {} non-terminal targets.", rows_affected);
+    info!("💡 Reset {} non-terminal derivations.", rows_affected);
 
     Ok(())
+}
+
+// Keeping the original function names for backward compatibility but also adding the new ones
+pub async fn mark_target_dry_run_in_progress(pool: &PgPool, target_id: i32) -> Result<Derivation> {
+    mark_derivation_dry_run_in_progress(pool, target_id).await
+}
+
+pub async fn mark_target_dry_run_complete(
+    pool: &PgPool,
+    target_id: i32,
+    derivation_path: &str,
+) -> Result<Derivation> {
+    mark_derivation_dry_run_complete(pool, target_id, derivation_path).await
+}
+
+pub async fn mark_target_build_in_progress(pool: &PgPool, target_id: i32) -> Result<Derivation> {
+    mark_derivation_build_in_progress(pool, target_id).await
+}
+
+pub async fn mark_target_build_complete(pool: &PgPool, target_id: i32) -> Result<Derivation> {
+    mark_derivation_build_complete(pool, target_id).await
+}
+
+pub async fn mark_target_failed(
+    pool: &PgPool,
+    target_id: i32,
+    phase: &str,
+    error_message: &str,
+) -> Result<Derivation> {
+    mark_derivation_failed(pool, target_id, phase, error_message).await
 }
