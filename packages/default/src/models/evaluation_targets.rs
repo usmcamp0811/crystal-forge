@@ -10,65 +10,89 @@ use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
-// Basically just derivations / outputs of a flake / aka System derivations
+// Updated derivation model to match the new database schema
 #[derive(Debug, FromRow, Serialize, Deserialize)]
-pub struct EvaluationTarget {
+pub struct Derivation {
     pub id: i32,
     pub commit_id: i32,
-    pub target_type: TargetType,         // e.g. "nixos", "home", "app"
-    pub target_name: String,             // e.g. system or profile name
+    pub derivation_type: DerivationType, // "nixos" or "package"
+    pub derivation_name: String, // display name (hostname for nixos, package name for packages)
     pub derivation_path: Option<String>, // populated post-build
     pub scheduled_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
-    pub status: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub attempt_count: i32,
+    pub evaluation_duration_ms: Option<i32>,
+    pub error_message: Option<String>,
+    pub parent_derivation_id: Option<i32>, // for hierarchical relationships (packages → systems)
+    pub pname: Option<String>,             // Nix package name (for packages)
+    pub version: Option<String>,           // package version (for packages)
+    pub status_id: i32,                    // foreign key to derivation_statuses table
 }
 
+// Enum for derivation types (updated from TargetType)
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text")]
-#[sqlx(rename_all = "lowercase")] // Add this line
-pub enum TargetType {
+#[sqlx(rename_all = "lowercase")]
+pub enum DerivationType {
+    #[sqlx(rename = "nixos")]
     NixOS,
-    HomeManager,
+    #[sqlx(rename = "package")]
+    Package,
 }
 
 // SQLx requires this for deserialization - make it safe
-impl From<String> for TargetType {
+impl From<String> for DerivationType {
     fn from(s: String) -> Self {
         match s.as_str() {
-            "nixos" => TargetType::NixOS,
-            "homemanager" => TargetType::HomeManager,
+            "nixos" => DerivationType::NixOS,
+            "package" => DerivationType::Package,
             _ => {
                 // Log the error but provide a default instead of panicking
-                eprintln!("Warning: Unknown TargetType '{}', defaulting to NixOS", s);
-                TargetType::NixOS
+                eprintln!(
+                    "Warning: Unknown DerivationType '{}', defaulting to NixOS",
+                    s
+                );
+                DerivationType::NixOS
             }
         }
     }
 }
 
-impl ToString for TargetType {
+impl ToString for DerivationType {
     fn to_string(&self) -> String {
         match self {
-            TargetType::NixOS => "nixos".into(),
-            TargetType::HomeManager => "homemanager".into(),
+            DerivationType::NixOS => "nixos".into(),
+            DerivationType::Package => "package".into(),
         }
     }
 }
 
-impl EvaluationTarget {
+// Status information from the derivation_statuses table
+#[derive(Debug, FromRow, Serialize, Deserialize)]
+pub struct DerivationStatus {
+    pub id: i32,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_terminal: bool,
+    pub is_success: bool,
+    pub display_order: i32,
+}
+
+impl Derivation {
     pub async fn summary(&self) -> Result<String> {
         let pool = CrystalForgeConfig::db_pool().await?;
         let commit = crate::queries::commits::get_commit_by_id(&pool, self.commit_id).await?;
         let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
         Ok(format!(
             "{}@{} ({})",
-            flake.name, commit.git_commit_hash, self.target_name
+            flake.name, commit.git_commit_hash, self.derivation_name
         ))
     }
 
     pub async fn resolve_derivation_path(&mut self, pool: &PgPool) -> Result<String> {
-        let name = self.target_name.clone();
-        let kind = self.target_type.clone();
+        let name = self.derivation_name.clone();
+        let kind = self.derivation_type.clone();
 
         info!(
             "🔍 Starting evaluation of {} target '{}'",
@@ -102,12 +126,14 @@ impl EvaluationTarget {
         });
         let build_config = cfg.get_build_config();
 
-        let hash = match self.target_type {
-            TargetType::NixOS => {
+        let hash = match self.derivation_type {
+            DerivationType::NixOS => {
                 self.evaluate_nixos_system_with_build(false, &build_config)
                     .await?
             }
-            TargetType::HomeManager => anyhow::bail!("Home Manager evaluation not implemented yet"),
+            DerivationType::Package => {
+                anyhow::bail!("Package derivation evaluation not implemented yet")
+            }
         };
 
         self.derivation_path = Some(hash.clone());
@@ -130,7 +156,7 @@ impl EvaluationTarget {
         let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
         let flake_url = &flake.repo_url;
         let commit_hash = &commit.git_commit_hash;
-        let system = &self.target_name;
+        let system = &self.derivation_name;
         let is_path = Path::new(flake_url).exists();
         debug!("📁 Is local path: {is_path}");
 
@@ -159,7 +185,7 @@ impl EvaluationTarget {
         } else {
             format!(
                 "git+{0}?rev={1}#nixosConfigurations.{2}.config.system.build.toplevel",
-                flake_url, commit.git_commit_hash, self.target_name
+                flake_url, commit.git_commit_hash, self.derivation_name
             )
         };
 
@@ -205,10 +231,10 @@ impl EvaluationTarget {
     /// Pushes a built derivation to the configured cache
     pub async fn push_to_cache(&self, store_path: &str, cache_config: &CacheConfig) -> Result<()> {
         // Check if we should push this target
-        if !cache_config.should_push(&self.target_name) {
+        if !cache_config.should_push(&self.derivation_name) {
             info!(
                 "⏭️ Skipping cache push for {} (filtered out)",
-                self.target_name
+                self.derivation_name
             );
             return Ok(());
         }
@@ -270,3 +296,7 @@ impl EvaluationTarget {
         Ok(store_path)
     }
 }
+
+// For backward compatibility during migration
+pub type EvaluationTarget = Derivation;
+pub type TargetType = DerivationType;
