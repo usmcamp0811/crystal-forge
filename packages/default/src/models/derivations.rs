@@ -31,7 +31,7 @@ pub struct Derivation {
 }
 
 // Enum for derivation types (updated from TargetType)
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type)]
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "text")]
 #[sqlx(rename_all = "lowercase")]
 pub enum DerivationType {

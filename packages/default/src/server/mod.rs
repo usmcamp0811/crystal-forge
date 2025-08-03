@@ -4,7 +4,7 @@ use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::derivations::{
     get_pending_dry_run_derivations, increment_derivation_attempt_count, insert_derivation,
-    mark_target_dry_run_complete, mark_derivation_dry_run_in_progress, mark_target_failed,
+    mark_derivation_dry_run_in_progress, mark_target_dry_run_complete, mark_target_failed,
     update_derivation_path, update_scheduled_at,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -95,8 +95,13 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             nixos_targets.len()
                         );
                         for mut derivation_name in nixos_targets {
-                            match insert_derivation(&pool, &commit, &derivation_name, target_type)
-                                .await
+                            match insert_derivation(
+                                &pool,
+                                Some(&commit),
+                                &derivation_name,
+                                target_type,
+                            )
+                            .await
                             {
                                 Ok(_) => info!(
                                     "✅ Inserted evaluation target: {} (commit {})",

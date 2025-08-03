@@ -287,13 +287,13 @@ pub async fn save_scan_results(
                 status_id = EXCLUDED.status_id
             RETURNING id
             "#,
-            None::<i32>,      // commit_id is NULL for packages
+            None::<i32>, // commit_id is NULL for packages
             "package",
             entry.name,
             entry.derivation, // This is the derivation path from vulnix
             entry.pname,
             entry.version,
-            (SELECT id FROM derivation_statuses WHERE name = "complete"),
+            11i32, // Status ID for 'complete' from your EvaluationStatus enum
         )
         .fetch_one(&mut *tx)
         .await?
