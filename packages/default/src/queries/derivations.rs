@@ -1,4 +1,5 @@
 use crate::models::commits::Commit;
+use anyhow::anyhow;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
 use anyhow::Result;
 use sqlx::PgPool;
@@ -958,10 +959,14 @@ pub async fn update_derivation_path_and_metadata(
     pname: Option<&str>,
     version: Option<&str>,
 ) -> Result<()> {
+    let pname = pname.ok_or_else(|| anyhow!("missing pname"))?;
+    let version = version.ok_or_else(|| anyhow!("missing version"))?;
+    let name = format!("{}-{}", pname, version);
     sqlx::query!(
         r#"
         UPDATE derivations 
         SET 
+            derivation_name = $5,
             derivation_path = $1,
             pname = $2,
             version = $3
@@ -970,7 +975,8 @@ pub async fn update_derivation_path_and_metadata(
         derivation_path,
         pname,
         version,
-        derivation_id
+        derivation_id,
+        name
     )
     .execute(pool)
     .await?;
