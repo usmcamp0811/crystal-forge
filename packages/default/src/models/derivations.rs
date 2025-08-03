@@ -490,7 +490,7 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
 
         // If we can't parse version, use the whole system part as pname
         return Some(PackageInfo {
-            pname: Some(format!("nixos-system-{}", system_part)),
+            pname: system_part,
             version: None,
         });
     }
