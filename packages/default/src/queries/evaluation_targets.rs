@@ -1,34 +1,31 @@
 use crate::models::commits::Commit;
-use crate::models::evaluation_targets::{EvaluationTarget, TargetType};
+use crate::models::evaluation_targets::{Derivation, DerivationType};
 use anyhow::Result;
 use sqlx::PgPool;
 use tracing::{error, info};
 
-// Enum to represent the different phases and statuses
+// Status IDs from the derivation_statuses table
+// These should match the IDs you inserted in your migration
 #[derive(Debug, Clone)]
 pub enum EvaluationStatus {
-    DryRunPending,
-    DryRunInProgress,
-    DryRunComplete,
-    DryRunFailed,
-    BuildPending,
-    BuildInProgress,
-    BuildComplete,
-    BuildFailed,
+    Pending = 1,
+    Queued = 2,
+    DryRunPending = 3,
+    DryRunInProgress = 4,
+    DryRunComplete = 5,
+    DryRunFailed = 6,
+    BuildPending = 7,
+    BuildInProgress = 8,
+    InProgress = 9,
+    BuildComplete = 10,
+    Complete = 11,
+    BuildFailed = 12,
+    Failed = 13,
 }
 
 impl EvaluationStatus {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            EvaluationStatus::DryRunPending => "dry-run-pending",
-            EvaluationStatus::DryRunInProgress => "dry-run-inprogress",
-            EvaluationStatus::DryRunComplete => "dry-run-complete",
-            EvaluationStatus::DryRunFailed => "dry-run-failed",
-            EvaluationStatus::BuildPending => "build-pending",
-            EvaluationStatus::BuildInProgress => "build-inprogress",
-            EvaluationStatus::BuildComplete => "build-complete",
-            EvaluationStatus::BuildFailed => "build-failed",
-        }
+    pub fn as_id(&self) -> i32 {
+        *self as i32
     }
 
     pub fn is_terminal(&self) -> bool {
@@ -38,13 +35,17 @@ impl EvaluationStatus {
                 | EvaluationStatus::DryRunFailed
                 | EvaluationStatus::BuildComplete
                 | EvaluationStatus::BuildFailed
+                | EvaluationStatus::Complete
+                | EvaluationStatus::Failed
         )
     }
 
     pub fn is_in_progress(&self) -> bool {
         matches!(
             self,
-            EvaluationStatus::DryRunInProgress | EvaluationStatus::BuildInProgress
+            EvaluationStatus::DryRunInProgress
+                | EvaluationStatus::BuildInProgress
+                | EvaluationStatus::InProgress
         )
     }
 }
@@ -54,20 +55,46 @@ pub async fn insert_evaluation_target(
     commit: &Commit,
     target_name: &str,
     target_type: &str,
-) -> Result<EvaluationTarget> {
+) -> Result<Derivation> {
+    let derivation_type = match target_type {
+        "nixos" => "nixos",
+        "package" => "package",
+        _ => "nixos", // default
+    };
+
     let inserted = sqlx::query_as!(
-        EvaluationTarget,
+        Derivation,
         r#"
-    INSERT INTO evaluation_targets (commit_id, target_type, target_name, status)
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT (commit_id, target_type, target_name)
-    DO UPDATE SET commit_id = EXCLUDED.commit_id
-    RETURNING id, commit_id, target_type, target_name, derivation_path, scheduled_at, completed_at, status
-    "#,
+        INSERT INTO derivations (
+            commit_id, 
+            derivation_type, 
+            derivation_name, 
+            status_id,
+            attempt_count
+        )
+        VALUES ($1, $2, $3, $4, 0)
+        ON CONFLICT (derivation_path) DO NOTHING
+        RETURNING 
+            id,
+            commit_id,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
+            derivation_path,
+            scheduled_at,
+            completed_at,
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            parent_derivation_id,
+            pname,
+            version,
+            status_id
+        "#,
         commit.id,
-        target_type,
+        derivation_type,
         target_name,
-        EvaluationStatus::DryRunPending.as_str()
+        EvaluationStatus::DryRunPending.as_id()
     )
     .fetch_one(pool)
     .await?;
@@ -75,18 +102,18 @@ pub async fn insert_evaluation_target(
     Ok(inserted)
 }
 
-/// Unified function to update evaluation target status with optional additional fields
+/// Unified function to update derivation status with optional additional fields
 pub async fn update_evaluation_target_status(
     pool: &PgPool,
     target_id: i32,
     status: EvaluationStatus,
     derivation_path: Option<&str>,
     error_message: Option<&str>,
-) -> Result<EvaluationTarget> {
-    let status_str = status.as_str();
+) -> Result<Derivation> {
+    let status_id = status.as_id();
 
     // Build the query dynamically based on what fields need updating
-    let mut query_parts = vec!["UPDATE evaluation_targets SET status = $1".to_string()];
+    let mut query_parts = vec!["UPDATE derivations SET status_id = $1".to_string()];
     let mut param_count = 1;
 
     // Always update timestamps based on status
@@ -114,17 +141,23 @@ pub async fn update_evaluation_target_status(
     param_count += 1;
     let where_clause = format!("WHERE id = ${}", param_count);
 
-    // CRITICAL: No type cast here!
     let returning_clause = r#"
     RETURNING
         id,
         commit_id,
-        target_type,
-        target_name,
+        derivation_type as "derivation_type: DerivationType",
+        derivation_name,
         derivation_path,
         scheduled_at,
         completed_at,
-        status
+        started_at,
+        attempt_count,
+        evaluation_duration_ms,
+        error_message,
+        parent_derivation_id,
+        pname,
+        version,
+        status_id
     "#;
 
     let full_query = format!(
@@ -138,7 +171,7 @@ pub async fn update_evaluation_target_status(
     let updated = match (derivation_path, error_message) {
         (Some(path), Some(err)) => {
             sqlx::query_as(&full_query)
-                .bind(status_str)
+                .bind(status_id)
                 .bind(path)
                 .bind(err)
                 .bind(target_id)
@@ -147,7 +180,7 @@ pub async fn update_evaluation_target_status(
         }
         (Some(path), None) => {
             sqlx::query_as(&full_query)
-                .bind(status_str)
+                .bind(status_id)
                 .bind(path)
                 .bind(target_id)
                 .fetch_one(pool)
@@ -155,7 +188,7 @@ pub async fn update_evaluation_target_status(
         }
         (None, Some(err)) => {
             sqlx::query_as(&full_query)
-                .bind(status_str)
+                .bind(status_id)
                 .bind(err)
                 .bind(target_id)
                 .fetch_one(pool)
@@ -163,7 +196,7 @@ pub async fn update_evaluation_target_status(
         }
         (None, None) => {
             sqlx::query_as(&full_query)
-                .bind(status_str)
+                .bind(status_id)
                 .bind(target_id)
                 .fetch_one(pool)
                 .await?
@@ -174,10 +207,7 @@ pub async fn update_evaluation_target_status(
 }
 
 // Simplified convenience functions that use the unified update function
-pub async fn mark_target_dry_run_in_progress(
-    pool: &PgPool,
-    target_id: i32,
-) -> Result<EvaluationTarget> {
+pub async fn mark_target_dry_run_in_progress(pool: &PgPool, target_id: i32) -> Result<Derivation> {
     update_evaluation_target_status(
         pool,
         target_id,
@@ -192,7 +222,7 @@ pub async fn mark_target_dry_run_complete(
     pool: &PgPool,
     target_id: i32,
     derivation_path: &str,
-) -> Result<EvaluationTarget> {
+) -> Result<Derivation> {
     update_evaluation_target_status(
         pool,
         target_id,
@@ -203,10 +233,7 @@ pub async fn mark_target_dry_run_complete(
     .await
 }
 
-pub async fn mark_target_build_in_progress(
-    pool: &PgPool,
-    target_id: i32,
-) -> Result<EvaluationTarget> {
+pub async fn mark_target_build_in_progress(pool: &PgPool, target_id: i32) -> Result<Derivation> {
     update_evaluation_target_status(
         pool,
         target_id,
@@ -217,7 +244,7 @@ pub async fn mark_target_build_in_progress(
     .await
 }
 
-pub async fn mark_target_build_complete(pool: &PgPool, target_id: i32) -> Result<EvaluationTarget> {
+pub async fn mark_target_build_complete(pool: &PgPool, target_id: i32) -> Result<Derivation> {
     update_evaluation_target_status(pool, target_id, EvaluationStatus::BuildComplete, None, None)
         .await
 }
@@ -227,7 +254,7 @@ pub async fn mark_target_failed(
     target_id: i32,
     phase: &str, // "dry-run" or "build"
     error_message: &str,
-) -> Result<EvaluationTarget> {
+) -> Result<Derivation> {
     let status = match phase {
         "dry-run" => EvaluationStatus::DryRunFailed,
         "build" => EvaluationStatus::BuildFailed,
@@ -240,9 +267,9 @@ pub async fn mark_target_failed(
 // Keeping the original function but updating it to use the new status
 pub async fn update_evaluation_target_path(
     pool: &PgPool,
-    target: &EvaluationTarget,
+    target: &Derivation,
     path: &str,
-) -> Result<EvaluationTarget> {
+) -> Result<Derivation> {
     update_evaluation_target_status(
         pool,
         target.id,
@@ -253,20 +280,27 @@ pub async fn update_evaluation_target_path(
     .await
 }
 
-pub async fn get_target_by_id(pool: &PgPool, target_id: i32) -> Result<EvaluationTarget> {
+pub async fn get_target_by_id(pool: &PgPool, target_id: i32) -> Result<Derivation> {
     let target = sqlx::query_as!(
-        EvaluationTarget,
+        Derivation,
         r#"
         SELECT
             id,
             commit_id,
-            target_type as "target_type: TargetType",
-            target_name,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
             derivation_path,
             scheduled_at,
             completed_at,
-            status
-        FROM evaluation_targets
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            parent_derivation_id,
+            pname,
+            version,
+            status_id
+        FROM derivations
         WHERE id = $1
         "#,
         target_id
@@ -278,25 +312,32 @@ pub async fn get_target_by_id(pool: &PgPool, target_id: i32) -> Result<Evaluatio
 }
 
 // Updated to get targets ready for dry-run
-pub async fn get_pending_dry_run_targets(pool: &PgPool) -> Result<Vec<EvaluationTarget>> {
+pub async fn get_pending_dry_run_targets(pool: &PgPool) -> Result<Vec<Derivation>> {
     let rows = sqlx::query_as!(
-        EvaluationTarget,
+        Derivation,
         r#"
         SELECT
             id,
             commit_id,
-            target_type as "target_type: TargetType",
-            target_name,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
             derivation_path,
             scheduled_at,
             completed_at,
-            status
-        FROM evaluation_targets
-        WHERE status = $1
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            parent_derivation_id,
+            pname,
+            version,
+            status_id
+        FROM derivations
+        WHERE status_id = $1
         AND attempt_count < 5
         ORDER BY scheduled_at DESC
         "#,
-        EvaluationStatus::DryRunPending.as_str()
+        EvaluationStatus::DryRunPending.as_id()
     )
     .fetch_all(pool)
     .await?;
@@ -305,24 +346,31 @@ pub async fn get_pending_dry_run_targets(pool: &PgPool) -> Result<Vec<Evaluation
 }
 
 // New function to get targets ready for building
-pub async fn get_targets_ready_for_build(pool: &PgPool) -> Result<Vec<EvaluationTarget>> {
+pub async fn get_targets_ready_for_build(pool: &PgPool) -> Result<Vec<Derivation>> {
     let rows = sqlx::query_as!(
-        EvaluationTarget,
+        Derivation,
         r#"
         SELECT
             id,
             commit_id,
-            target_type as "target_type: TargetType",
-            target_name,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
             derivation_path,
             scheduled_at,
             completed_at,
-            status
-        FROM evaluation_targets
-        WHERE status = $1
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            parent_derivation_id,
+            pname,
+            version,
+            status_id
+        FROM derivations
+        WHERE status_id = $1
         ORDER BY completed_at ASC
         "#,
-        EvaluationStatus::DryRunComplete.as_str()
+        EvaluationStatus::DryRunComplete.as_id()
     )
     .fetch_all(pool)
     .await?;
@@ -333,14 +381,14 @@ pub async fn get_targets_ready_for_build(pool: &PgPool) -> Result<Vec<Evaluation
 pub async fn update_scheduled_at(pool: &PgPool) -> Result<()> {
     sqlx::query!(
         r#"
-    UPDATE evaluation_targets
-    SET scheduled_at = NOW() 
-    WHERE status NOT IN ($1, $2, $3, $4)
-    "#,
-        EvaluationStatus::DryRunComplete.as_str(),
-        EvaluationStatus::DryRunFailed.as_str(),
-        EvaluationStatus::BuildComplete.as_str(),
-        EvaluationStatus::BuildFailed.as_str()
+        UPDATE derivations
+        SET scheduled_at = NOW() 
+        WHERE status_id NOT IN ($1, $2, $3, $4)
+        "#,
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::DryRunFailed.as_id(),
+        EvaluationStatus::BuildComplete.as_id(),
+        EvaluationStatus::BuildFailed.as_id()
     )
     .execute(pool)
     .await?;
@@ -350,16 +398,16 @@ pub async fn update_scheduled_at(pool: &PgPool) -> Result<()> {
 /// Increment the number of attempts for failed operations
 pub async fn increment_evaluation_target_attempt_count(
     pool: &PgPool,
-    target: &EvaluationTarget,
+    target: &Derivation,
     error: &anyhow::Error,
 ) -> Result<()> {
     error!("❌ Failed to process target: {}", error);
     sqlx::query!(
         r#"
-    UPDATE evaluation_targets
-    SET attempt_count = attempt_count + 1
-    WHERE id = $1
-    "#,
+        UPDATE derivations
+        SET attempt_count = attempt_count + 1
+        WHERE id = $1
+        "#,
         target.id
     )
     .execute(pool)
@@ -370,21 +418,21 @@ pub async fn increment_evaluation_target_attempt_count(
 pub async fn reset_non_terminal_targets(pool: &PgPool) -> Result<()> {
     let result = sqlx::query!(
         r#"
-        UPDATE evaluation_targets 
-        SET status = CASE 
+        UPDATE derivations 
+        SET status_id = CASE 
             WHEN derivation_path IS NULL THEN $1
             WHEN derivation_path IS NOT NULL THEN $2
             ELSE $1
         END,
         scheduled_at = NOW()
-        WHERE status NOT IN ($3, $4, $5, $6)
+        WHERE status_id NOT IN ($3, $4, $5, $6)
         "#,
-        EvaluationStatus::DryRunPending.as_str(),  // $1
-        EvaluationStatus::BuildPending.as_str(),   // $2
-        EvaluationStatus::DryRunComplete.as_str(), // $3
-        EvaluationStatus::DryRunFailed.as_str(),   // $4
-        EvaluationStatus::BuildComplete.as_str(),  // $5
-        EvaluationStatus::BuildFailed.as_str()     // $6
+        EvaluationStatus::DryRunPending.as_id(),  // $1
+        EvaluationStatus::BuildPending.as_id(),   // $2
+        EvaluationStatus::DryRunComplete.as_id(), // $3
+        EvaluationStatus::DryRunFailed.as_id(),   // $4
+        EvaluationStatus::BuildComplete.as_id(),  // $5
+        EvaluationStatus::BuildFailed.as_id()     // $6
     )
     .execute(pool)
     .await?;

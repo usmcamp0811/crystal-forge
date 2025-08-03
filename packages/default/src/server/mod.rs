@@ -94,21 +94,24 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             commit.git_commit_hash,
                             nixos_targets.len()
                         );
-                        for mut target_name in nixos_targets {
+                        for mut derivation_name in nixos_targets {
                             match insert_evaluation_target(
                                 &pool,
                                 &commit,
-                                &target_name,
+                                &derivation_name,
                                 target_type,
                             )
                             .await
                             {
                                 Ok(_) => info!(
                                     "✅ Inserted evaluation target: {} (commit {})",
-                                    target_name, commit.git_commit_hash
+                                    derivation_name, commit.git_commit_hash
                                 ),
                                 Err(e) => {
-                                    error!("❌ Failed to insert target for {}: {}", target_name, e)
+                                    error!(
+                                        "❌ Failed to insert target for {}: {}",
+                                        derivation_name, e
+                                    )
                                 }
                             }
                         }
@@ -159,7 +162,7 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
                             {
                                 error!("❌ Failed to mark target as failed: {mark_err}");
                             } else {
-                                info!("💥 Marked target {} as failed", target.target_name);
+                                info!("💥 Marked target {} as failed", target.derivation_name);
                             }
                         }
                     }
