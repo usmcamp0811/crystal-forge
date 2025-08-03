@@ -490,7 +490,7 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
 
         // If we can't parse version, use the whole system part as pname
         return Some(PackageInfo {
-            pname: system_part,
+            pname: Some(system_part),
             version: None,
         });
     }
