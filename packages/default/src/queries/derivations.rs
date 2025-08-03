@@ -636,6 +636,46 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
     let rows = sqlx::query_as!(
         Derivation,
         r#"
+        WITH nixos_system_groups AS (
+            -- Get NixOS systems and their associated packages
+            SELECT 
+                d.id,
+                d.commit_id,
+                d.derivation_type,
+                d.derivation_name,
+                d.derivation_path,
+                d.scheduled_at,
+                d.completed_at,
+                d.started_at,
+                d.attempt_count,
+                d.evaluation_duration_ms,
+                d.error_message,
+                d.pname,
+                d.version,
+                d.status_id,
+                -- Find the related NixOS system for packages, or use self for NixOS systems
+                CASE 
+                    WHEN d.derivation_type = 'package' THEN 
+                        COALESCE(
+                            (SELECT MIN(nixos_dep.id) 
+                             FROM derivation_dependencies dd 
+                             JOIN derivations nixos_dep ON dd.derivation_id = nixos_dep.id 
+                             WHERE dd.depends_on_id = d.id 
+                               AND nixos_dep.derivation_type = 'nixos'
+                             LIMIT 1),
+                            999999 -- Orphaned packages get highest group number
+                        )
+                    ELSE d.id -- NixOS systems group by themselves
+                END as nixos_group_id,
+                -- Priority: packages first (0), then NixOS systems (1)
+                CASE 
+                    WHEN d.derivation_type = 'package' THEN 0
+                    WHEN d.derivation_type = 'nixos' THEN 1
+                    ELSE 2
+                END as type_priority
+            FROM derivations d
+            WHERE d.status_id = $1
+        )
         SELECT
             id,
             commit_id,
@@ -651,15 +691,17 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             pname,
             version,
             status_id
-        FROM derivations
-        WHERE status_id = $1
-        ORDER BY completed_at ASC
+        FROM nixos_system_groups
+        ORDER BY 
+            nixos_group_id,          -- Group related packages and systems together
+            type_priority,           -- Within each group: packages first, then NixOS
+            completed_at ASC         -- Within same type: oldest first
         "#,
         EvaluationStatus::DryRunComplete.as_id()
     )
     .fetch_all(pool)
     .await?;
-
+    
     Ok(rows)
 }
 
