@@ -293,7 +293,7 @@ pub async fn save_scan_results(
             entry.derivation, // This is the derivation path from vulnix
             entry.pname,
             entry.version,
-            (SELECT id FROM derivation_statuses WHERE name = 'complete'), 
+            (SELECT id FROM derivation_statuses WHERE name = "complete"),
         )
         .fetch_one(&mut *tx)
         .await?

@@ -82,15 +82,36 @@ pub struct DerivationStatus {
 impl Derivation {
     pub async fn summary(&self) -> Result<String> {
         let pool = CrystalForgeConfig::db_pool().await?;
-        let commit = crate::queries::commits::get_commit_by_id(&pool, self.commit_id).await?;
-        let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
-        Ok(format!(
-            "{}@{} ({})",
-            flake.name, commit.git_commit_hash, self.derivation_name
-        ))
+
+        if let Some(commit_id) = self.commit_id {
+            let commit = crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;
+            let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
+            Ok(format!(
+                "{}@{} ({})",
+                flake.name, commit.git_commit_hash, self.derivation_name
+            ))
+        } else {
+            // For packages without a commit (discovered during CVE scans)
+            Ok(format!(
+                "package {} ({})",
+                self.derivation_name,
+                self.pname.as_deref().unwrap_or("unknown")
+            ))
+        }
     }
 
     pub async fn resolve_derivation_path(&mut self, pool: &PgPool) -> Result<String> {
+        // Only NixOS derivations should resolve paths, packages are discovered
+        if self.derivation_type == DerivationType::Package {
+            return Err(anyhow::anyhow!("Package derivations don't resolve paths"));
+        }
+
+        if self.commit_id.is_none() {
+            return Err(anyhow::anyhow!(
+                "Cannot resolve path for derivation without commit"
+            ));
+        }
+
         let name = self.derivation_name.clone();
         let kind = self.derivation_type.clone();
 
@@ -149,10 +170,15 @@ impl Derivation {
         full_build: bool,
         build_config: &BuildConfig,
     ) -> Result<String> {
+        // Require commit_id for NixOS builds
+        let commit_id = self
+            .commit_id
+            .ok_or_else(|| anyhow::anyhow!("Cannot build NixOS derivation without commit_id"))?;
+
         let summary = self.summary().await?;
         info!("🔍 Determining derivation for {summary}");
         let pool = CrystalForgeConfig::db_pool().await?;
-        let commit = crate::queries::commits::get_commit_by_id(&pool, self.commit_id).await?;
+        let commit = crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;
         let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
         let flake_url = &flake.repo_url;
         let commit_hash = &commit.git_commit_hash;
