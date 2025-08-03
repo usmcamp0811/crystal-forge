@@ -357,6 +357,38 @@ impl Derivation {
             main_path.to_string()
         };
 
+        // Update the current NixOS derivation with pname and version info
+        if let Some(package_info) = parse_derivation_path(&main_derivation_path) {
+            let update_result = sqlx::query!(
+                r#"
+            UPDATE derivations 
+            SET 
+                derivation_path = $1,
+                pname = $2,
+                version = $3
+            WHERE id = $4
+            "#,
+                main_derivation_path,
+                package_info.pname.as_deref(),
+                package_info.version.as_deref(),
+                self.id
+            )
+            .execute(&pool)
+            .await;
+
+            if let Err(e) = update_result {
+                warn!(
+                    "⚠️ Failed to update NixOS derivation with pname/version: {}",
+                    e
+                );
+            } else {
+                debug!(
+                    "✅ Updated NixOS derivation {} with pname: {:?}, version: {:?}",
+                    self.derivation_name, package_info.pname, package_info.version
+                );
+            }
+        }
+
         info!(
             "✅ {} path for {}: {main_derivation_path}",
             if full_build {
@@ -447,6 +479,31 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
     // Split by first dash to separate hash from name-version
     let (_, name_version) = filename.split_once('-')?;
 
+    // Handle NixOS system derivations specifically
+    if name_version.starts_with("nixos-system-") {
+        // Pattern: nixos-system-HOSTNAME-VERSION
+        // Example: nixos-system-aws-test-25.05.20250802.b6bab62
+        let system_part = name_version.strip_prefix("nixos-system-")?;
+
+        // Find the last dash to separate hostname from version
+        if let Some((hostname, version)) = system_part.rsplit_once('-') {
+            // Check if the last part looks like a version (contains dots or digits)
+            if version.chars().any(|c| c.is_ascii_digit() || c == '.') {
+                return Some(PackageInfo {
+                    pname: Some(format!("nixos-system-{}", hostname)),
+                    version: Some(version.to_string()),
+                });
+            }
+        }
+
+        // If we can't parse version, use the whole system part as pname
+        return Some(PackageInfo {
+            pname: Some(format!("nixos-system-{}", system_part)),
+            version: None,
+        });
+    }
+
+    // Handle regular packages
     // Try to split name and version
     // This is heuristic - Nix derivation naming isn't perfectly consistent
     if let Some((name, version)) = name_version.rsplit_once('-') {
