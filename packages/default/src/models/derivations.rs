@@ -359,21 +359,13 @@ impl Derivation {
 
         // Update the current NixOS derivation with pname and version info
         if let Some(package_info) = parse_derivation_path(&main_derivation_path) {
-            let update_result = sqlx::query!(
-                r#"
-            UPDATE derivations 
-            SET 
-                derivation_path = $1,
-                pname = $2,
-                version = $3
-            WHERE id = $4
-            "#,
-                main_derivation_path,
+            let update_result = crate::queries::derivations::update_derivation_path_and_metadata(
+                &pool,
+                self.id,
+                &main_derivation_path,
                 package_info.pname.as_deref(),
                 package_info.version.as_deref(),
-                self.id
             )
-            .execute(&pool)
             .await;
 
             if let Err(e) = update_result {

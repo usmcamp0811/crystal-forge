@@ -950,3 +950,30 @@ pub async fn discover_and_insert_packages(
     info!("✅ Completed package discovery");
     Ok(())
 }
+
+pub async fn update_derivation_path_and_metadata(
+    pool: &PgPool,
+    derivation_id: i32,
+    derivation_path: &str,
+    pname: Option<&str>,
+    version: Option<&str>,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET 
+            derivation_path = $1,
+            pname = $2,
+            version = $3
+        WHERE id = $4
+        "#,
+        derivation_path,
+        pname,
+        version,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
