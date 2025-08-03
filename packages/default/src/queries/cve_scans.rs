@@ -1,6 +1,6 @@
 use crate::models::cve_scans::{CveScan, ScanStatus};
 
-use crate::models::evaluation_targets::EvaluationTarget;
+use crate::models::derivations::Derivation;
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
 use bigdecimal::BigDecimal;

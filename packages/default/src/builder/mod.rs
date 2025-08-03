@@ -5,10 +5,9 @@ use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
     save_scan_results,
 };
-use crate::queries::evaluation_targets::update_evaluation_target_status;
-use crate::queries::evaluation_targets::{
+use crate::queries::derivations::{
     EvaluationStatus, get_targets_ready_for_build, mark_target_build_in_progress,
-    mark_target_failed,
+    mark_target_failed, update_evaluation_target_status,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
@@ -147,7 +146,7 @@ async fn build_targets(
             }
 
             // Mark as build complete (this will make it available for CVE scanning)
-            use crate::queries::evaluation_targets::mark_target_build_complete;
+            use crate::queries::derivations::mark_target_build_complete;
             mark_target_build_complete(pool, target.id).await?;
         }
         Err(e) => error!("❌ Failed to get targets ready for build: {e}"),
