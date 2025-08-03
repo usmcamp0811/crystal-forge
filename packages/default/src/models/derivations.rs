@@ -225,6 +225,7 @@ impl Derivation {
         if !full_build {
             cmd.arg("--dry-run");
             cmd.arg("--print-out-paths");
+            // NOTE: Don't add --json for dry-run, it conflicts with --dry-run output format
         } else {
             cmd.arg("--json");
         }
@@ -248,19 +249,39 @@ impl Derivation {
                 .context("❌ Missing derivation output in nix build output")?
                 .to_string()
         } else {
-            // Dry run: parse stdout for derivation paths
+            // Dry run: parse text output for derivation paths
             let stdout = String::from_utf8_lossy(&output.stdout);
             info!("🔍 Dry-run output:\n{}", stdout);
 
-            // Extract all derivation paths from the output
-            let derivation_paths: Vec<&str> = stdout
-                .lines()
-                .filter(|line| line.starts_with("/nix/store/") && line.contains(".drv"))
-                .collect();
+            // Parse the output: first collect all derivation paths from the "these X derivations will be built:" section
+            let mut derivation_paths = Vec::new();
+            let mut in_derivation_list = false;
+
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+
+                if trimmed.starts_with("these ") && trimmed.contains("derivations will be built:") {
+                    in_derivation_list = true;
+                    continue;
+                }
+
+                // If we're in the derivation list and find a line that starts with /nix/store/ and ends with .drv
+                if in_derivation_list
+                    && trimmed.starts_with("/nix/store/")
+                    && trimmed.ends_with(".drv")
+                {
+                    derivation_paths.push(trimmed);
+                }
+
+                // Stop collecting when we hit an empty line or the JSON output section
+                if in_derivation_list && (trimmed.is_empty() || trimmed.starts_with("[{")) {
+                    in_derivation_list = false;
+                }
+            }
 
             info!("🔍 Found {} derivation paths", derivation_paths.len());
 
-            // The main system derivation should be the one that matches our target
+            // The main system derivation should be the one that contains "nixos-system" or the system name
             let main_path = derivation_paths
                 .iter()
                 .find(|path| path.contains("nixos-system") || path.contains(&self.derivation_name))

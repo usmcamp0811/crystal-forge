@@ -712,38 +712,43 @@ pub async fn increment_derivation_attempt_count(
 }
 
 pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
-    // Split into separate, simpler queries to avoid parameter type issues
-
     // Reset derivations without paths to dry-run-pending
+    // Include failed derivations that haven't exceeded attempt limit
     let result1 = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NULL 
-        AND status_id NOT IN ($2, $3, $4, $5)
+        AND (
+            status_id NOT IN ($2, $3, $4) 
+            OR (status_id = $5 AND attempt_count < 5)  -- Include dry-run-failed with < 5 attempts
+        )
         "#,
-        EvaluationStatus::DryRunPending.as_id(),
-        EvaluationStatus::DryRunComplete.as_id(),
-        EvaluationStatus::DryRunFailed.as_id(),
-        EvaluationStatus::BuildComplete.as_id(),
-        EvaluationStatus::BuildFailed.as_id()
+        EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
+        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
+        EvaluationStatus::BuildFailed.as_id(),    // $4 = 12 (always terminal)
+        EvaluationStatus::DryRunFailed.as_id()    // $5 = 6 (only terminal if attempts >= 5)
     )
     .execute(pool)
     .await?;
 
     // Reset derivations with paths to build-pending
+    // Include failed derivations that haven't exceeded attempt limit
     let result2 = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NOT NULL 
-        AND status_id NOT IN ($2, $3, $4, $5)
+        AND (
+            status_id NOT IN ($2, $3, $4)
+            OR (status_id = $4 AND attempt_count < 5)  -- Include build-failed with < 5 attempts
+        )
         "#,
-        EvaluationStatus::BuildPending.as_id(),
-        EvaluationStatus::DryRunComplete.as_id(),
-        EvaluationStatus::DryRunFailed.as_id(),
-        EvaluationStatus::BuildComplete.as_id(),
-        EvaluationStatus::BuildFailed.as_id()
+        EvaluationStatus::BuildPending.as_id(),   // $1 = 7
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
+        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
+        EvaluationStatus::BuildFailed.as_id()     // $4 = 12 (check this for retry condition)
     )
     .execute(pool)
     .await?;

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations \n        SET status_id = $1, scheduled_at = NOW()\n        WHERE derivation_path IS NULL \n        AND (\n            status_id NOT IN ($2, $3, $4) \n            OR (status_id = $5 AND attempt_count < 5)  -- Include dry-run-failed with < 5 attempts\n        )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f820d4c51e3c651d5025b2575fc9b657a33bfbe4e3be085d09645a83f540801b"
+}
