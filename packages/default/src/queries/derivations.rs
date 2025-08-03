@@ -1,5 +1,5 @@
 use crate::models::commits::Commit;
-use crate::models::derivations::{Derivation, DerivationType};
+use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
 use anyhow::Result;
 use sqlx::PgPool;
 use tracing::{error, info};
@@ -782,4 +782,80 @@ pub async fn mark_target_failed(
     error_message: &str,
 ) -> Result<Derivation> {
     mark_derivation_failed(pool, target_id, phase, error_message).await
+}
+
+/// Discover packages from derivation paths and insert them into the database
+pub async fn discover_and_insert_packages(
+    pool: &PgPool,
+    parent_derivation_id: i32,
+    derivation_paths: &[&str],
+) -> Result<()> {
+    use tracing::warn;
+
+    info!(
+        "🔍 Analyzing {} derivation paths for package information",
+        derivation_paths.len()
+    );
+
+    for &drv_path in derivation_paths {
+        // Parse derivation path to extract package information
+        if let Some(package_info) = parse_derivation_path(drv_path) {
+            // Insert package derivation
+            let _package_derivation = sqlx::query_as!(
+                Derivation,
+                r#"
+                INSERT INTO derivations (
+                    commit_id,
+                    derivation_type, 
+                    derivation_name, 
+                    derivation_path, 
+                    pname, 
+                    version, 
+                    status_id, 
+                    attempt_count,
+                    parent_derivation_id
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8)
+                ON CONFLICT (derivation_path) DO UPDATE SET
+                    derivation_name = EXCLUDED.derivation_name,
+                    pname = EXCLUDED.pname,
+                    version = EXCLUDED.version,
+                    parent_derivation_id = EXCLUDED.parent_derivation_id
+                RETURNING 
+                    id,
+                    commit_id,
+                    derivation_type as "derivation_type: DerivationType",
+                    derivation_name,
+                    derivation_path,
+                    scheduled_at,
+                    completed_at,
+                    started_at,
+                    attempt_count,
+                    evaluation_duration_ms,
+                    error_message,
+                    parent_derivation_id,
+                    pname,
+                    version,
+                    status_id
+                "#,
+                None::<i32>, // commit_id is NULL for discovered packages
+                "package",
+                drv_path, // Use derivation path as name for uniqueness
+                drv_path,
+                package_info.pname.as_deref(),
+                package_info.version.as_deref(),
+                EvaluationStatus::Complete.as_id(), // Discovered packages are "complete"
+                Some(parent_derivation_id)          // Set the NixOS derivation as the parent
+            )
+            .fetch_one(pool)
+            .await;
+
+            if let Err(e) = _package_derivation {
+                warn!("⚠️ Failed to insert package derivation {}: {}", drv_path, e);
+            }
+        }
+    }
+
+    info!("✅ Completed package discovery");
+    Ok(())
 }

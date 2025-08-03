@@ -1,4 +1,5 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
+use crate::queries::derivations::discover_and_insert_packages;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -223,8 +224,10 @@ impl Derivation {
 
         if !full_build {
             cmd.arg("--dry-run");
+            cmd.arg("--print-out-paths");
+        } else {
+            cmd.arg("--json");
         }
-        cmd.arg("--json");
 
         // Apply build configuration
         build_config.apply_to_command(&mut cmd);
@@ -236,22 +239,62 @@ impl Derivation {
             anyhow::bail!("nix build failed: {}", stderr.trim());
         }
 
-        let parsed: Value = serde_json::from_slice(&output.stdout)?;
-        let hash = parsed
-            .get(0)
-            .and_then(|v| v["outputs"]["out"].as_str())
-            .context("❌ Missing derivation output in nix build output")?
-            .to_string();
+        let main_derivation_path = if full_build {
+            // Full build: parse JSON output
+            let parsed: Value = serde_json::from_slice(&output.stdout)?;
+            parsed
+                .get(0)
+                .and_then(|v| v["outputs"]["out"].as_str())
+                .context("❌ Missing derivation output in nix build output")?
+                .to_string()
+        } else {
+            // Dry run: parse stdout for derivation paths
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            info!("🔍 Dry-run output:\n{}", stdout);
+
+            // Extract all derivation paths from the output
+            let derivation_paths: Vec<&str> = stdout
+                .lines()
+                .filter(|line| line.starts_with("/nix/store/") && line.contains(".drv"))
+                .collect();
+
+            info!("🔍 Found {} derivation paths", derivation_paths.len());
+
+            // The main system derivation should be the one that matches our target
+            let main_path = derivation_paths
+                .iter()
+                .find(|path| path.contains("nixos-system") || path.contains(&self.derivation_name))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Could not find main system derivation in dry-run output")
+                })?;
+
+            // Insert discovered packages into the database
+            if !derivation_paths.is_empty() {
+                info!(
+                    "🔍 Discovering packages from {} derivations",
+                    derivation_paths.len()
+                );
+                crate::queries::derivations::discover_and_insert_packages(
+                    &pool,
+                    self.id,
+                    &derivation_paths,
+                )
+                .await?;
+            }
+
+            main_path.to_string()
+        };
 
         info!(
-            "✅ {} path for {system}: {hash}",
+            "✅ {} path for {system}: {main_derivation_path}",
             if full_build {
                 "Built output"
             } else {
                 "Derivation"
             }
         );
-        Ok(hash)
+
+        Ok(main_derivation_path)
     }
 
     /// Pushes a built derivation to the configured cache
@@ -321,6 +364,38 @@ impl Derivation {
 
         Ok(store_path)
     }
+}
+
+/// Parse derivation path to extract package information
+pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
+    // Derivation paths look like: /nix/store/hash-name-version.drv
+    let filename = drv_path.split('/').last()?.strip_suffix(".drv")?;
+
+    // Split by first dash to separate hash from name-version
+    let (_, name_version) = filename.split_once('-')?;
+
+    // Try to split name and version
+    // This is heuristic - Nix derivation naming isn't perfectly consistent
+    if let Some((name, version)) = name_version.rsplit_once('-') {
+        // Check if the last part looks like a version (starts with digit)
+        if version.chars().next()?.is_ascii_digit() {
+            return Some(PackageInfo {
+                pname: Some(name.to_string()),
+                version: Some(version.to_string()),
+            });
+        }
+    }
+
+    // If we can't parse version, use the whole name_version as pname
+    Some(PackageInfo {
+        pname: Some(name_version.to_string()),
+        version: None,
+    })
+}
+#[derive(Debug)]
+pub struct PackageInfo {
+    pub pname: Option<String>,
+    pub version: Option<String>,
 }
 
 // For backward compatibility during migration
