@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct Derivation {
     pub id: i32,
-    pub commit_id: i32,
+    pub commit_id: Option<i32>,          // Changed from i32 to Option<i32>
     pub derivation_type: DerivationType, // "nixos" or "package"
     pub derivation_name: String, // display name (hostname for nixos, package name for packages)
     pub derivation_path: Option<String>, // populated post-build
