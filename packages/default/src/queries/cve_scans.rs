@@ -22,6 +22,7 @@ pub async fn get_targets_needing_cve_scan(
             d.derivation_type as "derivation_type: DerivationType",
             d.derivation_name,
             d.derivation_path,
+            d.derivation_target,
             d.scheduled_at,
             d.completed_at,
             d.started_at,
@@ -273,12 +274,13 @@ pub async fn save_scan_results(
                 derivation_type, 
                 derivation_name, 
                 derivation_path, 
+                derivation_target, -- NULL for packages discovered during scanning
                 pname, 
                 version, 
                 status_id, 
                 attempt_count
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, 0)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)
             ON CONFLICT (derivation_path) DO UPDATE SET
                 derivation_name = EXCLUDED.derivation_name,
                 pname = EXCLUDED.pname,
@@ -290,6 +292,7 @@ pub async fn save_scan_results(
             "package",
             entry.derivation, // Use derivation path as name to ensure uniqueness
             entry.derivation, // This is the derivation path from vulnix
+            None::<String>,   // derivation_target is NULL for packages discovered during scanning
             entry.pname,
             entry.version,
             11i32, // Status ID for 'complete' from your EvaluationStatus enum
