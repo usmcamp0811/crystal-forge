@@ -404,27 +404,6 @@ in
       except Exception:
           pytest.fail("Builder service not logging startup messages")
 
-      # 8. Insert a test derivation and resolve status_id
-      commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"
-
-      derivation_id = server.succeed(f"""
-          psql -t -A -U crystal_forge -d crystal_forge -c "
-          WITH inserted AS (
-              INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id)
-              SELECT
-                  c.id,
-                  'nixos',
-                  'testSystem',
-                  s.id
-              FROM commits c, derivation_statuses s
-              WHERE c.git_commit_hash = '{commit_hash}'
-                AND s.status = 'dry-run-pending'
-              LIMIT 1
-              RETURNING id
-          )
-          SELECT id FROM inserted;
-          "
-      """).strip()
 
       # 10. Check that derivation status changed from 'dry-run-pending'
       try:
