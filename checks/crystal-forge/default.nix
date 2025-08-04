@@ -404,24 +404,39 @@ in
       except Exception:
           pytest.fail("Builder service not logging startup messages")
 
+      # 8. Insert a test derivation and resolve status_id
+      commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"
 
-      # 10. Check that derivation status changed from pending via status events
+      derivation_id = server.succeed(f"""
+          psql -t -A -U crystal_forge -d crystal_forge -c "
+          WITH inserted AS (
+              INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id)
+              SELECT
+                  c.id,
+                  'nixos',
+                  'testSystem',
+                  s.id
+              FROM commits c, derivation_statuses s
+              WHERE c.git_commit_hash = '{commit_hash}'
+                AND s.status = 'dry-run-pending'
+              LIMIT 1
+              RETURNING id
+          )
+          SELECT id FROM inserted;
+          "
+      """).strip()
+
+      # 10. Check that derivation status changed from 'dry-run-pending'
       try:
-          server.wait_until_succeeds("""
+          server.wait_until_succeeds(f"""
               psql -U crystal_forge -d crystal_forge -c "
-              SELECT status FROM derivation_status_events
-              WHERE derivation_id = (
-                SELECT id FROM derivations
-                WHERE derivation_name = 'testSystem'
-                ORDER BY created_at DESC
-                LIMIT 1
-              )
-              ORDER BY timestamp DESC
-              LIMIT 1;
+              SELECT s.status FROM derivations d
+              JOIN derivation_statuses s ON d.status_id = s.id
+              WHERE d.id = '{derivation_id}' AND s.status != 'dry-run-pending'
               " | grep -v 'dry-run-pending'
           """, timeout=120)
       except Exception:
-          pytest.fail("Derivation status did not change from pending in status events")
+          pytest.fail("Derivation status did not change from 'dry-run-pending'")
 
       # 11. Check builder memory usage is reasonable
       try:
