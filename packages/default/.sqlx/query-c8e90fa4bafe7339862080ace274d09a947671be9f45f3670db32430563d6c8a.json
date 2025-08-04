@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        error_message = $2\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id\n                    ",
+  "query": "\n                    UPDATE derivations SET status_id = $1\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id\n                    ",
   "describe": {
     "columns": [
       {
@@ -30,46 +30,51 @@
       },
       {
         "ordinal": 5,
+        "name": "derivation_target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
         "name": "scheduled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "attempt_count",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "evaluation_duration_ms",
         "type_info": "Int4"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "error_message",
         "type_info": "Text"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "status_id",
         "type_info": "Int4"
       }
@@ -77,7 +82,6 @@
     "parameters": {
       "Left": [
         "Int4",
-        "Text",
         "Int4"
       ]
     },
@@ -90,6 +94,7 @@
       true,
       true,
       true,
+      true,
       false,
       true,
       true,
@@ -98,5 +103,5 @@
       false
     ]
   },
-  "hash": "ebdfd0925f4c3e7ab080e70d50bd8d1811d62c8a8237b2fe96b880914f8dc6f6"
+  "hash": "c8e90fa4bafe7339862080ace274d09a947671be9f45f3670db32430563d6c8a"
 }

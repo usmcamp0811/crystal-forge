@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO derivations (\n            commit_id,\n            derivation_type, \n            derivation_name,\n            pname,\n            version,\n            status_id,\n            attempt_count\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, 0)\n        ON CONFLICT (derivation_path) DO UPDATE SET\n            derivation_name = EXCLUDED.derivation_name,\n            pname = EXCLUDED.pname,\n            version = EXCLUDED.version\n        RETURNING \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id\n        ",
+  "query": "\n        INSERT INTO derivations (\n            commit_id,\n            derivation_type, \n            derivation_name,\n            pname,\n            version,\n            status_id,\n            attempt_count\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, 0)\n        ON CONFLICT (derivation_path) DO UPDATE SET\n            derivation_name = EXCLUDED.derivation_name,\n            pname = EXCLUDED.pname,\n            version = EXCLUDED.version\n        RETURNING \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id\n        ",
   "describe": {
     "columns": [
       {
@@ -30,46 +30,51 @@
       },
       {
         "ordinal": 5,
+        "name": "derivation_target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
         "name": "scheduled_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "completed_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "attempt_count",
         "type_info": "Int4"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "evaluation_duration_ms",
         "type_info": "Int4"
       },
       {
-        "ordinal": 10,
+        "ordinal": 11,
         "name": "error_message",
         "type_info": "Text"
       },
       {
-        "ordinal": 11,
+        "ordinal": 12,
         "name": "pname",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 12,
+        "ordinal": 13,
         "name": "version",
         "type_info": "Varchar"
       },
       {
-        "ordinal": 13,
+        "ordinal": 14,
         "name": "status_id",
         "type_info": "Int4"
       }
@@ -93,6 +98,7 @@
       true,
       true,
       true,
+      true,
       false,
       true,
       true,
@@ -101,5 +107,5 @@
       false
     ]
   },
-  "hash": "c49be9a32bb53a7a494502611391af87b1d04e690904931da0d33e0088159241"
+  "hash": "1d80a2340fec25fc45313fbaed152457f3b539d80c8a947b0c09e83a47063610"
 }

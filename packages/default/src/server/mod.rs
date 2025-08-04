@@ -3,7 +3,7 @@ use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::derivations::{
-    get_pending_dry_run_derivations, increment_derivation_attempt_count, insert_derivation,
+    get_pending_dry_run_derivations, increment_derivation_attempt_count, insert_derivation_with_target,
     mark_derivation_dry_run_in_progress, mark_target_dry_run_complete, mark_target_failed,
     update_derivation_path, update_scheduled_at,
 };
@@ -172,17 +172,27 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
             let concurrency_limit = 1; // adjust as needed
-            stream::iter(pending_targets.into_iter().map(|mut target| {
+            stream::iter(pending_targets.into_iter().map(|target| {
                 let pool = pool.clone();
                 async move {
                     if let Err(e) = mark_derivation_dry_run_in_progress(&pool, target.id).await {
                         error!("❌ Failed to mark target in-progress: {e}");
                         return;
                     }
-                    match target.resolve_derivation_path(&pool).await {
-                        Ok(path) => match update_derivation_path(&pool, &target, &path).await {
-                            Ok(updated) => info!("✅ Updated: {:?}", updated),
-                            Err(e) => error!("❌ Failed to update path: {e}"),
+
+                    // Use the new evaluate_and_build method instead of resolve_derivation_path
+                    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
+                        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
+                        CrystalForgeConfig::default()
+                    });
+                    let build_config = cfg.get_build_config();
+
+                    match target.evaluate_and_build(false, &build_config).await {
+                        Ok(derivation_path) => {
+                            match update_derivation_path(&pool, &target, &derivation_path).await {
+                                Ok(updated) => info!("✅ Updated: {}", updated.derivation_name),
+                                Err(e) => error!("❌ Failed to update path: {e}"),
+                            }
                         },
                         Err(e) => {
                             if let Err(inc_err) =
