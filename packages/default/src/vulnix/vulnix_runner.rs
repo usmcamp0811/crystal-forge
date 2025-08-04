@@ -16,7 +16,7 @@ pub type VulnixScanOutput = Vec<VulnixEntry>;
 pub struct VulnixRunner {
     config: VulnixConfig,
 }
-// TODO: get from CyrstalForgeConfig
+
 impl VulnixRunner {
     pub fn new() -> Self {
         Self {
@@ -53,23 +53,20 @@ impl VulnixRunner {
         }
     }
 
-    /// Scan a specific derivation path
-    pub async fn scan_target(
+    /// Scan a specific derivation
+    pub async fn scan_derivation(
         &self,
         pool: &PgPool,
-        evaluation_target_id: i32,
+        derivation_id: i32,
         vulnix_version: Option<String>,
     ) -> Result<VulnixScanOutput> {
-        // Get the evaluation target and extract derivation path
-        let target =
-            crate::queries::evaluation_targets::get_target_by_id(pool, evaluation_target_id)
-                .await?;
-        let derivation_path = target.derivation_path.ok_or_else(|| {
-            anyhow!(
-                "Evaluation target {} has no derivation path",
-                evaluation_target_id
-            )
-        })?;
+        // Get the derivation and extract derivation path
+        let derivation =
+            crate::queries::derivations::get_derivation_by_id(pool, derivation_id).await?;
+        let derivation_path = derivation
+            .derivation_path
+            .ok_or_else(|| anyhow!("Derivation {} has no derivation path", derivation_id))?;
+
         // Check if the derivation path actually exists on the filesystem
         if !tokio::fs::try_exists(&derivation_path)
             .await
@@ -80,16 +77,20 @@ impl VulnixRunner {
                 derivation_path
             ));
         }
+
         info!(
-            "🔍 Scanning target {} with derivation path: {}",
-            evaluation_target_id, derivation_path
+            "🔍 Scanning derivation {} with derivation path: {}",
+            derivation_id, derivation_path
         );
+
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
         cmd.arg("--json").arg(derivation_path);
+
         if self.config.enable_whitelist {
             cmd.arg("--whitelist").arg("/etc/vulnix-whitelist.toml");
         }
+
         // Add extra args
         for arg in &self.config.extra_args {
             cmd.arg(arg);
@@ -167,6 +168,17 @@ impl VulnixRunner {
                 ))
             }
         }
+    }
+
+    /// Backward compatibility method - delegates to scan_derivation
+    pub async fn scan_target(
+        &self,
+        pool: &PgPool,
+        derivation_id: i32,
+        vulnix_version: Option<String>,
+    ) -> Result<VulnixScanOutput> {
+        self.scan_derivation(pool, derivation_id, vulnix_version)
+            .await
     }
 }
 

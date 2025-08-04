@@ -8,7 +8,6 @@ pub async fn insert_commit(pool: &PgPool, commit_hash: &str, repo_url: &str) -> 
         .fetch_optional(pool)
         .await?
         .context("No flake entry found")?;
-
     sqlx::query(
         "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
          VALUES ($1, $2, now()) ON CONFLICT DO NOTHING",
@@ -17,7 +16,6 @@ pub async fn insert_commit(pool: &PgPool, commit_hash: &str, repo_url: &str) -> 
     .bind(commit_hash)
     .execute(pool)
     .await?;
-
     Ok(())
 }
 
@@ -26,7 +24,6 @@ pub async fn get_commit_by_hash(pool: &PgPool, commit_hash: &str) -> Result<Comm
         .bind(commit_hash)
         .fetch_one(pool)
         .await?;
-
     Ok(commit)
 }
 
@@ -35,7 +32,6 @@ pub async fn get_commit_by_id(pool: &PgPool, id: i32) -> Result<Commit> {
         .bind(id)
         .fetch_one(pool)
         .await?;
-
     Ok(commit)
 }
 
@@ -43,31 +39,30 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
     let rows = sqlx::query_as!(
         Commit,
         r#"
-        SELECT c.id, c.flake_id, c.git_commit_hash, c.commit_timestamp
+        SELECT c.id, c.flake_id, c.git_commit_hash, c.commit_timestamp, c.attempt_count
         FROM commits c
-        LEFT JOIN evaluation_targets t ON c.id = t.commit_id
-        WHERE t.commit_id IS NULL
+        LEFT JOIN derivations d ON c.id = d.commit_id
+        WHERE d.commit_id IS NULL
         AND c.attempt_count < 5
+        ORDER BY c.commit_timestamp DESC
         "#
     )
     .fetch_all(pool)
     .await?;
-
     Ok(rows)
 }
 
-pub async fn increment_commit_list_attempt_count(pool: &PgPool, target: &Commit) -> Result<()> {
-    let updated = sqlx::query!(
+pub async fn increment_commit_list_attempt_count(pool: &PgPool, commit: &Commit) -> Result<()> {
+    let _updated = sqlx::query!(
         r#"
-    UPDATE commits
-    SET attempt_count = attempt_count + 1
-    WHERE id = $1
-    "#,
-        target.id
+        UPDATE commits
+        SET attempt_count = attempt_count + 1
+        WHERE id = $1
+        "#,
+        commit.id
     )
     .execute(pool)
     .await?;
-
     Ok(())
 }
 
@@ -81,6 +76,5 @@ pub async fn flake_has_commits(pool: &PgPool, repo_url: &str) -> Result<bool> {
     .bind(repo_url)
     .fetch_one(pool)
     .await?;
-
     Ok(count.0 > 0)
 }

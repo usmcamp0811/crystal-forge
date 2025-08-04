@@ -10,7 +10,7 @@ use crystal_forge::{
     },
     models::config::CrystalForgeConfig,
     queries::{
-        commits::get_commits_pending_evaluation, evaluation_targets::reset_non_terminal_targets,
+        commits::get_commits_pending_evaluation, derivations::reset_non_terminal_derivations,
     },
     server::memory_monitor_task,
     server::spawn_background_tasks,
@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
     let flake_init_pool = pool.clone();
     // TODO: Update this to get the first N commits on the first time
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
-    reset_non_terminal_targets(&pool).await?;
+    reset_non_terminal_derivations(&pool).await?;
     spawn_background_tasks(cfg.clone(), background_pool);
 
     // Start HTTP server
