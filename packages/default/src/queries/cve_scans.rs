@@ -36,7 +36,6 @@ pub async fn get_targets_needing_cve_scan(
         JOIN derivation_statuses ds ON d.status_id = ds.id
         WHERE ds.name IN ('build-complete', 'complete')
             AND d.derivation_path IS NOT NULL
-            AND d.derivation_type = 'nixos'
             AND NOT EXISTS (
                 SELECT 1 
                 FROM cve_scans cs 
