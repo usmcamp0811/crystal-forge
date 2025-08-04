@@ -6,7 +6,7 @@ use uuid::Uuid;
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct CveScan {
     pub id: Uuid,
-    pub evaluation_target_id: i64,
+    pub derivation_id: i32, // Changed from evaluation_target_id: i64
     pub scheduled_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub status: ScanStatus,
@@ -26,11 +26,11 @@ pub struct CveScan {
 
 impl CveScan {
     /// Create a new CVE scan record
-    pub fn new(evaluation_target_id: i64, scanner_name: String) -> Self {
+    pub fn new(derivation_id: i32, scanner_name: String) -> Self {
         let now = Utc::now();
         Self {
             id: Uuid::new_v4(),
-            evaluation_target_id,
+            derivation_id, // Updated parameter name
             scheduled_at: Some(now),
             completed_at: None,
             status: ScanStatus::Pending,

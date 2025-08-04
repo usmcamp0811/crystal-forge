@@ -2,10 +2,10 @@ use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
-use crate::queries::evaluation_targets::{
-    get_pending_dry_run_targets, increment_evaluation_target_attempt_count,
-    insert_evaluation_target, mark_target_dry_run_complete, mark_target_dry_run_in_progress,
-    mark_target_failed, update_evaluation_target_path, update_scheduled_at,
+use crate::queries::derivations::{
+    get_pending_dry_run_derivations, increment_derivation_attempt_count, insert_derivation_with_target,
+    mark_derivation_dry_run_in_progress, mark_target_dry_run_complete, mark_target_failed,
+    update_derivation_path, update_scheduled_at,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
@@ -33,7 +33,7 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
         commit_pool,
         flake_config.commit_evaluation_interval,
     ));
-    tokio::spawn(run_target_evaluation_loop(
+    tokio::spawn(run_derivation_evaluation_loop(
         target_pool,
         flake_config.build_processing_interval,
     ));
@@ -68,13 +68,13 @@ async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
 }
 
 /// Runs the periodic evaluation target resolution loop  
-async fn run_target_evaluation_loop(pool: PgPool, interval: Duration) {
+async fn run_derivation_evaluation_loop(pool: PgPool, interval: Duration) {
     info!(
         "🔍 Starting periodic evaluation target check loop (every {:?})...",
         interval
     );
     loop {
-        if let Err(e) = process_pending_targets(&pool).await {
+        if let Err(e) = process_pending_derivations(&pool).await {
             error!("❌ Error in target evaluation cycle: {e}");
         }
         tokio::time::sleep(interval).await;
@@ -94,21 +94,45 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             commit.git_commit_hash,
                             nixos_targets.len()
                         );
-                        for mut target_name in nixos_targets {
-                            match insert_evaluation_target(
+
+                        // Get flake info to build the derivation target
+                        let flake = match commit.get_flake(&pool).await {
+                            Ok(flake) => flake,
+                            Err(e) => {
+                                error!(
+                                    "❌ Failed to get flake for commit {}: {}",
+                                    commit.git_commit_hash, e
+                                );
+                                continue;
+                            }
+                        };
+
+                        for derivation_name in nixos_targets {
+                            // Build the complete flake target string
+                            let derivation_target = build_flake_target_string(
+                                &flake.repo_url,
+                                &commit.git_commit_hash,
+                                &derivation_name,
+                            );
+
+                            match insert_derivation_with_target(
                                 &pool,
-                                &commit,
-                                &target_name,
+                                Some(&commit),
+                                &derivation_name,
                                 target_type,
+                                Some(&derivation_target),
                             )
                             .await
                             {
                                 Ok(_) => info!(
-                                    "✅ Inserted evaluation target: {} (commit {})",
-                                    target_name, commit.git_commit_hash
+                                    "✅ Inserted NixOS derivation: {} (commit {}) with target: {}",
+                                    derivation_name, commit.git_commit_hash, derivation_target
                                 ),
                                 Err(e) => {
-                                    error!("❌ Failed to insert target for {}: {}", target_name, e)
+                                    error!(
+                                        "❌ Failed to insert NixOS derivation for {}: {}",
+                                        derivation_name, e
+                                    )
                                 }
                             }
                         }
@@ -125,29 +149,54 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
     Ok(())
 }
 
-async fn process_pending_targets(pool: &PgPool) -> Result<()> {
+/// Helper function to build flake target string
+fn build_flake_target_string(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
+    let is_path = std::path::Path::new(repo_url).exists();
+
+    if is_path {
+        format!("{repo_url}#nixosConfigurations.{system_name}.config.system.build.toplevel")
+    } else if repo_url.starts_with("git+") {
+        format!(
+            "{repo_url}?rev={commit_hash}#nixosConfigurations.{system_name}.config.system.build.toplevel"
+        )
+    } else {
+        format!(
+            "git+{repo_url}?rev={commit_hash}#nixosConfigurations.{system_name}.config.system.build.toplevel"
+        )
+    }
+}
+
+async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
     update_scheduled_at(pool).await?;
-    match get_pending_dry_run_targets(pool).await {
+    match get_pending_dry_run_derivations(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
-            let concurrency_limit = 4; // adjust as needed
-            stream::iter(pending_targets.into_iter().map(|mut target| {
+            let concurrency_limit = 1; // adjust as needed
+            stream::iter(pending_targets.into_iter().map(|target| {
                 let pool = pool.clone();
                 async move {
-                    if let Err(e) = mark_target_dry_run_in_progress(&pool, target.id).await {
+                    if let Err(e) = mark_derivation_dry_run_in_progress(&pool, target.id).await {
                         error!("❌ Failed to mark target in-progress: {e}");
                         return;
                     }
-                    match target.resolve_derivation_path(&pool).await {
-                        Ok(path) => {
-                            match update_evaluation_target_path(&pool, &target, &path).await {
-                                Ok(updated) => info!("✅ Updated: {:?}", updated),
+
+                    // Use the new evaluate_and_build method instead of resolve_derivation_path
+                    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
+                        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
+                        CrystalForgeConfig::default()
+                    });
+                    let build_config = cfg.get_build_config();
+
+                    match target.evaluate_and_build(false, &build_config).await {
+                        Ok(derivation_path) => {
+                            match update_derivation_path(&pool, &target, &derivation_path).await {
+                                Ok(updated) => info!("✅ Updated: {}", updated.derivation_name),
                                 Err(e) => error!("❌ Failed to update path: {e}"),
                             }
-                        }
+                        },
                         Err(e) => {
                             if let Err(inc_err) =
-                                increment_evaluation_target_attempt_count(&pool, &target, &e).await
+                                increment_derivation_attempt_count(&pool, &target, &e).await
                             {
                                 error!("❌ Failed to increment attempt count: {inc_err}");
                             }
@@ -159,7 +208,7 @@ async fn process_pending_targets(pool: &PgPool) -> Result<()> {
                             {
                                 error!("❌ Failed to mark target as failed: {mark_err}");
                             } else {
-                                info!("💥 Marked target {} as failed", target.target_name);
+                                info!("💥 Marked target {} as failed", target.derivation_name);
                             }
                         }
                     }

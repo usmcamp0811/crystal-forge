@@ -1,0 +1,107 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE derivations SET status_id = $1\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "derivation_type: DerivationType",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "derivation_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "derivation_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "derivation_target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "attempt_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "evaluation_duration_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "pname",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "version",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "status_id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "c8e90fa4bafe7339862080ace274d09a947671be9f45f3670db32430563d6c8a"
+}
