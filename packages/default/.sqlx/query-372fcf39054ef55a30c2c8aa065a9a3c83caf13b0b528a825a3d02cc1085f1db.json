@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE commits\n        SET attempt_count = attempt_count + 1\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "372fcf39054ef55a30c2c8aa065a9a3c83caf13b0b528a825a3d02cc1085f1db"
+}

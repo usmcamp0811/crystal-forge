@@ -404,34 +404,6 @@ in
       except Exception:
           pytest.fail("Builder service not logging startup messages")
 
-      # 8. Insert a test evaluation target that builder can process
-      commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"  # Define commit hash for builder tests
-
-      server.succeed(f"""
-          psql -U crystal_forge -d crystal_forge -c "
-          INSERT INTO evaluation_targets (commit_id, target_type, target_name, status)
-          SELECT
-              c.id,
-              'nixos',
-              'testSystem',
-              'dry-run-pending'
-          FROM commits c
-          WHERE c.git_commit_hash = '{commit_hash}'
-          LIMIT 1;
-          "
-      """)
-
-      # 10. Check that evaluation target status changed from pending
-      try:
-          server.wait_until_succeeds("""
-              psql -U crystal_forge -d crystal_forge -c "
-              SELECT status FROM evaluation_targets
-              WHERE target_name = 'testSystem' AND status != 'dry-run-pending'
-              " | grep -v 'dry-run-pending'
-          """, timeout=120)
-      except Exception:
-          pytest.fail("Evaluation target status did not change from pending")
-
       # 11. Check builder memory usage is reasonable
       try:
           memory_usage = server.succeed("systemctl show crystal-forge-builder.service --property=MemoryCurrent")

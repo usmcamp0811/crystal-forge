@@ -12,6 +12,7 @@ pub struct Commit {
     pub flake_id: i32,
     pub git_commit_hash: String,
     pub commit_timestamp: DateTime<Utc>,
+    pub attempt_count: i32, // Add this field to match your database schema
 }
 
 impl Commit {
@@ -24,8 +25,8 @@ impl fmt::Display for Commit {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "Commit(id={}, flake_id={}, hash={}, timestamp={})",
-            self.id, self.flake_id, self.git_commit_hash, self.commit_timestamp
+            "Commit(id={}, flake_id={}, hash={}, timestamp={}, attempts={})",
+            self.id, self.flake_id, self.git_commit_hash, self.commit_timestamp, self.attempt_count
         )
     }
 }
