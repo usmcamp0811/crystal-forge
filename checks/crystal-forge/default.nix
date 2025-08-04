@@ -404,33 +404,24 @@ in
       except Exception:
           pytest.fail("Builder service not logging startup messages")
 
-      # 8. Insert a test evaluation target that builder can process
-      commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"  # Define commit hash for builder tests
 
-      server.succeed(f"""
-          psql -U crystal_forge -d crystal_forge -c "
-          INSERT INTO evaluation_targets (commit_id, target_type, target_name, status)
-          SELECT
-              c.id,
-              'nixos',
-              'testSystem',
-              'dry-run-pending'
-          FROM commits c
-          WHERE c.git_commit_hash = '{commit_hash}'
-          LIMIT 1;
-          "
-      """)
-
-      # 10. Check that evaluation target status changed from pending
+      # 10. Check that derivation status changed from pending via status events
       try:
           server.wait_until_succeeds("""
               psql -U crystal_forge -d crystal_forge -c "
-              SELECT status FROM evaluation_targets
-              WHERE target_name = 'testSystem' AND status != 'dry-run-pending'
+              SELECT status FROM derivation_status_events
+              WHERE derivation_id = (
+                SELECT id FROM derivations
+                WHERE derivation_name = 'testSystem'
+                ORDER BY created_at DESC
+                LIMIT 1
+              )
+              ORDER BY timestamp DESC
+              LIMIT 1;
               " | grep -v 'dry-run-pending'
           """, timeout=120)
       except Exception:
-          pytest.fail("Evaluation target status did not change from pending")
+          pytest.fail("Derivation status did not change from pending in status events")
 
       # 11. Check builder memory usage is reasonable
       try:
