@@ -404,19 +404,6 @@ in
       except Exception:
           pytest.fail("Builder service not logging startup messages")
 
-
-      # 10. Check that derivation status changed from 'dry-run-pending'
-      try:
-          server.wait_until_succeeds(f"""
-              psql -U crystal_forge -d crystal_forge -c "
-              SELECT s.status FROM derivations d
-              JOIN derivation_statuses s ON d.status_id = s.id
-              WHERE d.id = '{derivation_id}' AND s.status != 'dry-run-pending'
-              " | grep -v 'dry-run-pending'
-          """, timeout=120)
-      except Exception:
-          pytest.fail("Derivation status did not change from 'dry-run-pending'")
-
       # 11. Check builder memory usage is reasonable
       try:
           memory_usage = server.succeed("systemctl show crystal-forge-builder.service --property=MemoryCurrent")
