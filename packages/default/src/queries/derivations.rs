@@ -88,6 +88,7 @@ pub async fn insert_derivation(
             derivation_type as "derivation_type: DerivationType",
             derivation_name,
             derivation_path,
+            derivation_target,
             scheduled_at,
             completed_at,
             started_at,
@@ -102,6 +103,58 @@ pub async fn insert_derivation(
         derivation_type,
         target_name,
         EvaluationStatus::DryRunPending.as_id()
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(derivation)
+}
+
+pub async fn insert_derivation_with_target(
+    pool: &PgPool,
+    commit: Option<&crate::models::commits::Commit>,
+    derivation_name: &str,
+    derivation_type: &str,
+    derivation_target: Option<&str>,
+) -> Result<crate::models::derivations::Derivation> {
+    let commit_id = commit.map(|c| c.id);
+    
+    let derivation = sqlx::query_as!(
+        crate::models::derivations::Derivation,
+        r#"
+        INSERT INTO derivations (
+            commit_id, 
+            derivation_type, 
+            derivation_name, 
+            derivation_target,
+            status_id, 
+            attempt_count,
+            scheduled_at
+        ) 
+        VALUES ($1, $2, $3, $4, $5, $6, NOW())
+        RETURNING 
+            id,
+            commit_id,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
+            derivation_path,
+            derivation_target,
+            scheduled_at,
+            completed_at,
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            pname,
+            version,
+            status_id
+        "#,
+        commit_id,
+        derivation_type,
+        derivation_name,
+        derivation_target,
+        1, // assuming status_id 1 is "pending"
+        0  // initial attempt_count
     )
     .fetch_one(pool)
     .await?;
@@ -149,6 +202,7 @@ pub async fn insert_package_derivation(
             derivation_type as "derivation_type: DerivationType",
             derivation_name,
             derivation_path,
+            derivation_target,
             scheduled_at,
             completed_at,
             started_at,
@@ -202,6 +256,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -235,6 +290,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -271,6 +327,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -302,6 +359,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -337,6 +395,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -368,6 +427,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -401,6 +461,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -431,6 +492,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -458,6 +520,7 @@ pub async fn update_derivation_status(
                         derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
+                        derivation_target,
                         scheduled_at,
                         completed_at,
                         started_at,
@@ -579,6 +642,7 @@ pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Deriv
             derivation_type as "derivation_type: DerivationType",
             derivation_name,
             derivation_path,
+            derivation_target,
             scheduled_at,
             completed_at,
             started_at,
@@ -610,6 +674,7 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
             derivation_type as "derivation_type: DerivationType",
             derivation_name,
             derivation_path,
+            derivation_target,
             scheduled_at,
             completed_at,
             started_at,
@@ -645,6 +710,7 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
                 d.derivation_type,
                 d.derivation_name,
                 d.derivation_path,
+                d.derivation_target,
                 d.scheduled_at,
                 d.completed_at,
                 d.started_at,
@@ -683,6 +749,7 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             derivation_type as "derivation_type: DerivationType",
             derivation_name,
             derivation_path,
+            derivation_target,
             scheduled_at,
             completed_at,
             started_at,
@@ -898,6 +965,7 @@ pub async fn discover_and_insert_packages(
                     derivation_type as "derivation_type: DerivationType",
                     derivation_name,
                     derivation_path,
+                    derivation_target,
                     scheduled_at,
                     completed_at,
                     started_at,

@@ -86,7 +86,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
             for commit in pending_commits {
-                let target_type = "nixos"; // This correctly sets the type to "nixos"
+                let target_type = "nixos";
                 match list_nixos_configurations_from_commit(&pool, &commit).await {
                     Ok(nixos_targets) => {
                         info!(
@@ -94,19 +94,39 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             commit.git_commit_hash,
                             nixos_targets.len()
                         );
+
+                        // Get flake info to build the derivation target
+                        let flake = match commit.get_flake(&pool).await {
+                            Ok(flake) => flake,
+                            Err(e) => {
+                                error!(
+                                    "❌ Failed to get flake for commit {}: {}",
+                                    commit.git_commit_hash, e
+                                );
+                                continue;
+                            }
+                        };
+
                         for derivation_name in nixos_targets {
-                            // Removed 'mut' - not needed
-                            match insert_derivation(
+                            // Build the complete flake target string
+                            let derivation_target = build_flake_target_string(
+                                &flake.repo_url,
+                                &commit.git_commit_hash,
+                                &derivation_name,
+                            );
+
+                            match insert_derivation_with_target(
                                 &pool,
                                 Some(&commit),
                                 &derivation_name,
-                                target_type, // This will be "nixos"
+                                target_type,
+                                Some(&derivation_target),
                             )
                             .await
                             {
                                 Ok(_) => info!(
-                                    "✅ Inserted NixOS derivation: {} (commit {})",
-                                    derivation_name, commit.git_commit_hash
+                                    "✅ Inserted NixOS derivation: {} (commit {}) with target: {}",
+                                    derivation_name, commit.git_commit_hash, derivation_target
                                 ),
                                 Err(e) => {
                                     error!(
@@ -127,6 +147,23 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
         Err(e) => error!("❌ Failed to get pending commits: {e}"),
     }
     Ok(())
+}
+
+/// Helper function to build flake target string
+fn build_flake_target_string(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
+    let is_path = std::path::Path::new(repo_url).exists();
+
+    if is_path {
+        format!("{repo_url}#nixosConfigurations.{system_name}.config.system.build.toplevel")
+    } else if repo_url.starts_with("git+") {
+        format!(
+            "{repo_url}?rev={commit_hash}#nixosConfigurations.{system_name}.config.system.build.toplevel"
+        )
+    } else {
+        format!(
+            "git+{repo_url}?rev={commit_hash}#nixosConfigurations.{system_name}.config.system.build.toplevel"
+        )
+    }
 }
 
 async fn process_pending_derivations(pool: &PgPool) -> Result<()> {

@@ -29,6 +29,7 @@ pub struct Derivation {
     pub pname: Option<String>,   // Nix package name (for packages)
     pub version: Option<String>, // package version (for packages)
     pub status_id: i32,          // foreign key to derivation_statuses table
+    pub derivation_target: Option<String>,
 }
 
 // Enum for derivation types (updated from TargetType)
@@ -40,6 +41,12 @@ pub enum DerivationType {
     NixOS,
     #[sqlx(rename = "package")]
     Package,
+}
+
+#[derive(Debug, Clone)]
+pub struct EvaluationResult {
+    pub main_derivation_path: String,
+    pub dependency_derivation_paths: Vec<String>,
 }
 
 // SQLx requires this for deserialization - make it safe
@@ -101,94 +108,261 @@ impl Derivation {
         }
     }
 
-    pub async fn resolve_derivation_path(&mut self, pool: &PgPool) -> Result<String> {
-        // Only NixOS derivations should resolve paths, packages are discovered
-        if self.derivation_type == DerivationType::Package {
-            return Err(anyhow::anyhow!("Package derivations don't resolve paths"));
+    /// Phase 1: Evaluate and discover all derivation paths (dry-run only)
+    /// This can run on any machine and doesn't require commit_id
+    pub async fn evaluate_derivation_path(
+        flake_target: &str,
+        build_config: &BuildConfig,
+    ) -> Result<EvaluationResult> {
+        info!("🔍 Evaluating derivation paths for: {}", flake_target);
+
+        let mut cmd = Command::new("nix");
+        cmd.args(["build", flake_target, "--dry-run", "--print-out-paths"]);
+
+        // Apply build configuration
+        build_config.apply_to_command(&mut cmd);
+
+        let output = cmd.output().await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("❌ nix build dry-run failed: {}", stderr.trim());
+            anyhow::bail!("nix build dry-run failed: {}", stderr.trim());
         }
 
-        if self.commit_id.is_none() {
-            return Err(anyhow::anyhow!(
-                "Cannot resolve path for derivation without commit"
-            ));
-        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
 
-        let name = self.derivation_name.clone();
-        let kind = self.derivation_type.clone();
+        info!("🔍 Dry-run stdout:\n{}", stdout);
+        info!("🔍 Dry-run stderr:\n{}", stderr);
 
-        info!(
-            "🔍 Starting evaluation of {} target '{}'",
-            kind.to_string().to_lowercase(),
-            name
-        );
+        // Parse derivation paths from stderr
+        let mut derivation_paths = Vec::new();
+        let mut collecting_derivations = false;
 
-        let (tx, mut rx) = watch::channel(false);
+        for line in stderr.lines() {
+            let trimmed = line.trim();
 
-        let ticker = tokio::spawn({
-            let name = name.clone();
-            let kind = kind.clone();
-            async move {
-                loop {
-                    sleep(Duration::from_secs(60)).await;
-                    if *rx.borrow_and_update() {
-                        break;
-                    }
-                    info!(
-                        "⏳ Still evaluating {} '{}'",
-                        kind.to_string().to_lowercase(),
-                        name
-                    );
+            if trimmed.starts_with("these ") && trimmed.contains("derivations will be built:") {
+                collecting_derivations = true;
+                debug!("🔍 Found derivation list header: {}", trimmed);
+                continue;
+            }
+
+            if collecting_derivations {
+                if trimmed.starts_with("/nix/store/") && trimmed.ends_with(".drv") {
+                    derivation_paths.push(trimmed.to_string());
+                    debug!("🔍 Found derivation: {}", trimmed);
+                } else if trimmed.is_empty() || trimmed.starts_with("[{") {
+                    collecting_derivations = false;
+                    debug!("🔍 Stopped collecting derivations at: '{}'", trimmed);
                 }
             }
-        });
+        }
 
-        let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
-            warn!("Failed to load Crystal Forge config: {}, using defaults", e);
-            CrystalForgeConfig::default()
-        });
-        let build_config = cfg.get_build_config();
+        if derivation_paths.is_empty() {
+            info!("📦 No new derivations needed - everything already available");
 
-        let hash = match self.derivation_type {
-            DerivationType::NixOS => {
-                self.evaluate_nixos_system_with_build(false, &build_config)
-                    .await?
+            // Get the output path directly since nothing needs building
+            let mut store_cmd = Command::new("nix");
+            store_cmd.args(["build", flake_target, "--print-out-paths"]);
+            build_config.apply_to_command(&mut store_cmd);
+
+            let store_output = store_cmd.output().await?;
+            if !store_output.status.success() {
+                let store_stderr = String::from_utf8_lossy(&store_output.stderr);
+                anyhow::bail!("nix build for store path failed: {}", store_stderr.trim());
             }
-            DerivationType::Package => {
-                anyhow::bail!("Package derivation evaluation not implemented yet")
-            }
-        };
 
-        self.derivation_path = Some(hash.clone());
+            let store_stdout = String::from_utf8_lossy(&store_output.stdout);
+            let store_path = store_stdout.trim().to_string();
 
-        let _ = tx.send(true);
-        let _ = ticker.await;
+            return Ok(EvaluationResult {
+                main_derivation_path: store_path,
+                dependency_derivation_paths: Vec::new(),
+            });
+        }
 
-        Ok(hash)
+        // Find the main derivation (nixos-system or the target we're building)
+        let main_derivation = derivation_paths
+            .iter()
+            .find(|path| {
+                // For NixOS systems
+                if flake_target.contains("nixosConfigurations") {
+                    path.contains("nixos-system")
+                } else {
+                    // For packages, this is more heuristic - you might need to adjust
+                    // based on your specific use case
+                    true // For now, take the first one
+                }
+            })
+            .ok_or_else(|| {
+                error!("❌ Could not find main derivation. Available paths:");
+                for path in &derivation_paths {
+                    error!("  - {}", path);
+                }
+                anyhow::anyhow!("Could not find main derivation in dry-run output")
+            })?
+            .clone();
+
+        // Dependencies are all the other derivations
+        let dependencies: Vec<String> = derivation_paths
+            .into_iter()
+            .filter(|path| path != &main_derivation)
+            .collect();
+
+        info!("🔍 Main derivation: {}", main_derivation);
+        info!("🔍 Found {} dependency derivations", dependencies.len());
+
+        Ok(EvaluationResult {
+            main_derivation_path: main_derivation,
+            dependency_derivation_paths: dependencies,
+        })
     }
 
-    pub async fn evaluate_nixos_system_with_build(
+    /// Phase 2: Build a derivation from its .drv path
+    /// This can run on any machine that has access to the required inputs
+    pub async fn build_derivation_from_path(
+        drv_path: &str,
+        build_config: &BuildConfig,
+    ) -> Result<String> {
+        info!("🔨 Building derivation: {}", drv_path);
+
+        if !drv_path.ends_with(".drv") {
+            anyhow::bail!("Expected .drv path, got: {}", drv_path);
+        }
+
+        let mut cmd = Command::new("nix-store");
+        cmd.args(["--realise", drv_path]);
+
+        // Apply any relevant build config (though nix-store has fewer options)
+        // You might need to adjust this based on what BuildConfig contains
+
+        let output = cmd.output().await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("❌ nix-store --realise failed: {}", stderr.trim());
+            anyhow::bail!("nix-store --realise failed: {}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let output_path = stdout.trim();
+
+        if output_path.is_empty() {
+            anyhow::bail!("No output path returned from nix-store --realise");
+        }
+
+        info!("✅ Built derivation {} -> {}", drv_path, output_path);
+        Ok(output_path.to_string())
+    }
+
+    /// High-level function that handles both NixOS and Package derivations
+    pub async fn evaluate_and_build(
         &self,
         full_build: bool,
         build_config: &BuildConfig,
     ) -> Result<String> {
-        // Require commit_id for NixOS builds
-        let commit_id = self
-            .commit_id
-            .ok_or_else(|| anyhow::anyhow!("Cannot build NixOS derivation without commit_id"))?;
+        match self.derivation_type {
+            DerivationType::NixOS => {
+                // NixOS derivations need commit_id for flake evaluation
+                let commit_id = self.commit_id.ok_or_else(|| {
+                    anyhow::anyhow!("Cannot build NixOS derivation without commit_id")
+                })?;
 
-        let summary = self.summary().await?;
-        info!("🔍 Determining derivation for {summary}");
-        let pool = CrystalForgeConfig::db_pool().await?;
-        let commit = crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;
-        let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
+                let pool = CrystalForgeConfig::db_pool().await?;
+                let commit = crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;
+                let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
+
+                let flake_target = self.build_flake_target(&flake, &commit).await?;
+
+                if full_build {
+                    // Phase 1: Evaluate
+                    let eval_result =
+                        Self::evaluate_derivation_path(&flake_target, build_config).await?;
+
+                    // Insert dependencies into database
+                    if !eval_result.dependency_derivation_paths.is_empty() {
+                        crate::queries::derivations::discover_and_insert_packages(
+                            &pool,
+                            self.id,
+                            &eval_result
+                                .dependency_derivation_paths
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>(),
+                        )
+                        .await?;
+                    }
+
+                    // Phase 2: Build the main derivation
+                    if eval_result.main_derivation_path.ends_with(".drv") {
+                        Self::build_derivation_from_path(
+                            &eval_result.main_derivation_path,
+                            build_config,
+                        )
+                        .await
+                    } else {
+                        // Already built, return the output path
+                        Ok(eval_result.main_derivation_path)
+                    }
+                } else {
+                    // Dry-run only
+                    let eval_result =
+                        Self::evaluate_derivation_path(&flake_target, build_config).await?;
+
+                    // Insert dependencies into database
+                    if !eval_result.dependency_derivation_paths.is_empty() {
+                        crate::queries::derivations::discover_and_insert_packages(
+                            &pool,
+                            self.id,
+                            &eval_result
+                                .dependency_derivation_paths
+                                .iter()
+                                .map(|s| s.as_str())
+                                .collect::<Vec<_>>(),
+                        )
+                        .await?;
+                    }
+
+                    Ok(eval_result.main_derivation_path)
+                }
+            }
+            DerivationType::Package => {
+                // Package derivations just need their .drv path built
+                let drv_path = self
+                    .derivation_path
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Package derivation missing derivation_path"))?;
+
+                if full_build {
+                    // Build the package from its .drv path
+                    Self::build_derivation_from_path(drv_path, build_config).await
+                } else {
+                    // For dry-run, just return the existing .drv path
+                    Ok(drv_path.clone())
+                }
+            }
+        }
+    }
+
+    /// Helper to build the flake target string
+    async fn build_flake_target(
+        &self,
+        flake: &crate::models::flakes::Flake,
+        commit: &crate::models::commits::Commit,
+    ) -> Result<String> {
         let flake_url = &flake.repo_url;
         let system = &self.derivation_name;
         let is_path = Path::new(flake_url).exists();
-        debug!("📁 Is local path: {is_path}");
 
         if is_path {
-            info!("📌 Running 'git checkout {:?}' in {}", commit, flake_url);
-            let status = Command::new("git")
+            // For local paths, checkout first
+            info!(
+                "📌 Running 'git checkout {}' in {}",
+                commit.git_commit_hash, flake_url
+            );
+            let status = tokio::process::Command::new("git")
                 .args(["-C", flake_url, "checkout", &commit.git_commit_hash])
                 .status()
                 .await?;
@@ -196,204 +370,24 @@ impl Derivation {
                 anyhow::bail!(
                     "❌ git checkout failed for path {} at rev {}",
                     flake_url,
-                    commit
+                    commit.git_commit_hash
                 );
             }
-        }
-
-        let flake_target = if is_path {
-            format!("{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel")
+            Ok(format!(
+                "{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel"
+            ))
         } else if flake_url.starts_with("git+") {
-            format!(
+            Ok(format!(
                 "{flake_url}?rev={}#nixosConfigurations.{system}.config.system.build.toplevel",
                 commit.git_commit_hash
-            )
+            ))
         } else {
-            format!(
+            Ok(format!(
                 "git+{0}?rev={1}#nixosConfigurations.{2}.config.system.build.toplevel",
                 flake_url, commit.git_commit_hash, self.derivation_name
-            )
-        };
-
-        let build_mode = if full_build { "full build" } else { "dry-run" };
-        info!("🔨 Building flake target: {flake_target} ({})", build_mode);
-
-        let mut cmd = Command::new("nix");
-        cmd.args(["build", &flake_target]);
-
-        if !full_build {
-            cmd.arg("--dry-run");
-            cmd.arg("--print-out-paths");
-            // NOTE: Don't add --json for dry-run, it conflicts with --dry-run output format
-        } else {
-            cmd.arg("--json");
+            ))
         }
-
-        // Apply build configuration
-        build_config.apply_to_command(&mut cmd);
-
-        let output = cmd.output().await?;
-
-        // Always capture both stdout and stderr for debugging
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !output.status.success() {
-            error!("❌ nix build failed: {}", stderr.trim());
-            anyhow::bail!("nix build failed: {}", stderr.trim());
-        }
-
-        let main_derivation_path = if full_build {
-            // Full build: parse JSON output
-            let parsed: Value = serde_json::from_slice(&output.stdout)?;
-            parsed
-                .get(0)
-                .and_then(|v| v["outputs"]["out"].as_str())
-                .context("❌ Missing derivation output in nix build output")?
-                .to_string()
-        } else {
-            // Dry run: parse stderr output for derivation paths
-            info!("🔍 Full dry-run stdout:\n{}", stdout);
-            info!("🔍 Full dry-run stderr:\n{}", stderr);
-
-            // Parse the stderr output: collect all derivation paths
-            let mut derivation_paths = Vec::new();
-            let mut collecting_derivations = false;
-
-            for line in stderr.lines() {
-                let trimmed = line.trim();
-
-                if trimmed.starts_with("these ") && trimmed.contains("derivations will be built:") {
-                    collecting_derivations = true;
-                    debug!("🔍 Found derivation list header: {}", trimmed);
-                    continue;
-                }
-
-                if collecting_derivations {
-                    if trimmed.starts_with("/nix/store/") && trimmed.ends_with(".drv") {
-                        derivation_paths.push(trimmed);
-                        debug!("🔍 Found derivation: {}", trimmed);
-                    } else if trimmed.is_empty() || trimmed.starts_with("[{") {
-                        collecting_derivations = false;
-                        debug!("🔍 Stopped collecting derivations at: '{}'", trimmed);
-                    }
-                }
-            }
-
-            info!("🔍 Found {} derivation paths", derivation_paths.len());
-
-            if derivation_paths.is_empty() {
-                info!("📦 No new derivations needed - everything already available");
-
-                // Run without --dry-run but still with --print-out-paths to get the store path
-                let mut store_cmd = Command::new("nix");
-                store_cmd.args(["build", &flake_target, "--print-out-paths"]);
-                build_config.apply_to_command(&mut store_cmd);
-
-                let store_output = store_cmd.output().await?;
-                if !store_output.status.success() {
-                    let store_stderr = String::from_utf8_lossy(&store_output.stderr);
-                    error!(
-                        "❌ nix build for store path failed: {}",
-                        store_stderr.trim()
-                    );
-                    anyhow::bail!("nix build for store path failed: {}", store_stderr.trim());
-                }
-
-                let store_stdout = String::from_utf8_lossy(&store_output.stdout);
-                let store_path = store_stdout.trim();
-
-                if store_path.is_empty() {
-                    anyhow::bail!("No store path returned from nix build");
-                }
-
-                info!("✅ Using existing store path: {}", store_path);
-                return Ok(store_path.to_string());
-            }
-
-            // Look for the main system derivation
-            let main_path = derivation_paths
-                .iter()
-                .find(|path| {
-                    let contains_nixos_system = path.contains("nixos-system");
-                    let contains_system_name = path.contains(&self.derivation_name);
-                    debug!(
-                        "🔍 Checking path {}: nixos-system={}, system-name={}",
-                        path, contains_nixos_system, contains_system_name
-                    );
-                    contains_nixos_system || contains_system_name
-                })
-                .ok_or_else(|| {
-                    error!("❌ Could not find main system derivation. Available paths:");
-                    for path in &derivation_paths {
-                        error!("  - {}", path);
-                    }
-                    anyhow::anyhow!("Could not find main system derivation in dry-run output")
-                })?;
-
-            info!("🔍 Selected main derivation: {}", main_path);
-
-            // Insert discovered packages into the database
-            // IMPORTANT: Only pass non-system derivations to avoid duplicating the main system
-            let package_paths: Vec<&str> = derivation_paths
-                .iter()
-                .filter(|path| !path.contains("nixos-system-"))
-                .copied()
-                .collect();
-
-            if !package_paths.is_empty() {
-                info!(
-                    "🔍 Discovering {} packages (excluding main system derivation)",
-                    package_paths.len()
-                );
-                crate::queries::derivations::discover_and_insert_packages(
-                    &pool,
-                    self.id,
-                    &package_paths,
-                )
-                .await?;
-            }
-
-            main_path.to_string()
-        };
-
-        // Update the current NixOS derivation with pname and version info
-        if let Some(package_info) = parse_derivation_path(&main_derivation_path) {
-            let update_result = crate::queries::derivations::update_derivation_path_and_metadata(
-                &pool,
-                self.id,
-                &main_derivation_path,
-                package_info.pname.as_deref(),
-                package_info.version.as_deref(),
-            )
-            .await;
-
-            if let Err(e) = update_result {
-                warn!(
-                    "⚠️ Failed to update NixOS derivation with pname/version: {}",
-                    e
-                );
-            } else {
-                debug!(
-                    "✅ Updated NixOS derivation {} with pname: {:?}, version: {:?}",
-                    self.derivation_name, package_info.pname, package_info.version
-                );
-            }
-        }
-
-        info!(
-            "✅ {} path for {}: {main_derivation_path}",
-            if full_build {
-                "Built output"
-            } else {
-                "Derivation"
-            },
-            self.derivation_name
-        );
-
-        Ok(main_derivation_path)
     }
-
     /// Pushes a built derivation to the configured cache
     pub async fn push_to_cache(&self, store_path: &str, cache_config: &CacheConfig) -> Result<()> {
         // Check if we should push this target
@@ -447,9 +441,7 @@ impl Derivation {
         build_config: &BuildConfig,
         cache_config: &CacheConfig,
     ) -> Result<String> {
-        let store_path: String = self
-            .evaluate_nixos_system_with_build(full_build, build_config)
-            .await?;
+        let store_path: String = self.evaluate_and_build(full_build, build_config).await?;
 
         // Only push to cache if we did a full build (not a dry-run)
         if full_build && cache_config.push_after_build {
@@ -490,7 +482,7 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
 
         // If we can't parse version, use the whole system part as pname
         return Some(PackageInfo {
-            pname: Some(system_part),
+            pname: Some(format!("{}", system_part)),
             version: None,
         });
     }
