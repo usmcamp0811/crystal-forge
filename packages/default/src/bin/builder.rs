@@ -1,6 +1,7 @@
 use crystal_forge::builder::{run_build_loop, run_cve_scan_loop};
 use crystal_forge::models::config::CrystalForgeConfig;
 use crystal_forge::server::memory_monitor_task;
+use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -27,20 +28,51 @@ async fn main() -> anyhow::Result<()> {
     info!("✅ Both build and CVE scan loops started");
 
     // Wait for either task to complete (they shouldn't under normal circumstances)
+
+    // After spawning tasks...
+    info!("✅ Both build and CVE scan loops started");
+
+    // Wait for shutdown signal instead of task completion
+    // After spawning tasks...
+    info!("✅ Both build and CVE scan loops started");
+
+    // Wait for shutdown signal instead of task completion
     tokio::select! {
         result = build_handle => {
             match result {
-                Ok(_) => info!("Build loop completed"),
-                Err(e) => tracing::error!("Build loop panicked: {}", e),
+                Ok(Ok(())) => {
+                    tracing::error!("Build loop completed normally (this shouldn't happen)");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("Build loop returned error: {}", e);
+                }
+                Err(e) => {
+                    tracing::error!("Build loop panicked: {}", e);
+                }
             }
         }
         result = cve_scan_handle => {
             match result {
-                Ok(_) => info!("CVE scan loop completed"),
-                Err(e) => tracing::error!("CVE scan loop panicked: {}", e),
+                Ok(Ok(())) => {
+                    tracing::error!("CVE scan loop completed normally (this shouldn't happen)");
+                }
+                Ok(Err(e)) => {
+                    tracing::error!("CVE scan loop returned error: {}", e);
+                }
+                Err(e) => {
+                    tracing::error!("CVE scan loop panicked: {}", e);
+                }
             }
         }
+        _ = signal::ctrl_c() => {
+            info!("Received shutdown signal");
+            return Ok(());
+        }
     }
+
+    tracing::error!("One of the loops exited - this indicates a bug in the loop implementation");
+
+    info!("Shutting down Crystal Forge Builder...");
 
     Ok(())
 }
