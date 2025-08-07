@@ -33,44 +33,17 @@ async fn main() -> anyhow::Result<()> {
     info!("✅ Both build and CVE scan loops started");
 
     // Wait for shutdown signal instead of task completion
-    // After spawning tasks...
-    info!("✅ Both build and CVE scan loops started");
-
-    // Wait for shutdown signal instead of task completion
     tokio::select! {
         result = build_handle => {
-            match result {
-                Ok(Ok(())) => {
-                    tracing::error!("Build loop completed normally (this shouldn't happen)");
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("Build loop returned error: {}", e);
-                }
-                Err(e) => {
-                    tracing::error!("Build loop panicked: {}", e);
-                }
-            }
+            tracing::error!("Build loop exited unexpectedly: {:?}", result);
         }
         result = cve_scan_handle => {
-            match result {
-                Ok(Ok(())) => {
-                    tracing::error!("CVE scan loop completed normally (this shouldn't happen)");
-                }
-                Ok(Err(e)) => {
-                    tracing::error!("CVE scan loop returned error: {}", e);
-                }
-                Err(e) => {
-                    tracing::error!("CVE scan loop panicked: {}", e);
-                }
-            }
+            tracing::error!("CVE scan loop exited unexpectedly: {:?}", result);
         }
         _ = signal::ctrl_c() => {
             info!("Received shutdown signal");
-            return Ok(());
         }
     }
-
-    tracing::error!("One of the loops exited - this indicates a bug in the loop implementation");
 
     info!("Shutting down Crystal Forge Builder...");
 
