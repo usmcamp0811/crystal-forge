@@ -6,6 +6,7 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
+        status,
         webhook::webhook_handler,
     },
     models::config::CrystalForgeConfig,
@@ -55,6 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = CFState::new(pool);
     let app = Router::new()
+        .route("/status", get(status::status))
         .route("/system_state", post(state::update))
         .route("/agent/heartbeat", post(heartbeat::log))
         .route("/agent/state", post(state::update))
