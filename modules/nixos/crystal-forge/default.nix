@@ -8,7 +8,6 @@
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
 
-  # Generate the base TOML config structure
   baseConfig =
     {
       database = {
@@ -84,91 +83,56 @@
           signing_key = toString cfg.cache.signing_key;
         };
     };
-  # Generate the raw config file
-  rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
 
-  # Final config path
+  rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
   generatedConfigPath = "/var/lib/crystal-forge/config.toml";
 
-  # Script to handle password substitution and config generation
   configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
     set -euo pipefail
-
-    echo "Generating Crystal Forge configuration..."
-
-    # Ensure target directory exists with proper permissions
     mkdir -p "$(dirname "${generatedConfigPath}")"
-
-    # Copy the base config
     cp "${rawConfigFile}" "${generatedConfigPath}"
 
     ${lib.optionalString (cfg.database.passwordFile != null) ''
-      # Replace password placeholder with actual password from file
       if [ -f "${cfg.database.passwordFile}" ]; then
         PASSWORD=$(cat "${cfg.database.passwordFile}")
-        # Use a more robust sed replacement that handles special characters
         ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|''${PASSWORD}|" "${generatedConfigPath}"
-        echo "Password substituted from ${cfg.database.passwordFile}"
       else
-        echo "ERROR: Password file not found: ${cfg.database.passwordFile}"
+        echo "ERROR: Password file not found: ${cfg.database.passwordFile}" >&2
         exit 1
       fi
     ''}
 
-    # Set appropriate permissions
     chmod 600 "${generatedConfigPath}"
-
-    echo "Configuration generated at ${generatedConfigPath}"
   '';
 
-  # Server wrapper script
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
     exec ${pkgs.crystal-forge.server}/bin/server "$@"
   '';
 
-  # Builder wrapper scripts
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
     set -euo pipefail
-
-    # Set up environment
     export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
     export TMPDIR="/var/lib/crystal-forge/tmp"
     export HOME="/var/lib/crystal-forge"
 
-    # CRITICAL: Clean up build artifacts periodically
     cleanup_old_builds() {
-      echo "🧹 Cleaning up old build artifacts..."
       find /var/lib/crystal-forge/workdir -name "result*" -type l -mtime +1 -delete 2>/dev/null || true
       find /var/lib/crystal-forge/tmp -type f -mtime +1 -delete 2>/dev/null || true
     }
-
-    # Set up signal handlers for cleanup
     trap cleanup_old_builds EXIT INT TERM
 
-    # Ensure we're in a writable directory
+    mkdir -p /var/lib/crystal-forge/workdir
     cd /var/lib/crystal-forge/workdir
-
-    # Clean up any stale symlinks
     cleanup_old_builds
 
-    # Set resource limits
     export NIX_BUILD_CORES="${toString cfg.build.cores}"
     export NIX_MAX_JOBS="${toString cfg.build.max_jobs}"
+    ulimit -v $((4 * 1024 * 1024)) # 4GiB
 
-    # CRITICAL: Limit memory per Nix build
-    ulimit -v $((4 * 1024 * 1024))  # 4GB virtual memory limit
-
-    echo "Crystal Forge Builder starting..."
-    echo "Working directory: $(pwd)"
-    echo "Config file: $CRYSTAL_FORGE_CONFIG"
-    echo "Temp directory: $TMPDIR"
-
-    # Run the actual builder
     exec ${pkgs.crystal-forge.server}/bin/builder "$@"
   '';
 
-  # Agent wrapper script
   agentScript = pkgs.writeShellScript "crystal-forge-agent" ''
     export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
     exec ${pkgs.crystal-forge.agent}/bin/agent "$@"
@@ -202,31 +166,26 @@ in {
         default = "/run/postgresql";
         description = "Database host (use socket path for local connections)";
       };
-
       port = lib.mkOption {
         type = lib.types.port;
         default = 5432;
         description = "Database port";
       };
-
       user = lib.mkOption {
         type = lib.types.str;
         default = "crystal_forge";
         description = "Database user";
       };
-
       password = lib.mkOption {
         type = lib.types.str;
         default = "password";
         description = "Database password (only used if passwordFile is null)";
       };
-
       passwordFile = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
         description = "Path to file containing database password";
       };
-
       name = lib.mkOption {
         type = lib.types.str;
         default = "crystal_forge";
@@ -248,7 +207,7 @@ in {
             };
             auto_poll = lib.mkOption {
               type = lib.types.bool;
-              description = "Whether to automatically poll the repository for new commits instead of relying solely on webhooks";
+              description = "Automatically poll for new commits";
             };
           };
         });
@@ -264,23 +223,21 @@ in {
       };
       flake_polling_interval = lib.mkOption {
         type = lib.types.str;
-        default = "10m"; # 10 minutes
-        description = "Interval between flake polling checks (e.g., '10m', '1h')";
+        default = "10m";
+        description = "Interval between flake polling checks";
       };
-
       commit_evaluation_interval = lib.mkOption {
         type = lib.types.str;
-        default = "1m"; # 1 minute
-        description = "Interval between commit evaluation checks (e.g., '1m', '5m')";
+        default = "1m";
+        description = "Interval between commit evaluation checks";
       };
-
       build_processing_interval = lib.mkOption {
         type = lib.types.str;
-        default = "1m"; # 1 minute
-        description = "Interval between build processing checks (e.g., '1m', '5m')";
+        default = "1m";
+        description = "Interval between build processing checks";
       };
     };
-    # Build configuration options
+
     build = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -292,25 +249,21 @@ in {
         default = 1;
         description = "Maximum CPU cores to use per build job";
       };
-
       max_jobs = lib.mkOption {
         type = lib.types.ints.positive;
         default = 1;
         description = "Maximum number of concurrent build jobs";
       };
-
       use_substitutes = lib.mkOption {
         type = lib.types.bool;
         default = true;
         description = "Whether to use binary substitutes/caches";
       };
-
       offline = lib.mkOption {
         type = lib.types.bool;
         default = false;
         description = "Build in offline mode (no network access)";
       };
-
       poll_interval = lib.mkOption {
         type = lib.types.str;
         default = "5m";
@@ -318,83 +271,72 @@ in {
       };
     };
 
-    # Vulnix configuration options
     vulnix = {
       timeout = lib.mkOption {
         type = lib.types.str;
         default = "5m";
         description = "Timeout for vulnix scans";
       };
-
       max_retries = lib.mkOption {
         type = lib.types.ints.unsigned;
         default = 5;
-        description = "Maximum number of retry attempts for failed scans";
+        description = "Max retries";
       };
-
       enable_whitelist = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Enable CVE whitelist filtering";
+        description = "Enable whitelist";
       };
-
       extra_args = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [];
-        description = "Additional arguments to pass to vulnix";
+        description = "Extra args";
       };
-
       whitelist_path = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "Path to CVE whitelist file";
+        description = "Whitelist path";
       };
-
       poll_interval = lib.mkOption {
         type = lib.types.str;
         default = "1m";
-        description = "Interval between checking for new CVE scan jobs";
+        description = "Polling interval for CVE jobs";
       };
     };
 
-    # Cache configuration options
     cache = {
       push_to = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Cache URI to push to (e.g., 's3://bucket', 'https://cache.example.com')";
+        description = "Cache URI to push to";
       };
-
       push_after_build = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Automatically push builds to cache after successful completion";
+        description = "Push after build";
       };
-
       signing_key = lib.mkOption {
         type = lib.types.nullOr lib.types.path;
         default = null;
-        description = "Path to private signing key for cache signatures";
+        description = "Signing key path";
       };
-
       compression = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
-        description = "Compression method for cache uploads";
+        description = "Compression method";
       };
-
       push_filter = lib.mkOption {
         type = lib.types.nullOr (lib.types.listOf lib.types.str);
         default = null;
-        description = "Only push builds for these systems/targets";
+        description = "Push filter";
       };
-
       parallel_uploads = lib.mkOption {
         type = lib.types.ints.positive;
         default = 4;
-        description = "Maximum parallel uploads to cache";
+        description = "Parallel uploads";
       };
     };
+
     systems = lib.mkOption {
       type = lib.types.listOf (lib.types.submodule {
         options = {
@@ -408,12 +350,12 @@ in {
           };
           environment = lib.mkOption {
             type = lib.types.str;
-            description = "Environment name (e.g., dev, prod, staging)";
+            description = "Environment name";
           };
           flake_name = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
             default = null;
-            description = "Reference to a flake name from flakes.watched";
+            description = "Flake ref name";
           };
         };
       });
@@ -434,28 +376,28 @@ in {
         options = {
           name = lib.mkOption {
             type = lib.types.str;
-            description = "Environment name (e.g., dev, prod, staging)";
+            description = "Environment name";
           };
           description = lib.mkOption {
             type = lib.types.str;
-            description = "Description of the environment";
+            description = "Description";
           };
           is_active = lib.mkOption {
             type = lib.types.bool;
-            description = "Whether the environment is currently active";
+            description = "Active flag";
           };
           risk_profile = lib.mkOption {
             type = lib.types.str;
-            description = "Risk profile for this environment";
+            description = "Risk profile";
           };
           compliance_level = lib.mkOption {
             type = lib.types.str;
-            description = "Compliance level for this environment";
+            description = "Compliance level";
           };
         };
       });
       default = [];
-      description = "List of environments for agents and evaluation";
+      description = "List of environments";
       example = [
         {
           name = "dev";
@@ -469,13 +411,11 @@ in {
 
     server = {
       enable = lib.mkEnableOption "Crystal Forge Server";
-
       host = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
         description = "Server bind address";
       };
-
       port = lib.mkOption {
         type = lib.types.port;
         default = 3000;
@@ -485,19 +425,16 @@ in {
 
     client = {
       enable = lib.mkEnableOption "Crystal Forge Agent";
-
       server_host = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
-        description = "Crystal Forge server hostname";
+        description = "Server hostname";
       };
-
       server_port = lib.mkOption {
         type = lib.types.port;
         default = 3000;
-        description = "Crystal Forge server port";
+        description = "Server port";
       };
-
       private_key = lib.mkOption {
         type = lib.types.path;
         description = "Path to Ed25519 private key file";
@@ -506,76 +443,38 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    # Allow crystal-forge user to build
     nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable) {
       experimental-features = ["nix-command" "flakes"];
       allowed-users = ["root" "crystal-forge"];
       trusted-users = ["root" "crystal-forge"];
     };
 
-    # Grant crystal-forge user access to nix commands
     users.users.crystal-forge = lib.mkIf (cfg.server.enable || cfg.build.enable) {
       description = "Crystal Forge service user";
       isSystemUser = true;
       group = "crystal-forge";
       home = "/var/lib/crystal-forge";
       createHome = true;
-
-      # Add to nixbld group for build access
-      extraGroups = ["nixbld"];
-
-      # Set a stable UID for consistent systemd user session
-      uid = 994;
+      # extraGroups is optional for daemon-style nix; keep empty unless needed.
+      # extraGroups = [ "nixbld" ];
     };
 
-    # Ensure the crystal-forge group exists
-    users.groups.crystal-forge = {
-      # Set a stable GID
-      gid = 994;
-    };
+    users.groups.crystal-forge = {};
 
-    # Add to systemd-tmpfiles for proper directory setup
     systemd.tmpfiles.rules = [
-      "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
-      "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
-      "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
-      "d /var/lib/crystal-forge/tmp 0755 crystal-forge crystal-forge -"
-      "d /var/lib/crystal-forge/builds 0755 crystal-forge crystal-forge -"
-      "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
       "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
-
-      # Enable lingering for crystal-forge user (creates persistent user session)
-      "f /var/lib/systemd/linger/crystal-forge 0644 root root - -"
-
-      # Ensure user runtime directory exists
-      "d /run/user/994 0700 crystal-forge crystal-forge -"
     ];
 
-    # Service to ensure lingering is properly enabled
-    systemd.services.crystal-forge-enable-linger = lib.mkIf (cfg.server.enable || cfg.build.enable) {
-      description = "Enable lingering for crystal-forge user";
-      wantedBy = ["multi-user.target"];
-      before = ["crystal-forge-server.service" "crystal-forge-builder.service"];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        ExecStart = "${pkgs.systemd}/bin/loginctl enable-linger crystal-forge";
-        ExecStop = "${pkgs.systemd}/bin/loginctl disable-linger crystal-forge";
-      };
-    };
-
-    # Create a dedicated systemd slice for build operations with higher limits
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Build Operations";
       sliceConfig = {
-        MemoryMax = "8G"; # Build operations get up to 8GB
-        MemoryHigh = "6G"; # Start throttling at 6GB
-        CPUQuota = "400%"; # 4 cores worth
-        TasksMax = "200"; # Limit number of processes
+        MemoryMax = "8G";
+        MemoryHigh = "6G";
+        CPUQuota = "400%";
+        TasksMax = "200";
       };
     };
 
-    # PostgreSQL setup when using local database
     services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
       enable = true;
       ensureDatabases = [cfg.database.name];
@@ -583,9 +482,7 @@ in {
         {
           name = cfg.database.user;
           ensureDBOwnership = true;
-          ensureClauses = {
-            login = true;
-          };
+          ensureClauses.login = true;
         }
       ];
       authentication = lib.mkAfter ''
@@ -604,6 +501,9 @@ in {
         Type = "oneshot";
         User = "crystal-forge";
         Group = "crystal-forge";
+        StateDirectory = "crystal-forge";
+        RuntimeDirectory = "crystal-forge";
+        CacheDirectory = "crystal-forge-nix";
       };
 
       environment = {
@@ -637,32 +537,20 @@ in {
     systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
-      after = (lib.optional cfg.local-database "postgresql.service") ++ ["crystal-forge-enable-linger.service"];
-      wants = (lib.optional cfg.local-database "postgresql.service") ++ ["crystal-forge-enable-linger.service"];
+      after = lib.optional cfg.local-database "postgresql.service";
+      wants = lib.optional cfg.local-database "postgresql.service";
 
-      path = with pkgs; [
-        nix
-        git
-        vulnix
-        systemd # Add systemd for systemd-run command
-      ];
+      path = with pkgs; [nix git vulnix systemd];
       environment = {
         RUST_LOG = cfg.log_level;
         NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
         TMPDIR = "/var/lib/crystal-forge/tmp";
-        # Ensure XDG_RUNTIME_DIR is set for systemd user session
-        XDG_RUNTIME_DIR = "/run/user/994";
+        XDG_RUNTIME_DIR = "/run/crystal-forge";
       };
 
       preStart = ''
-        echo "Starting Crystal Forge Builder configuration generation..."
         ${configScript}
-        echo "Configuration generation complete"
-
-        # Ensure XDG runtime directory exists with proper permissions
-        mkdir -p /run/user/994
-        chown crystal-forge:crystal-forge /run/user/994
-        chmod 700 /run/user/994
+        mkdir -p /var/lib/crystal-forge/.cache/nix
       '';
 
       serviceConfig = {
@@ -671,39 +559,23 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
 
-        # Put this service in the builds slice for higher memory limits
         Slice = "crystal-forge-builds.slice";
 
-        # Reduced memory limits for main service since builds use systemd scopes
-        MemoryMax = "2G"; # Main service gets 2GB
-        MemoryHigh = "1.5G"; # Start throttling at 1.5GB
-        MemorySwapMax = "1G"; # Allow some swap usage
+        MemoryMax = "2G";
+        MemoryHigh = "1.5G";
+        MemorySwapMax = "1G";
+        CPUQuota = "200%";
 
-        # CPU limits to prevent overwhelming the system
-        CPUQuota = "200%"; # Limit to 2 cores max
-
-        # File system access
-        ReadWritePaths = [
-          "/var/lib/crystal-forge"
-          "/nix/store" # Nix builds need write access to store
-          "/tmp" # Nix builds use /tmp
-          "/run/user/994" # User runtime directory
-        ];
-
-        # Additional Nix-related paths that might be needed
-        ReadOnlyPaths = [
-          "/etc/nix" # Nix configuration
-          "/etc/ssl/certs" # For HTTPS substituters
-        ];
-
-        # Cache directory for Nix
+        # Use systemd-managed dirs (no hardcoded IDs)
+        StateDirectory = "crystal-forge";
+        StateDirectoryMode = "0750";
+        RuntimeDirectory = "crystal-forge";
+        RuntimeDirectoryMode = "0700";
         CacheDirectory = "crystal-forge-nix";
         CacheDirectoryMode = "0750";
-        # Working directory - important for Nix builds
         WorkingDirectory = "/var/lib/crystal-forge/workdir";
-        # Security settings
-        NoNewPrivileges = true;
 
+        NoNewPrivileges = true;
         ProtectSystem = "no";
         ProtectHome = true;
         PrivateTmp = true;
@@ -711,40 +583,38 @@ in {
         ProtectKernelModules = true;
         ProtectControlGroups = true;
 
-        # Restart settings
+        # Only the required write paths
+        ReadWritePaths = [
+          "/var/lib/crystal-forge"
+          "/tmp"
+          "/run/crystal-forge"
+        ];
+
+        ReadOnlyPaths = [
+          "/etc/nix"
+          "/etc/ssl/certs"
+        ];
+
         Restart = "always";
         RestartSec = 5;
-
-        # State directory
-        StateDirectory = "crystal-forge";
-        StateDirectoryMode = "0750";
       };
     };
 
-    # Server service
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
-      after = (lib.optional cfg.local-database "postgresql.service") ++ ["crystal-forge-enable-linger.service"];
-      wants = (lib.optional cfg.local-database "postgresql.service") ++ ["crystal-forge-enable-linger.service"];
+      after = lib.optional cfg.local-database "postgresql.service";
+      wants = lib.optional cfg.local-database "postgresql.service";
 
-      path = with pkgs; [
-        nix
-        git
-      ];
+      path = with pkgs; [nix git];
       environment = {
         RUST_LOG = cfg.log_level;
         NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
       };
 
       preStart = ''
-        echo "Starting Crystal Forge Server configuration generation..."
         ${configScript}
-        echo "Configuration generation complete"
-
-        echo "Ensuring .cache/nix directory exists with correct ownership..."
         mkdir -p /var/lib/crystal-forge/.cache/nix
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/
       '';
 
       serviceConfig = {
@@ -753,9 +623,15 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
 
-        # Security settings
+        StateDirectory = "crystal-forge";
+        StateDirectoryMode = "0750";
+        RuntimeDirectory = "crystal-forge";
+        RuntimeDirectoryMode = "0700";
+        CacheDirectory = "crystal-forge-nix";
+        CacheDirectoryMode = "0750";
+        WorkingDirectory = "/var/lib/crystal-forge";
+
         NoNewPrivileges = true;
-        # TODO: test if we can do strict
         ProtectSystem = "no";
         ProtectHome = true;
         ReadWritePaths = ["/var/lib/crystal-forge"];
@@ -764,46 +640,27 @@ in {
         ProtectKernelModules = true;
         ProtectControlGroups = true;
 
-        # Restart settings
         Restart = "always";
         RestartSec = 5;
-
-        # State directory
-        StateDirectory = "crystal-forge";
-        StateDirectoryMode = "0750";
       };
     };
 
-    # Agent service
     systemd.services.crystal-forge-agent = lib.mkIf cfg.client.enable {
       description = "Crystal Forge Agent";
       wantedBy = ["multi-user.target"];
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
       path = with pkgs; [
-        # Existing
         coreutils
         zfs
-
-        # For filesystem data (df, mount, findmnt, lsblk)
         util-linux
-
-        # For network interface data (ip, ifconfig)
         iproute2
         nettools
-
-        # For system info (lscpu, lsmem, dmidecode)
         pciutils
         usbutils
         dmidecode
-
-        # For process/memory info (ps, top, free)
         procps
-
-        # For disk info (fdisk, parted)
         parted
-
-        # General system utilities
         systemd
         gawk
         gnused
@@ -824,24 +681,23 @@ in {
         User = "root";
         Group = "root";
 
-        # Security settings
+        StateDirectory = "crystal-forge";
+        StateDirectoryMode = "0750";
+        RuntimeDirectory = "crystal-forge";
+        RuntimeDirectoryMode = "0700";
+        WorkingDirectory = "/var/lib/crystal-forge";
+
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = true;
         ReadWritePaths = ["/var/lib/crystal-forge"];
         PrivateTmp = true;
 
-        # Restart settings
         Restart = "always";
         RestartSec = 5;
-
-        # State directory
-        StateDirectory = "crystal-forge";
-        StateDirectoryMode = "0750";
       };
     };
 
-    # Assertions for validation
     assertions = [
       {
         assertion = cfg.client.enable -> (cfg.client.private_key != null);
