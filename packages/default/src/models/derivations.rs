@@ -117,7 +117,13 @@ impl Derivation {
         info!("🔍 Evaluating derivation paths for: {}", flake_target);
 
         let mut cmd = Command::new("nix");
-        cmd.args(["build", flake_target, "--dry-run", "--print-out-paths"]);
+        cmd.args([
+            "build",
+            flake_target,
+            "--dry-run",
+            "--print-out-paths",
+            "--no-link",
+        ]);
 
         // Apply build configuration
         build_config.apply_to_command(&mut cmd);

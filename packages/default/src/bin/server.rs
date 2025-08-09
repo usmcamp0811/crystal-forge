@@ -1,11 +1,15 @@
 use anyhow::Context;
-use axum::{Router, routing::post};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
     flake::commits::initialize_flake_commits,
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
+        status,
         webhook::webhook_handler,
     },
     models::config::CrystalForgeConfig,
@@ -55,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = CFState::new(pool);
     let app = Router::new()
+        .route("/status", get(status::status))
         .route("/system_state", post(state::update))
         .route("/agent/heartbeat", post(heartbeat::log))
         .route("/agent/state", post(state::update))
