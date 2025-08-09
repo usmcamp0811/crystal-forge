@@ -1,11 +1,12 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::queries::derivations::discover_and_insert_packages;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
 use std::path::Path;
+use std::process::Output;
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
@@ -108,6 +109,179 @@ impl Derivation {
         }
     }
 
+    fn systemd_scoped_cmd_base() -> Command {
+        let mut c = Command::new("systemd-run");
+        c.args([
+            "--user",
+            "--scope",
+            "--collect",
+            "--property=MemoryMax=4G",
+            "--property=CPUQuota=300%",
+            "--property=TimeoutStopSec=600", // 10 minute timeout
+            "--quiet",
+            "--",
+            "nix",
+            "build",
+        ]);
+        c
+    }
+
+    async fn run_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
+        // Try systemd-run scoped build first
+        let mut scoped = Self::systemd_scoped_cmd_base();
+        scoped.args([flake_target, "--dry-run", "--print-out-paths", "--no-link"]);
+        build_config.apply_to_command(&mut scoped);
+
+        match scoped.output().await {
+            Ok(output) => {
+                if output.status.success() {
+                    info!("✅ Systemd-scoped evaluation completed successfully");
+                    Ok(output)
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // Check for systemd-specific issues that indicate fallback needed
+                    if stderr.contains("Failed to connect to user scope bus")
+                        || stderr.contains("DBUS_SESSION_BUS_ADDRESS")
+                        || stderr.contains("XDG_RUNTIME_DIR")
+                        || stderr.contains("Failed to create scope")
+                        || stderr.contains("systemd")
+                    {
+                        warn!(
+                            "⚠️ Systemd scope creation failed (no user session), falling back to direct execution"
+                        );
+                        Self::run_direct_dry_run(flake_target, build_config).await
+                    } else {
+                        // Other failure - return the systemd error
+                        Ok(output)
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("📋 systemd-run not available, using direct execution");
+                Self::run_direct_dry_run(flake_target, build_config).await
+            }
+            Err(e) => {
+                warn!("⚠️ systemd-run failed: {}, trying direct execution", e);
+                Self::run_direct_dry_run(flake_target, build_config).await
+            }
+        }
+    }
+
+    async fn run_direct_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
+        let mut direct = Command::new("nix");
+        direct.args([
+            "build",
+            flake_target,
+            "--dry-run",
+            "--print-out-paths",
+            "--no-link",
+        ]);
+        build_config.apply_to_command(&mut direct);
+        Ok(direct.output().await?)
+    }
+
+    fn parse_derivation_paths(stderr: &str, flake_target: &str) -> Result<(String, Vec<String>)> {
+        let mut derivation_paths = Vec::new();
+        let mut collecting = false;
+
+        for line in stderr.lines() {
+            let t = line.trim();
+            if t.starts_with("these ") && t.contains("derivations will be built:") {
+                collecting = true;
+                debug!("🔍 Found derivation list header: {}", t);
+                continue;
+            }
+            if collecting {
+                if t.starts_with("/nix/store/") && t.ends_with(".drv") {
+                    derivation_paths.push(t.to_string());
+                    debug!("🔍 Found derivation: {}", t);
+                } else if t.is_empty() || t.starts_with("[{") {
+                    collecting = false;
+                    debug!("🔍 Stopped collecting derivations at: '{}'", t);
+                }
+            }
+        }
+
+        if derivation_paths.is_empty() {
+            bail!("no-derivations");
+        }
+
+        let main = derivation_paths
+            .iter()
+            .find(|p| {
+                if flake_target.contains("nixosConfigurations") {
+                    p.contains("nixos-system")
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .ok_or_else(|| {
+                error!("❌ Could not find main derivation. Available paths:");
+                for path in &derivation_paths {
+                    error!("  - {}", path);
+                }
+                anyhow!(
+                    "Could not determine main derivation from {} candidates",
+                    derivation_paths.len()
+                )
+            })?;
+
+        let deps = derivation_paths
+            .into_iter()
+            .filter(|p| p != &main)
+            .collect::<Vec<_>>();
+
+        Ok((main, deps))
+    }
+
+    async fn run_print_out_paths(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
+        let mut scoped = Self::systemd_scoped_cmd_base();
+        scoped.args([flake_target, "--print-out-paths"]);
+        build_config.apply_to_command(&mut scoped);
+
+        match scoped.output().await {
+            Ok(output) => {
+                if output.status.success() {
+                    Ok(output)
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // Check for systemd-specific issues
+                    if stderr.contains("Failed to connect to user scope bus")
+                        || stderr.contains("DBUS_SESSION_BUS_ADDRESS")
+                        || stderr.contains("XDG_RUNTIME_DIR")
+                        || stderr.contains("Failed to create scope")
+                        || stderr.contains("systemd")
+                    {
+                        info!(
+                            "📋 systemd-run not available for store path lookup, using direct execution"
+                        );
+                        let mut direct = Command::new("nix");
+                        direct.args(["build", flake_target, "--print-out-paths"]);
+                        build_config.apply_to_command(&mut direct);
+                        Ok(direct.output().await?)
+                    } else {
+                        Ok(output)
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("📋 systemd-run not available for store path lookup");
+                let mut direct = Command::new("nix");
+                direct.args(["build", flake_target, "--print-out-paths"]);
+                build_config.apply_to_command(&mut direct);
+                Ok(direct.output().await?)
+            }
+            Err(e) => {
+                warn!("⚠️ systemd-run failed for store path lookup: {}", e);
+                let mut direct = Command::new("nix");
+                direct.args(["build", flake_target, "--print-out-paths"]);
+                build_config.apply_to_command(&mut direct);
+                Ok(direct.output().await?)
+            }
+        }
+    }
+
     /// Phase 1: Evaluate and discover all derivation paths (dry-run only)
     /// This can run on any machine and doesn't require commit_id
     pub async fn evaluate_derivation_path(
@@ -116,114 +290,55 @@ impl Derivation {
     ) -> Result<EvaluationResult> {
         info!("🔍 Evaluating derivation paths for: {}", flake_target);
 
-        let mut cmd = Command::new("nix");
-        cmd.args([
-            "build",
-            flake_target,
-            "--dry-run",
-            "--print-out-paths",
-            "--no-link",
-        ]);
-
-        // Apply build configuration
-        build_config.apply_to_command(&mut cmd);
-
-        let output = cmd.output().await?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("❌ nix build dry-run failed: {}", stderr.trim());
-            anyhow::bail!("nix build dry-run failed: {}", stderr.trim());
-        }
-
+        let output = Self::run_dry_run(flake_target, build_config).await?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        info!("🔍 Dry-run stdout:\n{}", stdout);
-        info!("🔍 Dry-run stderr:\n{}", stderr);
+        if !output.status.success() {
+            error!("❌ nix build dry-run failed: {}", stderr.trim());
 
-        // Parse derivation paths from stderr
-        let mut derivation_paths = Vec::new();
-        let mut collecting_derivations = false;
-
-        for line in stderr.lines() {
-            let trimmed = line.trim();
-
-            if trimmed.starts_with("these ") && trimmed.contains("derivations will be built:") {
-                collecting_derivations = true;
-                debug!("🔍 Found derivation list header: {}", trimmed);
-                continue;
-            }
-
-            if collecting_derivations {
-                if trimmed.starts_with("/nix/store/") && trimmed.ends_with(".drv") {
-                    derivation_paths.push(trimmed.to_string());
-                    debug!("🔍 Found derivation: {}", trimmed);
-                } else if trimmed.is_empty() || trimmed.starts_with("[{") {
-                    collecting_derivations = false;
-                    debug!("🔍 Stopped collecting derivations at: '{}'", trimmed);
-                }
+            // Provide more context for common failures
+            if stderr.contains("out of memory") {
+                bail!(
+                    "nix build failed due to insufficient memory: {}",
+                    stderr.trim()
+                );
+            } else if stderr.contains("timeout") {
+                bail!("nix build timed out: {}", stderr.trim());
+            } else {
+                bail!("nix build dry-run failed: {}", stderr.trim());
             }
         }
 
-        if derivation_paths.is_empty() {
-            info!("📦 No new derivations needed - everything already available");
+        debug!("🔍 Dry-run stdout:\n{}", stdout);
+        debug!("🔍 Dry-run stderr:\n{}", stderr);
 
-            // Get the output path directly since nothing needs building
-            let mut store_cmd = Command::new("nix");
-            store_cmd.args(["build", flake_target, "--print-out-paths"]);
-            build_config.apply_to_command(&mut store_cmd);
-
-            let store_output = store_cmd.output().await?;
-            if !store_output.status.success() {
-                let store_stderr = String::from_utf8_lossy(&store_output.stderr);
-                anyhow::bail!("nix build for store path failed: {}", store_stderr.trim());
+        match Self::parse_derivation_paths(&stderr, flake_target) {
+            Ok((main, deps)) => {
+                info!("🔍 Main derivation: {}", main);
+                info!("🔍 Found {} dependency derivations", deps.len());
+                Ok(EvaluationResult {
+                    main_derivation_path: main,
+                    dependency_derivation_paths: deps,
+                })
             }
+            Err(e) if e.to_string() == "no-derivations" => {
+                info!("📦 No new derivations needed - everything already available");
+                let store_output = Self::run_print_out_paths(flake_target, build_config).await?;
+                if !store_output.status.success() {
+                    let se = String::from_utf8_lossy(&store_output.stderr);
+                    bail!("nix build for store path failed: {}", se.trim());
+                }
+                let store_stdout = String::from_utf8_lossy(&store_output.stdout);
+                let store_path = store_stdout.trim().to_string();
 
-            let store_stdout = String::from_utf8_lossy(&store_output.stdout);
-            let store_path = store_stdout.trim().to_string();
-
-            return Ok(EvaluationResult {
-                main_derivation_path: store_path,
-                dependency_derivation_paths: Vec::new(),
-            });
+                Ok(EvaluationResult {
+                    main_derivation_path: store_path,
+                    dependency_derivation_paths: Vec::new(),
+                })
+            }
+            Err(e) => Err(e),
         }
-
-        // Find the main derivation (nixos-system or the target we're building)
-        let main_derivation = derivation_paths
-            .iter()
-            .find(|path| {
-                // For NixOS systems
-                if flake_target.contains("nixosConfigurations") {
-                    path.contains("nixos-system")
-                } else {
-                    // For packages, this is more heuristic - you might need to adjust
-                    // based on your specific use case
-                    true // For now, take the first one
-                }
-            })
-            .ok_or_else(|| {
-                error!("❌ Could not find main derivation. Available paths:");
-                for path in &derivation_paths {
-                    error!("  - {}", path);
-                }
-                anyhow::anyhow!("Could not find main derivation in dry-run output")
-            })?
-            .clone();
-
-        // Dependencies are all the other derivations
-        let dependencies: Vec<String> = derivation_paths
-            .into_iter()
-            .filter(|path| path != &main_derivation)
-            .collect();
-
-        info!("🔍 Main derivation: {}", main_derivation);
-        info!("🔍 Found {} dependency derivations", dependencies.len());
-
-        Ok(EvaluationResult {
-            main_derivation_path: main_derivation,
-            dependency_derivation_paths: dependencies,
-        })
     }
 
     /// Phase 2: Build a derivation from its .drv path
@@ -512,6 +627,7 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
         version: None,
     })
 }
+
 #[derive(Debug)]
 pub struct PackageInfo {
     pub pname: Option<String>,
