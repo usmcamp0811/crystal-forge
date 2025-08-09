@@ -1,57 +1,121 @@
 CREATE OR REPLACE VIEW public.view_commit_deployment_timeline AS
+WITH commit_evaluations AS (
+    -- Get evaluation status for each commit
+    SELECT
+        c.flake_id,
+        c.id AS commit_id,
+        c.git_commit_hash,
+        c.commit_timestamp,
+        COUNT(DISTINCT d.id) AS total_evaluations,
+        COUNT(DISTINCT d.id) FILTER (WHERE ds.is_success = TRUE) AS successful_evaluations,
+        STRING_AGG(DISTINCT ds.name, ', ') AS evaluation_statuses,
+        STRING_AGG(DISTINCT d.derivation_name, ', ') AS evaluated_targets
+    FROM
+        commits c
+        LEFT JOIN derivations d ON c.id = d.commit_id
+            AND d.derivation_type = 'nixos'
+        LEFT JOIN derivation_statuses ds ON d.status_id = ds.id
+    WHERE
+        c.commit_timestamp >= NOW() - INTERVAL '30 days'
+    GROUP BY
+        c.flake_id,
+        c.id,
+        c.git_commit_hash,
+        c.commit_timestamp
+),
+latest_successful_by_system AS (
+    -- For each system, find the most recent successful derivation
+    SELECT DISTINCT ON (d.derivation_name)
+        d.derivation_name,
+        d.commit_id,
+        c.git_commit_hash,
+        c.commit_timestamp AS derivation_commit_time
+    FROM
+        derivations d
+        JOIN derivation_statuses ds ON d.status_id = ds.id
+        JOIN commits c ON d.commit_id = c.id
+    WHERE
+        d.derivation_type = 'nixos'
+        AND ds.is_success = TRUE
+        AND c.commit_timestamp >= NOW() - INTERVAL '30 days'
+    ORDER BY
+        d.derivation_name,
+        c.commit_timestamp DESC
+),
+system_first_seen_with_commit AS (
+    -- Find when we first saw each system after each commit was made
+    -- This approximates "deployment time"
+    SELECT
+        lsbs.commit_id,
+        lsbs.derivation_name,
+        MIN(ss.timestamp) FILTER (WHERE ss.timestamp > lsbs.derivation_commit_time) AS first_seen_after_commit
+    FROM
+        latest_successful_by_system lsbs
+        JOIN system_states ss ON ss.hostname = lsbs.derivation_name
+    GROUP BY
+        lsbs.commit_id,
+        lsbs.derivation_name
+),
+current_deployments AS (
+    -- Get current deployment status
+    SELECT DISTINCT ON (hostname)
+        hostname,
+        timestamp AS current_timestamp
+    FROM
+        system_states
+    ORDER BY
+        hostname,
+        timestamp DESC
+),
+commit_deployment_stats AS (
+    -- Aggregate deployment info per commit
+    SELECT
+        lsbs.commit_id,
+        COUNT(DISTINCT lsbs.derivation_name) AS systems_with_successful_evaluation,
+        COUNT(DISTINCT sfswc.derivation_name) AS systems_seen_after_commit,
+        MIN(sfswc.first_seen_after_commit) AS first_system_seen,
+        MAX(sfswc.first_seen_after_commit) AS last_system_seen,
+        STRING_AGG(DISTINCT sfswc.derivation_name, ', ') AS systems_seen_list,
+        -- Current systems running this commit (based on latest successful derivation)
+        COUNT(DISTINCT CASE WHEN cd.hostname IS NOT NULL THEN
+                lsbs.derivation_name
+            END) AS currently_active_systems,
+        STRING_AGG(DISTINCT CASE WHEN cd.hostname IS NOT NULL THEN
+                lsbs.derivation_name
+            END, ', ') AS currently_active_systems_list
+    FROM
+        latest_successful_by_system lsbs
+        LEFT JOIN system_first_seen_with_commit sfswc ON lsbs.commit_id = sfswc.commit_id
+            AND lsbs.derivation_name = sfswc.derivation_name
+        LEFT JOIN current_deployments cd ON lsbs.derivation_name = cd.hostname
+    GROUP BY
+        lsbs.commit_id
+)
 SELECT
-    c.flake_id,
+    ce.flake_id,
     f.name AS flake_name,
-    c.id AS commit_id,
-    c.git_commit_hash,
-    LEFT (c.git_commit_hash,
+    ce.commit_id,
+    ce.git_commit_hash,
+    LEFT (ce.git_commit_hash,
         8) AS short_hash,
-    c.commit_timestamp,
-    -- Show evaluation info
-    COUNT(DISTINCT d.id) AS total_evaluations,
-    COUNT(DISTINCT d.id) FILTER (WHERE d.derivation_path IS NOT NULL) AS successful_evaluations,
-    STRING_AGG(DISTINCT ds.name, ', ') AS evaluation_statuses,
-    STRING_AGG(DISTINCT d.derivation_name, ', ') AS evaluated_targets,
-    -- Deployment info (only for successful evaluations with derivation_path)
-    MIN(ss.timestamp) AS first_deployment,
-    MAX(ss.timestamp) AS last_deployment,
-    COUNT(DISTINCT ss.hostname) AS total_systems_deployed,
-    COUNT(DISTINCT current_sys.hostname) AS currently_deployed_systems,
-    STRING_AGG(DISTINCT ss.hostname, ', ') AS deployed_systems,
-    STRING_AGG(DISTINCT CASE WHEN current_sys.hostname IS NOT NULL THEN
-            current_sys.hostname
-        END, ', ') AS currently_deployed_systems_list
+    ce.commit_timestamp,
+    ce.total_evaluations,
+    ce.successful_evaluations,
+    ce.evaluation_statuses,
+    ce.evaluated_targets,
+    -- "Deployment" timeline (really first-seen timeline)
+    cds.first_system_seen AS first_deployment,
+    cds.last_system_seen AS last_deployment,
+    COALESCE(cds.systems_seen_after_commit, 0) AS total_systems_deployed,
+    COALESCE(cds.currently_active_systems, 0) AS currently_deployed_systems,
+    cds.systems_seen_list AS deployed_systems,
+    cds.currently_active_systems_list AS currently_deployed_systems_list
 FROM
-    public.commits c
-    JOIN public.flakes f ON c.flake_id = f.id
-    LEFT JOIN public.derivations d ON c.id = d.commit_id
-        AND d.derivation_type = 'nixos'
-    LEFT JOIN public.derivation_statuses ds ON d.status_id = ds.id
-        AND ds.name IN ('build-failed', 'build-complete', 'dry-run-complete', 'build-pending', 'build-in-progress') -- Only relevant statuses
-    LEFT JOIN public.system_states ss ON d.derivation_path = ss.derivation_path
-        AND d.derivation_path IS NOT NULL -- Only join for successful evaluations
-    LEFT JOIN (
-        -- Get current deployment state per hostname
-        SELECT DISTINCT ON (hostname)
-            hostname,
-            derivation_path
-        FROM
-            public.system_states
-        ORDER BY
-            hostname,
-            timestamp DESC) current_sys ON d.derivation_path = current_sys.derivation_path
-    AND d.derivation_name = current_sys.hostname
-    AND d.derivation_path IS NOT NULL -- Only for successful evaluations
-WHERE
-    c.commit_timestamp >= NOW() - INTERVAL '30 days'
-GROUP BY
-    c.flake_id,
-    c.id,
-    c.git_commit_hash,
-    c.commit_timestamp,
-    f.name
+    commit_evaluations ce
+    JOIN flakes f ON ce.flake_id = f.id
+    LEFT JOIN commit_deployment_stats cds ON ce.commit_id = cds.commit_id
 ORDER BY
-    c.commit_timestamp DESC;
+    ce.commit_timestamp DESC;
 
-COMMENT ON VIEW public.view_commit_deployment_timeline IS 'Shows commit deployment timeline for successfully evaluated commits that have been deployed to systems.';
+COMMENT ON VIEW public.view_commit_deployment_timeline IS 'Shows commit evaluation timeline and approximates deployment by tracking when systems were first seen after commit timestamp.';
 
