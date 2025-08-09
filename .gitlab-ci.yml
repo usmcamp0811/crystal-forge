@@ -7,7 +7,7 @@ flake-check:
   tags:
     - nix
   script:
-    - nix flake check
+    - nix flake check --show-trace
   only:
     - merge_requests
     - main

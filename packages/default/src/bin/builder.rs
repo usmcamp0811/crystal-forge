@@ -1,6 +1,7 @@
 use crystal_forge::builder::{run_build_loop, run_cve_scan_loop};
 use crystal_forge::models::config::CrystalForgeConfig;
 use crystal_forge::server::memory_monitor_task;
+use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -27,20 +28,24 @@ async fn main() -> anyhow::Result<()> {
     info!("✅ Both build and CVE scan loops started");
 
     // Wait for either task to complete (they shouldn't under normal circumstances)
+
+    // After spawning tasks...
+    info!("✅ Both build and CVE scan loops started");
+
+    // Wait for shutdown signal instead of task completion
     tokio::select! {
         result = build_handle => {
-            match result {
-                Ok(_) => info!("Build loop completed"),
-                Err(e) => tracing::error!("Build loop panicked: {}", e),
-            }
+            tracing::error!("Build loop exited unexpectedly: {:?}", result);
         }
         result = cve_scan_handle => {
-            match result {
-                Ok(_) => info!("CVE scan loop completed"),
-                Err(e) => tracing::error!("CVE scan loop panicked: {}", e),
-            }
+            tracing::error!("CVE scan loop exited unexpectedly: {:?}", result);
+        }
+        _ = signal::ctrl_c() => {
+            info!("Received shutdown signal");
         }
     }
+
+    info!("Shutting down Crystal Forge Builder...");
 
     Ok(())
 }
