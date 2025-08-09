@@ -10,10 +10,7 @@ use sqlx::PgPool;
 use tracing::{error, info, warn};
 
 /// Handles an incoming webhook request for a Git push or merge event.
-pub async fn webqhook_handler(
-    State(pool): State<PgPool>,
-    Json(payload): Json<Value>,
-) -> StatusCode {
+pub async fn webhook_handler(State(pool): State<PgPool>, Json(payload): Json<Value>) -> StatusCode {
     use axum::http::StatusCode;
     use tracing::{error, info, warn};
 
