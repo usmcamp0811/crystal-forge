@@ -14,6 +14,18 @@ WITH current_state AS (
         hostname,
         "timestamp" DESC
 ),
+latest_heartbeat AS (
+    -- Get the most recent heartbeat (actual "last seen") for each hostname
+    SELECT DISTINCT ON (ss.hostname)
+        ss.hostname,
+        ah.timestamp AS last_heartbeat
+    FROM
+        system_states ss
+        JOIN agent_heartbeats ah ON ss.id = ah.system_state_id
+    ORDER BY
+        ss.hostname,
+        ah.timestamp DESC
+),
 latest_successful_derivation AS (
     -- For each system, get the most recent successful derivation
     SELECT DISTINCT ON (d.derivation_name)
@@ -29,8 +41,7 @@ latest_successful_derivation AS (
         LEFT JOIN commits c ON d.commit_id = c.id
     WHERE
         d.derivation_type = 'nixos'
-        AND ds.is_success = TRUE
-        AND ds.name IN ('dry-run-complete', 'build-complete', 'complete')
+        AND ds.name IN ('dry-run-complete', 'build-pending', 'build-in-progress', 'build-complete', 'build-failed', 'complete')
     ORDER BY
         d.derivation_name,
         c.commit_timestamp DESC
@@ -69,10 +80,10 @@ SELECT
     ELSE
         'Outdated'
     END AS status_text,
-    CASE WHEN cs.current_deployed_at IS NULL THEN
+    CASE WHEN lhb.last_heartbeat IS NULL THEN
         'never'
     ELSE
-        CONCAT((EXTRACT(epoch FROM (NOW() - cs.current_deployed_at))::integer / 60), 'm ago')
+        CONCAT((EXTRACT(epoch FROM (NOW() - lhb.last_heartbeat))::integer / 60), 'm ago')
     END AS last_seen,
     cs.agent_version AS version,
     (cs.uptime_days || 'd') AS uptime,
@@ -80,6 +91,7 @@ SELECT
 FROM
     systems s
     LEFT JOIN current_state cs ON s.hostname = cs.hostname
+    LEFT JOIN latest_heartbeat lhb ON s.hostname = lhb.hostname
     LEFT JOIN latest_successful_derivation lsd ON s.hostname = lsd.derivation_name
     LEFT JOIN latest_commit lc ON s.hostname = lc.hostname
 ORDER BY
@@ -92,9 +104,9 @@ ORDER BY
     ELSE
         3 -- Outdated in middle
     END,
-    CASE WHEN cs.current_deployed_at IS NULL THEN
+    CASE WHEN lhb.last_heartbeat IS NULL THEN
         'never'
     ELSE
-        CONCAT((EXTRACT(epoch FROM (NOW() - cs.current_deployed_at))::integer / 60), 'm ago')
+        CONCAT((EXTRACT(epoch FROM (NOW() - lhb.last_heartbeat))::integer / 60), 'm ago')
     END DESC;
 
