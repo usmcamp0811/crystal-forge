@@ -523,10 +523,16 @@ in {
 
       # Add to nixbld group for build access
       extraGroups = ["nixbld"];
+
+      # Set a stable UID for consistent systemd user session
+      uid = 994;
     };
 
     # Ensure the crystal-forge group exists
-    users.groups.crystal-forge = {};
+    users.groups.crystal-forge = {
+      # Set a stable GID
+      gid = 994;
+    };
 
     # Add to systemd-tmpfiles for proper directory setup
     systemd.tmpfiles.rules = [
@@ -537,7 +543,38 @@ in {
       "d /var/lib/crystal-forge/builds 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
       "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
+
+      # Enable lingering for crystal-forge user (creates persistent user session)
+      "f /var/lib/systemd/linger/crystal-forge 0644 root root - -"
+
+      # Ensure user runtime directory exists
+      "d /run/user/994 0700 crystal-forge crystal-forge -"
     ];
+
+    # Service to ensure lingering is properly enabled
+    systemd.services.crystal-forge-enable-linger = lib.mkIf (cfg.server.enable || cfg.build.enable) {
+      description = "Enable lingering for crystal-forge user";
+      wantedBy = ["multi-user.target"];
+      before = ["crystal-forge-server.service" "crystal-forge-builder.service"];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+        ExecStart = "${pkgs.systemd}/bin/loginctl enable-linger crystal-forge";
+        ExecStop = "${pkgs.systemd}/bin/loginctl disable-linger crystal-forge";
+      };
+    };
+
+    # Create a dedicated systemd slice for build operations with higher limits
+    systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
+      description = "Crystal Forge Build Operations";
+      sliceConfig = {
+        MemoryMax = "8G"; # Build operations get up to 8GB
+        MemoryHigh = "6G"; # Start throttling at 6GB
+        CPUQuota = "400%"; # 4 cores worth
+        TasksMax = "200"; # Limit number of processes
+      };
+    };
+
     # PostgreSQL setup when using local database
     services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
       enable = true;
@@ -596,27 +633,36 @@ in {
         Persistent = true;
       };
     };
+
     systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
-      after = lib.optional cfg.local-database "postgresql.service";
-      wants = lib.optional cfg.local-database "postgresql.service";
+      after = (lib.optional cfg.local-database "postgresql.service") ++ ["crystal-forge-enable-linger.service"];
+      wants = (lib.optional cfg.local-database "postgresql.service") ++ ["crystal-forge-enable-linger.service"];
 
       path = with pkgs; [
         nix
         git
         vulnix
+        systemd # Add systemd for systemd-run command
       ];
       environment = {
         RUST_LOG = cfg.log_level;
         NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
         TMPDIR = "/var/lib/crystal-forge/tmp";
+        # Ensure XDG_RUNTIME_DIR is set for systemd user session
+        XDG_RUNTIME_DIR = "/run/user/994";
       };
 
       preStart = ''
         echo "Starting Crystal Forge Builder configuration generation..."
         ${configScript}
         echo "Configuration generation complete"
+
+        # Ensure XDG runtime directory exists with proper permissions
+        mkdir -p /run/user/994
+        chown crystal-forge:crystal-forge /run/user/994
+        chmod 700 /run/user/994
       '';
 
       serviceConfig = {
@@ -625,18 +671,23 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
 
-        # Memory management - CRITICAL for preventing OOM kills
-        MemoryMax = "16G"; # Double your current limit
-        MemoryHigh = "12G"; # Start throttling at 12GB
-        MemorySwapMax = "4G"; # Allow some swap usage
+        # Put this service in the builds slice for higher memory limits
+        Slice = "crystal-forge-builds.slice";
+
+        # Reduced memory limits for main service since builds use systemd scopes
+        MemoryMax = "2G"; # Main service gets 2GB
+        MemoryHigh = "1.5G"; # Start throttling at 1.5GB
+        MemorySwapMax = "1G"; # Allow some swap usage
 
         # CPU limits to prevent overwhelming the system
         CPUQuota = "200%"; # Limit to 2 cores max
+
         # File system access
         ReadWritePaths = [
           "/var/lib/crystal-forge"
           "/nix/store" # Nix builds need write access to store
           "/tmp" # Nix builds use /tmp
+          "/run/user/994" # User runtime directory
         ];
 
         # Additional Nix-related paths that might be needed
@@ -674,8 +725,8 @@ in {
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
-      after = lib.optional cfg.local-database "postgresql.service";
-      wants = lib.optional cfg.local-database "postgresql.service";
+      after = (lib.optional cfg.local-database "postgresql.service") ++ ["crystal-forge-enable-linger.service"];
+      wants = (lib.optional cfg.local-database "postgresql.service") ++ ["crystal-forge-enable-linger.service"];
 
       path = with pkgs; [
         nix
