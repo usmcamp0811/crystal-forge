@@ -70,12 +70,16 @@ pub async fn authenticate_agent_request(
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]
 pub struct CFState {
-    pool: PgPool,
+    pub pool: PgPool,
 }
 
 impl CFState {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
     }
 }
 

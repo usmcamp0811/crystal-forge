@@ -4,20 +4,17 @@ use sqlx::PgPool;
 
 use crate::handlers::agent_request::CFState;
 
-/// Simple status endpoint showing basic server health
 pub async fn status(State(state): State<CFState>) -> Json<Value> {
-    // Try a simple DB query to verify connectivity
     let db_status = match sqlx::query("SELECT 1 as health_check")
-        .fetch_one(&state.pool)
+        .fetch_one(state.pool())
         .await
     {
         Ok(_) => "healthy",
         Err(_) => "unhealthy",
     };
 
-    // Get basic stats from the database
     let (total_systems, total_derivations, pending_evaluations) =
-        get_basic_stats(&state.pool).await;
+        get_basic_stats(state.pool()).await;
 
     Json(json!({
         "service": "Crystal Forge",
@@ -32,7 +29,6 @@ pub async fn status(State(state): State<CFState>) -> Json<Value> {
     }))
 }
 
-/// Get basic statistics for the status endpoint
 async fn get_basic_stats(pool: &PgPool) -> (i64, i64, i64) {
     let systems_count = sqlx::query_scalar!("SELECT COUNT(*) FROM systems")
         .fetch_one(pool)
