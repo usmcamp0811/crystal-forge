@@ -159,6 +159,12 @@ COMMENT ON VIEW public.view_derivation_stats IS 'Comprehensive statistics on all
 
 -- Additional detailed breakdown view
 CREATE OR REPLACE VIEW public.view_derivation_status_breakdown AS
+WITH total_derivations AS (
+    SELECT
+        COUNT(*) AS total_count
+    FROM
+        public.derivations
+)
 SELECT
     ds.name AS status_name,
     ds.description AS status_description,
@@ -172,20 +178,18 @@ SELECT
     MIN(d.scheduled_at) AS oldest_scheduled,
     MAX(d.scheduled_at) AS newest_scheduled,
     COUNT(*) FILTER (WHERE d.scheduled_at >= NOW() - INTERVAL '24 hours') AS count_last_24h,
-    -- Percentage of total derivations in this status
-    ROUND((COUNT(*)::numeric / (
-            SELECT
-                COUNT(*)
-            FROM public.derivations)) * 100, 2) AS percentage_of_total
+    ROUND((COUNT(*)::numeric / td.total_count) * 100, 2) AS percentage_of_total
 FROM
     public.derivations d
     JOIN public.derivation_statuses ds ON d.status_id = ds.id
+    CROSS JOIN total_derivations td
 GROUP BY
     ds.id,
     ds.name,
     ds.description,
     ds.is_terminal,
-    ds.is_success
+    ds.is_success,
+    td.total_count
 ORDER BY
     ds.display_order;
 
