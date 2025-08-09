@@ -1,5 +1,8 @@
 use anyhow::Context;
-use axum::{Router, routing::post};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
     flake::commits::initialize_flake_commits,
