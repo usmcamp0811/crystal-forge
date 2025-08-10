@@ -10,50 +10,32 @@ Crystal Forge processes derivations (NixOS systems and packages) through a multi
 
 ```mermaid
 sequenceDiagram
-    participant C as Commit Discovery
+    participant Commit as New Commit
     participant DB as Database
 
-    Note over C, DB: New Commit Processing
-
-    C->>DB: insert_derivation_with_target()
-
-    rect rgb(255, 235, 238)
-        Note over DB: Status 1 - pending (BROKEN STATE)
-        Note right of DB: No processing loop looks for this status!<br/>Derivations get stuck here
-        DB-->>DB: Manual fix: UPDATE status_id = 3 WHERE status_id = 1
-        DB->>DB: Status 3 - dry-run-pending (FIXED)
-    end
+    Commit->>DB: Create NixOS derivation
+    Note over DB: Status 3 - dry-run-pending
 ```
 
-## 2. Dry-Run Evaluation Phase
+## 2. Dry-Run Evaluation
 
 ```mermaid
 sequenceDiagram
-    participant EL as Evaluation Loop
+    participant Loop as Evaluation Loop
     participant DB as Database
-    participant N as Nix
 
-    Note over EL, N: Derivation Evaluation (Every ~30s)
+    Loop->>DB: Find pending derivations
+    Note over DB: Status 3 → 4 (in-progress)
 
-    EL->>DB: get_pending_dry_run_derivations()
-    Note right of DB: Query: status_id = 3 (dry-run-pending)
+    Loop->>Loop: Run nix evaluation
 
-    EL->>DB: mark_derivation_dry_run_in_progress()
-    Note right of DB: Status 4 - dry-run-in-progress
-
-    EL->>N: nix build --dry-run --print-out-paths
-
-    alt Evaluation Success
-        N-->>EL: Returns derivation paths
-        EL->>DB: mark_derivation_dry_run_complete()
-        Note right of DB: Status 5 - dry-run-complete
-        EL->>DB: discover_and_insert_packages()
-        Note right of DB: Insert package dependencies<br/>as "dry-run-complete" (Status 5)
-    else Evaluation Failure
-        N-->>EL: Build error
-        EL->>DB: mark_derivation_failed("dry-run", error)
-        Note right of DB: Status 6 - dry-run-failed
-        EL->>DB: increment_derivation_attempt_count()
+    alt Success
+        Loop->>DB: Evaluation complete
+        Note over DB: Status 4 → 5 (dry-run-complete)
+        Loop->>DB: Discover package dependencies
+    else Failure
+        Loop->>DB: Mark failed
+        Note over DB: Status 4 → 6 (dry-run-failed)
     end
 ```
 
@@ -61,60 +43,38 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant BL as Build Loop
+    participant Loop as Build Loop
     participant DB as Database
-    participant N as Nix Store
 
-    Note over BL, N: Build Processing
+    Loop->>DB: Find completed evaluations
+    Note over DB: Status 5 → 8 (build-in-progress)
 
-    BL->>DB: get_derivations_ready_for_build()
-    Note right of DB: Query: status_id IN (5, 7)<br/>(dry-run-complete, build-pending)
+    Loop->>Loop: Build derivation
 
-    BL->>DB: mark_derivation_build_in_progress()
-    Note right of DB: Status 8 - build-in-progress
-
-    BL->>N: nix-store --realise /nix/store/...drv
-
-    alt Build Success
-        N-->>BL: Returns store path
-        BL->>DB: mark_derivation_build_complete()
-        Note right of DB: Status 10 - build-complete (Terminal)
-    else Build Failure
-        N-->>BL: Build error
-        BL->>DB: mark_derivation_failed("build", error)
-        Note right of DB: Status 12 - build-failed
-        BL->>DB: increment_derivation_attempt_count()
+    alt Success
+        Loop->>DB: Build complete
+        Note over DB: Status 8 → 10 (build-complete)
+    else Failure
+        Loop->>DB: Build failed
+        Note over DB: Status 8 → 12 (build-failed)
     end
 ```
 
-## 4. Retry Logic & CVE Scanning
+## 4. Retry & CVE Scanning
 
 ```mermaid
 sequenceDiagram
-    participant S as Startup/Reset
+    participant System as System
     participant DB as Database
     participant CVE as CVE Scanner
 
-    Note over S, CVE: Retry Logic & Alternative Entry
+    Note over System, DB: Retry Failed Derivations
+    System->>DB: Reset failed attempts < 5
+    Note over DB: Failed → Pending (retry)
 
-    rect rgb(255, 248, 225)
-        Note over S, DB: Retry Logic (At Startup)
-        S->>DB: reset_non_terminal_derivations()
-
-        alt dry-run-failed with attempt_count < 5
-            DB->>DB: Reset to dry-run-pending (Status 3)
-        else build-failed with attempt_count < 5
-            DB->>DB: Reset to build-pending (Status 7)
-        else attempt_count >= 5
-            Note over DB: Remains in failed state (Terminal)
-        end
-    end
-
-    rect rgb(245, 245, 245)
-        Note over CVE, DB: CVE Scanning (Alternative Entry)
-        CVE->>DB: save_scan_results()
-        Note right of DB: Packages inserted directly as<br/>"complete" (Status 11) - Terminal
-    end
+    Note over CVE, DB: Alternative Entry
+    CVE->>DB: Insert scanned packages
+    Note over DB: Status 11 (complete)
 ```
 
 ## Status Definitions
