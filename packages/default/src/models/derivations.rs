@@ -351,45 +351,85 @@ impl Derivation {
             anyhow::bail!("Expected .drv path, got: {}", drv_path);
         }
 
-        let output = if build_config.should_use_systemd() {
-            // Create a custom systemd command for nix-store
-            let mut scoped = Command::new("systemd-run");
-            scoped.args([ "--scope", "--collect", "--quiet"]);
+        // Check if systemd should be used
+        if !build_config.should_use_systemd() {
+            info!("📋 Systemd disabled in config, using direct execution for nix-store");
+            return Self::run_direct_nix_store(drv_path).await;
+        }
 
-            // Add systemd properties from config
-            if let Some(ref memory_max) = build_config.systemd_memory_max {
-                scoped.args(["--property", &format!("MemoryMax={}", memory_max)]);
-            }
-            if let Some(cpu_quota) = build_config.systemd_cpu_quota {
-                scoped.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
-            }
-            if let Some(timeout_stop) = build_config.systemd_timeout_stop_sec {
-                scoped.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
-            }
-            for property in &build_config.systemd_properties {
-                scoped.args(["--property", property]);
-            }
+        // Try systemd-run scoped build first
+        let mut scoped = Command::new("systemd-run");
+        scoped.args(["--scope", "--collect", "--quiet"]);
 
-            scoped.args(["--", "nix-store", "--realise", drv_path]);
+        // Add systemd properties from config
+        if let Some(ref memory_max) = build_config.systemd_memory_max {
+            scoped.args(["--property", &format!("MemoryMax={}", memory_max)]);
+        }
+        if let Some(cpu_quota) = build_config.systemd_cpu_quota {
+            scoped.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+        }
+        if let Some(timeout_stop) = build_config.systemd_timeout_stop_sec {
+            scoped.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+        }
+        for property in &build_config.systemd_properties {
+            scoped.args(["--property", property]);
+        }
 
-            match scoped.output().await {
-                Ok(output) => output,
-                Err(e) => {
-                    warn!(
-                        "⚠️ systemd-run failed for nix-store, falling back to direct execution: {}",
-                        e
-                    );
-                    let mut cmd = Command::new("nix-store");
-                    cmd.args(["--realise", drv_path]);
-                    cmd.output().await?
+        scoped.args(["--", "nix-store", "--realise", drv_path]);
+
+        match scoped.output().await {
+            Ok(output) => {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let output_path = stdout.trim();
+
+                    if output_path.is_empty() {
+                        anyhow::bail!("No output path returned from nix-store --realise");
+                    }
+
+                    info!("✅ Built derivation {} -> {}", drv_path, output_path);
+                    Ok(output_path.to_string())
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // Check for systemd-specific issues that indicate fallback needed
+                    if stderr.contains("Failed to connect to user scope bus")
+                        || stderr.contains("DBUS_SESSION_BUS_ADDRESS")
+                        || stderr.contains("XDG_RUNTIME_DIR")
+                        || stderr.contains("Failed to create scope")
+                        || stderr.contains("Interactive authentication required")
+                        || stderr.contains("systemd")
+                    {
+                        warn!(
+                            "⚠️ Systemd scope creation failed, falling back to direct execution: {}",
+                            stderr.trim()
+                        );
+                        Self::run_direct_nix_store(drv_path).await
+                    } else {
+                        // Other failure - return the systemd error
+                        error!("❌ nix-store --realise failed: {}", stderr.trim());
+                        anyhow::bail!("nix-store --realise failed: {}", stderr.trim());
+                    }
                 }
             }
-        } else {
-            // Direct nix-store call
-            let mut cmd = Command::new("nix-store");
-            cmd.args(["--realise", drv_path]);
-            cmd.output().await?
-        };
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("📋 systemd-run not available for nix-store, using direct execution");
+                Self::run_direct_nix_store(drv_path).await
+            }
+            Err(e) => {
+                warn!(
+                    "⚠️ systemd-run failed for nix-store: {}, trying direct execution",
+                    e
+                );
+                Self::run_direct_nix_store(drv_path).await
+            }
+        }
+    }
+
+    async fn run_direct_nix_store(drv_path: &str) -> Result<String> {
+        let mut cmd = Command::new("nix-store");
+        cmd.args(["--realise", drv_path]);
+
+        let output = cmd.output().await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

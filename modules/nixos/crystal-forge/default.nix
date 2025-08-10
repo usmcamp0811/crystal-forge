@@ -624,6 +624,18 @@ in {
       };
     };
 
+    security.polkit.enable = true;
+    security.polkit.extraConfig = ''
+      polkit.addRule(function(action, subject) {
+        if (subject.user === "crystal-forge") {
+          if (action.id === "org.freedesktop.systemd1.manage-units" ||
+              action.id === "org.freedesktop.systemd1.set-property") {
+            return polkit.Result.YES;
+          }
+        }
+      });
+    '';
+
     systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
