@@ -280,62 +280,6 @@ impl Derivation {
         Ok((main, deps))
     }
 
-    async fn run_print_out_paths(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
-        // Check if systemd should be used
-        if !build_config.should_use_systemd() {
-            info!("📋 Systemd disabled in config, using direct execution for store path lookup");
-            let mut direct = Command::new("nix");
-            direct.args(["build", flake_target, "--print-out-paths"]);
-            build_config.apply_to_command(&mut direct);
-            return Ok(direct.output().await?);
-        }
-
-        let mut scoped = build_config.systemd_scoped_cmd_base();
-        scoped.args([flake_target, "--print-out-paths"]);
-        build_config.apply_to_command(&mut scoped);
-
-        match scoped.output().await {
-            Ok(output) => {
-                if output.status.success() {
-                    Ok(output)
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    // Check for systemd-specific issues
-                    if stderr.contains("Failed to connect to user scope bus")
-                        || stderr.contains("DBUS_SESSION_BUS_ADDRESS")
-                        || stderr.contains("XDG_RUNTIME_DIR")
-                        || stderr.contains("Failed to create scope")
-                        || stderr.contains("systemd")
-                    {
-                        info!(
-                            "📋 systemd-run not available for store path lookup, using direct execution"
-                        );
-                        let mut direct = Command::new("nix");
-                        direct.args(["build", flake_target, "--print-out-paths"]);
-                        build_config.apply_to_command(&mut direct);
-                        Ok(direct.output().await?)
-                    } else {
-                        Ok(output)
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!("📋 systemd-run not available for store path lookup");
-                let mut direct = Command::new("nix");
-                direct.args(["build", flake_target, "--print-out-paths"]);
-                build_config.apply_to_command(&mut direct);
-                Ok(direct.output().await?)
-            }
-            Err(e) => {
-                warn!("⚠️ systemd-run failed for store path lookup: {}", e);
-                let mut direct = Command::new("nix");
-                direct.args(["build", flake_target, "--print-out-paths"]);
-                build_config.apply_to_command(&mut direct);
-                Ok(direct.output().await?)
-            }
-        }
-    }
-
     /// Phase 1: Evaluate and discover all derivation paths (dry-run only)
     /// This can run on any machine and doesn't require commit_id
     pub async fn evaluate_derivation_path(
