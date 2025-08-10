@@ -153,7 +153,7 @@ pub async fn insert_derivation_with_target(
         derivation_type,
         derivation_name,
         derivation_target,
-        1, // assuming status_id 1 is "pending"
+        EvaluationStatus::DryRunPending.as_id(),
         0  // initial attempt_count
     )
     .fetch_one(pool)
