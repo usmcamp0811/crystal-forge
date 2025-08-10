@@ -765,7 +765,7 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             type_priority,           -- Within each group: packages first, then NixOS
             completed_at ASC         -- Within same type: oldest first
         "#,
-        EvaluationStatus::DryRunComplete.as_id()
+        EvaluationStatus::DryRunComplete.as_id(),
         EvaluationStatus::BuildPending.as_id()
     )
     .fetch_all(pool)
