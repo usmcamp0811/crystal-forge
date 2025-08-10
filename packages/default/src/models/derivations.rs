@@ -451,6 +451,7 @@ impl Derivation {
     /// High-level function that handles both NixOS and Package derivations
     pub async fn evaluate_and_build(
         &self,
+        pool: &PgPool,
         full_build: bool,
         build_config: &BuildConfig,
     ) -> Result<String> {
@@ -461,21 +462,19 @@ impl Derivation {
                     anyhow::anyhow!("Cannot build NixOS derivation without commit_id")
                 })?;
 
-                let pool = CrystalForgeConfig::db_pool().await?;
-                let commit = crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;
-                let flake = crate::queries::flakes::get_flake_by_id(&pool, commit.flake_id).await?;
-
+                // Use the provided pool instead of creating a new one
+                let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
+                let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
                 let flake_target = self.build_flake_target(&flake, &commit).await?;
 
                 if full_build {
                     // Phase 1: Evaluate
                     let eval_result =
                         Self::evaluate_derivation_path(&flake_target, build_config).await?;
-
                     // Insert dependencies into database
                     if !eval_result.dependency_derivation_paths.is_empty() {
                         crate::queries::derivations::discover_and_insert_packages(
-                            &pool,
+                            pool, // Use provided pool
                             self.id,
                             &eval_result
                                 .dependency_derivation_paths
@@ -485,7 +484,6 @@ impl Derivation {
                         )
                         .await?;
                     }
-
                     // Phase 2: Build the main derivation
                     if eval_result.main_derivation_path.ends_with(".drv") {
                         Self::build_derivation_from_path(
@@ -501,11 +499,10 @@ impl Derivation {
                     // Dry-run only
                     let eval_result =
                         Self::evaluate_derivation_path(&flake_target, build_config).await?;
-
                     // Insert dependencies into database
                     if !eval_result.dependency_derivation_paths.is_empty() {
                         crate::queries::derivations::discover_and_insert_packages(
-                            &pool,
+                            pool, // Use provided pool
                             self.id,
                             &eval_result
                                 .dependency_derivation_paths
@@ -515,7 +512,6 @@ impl Derivation {
                         )
                         .await?;
                     }
-
                     Ok(eval_result.main_derivation_path)
                 }
             }
@@ -525,7 +521,6 @@ impl Derivation {
                     .derivation_path
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("Package derivation missing derivation_path"))?;
-
                 if full_build {
                     // Build the package from its .drv path
                     Self::build_derivation_from_path(drv_path, build_config).await
@@ -628,11 +623,14 @@ impl Derivation {
     /// Evaluates and optionally pushes to cache in one go
     pub async fn evaluate_and_push_to_cache(
         &self,
+        pool: &PgPool,
         full_build: bool,
         build_config: &BuildConfig,
         cache_config: &CacheConfig,
     ) -> Result<String> {
-        let store_path: String = self.evaluate_and_build(full_build, build_config).await?;
+        let store_path: String = self
+            .evaluate_and_build(pool, full_build, build_config)
+            .await?;
 
         // Only push to cache if we did a full build (not a dry-run)
         if full_build && cache_config.push_after_build {

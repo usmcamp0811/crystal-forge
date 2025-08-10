@@ -113,7 +113,10 @@ async fn build_derivations(
             mark_target_build_in_progress(pool, derivation.id).await?;
 
             // Build the derivation
-            let store_path = match derivation.evaluate_and_build(true, build_config).await {
+            let store_path = match derivation
+                .evaluate_and_build(pool, true, build_config)
+                .await
+            {
                 Ok(path) => {
                     info!(
                         "✅ Build completed for {}: {}",

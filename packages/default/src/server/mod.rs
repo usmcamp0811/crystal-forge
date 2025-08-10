@@ -3,9 +3,9 @@ use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::derivations::{
-    get_pending_dry_run_derivations, increment_derivation_attempt_count, insert_derivation_with_target,
-    mark_derivation_dry_run_in_progress, mark_target_dry_run_complete, mark_target_failed,
-    update_derivation_path, update_scheduled_at,
+    get_pending_dry_run_derivations, increment_derivation_attempt_count,
+    insert_derivation_with_target, mark_derivation_dry_run_in_progress,
+    mark_target_dry_run_complete, mark_target_failed, update_derivation_path, update_scheduled_at,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
@@ -187,13 +187,13 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
                     });
                     let build_config = cfg.get_build_config();
 
-                    match target.evaluate_and_build(false, &build_config).await {
+                    match target.evaluate_and_build(&pool, false, &build_config).await {
                         Ok(derivation_path) => {
                             match update_derivation_path(&pool, &target, &derivation_path).await {
                                 Ok(updated) => info!("✅ Updated: {}", updated.derivation_name),
                                 Err(e) => error!("❌ Failed to update path: {e}"),
                             }
-                        },
+                        }
                         Err(e) => {
                             if let Err(inc_err) =
                                 increment_derivation_attempt_count(&pool, &target, &e).await
