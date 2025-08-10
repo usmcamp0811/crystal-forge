@@ -58,7 +58,7 @@ impl From<String> for DerivationType {
             "package" => DerivationType::Package,
             _ => {
                 // Log the error but provide a default instead of panicking
-                eprintln!(
+                error!(
                     "Warning: Unknown DerivationType '{}', defaulting to NixOS",
                     s
                 );
