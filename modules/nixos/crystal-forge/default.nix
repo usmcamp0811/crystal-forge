@@ -636,6 +636,9 @@ in {
         NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
         TMPDIR = "/var/lib/crystal-forge/tmp";
         XDG_RUNTIME_DIR = "/run/crystal-forge";
+        DBUS_SESSION_BUS_ADDRESS = "";
+        # Ensure we're using the Nix daemon
+        NIX_REMOTE = "daemon";
       };
 
       preStart = ''
@@ -727,6 +730,9 @@ in {
       environment = {
         RUST_LOG = cfg.log_level;
         NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
+        DBUS_SESSION_BUS_ADDRESS = "";
+        # Ensure we're using the Nix daemon
+        NIX_REMOTE = "daemon";
       };
 
       preStart = ''
