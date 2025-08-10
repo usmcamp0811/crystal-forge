@@ -109,21 +109,60 @@ impl Derivation {
         }
     }
 
-    fn systemd_scoped_cmd_base() -> Command {
-        let mut c = Command::new("systemd-run");
-        c.args([
-            "--user",
-            "--scope",
-            "--collect",
-            "--property=MemoryMax=4G",
-            "--property=CPUQuota=300%",
-            "--property=TimeoutStopSec=600", // 10 minute timeout
-            "--quiet",
-            "--",
-            "nix",
-            "build",
-        ]);
-        c
+    async fn run_print_out_paths(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
+        // Check if systemd should be used
+        if !build_config.should_use_systemd() {
+            info!("📋 Systemd disabled in config, using direct execution for store path lookup");
+            let mut direct = Command::new("nix");
+            direct.args(["build", flake_target, "--print-out-paths"]);
+            build_config.apply_to_command(&mut direct);
+            return Ok(direct.output().await?);
+        }
+
+        let mut scoped = build_config.systemd_scoped_cmd_base();
+        scoped.args([flake_target, "--print-out-paths"]);
+        build_config.apply_to_command(&mut scoped);
+
+        match scoped.output().await {
+            Ok(output) => {
+                if output.status.success() {
+                    Ok(output)
+                } else {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    // Check for systemd-specific issues
+                    if stderr.contains("Failed to connect to user scope bus")
+                        || stderr.contains("DBUS_SESSION_BUS_ADDRESS")
+                        || stderr.contains("XDG_RUNTIME_DIR")
+                        || stderr.contains("Failed to create scope")
+                        || stderr.contains("systemd")
+                    {
+                        info!(
+                            "📋 systemd-run not available for store path lookup, using direct execution"
+                        );
+                        let mut direct = Command::new("nix");
+                        direct.args(["build", flake_target, "--print-out-paths"]);
+                        build_config.apply_to_command(&mut direct);
+                        Ok(direct.output().await?)
+                    } else {
+                        Ok(output)
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                info!("📋 systemd-run not available for store path lookup");
+                let mut direct = Command::new("nix");
+                direct.args(["build", flake_target, "--print-out-paths"]);
+                build_config.apply_to_command(&mut direct);
+                Ok(direct.output().await?)
+            }
+            Err(e) => {
+                warn!("⚠️ systemd-run failed for store path lookup: {}", e);
+                let mut direct = Command::new("nix");
+                direct.args(["build", flake_target, "--print-out-paths"]);
+                build_config.apply_to_command(&mut direct);
+                Ok(direct.output().await?)
+            }
+        }
     }
 
     async fn run_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
@@ -241,62 +280,6 @@ impl Derivation {
         Ok((main, deps))
     }
 
-    async fn run_print_out_paths(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
-        // Check if systemd should be used
-        if !build_config.should_use_systemd() {
-            info!("📋 Systemd disabled in config, using direct execution for store path lookup");
-            let mut direct = Command::new("nix");
-            direct.args(["build", flake_target, "--print-out-paths"]);
-            build_config.apply_to_command(&mut direct);
-            return Ok(direct.output().await?);
-        }
-
-        let mut scoped = build_config.systemd_scoped_cmd_base();
-        scoped.args([flake_target, "--print-out-paths"]);
-        build_config.apply_to_command(&mut scoped);
-
-        match scoped.output().await {
-            Ok(output) => {
-                if output.status.success() {
-                    Ok(output)
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    // Check for systemd-specific issues
-                    if stderr.contains("Failed to connect to user scope bus")
-                        || stderr.contains("DBUS_SESSION_BUS_ADDRESS")
-                        || stderr.contains("XDG_RUNTIME_DIR")
-                        || stderr.contains("Failed to create scope")
-                        || stderr.contains("systemd")
-                    {
-                        info!(
-                            "📋 systemd-run not available for store path lookup, using direct execution"
-                        );
-                        let mut direct = Command::new("nix");
-                        direct.args(["build", flake_target, "--print-out-paths"]);
-                        build_config.apply_to_command(&mut direct);
-                        Ok(direct.output().await?)
-                    } else {
-                        Ok(output)
-                    }
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!("📋 systemd-run not available for store path lookup");
-                let mut direct = Command::new("nix");
-                direct.args(["build", flake_target, "--print-out-paths"]);
-                build_config.apply_to_command(&mut direct);
-                Ok(direct.output().await?)
-            }
-            Err(e) => {
-                warn!("⚠️ systemd-run failed for store path lookup: {}", e);
-                let mut direct = Command::new("nix");
-                direct.args(["build", flake_target, "--print-out-paths"]);
-                build_config.apply_to_command(&mut direct);
-                Ok(direct.output().await?)
-            }
-        }
-    }
-
     /// Phase 1: Evaluate and discover all derivation paths (dry-run only)
     /// This can run on any machine and doesn't require commit_id
     pub async fn evaluate_derivation_path(
@@ -368,13 +351,45 @@ impl Derivation {
             anyhow::bail!("Expected .drv path, got: {}", drv_path);
         }
 
-        let mut cmd = Command::new("nix-store");
-        cmd.args(["--realise", drv_path]);
+        let output = if build_config.should_use_systemd() {
+            // Create a custom systemd command for nix-store
+            let mut scoped = Command::new("systemd-run");
+            scoped.args(["--user", "--scope", "--collect", "--quiet"]);
 
-        // Apply any relevant build config (though nix-store has fewer options)
-        // You might need to adjust this based on what BuildConfig contains
+            // Add systemd properties from config
+            if let Some(ref memory_max) = build_config.systemd_memory_max {
+                scoped.args(["--property", &format!("MemoryMax={}", memory_max)]);
+            }
+            if let Some(cpu_quota) = build_config.systemd_cpu_quota {
+                scoped.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+            }
+            if let Some(timeout_stop) = build_config.systemd_timeout_stop_sec {
+                scoped.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+            }
+            for property in &build_config.systemd_properties {
+                scoped.args(["--property", property]);
+            }
 
-        let output = cmd.output().await?;
+            scoped.args(["--", "nix-store", "--realise", drv_path]);
+
+            match scoped.output().await {
+                Ok(output) => output,
+                Err(e) => {
+                    warn!(
+                        "⚠️ systemd-run failed for nix-store, falling back to direct execution: {}",
+                        e
+                    );
+                    let mut cmd = Command::new("nix-store");
+                    cmd.args(["--realise", drv_path]);
+                    cmd.output().await?
+                }
+            }
+        } else {
+            // Direct nix-store call
+            let mut cmd = Command::new("nix-store");
+            cmd.args(["--realise", drv_path]);
+            cmd.output().await?
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
