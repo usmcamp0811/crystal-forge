@@ -624,6 +624,23 @@ in {
       };
     };
 
+    security.polkit.enable = true;
+    security.polkit.extraConfig = ''
+      // Allow only crystal-forge to start/stop *its* transient scopes.
+      // Use: systemd-run --unit=cf-build-%j --scope ...
+      polkit.addRule(function(action, subject) {
+        if (action.id == "org.freedesktop.systemd1.manage-units"
+            && subject.user == "crystal-forge") {
+          var unit = action.lookup("unit");
+          var verb = action.lookup("verb");
+          if (unit && unit.indexOf("cf-build-") === 0 && unit.slice(-6) === ".scope"
+              && (verb == "start" || verb == "stop")) {
+            return polkit.Result.YES;
+          }
+        }
+      });
+    '';
+
     systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
