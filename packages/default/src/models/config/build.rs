@@ -98,7 +98,7 @@ impl BuildConfig {
         let mut cmd = tokio::process::Command::new("systemd-run");
 
         // Base systemd-run arguments
-        cmd.args(["--user", "--scope", "--collect", "--quiet"]);
+        cmd.args(["--scope", "--collect", "--quiet"]);
 
         // Memory limit
         if let Some(ref memory_max) = self.systemd_memory_max {

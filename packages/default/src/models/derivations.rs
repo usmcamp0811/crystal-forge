@@ -354,7 +354,7 @@ impl Derivation {
         let output = if build_config.should_use_systemd() {
             // Create a custom systemd command for nix-store
             let mut scoped = Command::new("systemd-run");
-            scoped.args(["--user", "--scope", "--collect", "--quiet"]);
+            scoped.args([ "--scope", "--collect", "--quiet"]);
 
             // Add systemd properties from config
             if let Some(ref memory_max) = build_config.systemd_memory_max {
