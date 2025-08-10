@@ -145,7 +145,6 @@
 
     export NIX_BUILD_CORES="${toString cfg.build.cores}"
     export NIX_MAX_JOBS="${toString cfg.build.max_jobs}"
-    ulimit -v $((4 * 1024 * 1024)) # 4GiB
 
     exec ${pkgs.crystal-forge.server}/bin/builder "$@"
   '';
