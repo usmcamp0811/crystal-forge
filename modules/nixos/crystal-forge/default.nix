@@ -60,6 +60,7 @@
           timeout = cfg.build.timeout;
           sandbox = cfg.build.sandbox;
           use_systemd_scope = cfg.build.use_systemd_scope;
+          max_concurrent_derivations = cfg.build.max_concurrent_derivations;
         }
         // lib.optionalAttrs (cfg.build.systemd_memory_max != null) {
           systemd_memory_max = cfg.build.systemd_memory_max;
@@ -299,6 +300,12 @@ in {
         type = lib.types.bool;
         default = true;
         description = "Enable sandbox for builds";
+      };
+
+      max_concurrent_derivations = lib.mkOption {
+        type = lib.types.int;
+        default = 8;
+        description = "Maximum concurrent dry run derivations to process";
       };
 
       # Systemd resource controls

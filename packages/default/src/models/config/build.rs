@@ -36,6 +36,8 @@ pub struct BuildConfig {
     pub use_systemd_scope: bool,
     /// Additional systemd properties to set
     pub systemd_properties: Vec<String>,
+
+    pub max_concurrent_derivations: Option<u32>,
 }
 
 impl Default for BuildConfig {
@@ -49,6 +51,7 @@ impl Default for BuildConfig {
             max_silent_time: Duration::from_secs(3600), // 1 hour
             timeout: Duration::from_secs(7200),      // 2 hours
             sandbox: true,
+            max_concurrent_derivations: Some(8),
 
             // Systemd defaults
             systemd_memory_max: Some("4G".to_string()),

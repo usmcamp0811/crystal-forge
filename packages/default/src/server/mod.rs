@@ -171,7 +171,7 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
     match get_pending_dry_run_derivations(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
-            let concurrency_limit = 1; // adjust as needed
+            let concurrency_limit = 10; // adjust as needed
             stream::iter(pending_targets.into_iter().map(|target| {
                 let pool = pool.clone();
                 async move {
