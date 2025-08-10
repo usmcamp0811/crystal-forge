@@ -310,12 +310,12 @@ in {
       };
       systemd_memory_max = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
-        default = "4G";
+        default = "32G";
         description = "Memory limit for systemd scope (e.g., '4G', '2048M')";
       };
       systemd_cpu_quota = lib.mkOption {
         type = lib.types.nullOr lib.types.ints.positive;
-        default = 300;
+        default = 800;
         description = "CPU quota as percentage (e.g., 300 for 3 cores worth)";
       };
       systemd_timeout_stop_sec = lib.mkOption {
@@ -325,11 +325,14 @@ in {
       };
       systemd_properties = lib.mkOption {
         type = lib.types.listOf lib.types.str;
-        default = [];
+        default = [
+          "MemorySwapMax=2G"
+          "TasksMax=3000"
+        ];
         description = "Additional systemd properties to set";
         example = [
           "MemorySwapMax=2G"
-          "TasksMax=1000"
+          "TasksMax=3000"
           "IOWeight=100"
         ];
       };
