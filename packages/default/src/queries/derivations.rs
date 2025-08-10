@@ -741,7 +741,7 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
                     ELSE 2
                 END as type_priority
             FROM derivations d
-            WHERE d.status_id = $1
+            WHERE d.status_id in ( $1, $2 )
         )
         SELECT
             id,
@@ -766,6 +766,7 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             completed_at ASC         -- Within same type: oldest first
         "#,
         EvaluationStatus::DryRunComplete.as_id()
+        EvaluationStatus::BuildPending.as_id()
     )
     .fetch_all(pool)
     .await?;
