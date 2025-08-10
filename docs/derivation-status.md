@@ -17,44 +17,44 @@ sequenceDiagram
 
     %% Commit discovery
     Commit->>DB: Insert NixOS derivations
-    Note over DB: Set status = 3 (dry-run-pending)
+    Note over DB: Set status = (dry-run-pending)
 
     %% Evaluation loop
-    Eval->>DB: Find status = 3
+    Eval->>DB: Find status = dry-run-pending
     DB-->>Eval: Return rows
-    Eval->>DB: Update → 4 (dry-run-in-progress)
+    Eval->>DB: Update → (dry-run-in-progress)
     Eval->>Eval: nix build --dry-run
 
     alt Evaluation succeeded
-        Eval->>DB: Update → 5 (dry-run-complete)
+        Eval->>DB: Update → (dry-run-complete)
         Eval->>DB: Insert discovered package deps
-        Note over DB: Packages initially at 7 (build-pending)
+        Note over DB: Packages initially at (build-pending)
     else Evaluation failed
-        Eval->>DB: Update → 6 (dry-run-failed)
+        Eval->>DB: Update → (dry-run-failed)
     end
 
     %% Build loop
-    Build->>DB: Find status IN (5,7)
+    Build->>DB: Find status IN (dry-run-complete,build-pending)
     DB-->>Build: Return rows
-    Build->>DB: Update → 8 (build-in-progress)
+    Build->>DB: Update → (build-in-progress)
     Build->>Build: nix-store --realise
 
     alt Build succeeded
-        Build->>DB: Update → 10 (build-complete)
+        Build->>DB: Update → (build-complete)
     else Build failed
-        Build->>DB: Update → 12 (build-failed)
+        Build->>DB: Update → (build-failed)
     end
 
     %% Retry handler
     loop While attempt_count < 5
-        Retry->>DB: Reset 6 → 3 (dry-run-failed → pending)
-        Retry->>DB: Reset 12 → 7 (build-failed → build-pending)
+        Retry->>DB: Reset (dry-run-failed → pending)
+        Retry->>DB: Reset (build-failed → build-pending)
     end
     Note over DB: attempt_count >= 5 → terminal
 
     %% Alternative entry via CVE scanning
     CVE->>DB: Insert packages from scan
-    Note over DB: Set status = 11 (complete)
+    Note over DB: Set status = (complete)
 ```
 
 ---
