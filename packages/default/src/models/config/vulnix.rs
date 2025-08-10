@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use std::time::Duration;
+use tracing::warn;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -43,7 +44,7 @@ impl VulnixConfig {
                 if std::path::Path::new(whitelist_path).exists() {
                     args.extend_from_slice(&["--whitelist".to_string(), whitelist_path.clone()]);
                 } else {
-                    eprintln!(
+                    warn!(
                         "Warning: Whitelist enabled but file {} not found",
                         whitelist_path
                     );
