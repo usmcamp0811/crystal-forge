@@ -49,13 +49,30 @@
       environments = cfg.environments;
     }
     // lib.optionalAttrs cfg.build.enable {
-      build = {
-        cores = cfg.build.cores;
-        max_jobs = cfg.build.max_jobs;
-        use_substitutes = cfg.build.use_substitutes;
-        offline = cfg.build.offline;
-        poll_interval = cfg.build.poll_interval;
-      };
+      build =
+        {
+          cores = cfg.build.cores;
+          max_jobs = cfg.build.max_jobs;
+          use_substitutes = cfg.build.use_substitutes;
+          offline = cfg.build.offline;
+          poll_interval = cfg.build.poll_interval;
+          max_silent_time = cfg.build.max_silent_time;
+          timeout = cfg.build.timeout;
+          sandbox = cfg.build.sandbox;
+          use_systemd_scope = cfg.build.use_systemd_scope;
+        }
+        // lib.optionalAttrs (cfg.build.systemd_memory_max != null) {
+          systemd_memory_max = cfg.build.systemd_memory_max;
+        }
+        // lib.optionalAttrs (cfg.build.systemd_cpu_quota != null) {
+          systemd_cpu_quota = cfg.build.systemd_cpu_quota;
+        }
+        // lib.optionalAttrs (cfg.build.systemd_timeout_stop_sec != null) {
+          systemd_timeout_stop_sec = cfg.build.systemd_timeout_stop_sec;
+        }
+        // lib.optionalAttrs (cfg.build.systemd_properties != []) {
+          systemd_properties = cfg.build.systemd_properties;
+        };
     }
     // {
       vulnix =
@@ -269,6 +286,53 @@ in {
         default = "5m";
         description = "Interval between checking for new build jobs";
       };
+      max_silent_time = lib.mkOption {
+        type = lib.types.str;
+        default = "1h";
+        description = "Maximum time a build can be silent before timing out";
+      };
+      timeout = lib.mkOption {
+        type = lib.types.str;
+        default = "2h";
+        description = "Maximum total time for a build before timing out";
+      };
+      sandbox = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Enable sandbox for builds";
+      };
+
+      # Systemd resource controls
+      use_systemd_scope = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Whether to use systemd-run for resource isolation";
+      };
+      systemd_memory_max = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = "4G";
+        description = "Memory limit for systemd scope (e.g., '4G', '2048M')";
+      };
+      systemd_cpu_quota = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = 300;
+        description = "CPU quota as percentage (e.g., 300 for 3 cores worth)";
+      };
+      systemd_timeout_stop_sec = lib.mkOption {
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = 600;
+        description = "Timeout for systemd scope stop operation in seconds";
+      };
+      systemd_properties = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [];
+        description = "Additional systemd properties to set";
+        example = [
+          "MemorySwapMax=2G"
+          "TasksMax=1000"
+          "IOWeight=100"
+        ];
+      };
     };
 
     vulnix = {
@@ -474,10 +538,27 @@ in {
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
       description = "Crystal Forge Build Operations";
       sliceConfig = {
-        MemoryMax = "8G";
-        MemoryHigh = "6G";
-        CPUQuota = "400%";
-        TasksMax = "200";
+        # Use build config values or sensible defaults for the slice
+        MemoryMax =
+          lib.mkIf (cfg.build.systemd_memory_max != null)
+          (cfg.build.systemd_memory_max + ""); # Ensure string conversion
+        MemoryHigh =
+          lib.mkIf (cfg.build.systemd_memory_max != null)
+          (let
+            # Calculate 75% of max memory for "high" threshold
+            memStr = cfg.build.systemd_memory_max;
+            memVal =
+              if lib.hasSuffix "G" memStr
+              then toString (lib.toInt (lib.removeSuffix "G" memStr) * 3 / 4) + "G"
+              else if lib.hasSuffix "M" memStr
+              then toString (lib.toInt (lib.removeSuffix "M" memStr) * 3 / 4) + "M"
+              else memStr;
+          in
+            memVal);
+        CPUQuota =
+          lib.mkIf (cfg.build.systemd_cpu_quota != null)
+          (toString cfg.build.systemd_cpu_quota + "%");
+        TasksMax = "200"; # Keep this as a reasonable default
       };
     };
 
@@ -567,10 +648,37 @@ in {
 
         Slice = "crystal-forge-builds.slice";
 
-        MemoryMax = "2G";
-        MemoryHigh = "1.5G";
+        # Use individual service limits that are more conservative than slice limits
+        MemoryMax =
+          lib.mkIf (cfg.build.systemd_memory_max != null)
+          (let
+            # Use half of the systemd memory max for individual service
+            memStr = cfg.build.systemd_memory_max;
+            memVal =
+              if lib.hasSuffix "G" memStr
+              then toString (lib.toInt (lib.removeSuffix "G" memStr) / 2) + "G"
+              else if lib.hasSuffix "M" memStr
+              then toString (lib.toInt (lib.removeSuffix "M" memStr) / 2) + "M"
+              else "2G";
+          in
+            memVal);
+        MemoryHigh =
+          lib.mkIf (cfg.build.systemd_memory_max != null)
+          (let
+            # Use 37.5% of systemd memory max for "high" threshold
+            memStr = cfg.build.systemd_memory_max;
+            memVal =
+              if lib.hasSuffix "G" memStr
+              then toString (lib.toInt (lib.removeSuffix "G" memStr) * 3 / 8) + "G"
+              else if lib.hasSuffix "M" memStr
+              then toString (lib.toInt (lib.removeSuffix "M" memStr) * 3 / 8) + "M"
+              else "1.5G";
+          in
+            memVal);
         MemorySwapMax = "1G";
-        CPUQuota = "200%";
+        CPUQuota =
+          lib.mkIf (cfg.build.systemd_cpu_quota != null)
+          (toString (cfg.build.systemd_cpu_quota / 2) + "%"); # Half of the slice quota
 
         # Use systemd-managed dirs (no hardcoded IDs)
         StateDirectory = "crystal-forge";

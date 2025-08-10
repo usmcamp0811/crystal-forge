@@ -127,8 +127,14 @@ impl Derivation {
     }
 
     async fn run_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
+        // Check if systemd should be used
+        if !build_config.should_use_systemd() {
+            info!("📋 Systemd disabled in config, using direct execution");
+            return Self::run_direct_dry_run(flake_target, build_config).await;
+        }
+
         // Try systemd-run scoped build first
-        let mut scoped = Self::systemd_scoped_cmd_base();
+        let mut scoped = build_config.systemd_scoped_cmd_base();
         scoped.args([flake_target, "--dry-run", "--print-out-paths", "--no-link"]);
         build_config.apply_to_command(&mut scoped);
 
@@ -236,7 +242,16 @@ impl Derivation {
     }
 
     async fn run_print_out_paths(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
-        let mut scoped = Self::systemd_scoped_cmd_base();
+        // Check if systemd should be used
+        if !build_config.should_use_systemd() {
+            info!("📋 Systemd disabled in config, using direct execution for store path lookup");
+            let mut direct = Command::new("nix");
+            direct.args(["build", flake_target, "--print-out-paths"]);
+            build_config.apply_to_command(&mut direct);
+            return Ok(direct.output().await?);
+        }
+
+        let mut scoped = build_config.systemd_scoped_cmd_base();
         scoped.args([flake_target, "--print-out-paths"]);
         build_config.apply_to_command(&mut scoped);
 
