@@ -24,6 +24,18 @@ pub struct BuildConfig {
     pub timeout: Duration,
     /// Enable sandbox for builds
     pub sandbox: bool,
+
+    // Systemd resource controls
+    /// Memory limit for systemd scope (e.g., "4G", "2048M")
+    pub systemd_memory_max: Option<String>,
+    /// CPU quota as percentage (e.g., 300 for 3 cores worth)
+    pub systemd_cpu_quota: Option<u32>,
+    /// Timeout for systemd scope stop operation in seconds
+    pub systemd_timeout_stop_sec: Option<u32>,
+    /// Whether to use systemd-run at all (fallback to direct execution if false)
+    pub use_systemd_scope: bool,
+    /// Additional systemd properties to set
+    pub systemd_properties: Vec<String>,
 }
 
 impl Default for BuildConfig {
@@ -37,6 +49,13 @@ impl Default for BuildConfig {
             max_silent_time: Duration::from_secs(3600), // 1 hour
             timeout: Duration::from_secs(7200),      // 2 hours
             sandbox: true,
+
+            // Systemd defaults
+            systemd_memory_max: Some("4G".to_string()),
+            systemd_cpu_quota: Some(300),        // 3 cores worth
+            systemd_timeout_stop_sec: Some(600), // 10 minutes
+            use_systemd_scope: true,
+            systemd_properties: Vec::new(),
         }
     }
 }
@@ -74,6 +93,39 @@ impl BuildConfig {
         }
     }
 
+    /// Create a systemd-run command with configured resource limits
+    pub fn systemd_scoped_cmd_base(&self) -> tokio::process::Command {
+        let mut cmd = tokio::process::Command::new("systemd-run");
+
+        // Base systemd-run arguments
+        cmd.args(["--user", "--scope", "--collect", "--quiet"]);
+
+        // Memory limit
+        if let Some(ref memory_max) = self.systemd_memory_max {
+            cmd.args(["--property", &format!("MemoryMax={}", memory_max)]);
+        }
+
+        // CPU quota
+        if let Some(cpu_quota) = self.systemd_cpu_quota {
+            cmd.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+        }
+
+        // Timeout for stopping the scope
+        if let Some(timeout_stop) = self.systemd_timeout_stop_sec {
+            cmd.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+        }
+
+        // Additional custom properties
+        for property in &self.systemd_properties {
+            cmd.args(["--property", property]);
+        }
+
+        // Add the actual command to run
+        cmd.args(["--", "nix", "build"]);
+
+        cmd
+    }
+
     /// Get timeout for build process (use the shorter of the two timeouts)
     pub fn process_timeout(&self) -> Duration {
         // Add some buffer time for process cleanup
@@ -88,5 +140,10 @@ impl BuildConfig {
     /// Get timeout in seconds for total timeout
     pub fn timeout_seconds(&self) -> u64 {
         self.timeout.as_secs()
+    }
+
+    /// Check if systemd should be used for this build
+    pub fn should_use_systemd(&self) -> bool {
+        self.use_systemd_scope
     }
 }
