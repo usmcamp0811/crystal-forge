@@ -103,63 +103,59 @@ async fn build_derivations(
                 info!("🔍 No derivations need building");
                 return Ok(());
             }
-
-            let derivation = &derivations[0];
-            info!(
-                "🏗️ Starting build for derivation: {}",
-                derivation.derivation_name
-            );
-
-            mark_target_build_in_progress(pool, derivation.id).await?;
-
-            // Build the derivation
-            let store_path = match derivation
-                .evaluate_and_build(pool, true, build_config)
-                .await
-            {
-                Ok(path) => {
-                    info!(
-                        "✅ Build completed for {}: {}",
-                        derivation.derivation_name, path
-                    );
-                    path
-                }
-                Err(e) => {
-                    error!("❌ Build failed for {}: {}", derivation.derivation_name, e);
-                    if let Err(save_err) =
-                        mark_target_failed(pool, derivation.id, "build", &e.to_string()).await
-                    {
-                        error!("❌ Failed to mark build as failed: {save_err}");
-                    }
-                    return Err(e);
-                }
-            };
-
-            // Push to cache if configured
-            if cache_config.push_after_build {
+            for derivation in &derivations {
                 info!(
-                    "📤 Starting cache push for derivation: {}",
+                    "🏗️ Starting build for derivation: {}",
                     derivation.derivation_name
                 );
-                match derivation.push_to_cache(&store_path, cache_config).await {
-                    Ok(_) => {
-                        info!("✅ Cache push completed for {}", derivation.derivation_name);
+                mark_target_build_in_progress(pool, derivation.id).await?;
+                // Build the derivation
+                let store_path = match derivation
+                    .evaluate_and_build(pool, true, build_config)
+                    .await
+                {
+                    Ok(path) => {
+                        info!(
+                            "✅ Build completed for {}: {}",
+                            derivation.derivation_name, path
+                        );
+                        path
                     }
                     Err(e) => {
-                        warn!(
-                            "⚠️ Cache push failed for {}: {}",
-                            derivation.derivation_name, e
-                        );
-                        // Cache push failures are non-fatal, just log and continue
+                        error!("❌ Build failed for {}: {}", derivation.derivation_name, e);
+                        if let Err(save_err) =
+                            mark_target_failed(pool, derivation.id, "build", &e.to_string()).await
+                        {
+                            error!("❌ Failed to mark build as failed: {save_err}");
+                        }
+                        continue;
                     }
+                };
+                // Push to cache if configured
+                if cache_config.push_after_build {
+                    info!(
+                        "📤 Starting cache push for derivation: {}",
+                        derivation.derivation_name
+                    );
+                    match derivation.push_to_cache(&store_path, cache_config).await {
+                        Ok(_) => {
+                            info!("✅ Cache push completed for {}", derivation.derivation_name);
+                        }
+                        Err(e) => {
+                            warn!(
+                                "⚠️ Cache push failed for {}: {}",
+                                derivation.derivation_name, e
+                            );
+                            // Cache push failures are non-fatal, just log and continue
+                        }
+                    }
+                } else {
+                    info!("⏭️ Skipping cache push (push_after_build = false)");
                 }
-            } else {
-                info!("⏭️ Skipping cache push (push_after_build = false)");
+                // Mark as build complete (this will make it available for CVE scanning)
+                use crate::queries::derivations::mark_target_build_complete;
+                mark_target_build_complete(pool, derivation.id).await?;
             }
-
-            // Mark as build complete (this will make it available for CVE scanning)
-            use crate::queries::derivations::mark_target_build_complete;
-            mark_target_build_complete(pool, derivation.id).await?;
         }
         Err(e) => error!("❌ Failed to get derivations ready for build: {e}"),
     }
