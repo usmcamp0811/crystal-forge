@@ -562,15 +562,19 @@ impl Derivation {
             Ok(format!(
                 "{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel"
             ))
-        } else if flake_url.starts_with("git+") {
-            Ok(format!(
-                "{flake_url}?rev={}#nixosConfigurations.{system}.config.system.build.toplevel",
-                commit.git_commit_hash
-            ))
         } else {
+            // Handle Git URL formats - maintain existing behavior
+            let git_url = if flake_url.starts_with("git+") {
+                // Already properly formatted with git+ prefix
+                format!("{}?rev={}", flake_url, commit.git_commit_hash)
+            } else {
+                // Add git+ prefix (current behavior)
+                format!("git+{}?rev={}", flake_url, commit.git_commit_hash)
+            };
+
             Ok(format!(
-                "git+{0}?rev={1}#nixosConfigurations.{2}.config.system.build.toplevel",
-                flake_url, commit.git_commit_hash, self.derivation_name
+                "{}#nixosConfigurations.{}.config.system.build.toplevel",
+                git_url, system
             ))
         }
     }
