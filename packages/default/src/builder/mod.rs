@@ -137,7 +137,10 @@ async fn build_derivations(
                         "📤 Starting cache push for derivation: {}",
                         derivation.derivation_name
                     );
-                    match derivation.push_to_cache(&store_path, cache_config).await {
+                    match derivation
+                        .push_to_cache(&store_path, cache_config, build_config)
+                        .await
+                    {
                         Ok(_) => {
                             info!("✅ Cache push completed for {}", derivation.derivation_name);
                         }
