@@ -75,6 +75,21 @@
           systemd_properties = cfg.build.systemd_properties;
         };
     }
+    // lib.optionalAttrs (cfg.auth.ssh_key_path != null || cfg.auth.netrc_path != null || cfg.auth.ssh_known_hosts_path != null || cfg.auth.ssh_disable_strict_host_checking) {
+      auth =
+        lib.optionalAttrs (cfg.auth.ssh_key_path != null) {
+          ssh_key_path = toString cfg.auth.ssh_key_path;
+        }
+        // lib.optionalAttrs (cfg.auth.ssh_known_hosts_path != null) {
+          ssh_known_hosts_path = toString cfg.auth.ssh_known_hosts_path;
+        }
+        // lib.optionalAttrs (cfg.auth.netrc_path != null) {
+          netrc_path = toString cfg.auth.netrc_path;
+        }
+        // lib.optionalAttrs cfg.auth.ssh_disable_strict_host_checking {
+          ssh_disable_strict_host_checking = cfg.auth.ssh_disable_strict_host_checking;
+        };
+    }
     // {
       vulnix =
         {
@@ -118,6 +133,24 @@
         echo "ERROR: Password file not found: ${cfg.database.passwordFile}" >&2
         exit 1
       fi
+    ''}
+
+    # Generate SSH keys if ssh_key_path is null and we need SSH auth
+    ${lib.optionalString (cfg.auth.ssh_key_path == null && (cfg.build.enable || cfg.server.enable)) ''
+      SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
+      if [ ! -f "$SSH_KEY_PATH" ]; then
+        echo "Generating SSH key for Crystal Forge Git authentication..."
+        ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(hostname)"
+        chown crystal-forge:crystal-forge "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub"
+        chmod 600 "$SSH_KEY_PATH"
+        chmod 644 "$SSH_KEY_PATH.pub"
+        echo "SSH key generated at $SSH_KEY_PATH"
+        echo "Public key for Git repository setup:"
+        cat "$SSH_KEY_PATH.pub"
+      fi
+
+      # Update config to use generated key path
+      ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "${generatedConfigPath}"
     ''}
 
     chmod 600 "${generatedConfigPath}"
@@ -255,6 +288,28 @@ in {
       };
     };
 
+    auth = {
+      ssh_key_path = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to SSH private key for Git authentication. If null, SSH keys will be generated automatically.";
+      };
+      ssh_known_hosts_path = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to SSH known_hosts file. If null, defaults to /var/lib/crystal-forge/.ssh/known_hosts";
+      };
+      netrc_path = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description = "Path to .netrc file for HTTPS Git authentication. If null, defaults to /var/lib/crystal-forge/.netrc";
+      };
+      ssh_disable_strict_host_checking = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Whether to disable strict host key checking for SSH";
+      };
+    };
     build = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -541,6 +596,7 @@ in {
       "d /var/lib/crystal-forge/tmp 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/builds 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.ssh 0700 crystal-forge crystal-forge -"
       "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
     ];
 
