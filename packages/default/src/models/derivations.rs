@@ -354,7 +354,7 @@ impl Derivation {
         // Check if systemd should be used
         if !build_config.should_use_systemd() {
             info!("📋 Systemd disabled in config, using direct execution for nix-store");
-            return Self::run_direct_nix_store(drv_path).await;
+            return Self::run_direct_nix_store(drv_path, build_config).await;
         }
 
         // Try systemd-run scoped build first
@@ -403,7 +403,7 @@ impl Derivation {
                             "⚠️ Systemd scope creation failed, falling back to direct execution: {}",
                             stderr.trim()
                         );
-                        Self::run_direct_nix_store(drv_path).await
+                        Self::run_direct_nix_store(drv_path, build_config).await
                     } else {
                         // Other failure - return the systemd error
                         error!("❌ nix-store --realise failed: {}", stderr.trim());
@@ -413,21 +413,24 @@ impl Derivation {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 info!("📋 systemd-run not available for nix-store, using direct execution");
-                Self::run_direct_nix_store(drv_path).await
+                Self::run_direct_nix_store(drv_path, build_config).await
             }
             Err(e) => {
                 warn!(
                     "⚠️ systemd-run failed for nix-store: {}, trying direct execution",
                     e
                 );
-                Self::run_direct_nix_store(drv_path).await
+                Self::run_direct_nix_store(drv_path, build_config).await
             }
         }
     }
 
-    async fn run_direct_nix_store(drv_path: &str) -> Result<String> {
+    async fn run_direct_nix_store(drv_path: &str, build_config: &BuildConfig) -> Result<String> {
         let mut cmd = Command::new("nix-store");
         cmd.args(["--realise", drv_path]);
+
+        // Add this line to apply auth configuration
+        build_config.apply_to_command(&mut cmd);
 
         let output = cmd.output().await?;
 
@@ -562,19 +565,15 @@ impl Derivation {
             Ok(format!(
                 "{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel"
             ))
-        } else {
-            // Handle Git URL formats - maintain existing behavior
-            let git_url = if flake_url.starts_with("git+") {
-                // Already properly formatted with git+ prefix
-                format!("{}?rev={}", flake_url, commit.git_commit_hash)
-            } else {
-                // Add git+ prefix (current behavior)
-                format!("git+{}?rev={}", flake_url, commit.git_commit_hash)
-            };
-
+        } else if flake_url.starts_with("git+") {
             Ok(format!(
-                "{}#nixosConfigurations.{}.config.system.build.toplevel",
-                git_url, system
+                "{flake_url}?rev={}#nixosConfigurations.{system}.config.system.build.toplevel",
+                commit.git_commit_hash
+            ))
+        } else {
+            Ok(format!(
+                "git+{0}?rev={1}#nixosConfigurations.{2}.config.system.build.toplevel",
+                flake_url, commit.git_commit_hash, self.derivation_name
             ))
         }
     }
@@ -603,6 +602,8 @@ impl Derivation {
 
         let mut cmd = Command::new("nix");
         cmd.args(&args);
+
+        build_config.apply_to_command(&mut cmd);
 
         let output = cmd
             .output()
