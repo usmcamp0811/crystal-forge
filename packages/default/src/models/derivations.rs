@@ -578,7 +578,12 @@ impl Derivation {
         }
     }
     /// Pushes a built derivation to the configured cache
-    pub async fn push_to_cache(&self, store_path: &str, cache_config: &CacheConfig) -> Result<()> {
+    pub async fn push_to_cache(
+        &self,
+        store_path: &str,
+        cache_config: &CacheConfig,
+        build_config: &BuildConfig,
+    ) -> Result<()> {
         // Check if we should push this target
         if !cache_config.should_push(&self.derivation_name) {
             info!(
