@@ -1,4 +1,5 @@
 mod agent;
+mod auth;
 mod build;
 mod cache;
 mod database;
@@ -9,6 +10,7 @@ mod system;
 mod vulnix;
 
 pub use agent::*;
+pub use auth::*;
 pub use build::*;
 pub use cache::*;
 pub use database::*;
@@ -56,6 +58,8 @@ pub struct CrystalForgeConfig {
     pub build: BuildConfig,
     #[serde(default)]
     pub cache: CacheConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
 }
 
 impl Default for CrystalForgeConfig {
@@ -70,6 +74,7 @@ impl Default for CrystalForgeConfig {
             vulnix: VulnixConfig::default(),
             build: BuildConfig::default(),
             cache: CacheConfig::default(),
+            auth: AuthConfig::default(),
         }
     }
 }
@@ -93,6 +98,10 @@ impl CrystalForgeConfig {
     /// Gets build config as reference (legacy method, same as get_build_config)
     pub fn build_config_ref(&self) -> &BuildConfig {
         &self.build
+    }
+
+    pub fn get_auth_config(&self) -> &AuthConfig {
+        &self.auth
     }
 
     pub fn load() -> Result<Self> {
