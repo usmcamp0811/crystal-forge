@@ -354,7 +354,7 @@ impl Derivation {
         // Check if systemd should be used
         if !build_config.should_use_systemd() {
             info!("📋 Systemd disabled in config, using direct execution for nix-store");
-            return Self::run_direct_nix_store(drv_path, build_config).await;
+            return Self::run_direct_nix_store(drv_path).await;
         }
 
         // Try systemd-run scoped build first
@@ -403,7 +403,7 @@ impl Derivation {
                             "⚠️ Systemd scope creation failed, falling back to direct execution: {}",
                             stderr.trim()
                         );
-                        Self::run_direct_nix_store(drv_path, build_config).await
+                        Self::run_direct_nix_store(drv_path).await
                     } else {
                         // Other failure - return the systemd error
                         error!("❌ nix-store --realise failed: {}", stderr.trim());
@@ -413,24 +413,21 @@ impl Derivation {
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 info!("📋 systemd-run not available for nix-store, using direct execution");
-                Self::run_direct_nix_store(drv_path, build_config).await
+                Self::run_direct_nix_store(drv_path).await
             }
             Err(e) => {
                 warn!(
                     "⚠️ systemd-run failed for nix-store: {}, trying direct execution",
                     e
                 );
-                Self::run_direct_nix_store(drv_path, build_config).await
+                Self::run_direct_nix_store(drv_path).await
             }
         }
     }
 
-    async fn run_direct_nix_store(drv_path: &str, build_config: &BuildConfig) -> Result<String> {
+    async fn run_direct_nix_store(drv_path: &str) -> Result<String> {
         let mut cmd = Command::new("nix-store");
         cmd.args(["--realise", drv_path]);
-
-        // Add this line to apply auth configuration
-        build_config.apply_to_command(&mut cmd);
 
         let output = cmd.output().await?;
 
@@ -602,8 +599,6 @@ impl Derivation {
 
         let mut cmd = Command::new("nix");
         cmd.args(&args);
-
-        build_config.apply_to_command(&mut cmd);
 
         let output = cmd
             .output()
