@@ -644,7 +644,10 @@ impl Derivation {
 
         // Only push to cache if we did a full build (not a dry-run)
         if full_build && cache_config.push_after_build {
-            if let Err(e) = self.push_to_cache(&store_path, cache_config).await {
+            if let Err(e) = self
+                .push_to_cache(&store_path, cache_config, build_config)
+                .await
+            {
                 warn!("⚠️ Cache push failed but continuing: {}", e);
                 // Don't fail the whole operation if cache push fails
             }
