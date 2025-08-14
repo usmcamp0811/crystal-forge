@@ -368,7 +368,7 @@ in rec {
   '';
 
   # CVE scanning functionality tests
-  cveScannungTests = ''
+  cveScanningTests = ''
     ${mkTestSection "CVE SCANNING TESTS" ''
       # Check if vulnix is available
       try:
@@ -449,7 +449,7 @@ in rec {
     ''}
   '';
 
-  # Service isolation and security tests
+  # Security isolation and security tests
   securityIsolationTests = ''
     ${mkTestSection "SECURITY ISOLATION TESTS" ''
       # Verify PostgreSQL not running on agent
@@ -479,7 +479,7 @@ in rec {
     ${postgresJobsTests}
     ${builderServiceTests}
     ${resourceManagementTests}
-    ${cveScannungTests}
+    ${cveScanningTests}
     ${sqlViewTests}
     ${securityIsolationTests}
   '';
@@ -504,7 +504,7 @@ in rec {
     ${basicInfrastructureTests}
     ${builderServiceTests}
     ${resourceManagementTests}
-    ${cveScannungTests}
+    ${cveScanningTests}
   '';
 
   runDatabaseTests = ''
