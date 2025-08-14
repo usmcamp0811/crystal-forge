@@ -1,5 +1,10 @@
-{lib, ...}:
-with lib; rec {
+{
+  lib,
+  inputs,
+  ...
+}: let
+  pkgs = inputs.nixpkgs.legacyPackages.x86_64-linux;
+in rec {
   cf_flake =
     pkgs.runCommand "cf-flake" {
       src = ../../.;

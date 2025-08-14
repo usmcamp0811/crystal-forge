@@ -31,10 +31,10 @@ in
         networking.useDHCP = true;
         networking.firewall.allowedTCPPorts = [3000];
 
-        environment.etc."crystal-forge-tests.sql".source = "${lib.sqlTests}";
+        environment.etc."crystal-forge-tests.sql".source = "${lib.crystal-forge.sqlTests}";
         environment.etc."agent.key".source = "${key}/agent.key";
         environment.etc."agent.pub".source = "${pub}/agent.pub";
-        environment.etc."cf_flake".source = "${lib.cf_flake}";
+        environment.etc."cf_flake".source = "${lib.crystal-forge.cf_flake}";
 
         services.postgresql = {
           enable = true;
