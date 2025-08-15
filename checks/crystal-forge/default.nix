@@ -1,3 +1,4 @@
+# checks/crystal-forge.nix
 {
   lib,
   inputs,
@@ -8,14 +9,33 @@
     mkdir -p $out
     ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/agent.key
   '';
-  key = pkgs.runCommand "agent.key" {} ''
+  keyPath = pkgs.runCommand "agent.key" {} ''
     mkdir -p $out
     cp ${keyPair}/agent.key $out/
   '';
-  pub = pkgs.runCommand "agent.pub" {} ''
+  pubPath = pkgs.runCommand "agent.pub" {} ''
     mkdir -p $out
     cp ${keyPair}/agent.pub $out/
   '';
+
+  cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
+    mkdir -p $out
+    cp -r $src/* $out/
+  '';
+
+  sqlTestsPath = pkgs.writeText "crystal-forge-view-tests.sql" (builtins.readFile ./sql/view-tests.sql);
+
+  pythonFiles = map (f: ./tests + "/${f}") [
+    "00_bootstrap.py"
+    "10_registration.py"
+    "20_postgres_jobs.py"
+    "30_builder.py"
+    "40_cve.py"
+    "50_sql_views.py"
+  ];
+
+  testScript =
+    lib.concatMapStringsSep "\n\n" (f: builtins.readFile f) pythonFiles;
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
@@ -31,10 +51,10 @@ in
         networking.useDHCP = true;
         networking.firewall.allowedTCPPorts = [3000];
 
-        environment.etc."crystal-forge-tests.sql".source = "${lib.crystal-forge.sqlTests}";
-        environment.etc."agent.key".source = "${key}/agent.key";
-        environment.etc."agent.pub".source = "${pub}/agent.pub";
-        environment.etc."cf_flake".source = "${lib.crystal-forge.cf_flake}";
+        environment.etc."crystal-forge-tests.sql".source = sqlTestsPath;
+        environment.etc."agent.key".source = keyPath;
+        environment.etc."agent.pub".source = pubPath;
+        environment.etc."cf_flake".source = cfFlakePath;
 
         services.postgresql = {
           enable = true;
@@ -50,6 +70,7 @@ in
             GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
           '';
         };
+
         services.crystal-forge = {
           enable = true;
           local-database = true;
@@ -78,7 +99,7 @@ in
           systems = [
             {
               hostname = "agent";
-              public_key = lib.strings.trim (builtins.readFile "${pub}/agent.pub");
+              public_key = lib.strings.trim (builtins.readFile pubPath);
               environment = "test";
               flake_name = "dotfiles";
             }
@@ -90,6 +111,7 @@ in
           };
         };
       };
+
       agent = {
         config,
         pkgs,
@@ -100,8 +122,8 @@ in
         networking.useDHCP = true;
         networking.firewall.enable = false;
 
-        environment.etc."agent.key".source = "${key}/agent.key";
-        environment.etc."agent.pub".source = "${pub}/agent.pub";
+        environment.etc."agent.key".source = keyPath;
+        environment.etc."agent.pub".source = pubPath;
 
         services.crystal-forge = {
           enable = true;
@@ -114,329 +136,8 @@ in
         };
       };
     };
+
     globalTimeout = 600;
     extraPythonPackages = p: [p.pytest];
-    testScript = lib.crystal-forge.fullTestSuite;
-    # testScript = ''
-    #   import pytest
-    #
-    #   start_all()
-    #
-    #   # Debug: Check if the service is even trying to start
-    #   server.succeed("systemctl status crystal-forge-server.service || true")
-    #   server.log("=== crystal-forge-server service logs ===")
-    #   server.succeed("journalctl -u crystal-forge-server.service --no-pager || true")
-    #
-    #
-    #   server.wait_for_unit("postgresql")
-    #   server.wait_for_unit("crystal-forge-server.service")
-    #   agent.wait_for_unit("crystal-forge-agent.service")
-    #   server.wait_for_unit("multi-user.target")
-    #
-    #   # Ensure keys are available
-    #   try:
-    #       agent.succeed("test -r /etc/agent.key")
-    #       agent.succeed("test -r /etc/agent.pub")
-    #       server.succeed("test -r /etc/agent.pub")
-    #   except Exception as e:
-    #       pytest.fail(f"Key presence check failed: {e}")
-    #
-    #   try:
-    #       server.succeed("ss -ltn | grep ':3000'")
-    #   except Exception:
-    #       pytest.fail("Server is not listening on port 3000")
-    #
-    #   try:
-    #       agent.succeed("ping -c1 server")
-    #   except Exception:
-    #       pytest.fail("Agent failed to ping server")
-    #
-    #   agent_hostname = agent.succeed("hostname -s").strip()
-    #   system_hash = agent.succeed("readlink /run/current-system").strip().split("-")[-1]
-    #   change_reason = "startup"
-    #
-    #   try:
-    #       server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep '✅ accepted agent'");
-    #   except Exception:
-    #       pytest.fail("Server did not log 'accepted from agent'")
-    #
-    #   agent.log("=== agent logs ===")
-    #   agent.log(agent.succeed("journalctl -u crystal-forge-agent.service || true"))
-    #
-    #   output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, derivation_path, change_reason FROM system_states;'")
-    #   server.log("Final DB state:\\n" + output)
-    #
-    #   if agent_hostname not in output:
-    #       pytest.fail(f"hostname '{agent_hostname}' not found in DB")
-    #   if change_reason not in output:
-    #       pytest.fail(f"change_reason '{change_reason}' not found in DB")
-    #   if system_hash not in output:
-    #       pytest.fail(f"derivation_path '{system_hash}' not found in DB")
-    #
-    #   commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"
-    #   curl_data = f"""'{{
-    #     "project": {{
-    #       "web_url": "https://gitlab.com/usmcamp0811/dotfiles"
-    #     }},
-    #     "checkout_sha": "{commit_hash}"
-    #   }}'"""
-    #
-    #   try:
-    #       server.succeed(f"curl -s -X POST http://localhost:3000/webhook -H 'Content-Type: application/json' -d {curl_data}")
-    #   except Exception:
-    #       pytest.fail("Webhook POST request failed")
-    #
-    #   try:
-    #       server.wait_until_succeeds(f"journalctl -u crystal-forge-server.service | grep {commit_hash}")
-    #   except Exception:
-    #       pytest.fail("Commit hash was not processed by server")
-    #
-    #   flake_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT repo_url FROM flakes WHERE repo_url = 'https://gitlab.com/usmcamp0811/dotfiles';\"")
-    #   if "https://gitlab.com/usmcamp0811/dotfiles" not in flake_check:
-    #       pytest.fail("flake not found in DB")
-    #
-    #   commit_list = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT * FROM commits;'")
-    #   server.log("commits contents:\\n" + commit_list)
-    #
-    #   if "0 rows" in commit_list or "0 rows" in commit_list.lower():
-    #       pytest.fail("commits is empty")
-    #
-    #   active_services = agent.succeed("systemctl list-units --type=service --state=active")
-    #   if "postgresql" in active_services:
-    #       pytest.fail("PostgreSQL is unexpectedly running on the agent")
-    #
-    #   # 1. Test that the postgres jobs timer is properly configured
-    #   try:
-    #       server.succeed("systemctl list-timers | grep crystal-forge-postgres-jobs")
-    #   except Exception:
-    #       pytest.fail("crystal-forge-postgres-jobs timer is not configured")
-    #
-    #   # 2. Manually trigger the postgres jobs service to ensure it works
-    #   try:
-    #       server.succeed("systemctl start crystal-forge-postgres-jobs.service")
-    #   except Exception:
-    #       pytest.fail("Failed to start crystal-forge-postgres-jobs.service")
-    #
-    #   # 3. Check that the service completed successfully by checking logs instead of status
-    #   # For oneshot services, we need to check the logs rather than status
-    #   try:
-    #       server.succeed("journalctl -u crystal-forge-postgres-jobs.service | grep 'All jobs completed successfully'")
-    #   except Exception:
-    #       pytest.fail("crystal-forge-postgres-jobs.service did not complete successfully")
-    #
-    #
-    #   # 6. Test that jobs can be run multiple times without error (idempotency)
-    #   try:
-    #       server.succeed("systemctl start crystal-forge-postgres-jobs.service")
-    #       # Check logs again for second successful run
-    #       server.succeed("journalctl -u crystal-forge-postgres-jobs.service | tail -20 | grep 'All jobs completed successfully'")
-    #   except Exception:
-    #       pytest.fail("postgres jobs are not idempotent - failed on second run")
-    #
-    #   server.log("=== postgres jobs validation completed ===")
-    #
-    #   # =============================================
-    #   # BUILDER SERVICE TESTS
-    #   # =============================================
-    #
-    #   # 1. Enable builder service on server node
-    #   server.succeed("systemctl enable crystal-forge-builder.service")
-    #   server.succeed("systemctl start crystal-forge-builder.service")
-    #
-    #   # 2. Wait for builder service to start
-    #   try:
-    #       server.wait_for_unit("crystal-forge-builder.service")
-    #   except Exception:
-    #       pytest.fail("crystal-forge-builder.service failed to start")
-    #
-    #   # 3. Check builder service is active and running
-    #   try:
-    #       server.succeed("systemctl is-active crystal-forge-builder.service")
-    #   except Exception:
-    #       pytest.fail("crystal-forge-builder.service is not active")
-    #
-    #   # 4. Verify builder can access Nix
-    #   try:
-    #       server.succeed("sudo -u crystal-forge nix --version")
-    #   except Exception:
-    #       pytest.fail("crystal-forge user cannot access nix command")
-    #
-    #   # 5. Check builder working directory exists with correct permissions
-    #   try:
-    #       server.succeed("test -d /var/lib/crystal-forge/workdir")
-    #       server.succeed("stat -c '%U' /var/lib/crystal-forge/workdir | grep -q crystal-forge")
-    #   except Exception:
-    #       pytest.fail("Builder working directory not properly set up")
-    #
-    #   # 6. Check builder cache directory exists
-    #   try:
-    #       server.succeed("test -d /var/lib/crystal-forge/.cache/nix")
-    #       server.succeed("stat -c '%U' /var/lib/crystal-forge/.cache/nix | grep -q crystal-forge")
-    #   except Exception:
-    #       pytest.fail("Builder cache directory not properly set up")
-    #
-    #   # 7. Test that builder logs are being generated
-    #   try:
-    #       server.wait_until_succeeds("journalctl -u crystal-forge-builder.service | grep 'Starting Build loop'", timeout=30)
-    #   except Exception:
-    #       pytest.fail("Builder service not logging startup messages")
-    #
-    #   # 11. Check builder memory usage is reasonable
-    #   try:
-    #       memory_usage = server.succeed("systemctl show crystal-forge-builder.service --property=MemoryCurrent")
-    #       server.log(f"Builder memory usage: {memory_usage}")
-    #       # Extract numeric value and check it's not excessive (less than 4GB)
-    #       if "MemoryCurrent=" in memory_usage:
-    #           mem_bytes = int(memory_usage.split("=")[1].strip())
-    #           if mem_bytes > 4 * 1024 * 1024 * 1024:  # 4GB in bytes
-    #               pytest.fail(f"Builder using excessive memory: {mem_bytes} bytes")
-    #   except Exception as e:
-    #       server.log(f"Warning: Could not check builder memory usage: {e}")
-    #
-    #   # 12. Test builder resource limits are applied
-    #   try:
-    #       # Check systemd limits are in place
-    #       server.succeed("systemctl show crystal-forge-builder.service --property=MemoryMax | grep -v infinity")
-    #       server.succeed("systemctl show crystal-forge-builder.service --property=TasksMax | grep -v infinity")
-    #   except Exception:
-    #       pytest.fail("Builder resource limits not properly configured")
-    #
-    #   # 13. Check builder can handle configuration reload
-    #   try:
-    #       server.succeed("systemctl reload-or-restart crystal-forge-builder.service")
-    #       server.wait_for_unit("crystal-forge-builder.service")
-    #       server.wait_until_succeeds("journalctl -u crystal-forge-builder.service | grep 'Starting Build loop'", timeout=30)
-    #   except Exception:
-    #       pytest.fail("Builder service cannot handle reload/restart")
-    #
-    #   # 14. Test builder cleanup functionality
-    #   try:
-    #       # Create some test symlinks that builder should clean up
-    #       server.succeed("sudo -u crystal-forge touch /var/lib/crystal-forge/workdir/result-test")
-    #       server.succeed("sudo -u crystal-forge ln -sf /nix/store/fake /var/lib/crystal-forge/workdir/result-old")
-    #
-    #       # Restart builder to trigger cleanup
-    #       server.succeed("systemctl restart crystal-forge-builder.service")
-    #       server.wait_for_unit("crystal-forge-builder.service")
-    #
-    #       # Check cleanup occurred (this might take a moment)
-    #       server.wait_until_fails("test -L /var/lib/crystal-forge/workdir/result-old", timeout=30)
-    #   except Exception as e:
-    #       server.log(f"Warning: Builder cleanup test failed: {e}")
-    #
-    #   # 15. Verify builder and server are not conflicting
-    #   try:
-    #       server_status = server.succeed("systemctl is-active crystal-forge-server.service")
-    #       builder_status = server.succeed("systemctl is-active crystal-forge-builder.service")
-    #       if "active" not in server_status or "active" not in builder_status:
-    #           pytest.fail("Server and builder services are conflicting")
-    #   except Exception:
-    #       pytest.fail("Cannot verify server and builder coexistence")
-    #
-    #
-    #   # =============================================
-    #   # CVE SCAN TESTS (if vulnix is available)
-    #   # =============================================
-    #
-    #   # 19. Check if vulnix is available for CVE scanning
-    #   try:
-    #       server.succeed("which vulnix")
-    #       vulnix_available = True
-    #   except Exception:
-    #       server.log("Warning: vulnix not available for CVE scanning tests")
-    #       vulnix_available = False
-    #
-    #   if vulnix_available:
-    #       # 20. Check CVE scan loop is running
-    #       try:
-    #           server.wait_until_succeeds(
-    #               "journalctl -u crystal-forge-builder.service | grep 'Starting CVE Scan loop'",
-    #               timeout=30
-    #           )
-    #       except Exception:
-    #           pytest.fail("CVE scan loop not starting")
-    #
-    #       # 21. Wait for CVE scan processing (this may take time)
-    #       try:
-    #           server.wait_until_succeeds(
-    #               "journalctl -u crystal-forge-builder.service | grep -E '(CVE scan|vulnix)'",
-    #               timeout=120
-    #           )
-    #       except Exception:
-    #           server.log("Warning: CVE scan did not run within timeout")
-    #
-    #   server.log("=== CVE scan validation completed ===")
-    #
-    #   # =============================================
-    #   # SQL VIEW TESTS
-    #   # =============================================
-    #
-    #   # Wait for all services to be fully operational
-    #   server.wait_for_unit("postgresql")
-    #   server.wait_for_unit("crystal-forge-server.service")
-    #
-    #   # Give some time for views to be created and data to populate
-    #   import time
-    #   time.sleep(10)
-    #
-    #   server.log("=== Running SQL View Tests ===")
-    #
-    #   try:
-    #       # Run the SQL test suite
-    #       test_output = server.succeed("psql -U crystal_forge -d crystal_forge -f /etc/crystal-forge-tests.sql")
-    #       server.log("SQL Test Results:\\n" + test_output)
-    #
-    #       # Check for any FAIL results
-    #       if "FAIL:" in test_output:
-    #           pytest.fail("One or more SQL view tests failed. Check logs above.")
-    #       else:
-    #           server.log("✅ All SQL view tests passed")
-    #
-    #   except Exception as e:
-    #       pytest.fail(f"SQL view tests failed to execute: {e}")
-    #
-    #   # Additional specific view tests after data is populated
-    #   try:
-    #       # Test that agent appears in views after registration
-    #       view_check = server.succeed("""
-    #           psql -U crystal_forge -d crystal_forge -c "
-    #           SELECT hostname, status, status_text
-    #           FROM view_systems_status_table
-    #           WHERE hostname = 'agent';
-    #           "
-    #       """)
-    #       server.log("Agent in status table:\\n" + view_check)
-    #
-    #       if "agent" not in view_check:
-    #           pytest.fail("Agent hostname not found in view_systems_status_table")
-    #
-    #   except Exception as e:
-    #       pytest.fail(f"Failed to verify agent in views: {e}")
-    #
-    #   # Test view performance under load
-    #   try:
-    #       import time
-    #       start_time = time.time()
-    #
-    #       server.succeed("""
-    #           psql -U crystal_forge -d crystal_forge -c "
-    #           SELECT COUNT(*) FROM view_systems_current_state;
-    #           SELECT COUNT(*) FROM view_systems_status_table;
-    #           SELECT COUNT(*) FROM view_commit_deployment_timeline;
-    #           "
-    #       """)
-    #
-    #       end_time = time.time()
-    #       query_time = end_time - start_time
-    #
-    #       server.log(f"View query performance: {query_time:.2f} seconds")
-    #
-    #       if query_time > 5.0:  # 5 second threshold
-    #           pytest.fail(f"Views are too slow: {query_time:.2f} seconds")
-    #
-    #   except Exception as e:
-    #       pytest.fail(f"View performance test failed: {e}")
-    #
-    #   server.log("=== SQL View Tests Completed ===")
-    # '';
+    inherit testScript;
   }
