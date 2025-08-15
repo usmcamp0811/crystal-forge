@@ -22,7 +22,7 @@
     cp -r $src/* $out/
   '';
 
-  sqlTestsPath = pkgs.writeText "crystal-forge-view-tests.sql" (builtins.readFile ./sql/view-tests.sql);
+  sqlTestsPath = pkgs.writeText "crystal-forge-view-tests.sql" (builtins.readFile ./tests/view-tests.sql);
 
   pythonFiles = map (f: ./tests + "/${f}") [
     "00_bootstrap.py"
@@ -51,8 +51,8 @@ in
         networking.firewall.allowedTCPPorts = [3000];
 
         environment.etc."crystal-forge-tests.sql".source = sqlTestsPath;
-        environment.etc."agent.key".source = keyPath;
-        environment.etc."agent.pub".source = pubPath;
+        environment.etc."agent.key".source = "${keyPath}/agent.key";
+        environment.etc."agent.pub".source = "${pubPath}/agent.pub";
         environment.etc."cf_flake".source = cfFlakePath;
 
         services.postgresql = {
@@ -98,7 +98,7 @@ in
           systems = [
             {
               hostname = "agent";
-              public_key = lib.strings.trim (builtins.readFile pubPath);
+              public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
               environment = "test";
               flake_name = "dotfiles";
             }
@@ -121,8 +121,8 @@ in
         networking.useDHCP = true;
         networking.firewall.enable = false;
 
-        environment.etc."agent.key".source = keyPath;
-        environment.etc."agent.pub".source = pubPath;
+        environment.etc."agent.key".source = "${keyPath}/agent.key";
+        environment.etc."agent.pub".source = "${pubPath}/agent.pub";
 
         services.crystal-forge = {
           enable = true;
