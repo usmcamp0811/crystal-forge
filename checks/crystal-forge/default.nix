@@ -1,4 +1,3 @@
-# checks/crystal-forge.nix
 {
   lib,
   inputs,
