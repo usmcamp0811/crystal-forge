@@ -40,20 +40,18 @@
     }).config.system.build.toplevel;
 
   # Create a flake that references the pre-built system
-  # Create a flake that references the pre-built system
   toyFlakeDir = pkgs.runCommand "toyflake-dir" {} ''
     mkdir -p $out
 
-    # Write the flake.nix that references pre-built system
+    # Write the flake.nix that doesn't depend on external nixpkgs
     cat > $out/flake.nix << 'EOF'
     {
-      inputs = {
-        nixpkgs.url = "path:${pkgs.path}";
-      };
-      outputs = { self, nixpkgs }:
+      inputs = {};
+      outputs = { self }:
       let
         system = "${system}";
-        pkgs = nixpkgs.legacyPackages.${system};
+        # Use the same pkgs that was passed in to avoid any path mismatches
+        pkgs = (import ${pkgs.path} { inherit system; });
       in {
         packages.${system}.hello = pkgs.writeShellApplication {
           name = "hello";
@@ -62,7 +60,7 @@
 
         packages.${system}.default = self.packages.${system}.hello;
 
-        nixosConfigurations.cf-test-sys = nixpkgs.lib.nixosSystem {
+        nixosConfigurations.cf-test-sys = (import ${pkgs.path}/nixos/lib/eval-config.nix {
           inherit system;
           modules = [{
             boot.isContainer = true;
@@ -79,31 +77,17 @@
             documentation.nixos.enable = false;
             system.nssModules = pkgs.lib.mkForce [];
           }];
-        };
+        });
       };
     }
     EOF
 
-    # Create a flake.lock with nixpkgs
+    # Create a simple flake.lock without nixpkgs input
     cat > $out/flake.lock << 'EOF'
     {
       "nodes": {
-        "nixpkgs": {
-          "locked": {
-            "lastModified": 1,
-            "narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "path": "${pkgs.path}",
-            "type": "path"
-          },
-          "original": {
-            "path": "${pkgs.path}",
-            "type": "path"
-          }
-        },
         "root": {
-          "inputs": {
-            "nixpkgs": "nixpkgs"
-          }
+          "inputs": {}
         }
       },
       "root": "root",
@@ -255,7 +239,7 @@ in
       builder.succeed("nix build /etc/toyflake#hello -o /root/pkg --impure")
       builder.succeed("/root/pkg/bin/hello | grep hello-from-flake")
 
-      # Test local nixos system build
+      # Test local nixos system build - use the correct attribute path
       builder.succeed("nix build /etc/toyflake#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /root/system --impure")
       builder.succeed("test -e /root/system")
 
@@ -266,5 +250,9 @@ in
       builder.succeed("nix flake show git://gitserver:8080/test-flake.git --no-write-lock-file")
       builder.succeed("nix build git://gitserver:8080/test-flake.git#hello -o /root/remote-pkg --no-write-lock-file")
       builder.succeed("/root/remote-pkg/bin/hello | grep hello-from-flake")
-    ''; # Replace the entire gitserver configuration with this minimal approach:
+
+      # Test remote nixos system build
+      builder.succeed("nix build git://gitserver:8080/test-flake.git#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /root/remote-system --no-write-lock-file")
+      builder.succeed("test -e /root/remote-system")
+    '';
   }
