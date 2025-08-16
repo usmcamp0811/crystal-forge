@@ -1,0 +1,373 @@
+{
+  pkgs,
+  system,
+  inputs,
+  ...
+}: let
+  lib = pkgs.lib;
+
+  # Pre-build a hello package for the test system
+  helloPackage = pkgs.writeShellApplication {
+    name = "hello";
+    text = "echo hello-from-crystal-forge-test\n";
+  };
+
+  # Pre-build a minimal NixOS system for testing
+  nixosSystemToplevel =
+    (import (pkgs.path + "/nixos/lib/eval-config.nix") {
+      inherit system;
+      modules = [
+        {
+          boot.isContainer = true;
+          fileSystems."/" = {
+            device = "none";
+            fsType = "tmpfs";
+          };
+          services.getty.autologinUser = "root";
+          environment.systemPackages = [helloPackage];
+          system.stateVersion = "25.05";
+          services.udisks2.enable = false;
+          security.polkit.enable = false;
+          documentation.enable = false;
+          documentation.nixos.enable = false;
+          system.nssModules = lib.mkForce [];
+        }
+      ];
+    }).config.system.build.toplevel;
+
+  # Create a test flake for Crystal Forge
+  testFlakeDir = pkgs.runCommand "crystal-forge-test-flake" {} ''
+    mkdir -p $out
+    cat > $out/flake.nix << 'EOF'
+    {
+      inputs = {
+        nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+      };
+      outputs = { self, nixpkgs }:
+      let
+        system = "${system}";
+        pkgs = import nixpkgs { inherit system; };
+      in {
+        packages.''${system}.hello = ${helloPackage};
+        defaultPackage.''${system} = self.packages.''${system}.hello;
+
+        nixosConfigurations = {
+          test-system = nixpkgs.lib.nixosSystem {
+            inherit system;
+            modules = [
+              {
+                boot.isContainer = true;
+                fileSystems."/" = { device = "none"; fsType = "tmpfs"; };
+                services.getty.autologinUser = "root";
+                environment.systemPackages = [ self.packages.''${system}.hello ];
+                system.stateVersion = "25.05";
+                services.udisks2.enable = false;
+                security.polkit.enable = false;
+                documentation.enable = false;
+                documentation.nixos.enable = false;
+                system.nssModules = pkgs.lib.mkForce [];
+              }
+            ];
+          };
+        };
+      };
+    }
+    EOF
+
+    cat > $out/flake.lock << 'EOF'
+    {
+      "nodes": {
+        "nixpkgs": {
+          "locked": {
+            "lastModified": 1,
+            "narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "type": "github",
+            "owner": "NixOS",
+            "repo": "nixpkgs"
+          },
+          "original": {
+            "type": "github",
+            "owner": "NixOS",
+            "repo": "nixpkgs",
+            "ref": "nixos-unstable"
+          }
+        },
+        "root": {
+          "inputs": {
+            "nixpkgs": "nixpkgs"
+          }
+        }
+      },
+      "root": "root",
+      "version": 7
+    }
+    EOF
+  '';
+
+  # Create a bare git repo containing the test flake
+  testFlakeGit = pkgs.runCommand "crystal-forge-test-flake.git" {buildInputs = [pkgs.git];} ''
+    set -eu
+    export HOME=$PWD
+    work="$TMPDIR/w"
+    mkdir -p "$work"
+    cp -r ${testFlakeDir}/* "$work"/
+    chmod -R u+rwX "$work"
+
+    git -C "$work" init
+    git -C "$work" config user.name "Crystal Forge Test"
+    git -C "$work" config user.email "test@crystal-forge.dev"
+    git -C "$work" add .
+    GIT_AUTHOR_DATE="1970-01-01T00:00:00Z" \
+    GIT_COMMITTER_DATE="1970-01-01T00:00:00Z" \
+      git -C "$work" commit -m "Initial test flake commit" --no-gpg-sign
+
+    git init --bare "$out"
+    git -C "$out" config receive.denyCurrentBranch ignore
+    git -C "$work" push "$out" HEAD:refs/heads/main
+    git -C "$out" symbolic-ref HEAD refs/heads/main
+  '';
+
+  # Generate test keypair for Crystal Forge
+  testKeyPair = pkgs.runCommand "test-keypair" {} ''
+    mkdir -p $out
+    ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/test.key
+  '';
+in
+  pkgs.testers.runNixOSTest {
+    name = "crystal-forge-nixos-build-integration";
+
+    nodes.builder = {
+      pkgs,
+      config,
+      ...
+    }: {
+      imports = [inputs.self.nixosModules.crystal-forge];
+
+      services.getty.autologinUser = "root";
+      virtualisation.writableStore = true;
+      virtualisation.memorySize = 4096;
+      virtualisation.cores = 2;
+
+      # Enable Crystal Forge with test configuration
+      services.crystal-forge = {
+        enable = true;
+        local-database = true;
+        log_level = "debug";
+
+        database = {
+          user = "crystal_forge";
+          host = "localhost";
+          name = "crystal_forge";
+        };
+
+        # Configure test flake for watching
+        flakes.watched = [
+          {
+            name = "test-flake";
+            repo_url = "/etc/test-flake.git";
+            auto_poll = false;
+          }
+        ];
+
+        # Test environment configuration
+        environments = [
+          {
+            name = "test";
+            description = "Test environment for Crystal Forge NixOS builds";
+            is_active = true;
+            risk_profile = "LOW";
+            compliance_level = "NONE";
+          }
+        ];
+
+        # Test system configuration
+        systems = [
+          {
+            hostname = "test-system";
+            public_key = lib.strings.trim (builtins.readFile "${testKeyPair}/test.pub");
+            environment = "test";
+            flake_name = "test-flake";
+          }
+        ];
+
+        server = {
+          enable = true;
+          host = "0.0.0.0";
+          port = 3000;
+        };
+      };
+
+      # PostgreSQL setup
+      services.postgresql = {
+        enable = true;
+        authentication = lib.concatStringsSep "\n" [
+          "local all root trust"
+          "local all postgres peer"
+          "host all all 127.0.0.1/32 trust"
+          "host all all ::1/128 trust"
+        ];
+        initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+          CREATE USER crystal_forge LOGIN;
+          CREATE DATABASE crystal_forge OWNER crystal_forge;
+          GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+        '';
+      };
+
+      # Nix configuration for building
+      nix = {
+        package = pkgs.nixVersions.stable;
+        settings = {
+          experimental-features = ["nix-command" "flakes"];
+          substituters = [];
+          builders-use-substitutes = false;
+          fallback = false;
+          sandbox = true;
+        };
+        extraOptions = ''
+          accept-flake-config = true
+          flake-registry = ${pkgs.writeText "empty-registry.json" ''{"flakes":[]}''}
+        '';
+      };
+
+      nix.nixPath = ["nixpkgs=${pkgs.path}"];
+      environment.systemPackages = [pkgs.git pkgs.crystal-forge.cli];
+
+      # Mount test assets
+      environment.etc = {
+        "test-flake.git".source = testFlakeGit;
+        "test.key".source = "${testKeyPair}/test.key";
+        "test.pub".source = "${testKeyPair}/test.pub";
+      };
+    };
+
+    globalTimeout = 900; # 15 minutes for build operations
+    extraPythonPackages = p: [p.pytest];
+
+    testScript = ''
+      import pytest
+      import time
+
+      builder.start()
+
+      # Wait for PostgreSQL and Crystal Forge services
+      builder.wait_for_unit("postgresql")
+      builder.wait_for_unit("crystal-forge-server.service")
+      builder.wait_for_unit("crystal-forge-builder.service")
+
+      # Verify services are active
+      builder.succeed("systemctl is-active postgresql") \
+        or pytest.fail("PostgreSQL is not active")
+      builder.succeed("systemctl is-active crystal-forge-server.service") \
+        or pytest.fail("Crystal Forge server is not active")
+      builder.succeed("systemctl is-active crystal-forge-builder.service") \
+        or pytest.fail("Crystal Forge builder is not active")
+
+      # Verify Crystal Forge user can access nix
+      builder.succeed("sudo -u crystal-forge nix --version") \
+        or pytest.fail("crystal-forge user cannot access nix command")
+
+      # Check that the test flake repo is accessible
+      builder.succeed("test -d /etc/test-flake.git")
+      builder.succeed("ls -la /etc/test-flake.git/")
+
+      # Wait for Crystal Forge to initialize and sync config to database
+      builder.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep -i 'server started\\|listening'", timeout=60)
+
+      # Test manual flake evaluation using Crystal Forge CLI
+      builder.log("Testing manual flake evaluation...")
+
+      # Clone the test flake to a working directory
+      builder.succeed("git clone /etc/test-flake.git /tmp/test-flake")
+      builder.succeed("cd /tmp/test-flake && git log --oneline")
+
+      # Get the commit hash for testing
+      commit_hash = builder.succeed("cd /tmp/test-flake && git rev-parse HEAD").strip()
+      builder.log(f"Test commit hash: {commit_hash}")
+
+      # Test that we can evaluate the NixOS configuration
+      builder.log("Testing NixOS configuration evaluation...")
+      builder.succeed(f"cd /tmp/test-flake && nix build .#nixosConfigurations.test-system.config.system.build.toplevel --dry-run")
+
+      # Insert test commit into Crystal Forge database via API or CLI
+      builder.log("Adding test commit to Crystal Forge...")
+
+      # Use Crystal Forge CLI to trigger evaluation
+      # This should create the necessary database entries and trigger the build loop
+      builder.succeed("sudo -u crystal-forge crystal-forge-cli flake add test-flake /etc/test-flake.git")
+
+      # Wait for the build loop to pick up and process the commit
+      builder.log("Waiting for Crystal Forge to process the commit...")
+      builder.wait_until_succeeds(
+        "journalctl -u crystal-forge-builder.service | grep -E '(Starting build|Build completed|test-system)'",
+        timeout=300
+      )
+
+      # Verify that Crystal Forge successfully built the NixOS system
+      builder.log("Verifying NixOS system build...")
+
+      # Check that derivations were created and processed
+      builder.wait_until_succeeds(
+        "sudo -u crystal-forge psql crystal_forge -c \"SELECT COUNT(*) FROM derivations WHERE derivation_type = 'nixos' AND derivation_name = 'test-system';\" | grep -v '^0$'",
+        timeout=60
+      )
+
+      # Check build status in database
+      build_status = builder.succeed(
+        "sudo -u crystal-forge psql crystal_forge -t -c \"SELECT ds.name FROM derivations d JOIN derivation_statuses ds ON d.status_id = ds.id WHERE d.derivation_name = 'test-system' ORDER BY d.id DESC LIMIT 1;\""
+      ).strip()
+
+      builder.log(f"Build status: {build_status}")
+
+      # Verify successful build (should be 'build-complete' or similar success status)
+      if build_status not in ["build-complete", "completed", "success"]:
+        # Get more detailed error information
+        error_info = builder.succeed(
+          "sudo -u crystal-forge psql crystal_forge -t -c \"SELECT error_message FROM derivations WHERE derivation_name = 'test-system' ORDER BY id DESC LIMIT 1;\""
+        ).strip()
+        builder.log(f"Build error: {error_info}")
+
+        # Show recent builder logs for debugging
+        builder.succeed("journalctl -u crystal-forge-builder.service --since '5 minutes ago'")
+        pytest.fail(f"Build did not complete successfully. Status: {build_status}, Error: {error_info}")
+
+      # Verify the built system has the expected components
+      builder.log("Verifying built system contents...")
+
+      # Get the store path of the built system
+      store_path = builder.succeed(
+        "sudo -u crystal-forge psql crystal_forge -t -c \"SELECT derivation_path FROM derivations WHERE derivation_name = 'test-system' AND derivation_path IS NOT NULL ORDER BY id DESC LIMIT 1;\""
+      ).strip()
+
+      if store_path:
+        builder.log(f"Built system store path: {store_path}")
+        builder.succeed(f"test -e {store_path}")
+        builder.succeed(f"test -x {store_path}/bin/switch-to-configuration")
+
+        # Verify our test package is included
+        builder.succeed(f"find {store_path} -name '*hello*' | grep -q hello")
+      else:
+        pytest.fail("No store path found for built system")
+
+      # Test that Crystal Forge can handle the full workflow
+      builder.log("Testing complete Crystal Forge workflow...")
+
+      # Verify CVE scanning capability (should be queued but might not complete in test time)
+      scan_count = builder.succeed(
+        "sudo -u crystal-forge psql crystal_forge -c \"SELECT COUNT(*) FROM cve_scans WHERE derivation_id IN (SELECT id FROM derivations WHERE derivation_name = 'test-system');\" | tail -n 1"
+      ).strip()
+
+      builder.log(f"CVE scans initiated: {scan_count}")
+
+      # Final verification - check that Crystal Forge maintained system state
+      builder.log("Final system verification...")
+      builder.succeed("systemctl is-active crystal-forge-server.service")
+      builder.succeed("systemctl is-active crystal-forge-builder.service")
+
+      # Verify database integrity
+      builder.succeed("sudo -u crystal-forge psql crystal_forge -c \"SELECT COUNT(*) FROM flakes;\"")
+      builder.succeed("sudo -u crystal-forge psql crystal_forge -c \"SELECT COUNT(*) FROM commits;\"")
+      builder.succeed("sudo -u crystal-forge psql crystal_forge -c \"SELECT COUNT(*) FROM derivations;\"")
+
+      builder.log("✅ Crystal Forge NixOS build integration test completed successfully!")
+    '';
+  }

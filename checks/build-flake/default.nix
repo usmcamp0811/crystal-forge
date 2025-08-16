@@ -24,7 +24,7 @@
             fsType = "tmpfs";
           };
           services.getty.autologinUser = "root";
-          environment.systemPackages = [];
+          environment.systemPackages = [helloPackage];
           system.stateVersion = "25.05";
 
           # Disable unnecessary services for faster build
