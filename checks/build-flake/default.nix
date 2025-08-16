@@ -138,8 +138,36 @@ in
       gitserver = {pkgs, ...}: {
         services.getty.autologinUser = "root";
         networking.firewall.allowedTCPPorts = [8080];
+        virtualisation.writableStore = true; # Add this
+        virtualisation.memorySize = 2048; # Add this
 
         environment.systemPackages = [pkgs.git pkgs.python3];
+
+        # Add Nix configuration for flake support
+        nix = {
+          package = pkgs.nixVersions.stable;
+          settings = {
+            experimental-features = ["nix-command" "flakes"];
+            substituters = [];
+            builders-use-substitutes = false;
+            fallback = false;
+            sandbox = true;
+          };
+          extraOptions = ''
+            accept-flake-config = true
+            flake-registry = ${pkgs.writeText "empty-registry.json" ''{"flakes":[]}''}
+          '';
+        };
+
+        # Make nixpkgs available in NIX_PATH
+        nix.nixPath = ["nixpkgs=${pkgs.path}"];
+
+        # Ensure needed closures are present
+        environment.etc = {
+          toyflake.source = toyFlakeDir;
+          "prefetch-hello".source = helloPackage;
+          "prefetch-nixos-system".source = nixosSystemToplevel;
+        };
 
         # Create git user for proper permissions
         users.users.git = {
@@ -150,19 +178,17 @@ in
         };
         users.groups.git = {};
 
-        # Copy the test flake git repo to the expected location
+        # Rest of your existing gitserver config...
         systemd.tmpfiles.rules = [
           "d /srv/git 0755 git git -"
           "L+ /srv/git/test-flake.git - - - - ${testFlakeGit}"
         ];
 
-        # Configure git to trust the repository directory
         environment.etc."gitconfig".text = ''
           [safe]
               directory = /srv/git/test-flake.git
         '';
 
-        # Use a simple HTTP server that can serve git repositories
         systemd.services.git-http-server = {
           enable = true;
           description = "Simple Git HTTP Server";
@@ -179,7 +205,6 @@ in
           };
         };
 
-        # Ensure proper ownership after the symlink is created
         systemd.services.fix-git-ownership = {
           enable = true;
           description = "Fix Git Repository Ownership";
@@ -235,24 +260,37 @@ in
       builder.start()
       builder.wait_for_unit("multi-user.target")
 
-      # Test local package build
+      # Test local package build on builder
       builder.succeed("nix build /etc/toyflake#hello -o /root/pkg --impure")
       builder.succeed("/root/pkg/bin/hello | grep hello-from-flake")
 
-      # Test local nixos system build - use the correct attribute path
+      # Test local nixos system build on builder
       builder.succeed("nix build /etc/toyflake#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /root/system --impure")
       builder.succeed("test -e /root/system")
 
-      # Test basic connectivity first
+      # Test basic connectivity
       gitserver.succeed("ls -la /srv/git/test-flake.git/")
 
-      # Test remote flake access via git protocol
-      builder.succeed("nix flake show git://gitserver:8080/test-flake.git --no-write-lock-file")
-      builder.succeed("nix build git://gitserver:8080/test-flake.git#hello -o /root/remote-pkg --no-write-lock-file")
+      # Clone the repository on gitserver to get a working tree
+      gitserver.succeed("cd /tmp && git clone /srv/git/test-flake.git test-flake-checkout")
+      gitserver.succeed("ls -la /tmp/test-flake-checkout/")
+
+      # Test flake operations on the gitserver using the checked-out copy
+      gitserver.succeed("nix flake show /tmp/test-flake-checkout --impure")
+      gitserver.succeed("nix build /tmp/test-flake-checkout#hello -o /root/gitserver-pkg --impure")
+      gitserver.succeed("/root/gitserver-pkg/bin/hello | grep hello-from-flake")
+
+      # Test nixos system build on gitserver
+      gitserver.succeed("nix build /tmp/test-flake-checkout#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /root/gitserver-system --impure")
+      gitserver.succeed("test -e /root/gitserver-system")
+
+      # Test remote flake access from builder (this should work with git protocol)
+      builder.succeed("nix flake show git://gitserver:8080/test-flake.git --no-write-lock-file --impure")
+      builder.succeed("nix build git://gitserver:8080/test-flake.git#hello -o /root/remote-pkg --no-write-lock-file --impure")
       builder.succeed("/root/remote-pkg/bin/hello | grep hello-from-flake")
 
       # Test remote nixos system build
-      builder.succeed("nix build git://gitserver:8080/test-flake.git#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /root/remote-system --no-write-lock-file")
+      builder.succeed("nix build git://gitserver:8080/test-flake.git#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /root/remote-system --no-write-lock-file --impure")
       builder.succeed("test -e /root/remote-system")
     '';
   }
