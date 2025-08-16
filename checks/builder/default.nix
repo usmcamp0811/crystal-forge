@@ -164,7 +164,6 @@ in
       server.succeed("sudo -u crystal-forge ln -sf /nix/store/fake /var/lib/crystal-forge/workdir/result-old")
       server.succeed("systemctl restart crystal-forge-builder.service")
       server.wait_for_unit("crystal-forge-builder.service")
-      # server.wait_until_fails("test -L /var/lib/crystal-forge/workdir/result-old", timeout=30)
 
       server_status = server.succeed("systemctl is-active crystal-forge-server.service")
       builder_status = server.succeed("systemctl is-active crystal-forge-builder.service")
