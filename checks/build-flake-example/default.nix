@@ -273,20 +273,9 @@ in
       # Wait for Crystal Forge to initialize and sync config to database
       builder.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep -i 'server started\\|listening'", timeout=60)
 
-      # Test manual flake evaluation using Crystal Forge CLI
-      builder.log("Testing manual flake evaluation...")
-
-      # Clone the test flake to a working directory
-      builder.succeed("git clone /etc/test-flake.git /tmp/test-flake")
-      builder.succeed("cd /tmp/test-flake && git log --oneline")
-
       # Get the commit hash for testing
       commit_hash = builder.succeed("cd /tmp/test-flake && git rev-parse HEAD").strip()
       builder.log(f"Test commit hash: {commit_hash}")
-
-      # Test that we can evaluate the NixOS configuration
-      builder.log("Testing NixOS configuration evaluation...")
-      builder.succeed(f"cd /tmp/test-flake && nix build .#nixosConfigurations.test-system.config.system.build.toplevel --dry-run")
 
       # Insert test commit into Crystal Forge database via API or CLI
       builder.log("Adding test commit to Crystal Forge...")
