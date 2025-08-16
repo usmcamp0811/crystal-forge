@@ -5,7 +5,7 @@
   ...
 }: {
   # Minimal configuration
-  boot.isContainer = true;
+  # boot.isContainer = true;
   fileSystems."/" = {
     device = "none";
     fsType = "tmpfs";
