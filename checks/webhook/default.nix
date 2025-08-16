@@ -21,6 +21,26 @@
     mkdir -p $out
     cp -r $src/* $out/
   '';
+
+  sqlTestsPath = pkgs.writeText "crystal-forge-view-tests.sql" (builtins.readFile ./tests/view-tests.sql);
+
+  # Create a proper derivation for the test package
+  testPackage = pkgs.stdenv.mkDerivation {
+    pname = "crystal-forge-tests";
+    version = "1.0.0";
+
+    src = ./tests;
+
+    dontBuild = true;
+
+    installPhase = ''
+      mkdir -p $out
+
+      # Copy all files from the tests directory
+      cp -r $src/* $out/
+    '';
+  };
+  testScript = builtins.readFile "${testPackage}/run_tests.py";
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
@@ -36,6 +56,7 @@ in
         networking.useDHCP = true;
         networking.firewall.allowedTCPPorts = [3000];
 
+        environment.etc."crystal-forge-tests.sql".source = sqlTestsPath;
         environment.etc."agent.key".source = "${keyPath}/agent.key";
         environment.etc."agent.pub".source = "${pubPath}/agent.pub";
         environment.etc."cf_flake".source = cfFlakePath;
@@ -124,37 +145,28 @@ in
     globalTimeout = 600;
     extraPythonPackages = p: [p.pytest];
     testScript = ''
+      import pytest
+
       start_all()
       server.wait_for_unit("postgresql")
       server.wait_for_unit("crystal-forge-server.service")
+      agent.wait_for_unit("crystal-forge-agent.service")
+      server.wait_for_unit("multi-user.target")
 
-      # time.sleep(10)
-      #
-      # test_output = server.succeed("psql -U crystal_forge -d crystal_forge -f /etc/crystal-forge-tests.sql")
-      # if "FAIL:" in test_output:
-      #     pytest.fail("One or more SQL view tests failed")
-      #
-      # view_check = server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT hostname, status, status_text
-      #     FROM view_systems_status_table
-      #     WHERE hostname = 'agent';
-      #   "
-      # """)
-      # if "agent" not in view_check:
-      #     pytest.fail("Agent hostname not found in view_systems_status_table")
-      #
-      # t0 = time.time()
-      # server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT COUNT(*) FROM view_systems_current_state;
-      #     SELECT COUNT(*) FROM view_systems_status_table;
-      #     SELECT COUNT(*) FROM view_commit_deployment_timeline;
-      #   "
-      # """)
-      # dt = time.time() - t0
-      # server.log(f"View query performance: {dt:.2f} seconds")
-      # if dt > 5.0:
-      #     pytest.fail(f"Views are too slow: {dt:.2f} seconds")
+      server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep -E 'accepted.*agent'")
+
+      commit_hash = "2abc071042b61202f824e7f50b655d00dfd07765"
+      curl_data = f"""'{{"project": {{"web_url": "https://gitlab.com/usmcamp0811/dotfiles"}}, "checkout_sha": "{commit_hash}"}}'"""
+
+      server.succeed(f"curl -s -X POST http://localhost:3000/webhook -H 'Content-Type: application/json' -d {curl_data}")
+      server.wait_until_succeeds(f"journalctl -u crystal-forge-server.service | grep {commit_hash}")
+
+      flake_check = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT repo_url FROM flakes WHERE repo_url = 'https://gitlab.com/usmcamp0811/dotfiles';\"")
+      if "https://gitlab.com/usmcamp0811/dotfiles" not in flake_check:
+          pytest.fail("flake not found in DB")
+
+      commit_list = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT * FROM commits;'")
+      if "0 rows" in commit_list or "0 rows" in commit_list.lower():
+          pytest.fail("commits is empty")
     '';
   }

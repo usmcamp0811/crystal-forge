@@ -124,37 +124,38 @@ in
     globalTimeout = 600;
     extraPythonPackages = p: [p.pytest];
     testScript = ''
+
+      import pytest
       start_all()
+
+      server.succeed("systemctl status crystal-forge-server.service || true")
+      server.log("=== crystal-forge-server service logs ===")
+      server.succeed("journalctl -u crystal-forge-server.service --no-pager || true")
+
       server.wait_for_unit("postgresql")
       server.wait_for_unit("crystal-forge-server.service")
+      agent.wait_for_unit("crystal-forge-agent.service")
+      server.wait_for_unit("multi-user.target")
 
-      # time.sleep(10)
-      #
-      # test_output = server.succeed("psql -U crystal_forge -d crystal_forge -f /etc/crystal-forge-tests.sql")
-      # if "FAIL:" in test_output:
-      #     pytest.fail("One or more SQL view tests failed")
-      #
-      # view_check = server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT hostname, status, status_text
-      #     FROM view_systems_status_table
-      #     WHERE hostname = 'agent';
-      #   "
-      # """)
-      # if "agent" not in view_check:
-      #     pytest.fail("Agent hostname not found in view_systems_status_table")
-      #
-      # t0 = time.time()
-      # server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT COUNT(*) FROM view_systems_current_state;
-      #     SELECT COUNT(*) FROM view_systems_status_table;
-      #     SELECT COUNT(*) FROM view_commit_deployment_timeline;
-      #   "
-      # """)
-      # dt = time.time() - t0
-      # server.log(f"View query performance: {dt:.2f} seconds")
-      # if dt > 5.0:
-      #     pytest.fail(f"Views are too slow: {dt:.2f} seconds")
+      agent.succeed("test -r /etc/agent.key")
+      agent.succeed("test -r /etc/agent.pub")
+      server.succeed("test -r /etc/agent.pub")
+
+      server.succeed("ss -ltn | grep ':3000'")
+      agent.succeed("ping -c1 server")
+
+      agent_hostname = agent.succeed("hostname -s").strip()
+      system_hash = agent.succeed("readlink /run/current-system").strip().split("-")[-1]
+      change_reason = "startup"
+
+      server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep -E 'accepted.*agent'")
+
+      output = server.succeed("psql -U crystal_forge -d crystal_forge -c 'SELECT hostname, derivation_path, change_reason FROM system_states;'")
+      if agent_hostname not in output:
+          pytest.fail(f"hostname '{agent_hostname}' not found in DB")
+      if change_reason not in output:
+          pytest.fail(f"change_reason '{change_reason}' not found in DB")
+      if system_hash not in output:
+          pytest.fail(f"derivation_path '{system_hash}' not found in DB")
     '';
   }

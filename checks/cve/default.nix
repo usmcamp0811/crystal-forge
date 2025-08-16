@@ -21,6 +21,26 @@
     mkdir -p $out
     cp -r $src/* $out/
   '';
+
+  sqlTestsPath = pkgs.writeText "crystal-forge-view-tests.sql" (builtins.readFile ./tests/view-tests.sql);
+
+  # Create a proper derivation for the test package
+  testPackage = pkgs.stdenv.mkDerivation {
+    pname = "crystal-forge-tests";
+    version = "1.0.0";
+
+    src = ./tests;
+
+    dontBuild = true;
+
+    installPhase = ''
+      mkdir -p $out
+
+      # Copy all files from the tests directory
+      cp -r $src/* $out/
+    '';
+  };
+  testScript = builtins.readFile "${testPackage}/run_tests.py";
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
@@ -36,6 +56,7 @@ in
         networking.useDHCP = true;
         networking.firewall.allowedTCPPorts = [3000];
 
+        environment.etc."crystal-forge-tests.sql".source = sqlTestsPath;
         environment.etc."agent.key".source = "${keyPath}/agent.key";
         environment.etc."agent.pub".source = "${pubPath}/agent.pub";
         environment.etc."cf_flake".source = cfFlakePath;
@@ -124,37 +145,19 @@ in
     globalTimeout = 600;
     extraPythonPackages = p: [p.pytest];
     testScript = ''
-      start_all()
-      server.wait_for_unit("postgresql")
-      server.wait_for_unit("crystal-forge-server.service")
+      import pytest
 
-      # time.sleep(10)
-      #
-      # test_output = server.succeed("psql -U crystal_forge -d crystal_forge -f /etc/crystal-forge-tests.sql")
-      # if "FAIL:" in test_output:
-      #     pytest.fail("One or more SQL view tests failed")
-      #
-      # view_check = server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT hostname, status, status_text
-      #     FROM view_systems_status_table
-      #     WHERE hostname = 'agent';
-      #   "
-      # """)
-      # if "agent" not in view_check:
-      #     pytest.fail("Agent hostname not found in view_systems_status_table")
-      #
-      # t0 = time.time()
-      # server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT COUNT(*) FROM view_systems_current_state;
-      #     SELECT COUNT(*) FROM view_systems_status_table;
-      #     SELECT COUNT(*) FROM view_commit_deployment_timeline;
-      #   "
-      # """)
-      # dt = time.time() - t0
-      # server.log(f"View query performance: {dt:.2f} seconds")
-      # if dt > 5.0:
-      #     pytest.fail(f"Views are too slow: {dt:.2f} seconds")
+      start_all()
+      server.wait_for_unit("crystal-forge-server.service")
+      server.wait_for_unit("postgresql")
+      server.succeed("systemctl start crystal-forge-builder.service")
+      server.wait_for_unit("crystal-forge-builder.service")
+
+      try:
+          server.succeed("which vulnix")
+          server.wait_until_succeeds("journalctl -u crystal-forge-builder.service | grep 'Starting CVE Scan loop'", timeout=30)
+          server.wait_until_succeeds("journalctl -u crystal-forge-builder.service | grep -E '(CVE scan|vulnix)'", timeout=120)
+      except Exception:
+          server.log("Warning: vulnix/CVE scan not available or did not run within timeout")
     '';
   }

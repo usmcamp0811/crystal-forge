@@ -124,37 +124,51 @@ in
     globalTimeout = 600;
     extraPythonPackages = p: [p.pytest];
     testScript = ''
+      import pytest
+
       start_all()
       server.wait_for_unit("postgresql")
       server.wait_for_unit("crystal-forge-server.service")
+      server.wait_for_unit("crystal-forge-builder.service")
+      server.succeed("systemctl is-active crystal-forge-builder.service") \
+        or pytest.fail("crystal-forge-builder.service is not active")
 
-      # time.sleep(10)
-      #
-      # test_output = server.succeed("psql -U crystal_forge -d crystal_forge -f /etc/crystal-forge-tests.sql")
-      # if "FAIL:" in test_output:
-      #     pytest.fail("One or more SQL view tests failed")
-      #
-      # view_check = server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT hostname, status, status_text
-      #     FROM view_systems_status_table
-      #     WHERE hostname = 'agent';
-      #   "
-      # """)
-      # if "agent" not in view_check:
-      #     pytest.fail("Agent hostname not found in view_systems_status_table")
-      #
-      # t0 = time.time()
-      # server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT COUNT(*) FROM view_systems_current_state;
-      #     SELECT COUNT(*) FROM view_systems_status_table;
-      #     SELECT COUNT(*) FROM view_commit_deployment_timeline;
-      #   "
-      # """)
-      # dt = time.time() - t0
-      # server.log(f"View query performance: {dt:.2f} seconds")
-      # if dt > 5.0:
-      #     pytest.fail(f"Views are too slow: {dt:.2f} seconds")
+      server.succeed("sudo -u crystal-forge nix --version") \
+        or pytest.fail("crystal-forge user cannot access nix command")
+
+      server.succeed("test -d /var/lib/crystal-forge/workdir")
+      server.succeed("stat -c '%U' /var/lib/crystal-forge/workdir | grep -q crystal-forge")
+
+      server.succeed("test -d /var/lib/crystal-forge/.cache/nix")
+      server.succeed("stat -c '%U' /var/lib/crystal-forge/.cache/nix | grep -q crystal-forge")
+
+      server.wait_until_succeeds("journalctl -u crystal-forge-builder.service | grep 'Starting Build loop'", timeout=30)
+
+      memory_usage = server.succeed("systemctl show crystal-forge-builder.service --property=MemoryCurrent")
+      if "MemoryCurrent=" in memory_usage:
+          try:
+              mem_bytes = int(memory_usage.split("=",1)[1].strip())
+              if mem_bytes > 4 * 1024 * 1024 * 1024:
+                  pytest.fail(f"Builder using excessive memory: {mem_bytes} bytes")
+          except Exception:
+              server.log("Warning: Could not parse MemoryCurrent")
+
+      server.succeed("systemctl show crystal-forge-builder.service --property=MemoryMax | grep -v infinity")
+      server.succeed("systemctl show crystal-forge-builder.service --property=TasksMax | grep -v infinity")
+
+      server.succeed("systemctl reload-or-restart crystal-forge-builder.service")
+      server.wait_for_unit("crystal-forge-builder.service")
+      server.wait_until_succeeds("journalctl -u crystal-forge-builder.service | grep 'Starting Build loop'", timeout=30)
+
+      server.succeed("sudo -u crystal-forge touch /var/lib/crystal-forge/workdir/result-test")
+      server.succeed("sudo -u crystal-forge ln -sf /nix/store/fake /var/lib/crystal-forge/workdir/result-old")
+      server.succeed("systemctl restart crystal-forge-builder.service")
+      server.wait_for_unit("crystal-forge-builder.service")
+      # server.wait_until_fails("test -L /var/lib/crystal-forge/workdir/result-old", timeout=30)
+
+      server_status = server.succeed("systemctl is-active crystal-forge-server.service")
+      builder_status = server.succeed("systemctl is-active crystal-forge-builder.service")
+      if "active" not in server_status or "active" not in builder_status:
+          pytest.fail("Server and builder services are conflicting")
     '';
   }

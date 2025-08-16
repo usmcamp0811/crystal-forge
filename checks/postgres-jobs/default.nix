@@ -21,6 +21,26 @@
     mkdir -p $out
     cp -r $src/* $out/
   '';
+
+  sqlTestsPath = pkgs.writeText "crystal-forge-view-tests.sql" (builtins.readFile ./tests/view-tests.sql);
+
+  # Create a proper derivation for the test package
+  testPackage = pkgs.stdenv.mkDerivation {
+    pname = "crystal-forge-tests";
+    version = "1.0.0";
+
+    src = ./tests;
+
+    dontBuild = true;
+
+    installPhase = ''
+      mkdir -p $out
+
+      # Copy all files from the tests directory
+      cp -r $src/* $out/
+    '';
+  };
+  testScript = builtins.readFile "${testPackage}/run_tests.py";
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
@@ -36,6 +56,7 @@ in
         networking.useDHCP = true;
         networking.firewall.allowedTCPPorts = [3000];
 
+        environment.etc."crystal-forge-tests.sql".source = sqlTestsPath;
         environment.etc."agent.key".source = "${keyPath}/agent.key";
         environment.etc."agent.pub".source = "${pubPath}/agent.pub";
         environment.etc."cf_flake".source = cfFlakePath;
@@ -124,37 +145,22 @@ in
     globalTimeout = 600;
     extraPythonPackages = p: [p.pytest];
     testScript = ''
+      import pytest
+
       start_all()
       server.wait_for_unit("postgresql")
       server.wait_for_unit("crystal-forge-server.service")
+      agent.wait_for_unit("crystal-forge-agent.service")
 
-      # time.sleep(10)
-      #
-      # test_output = server.succeed("psql -U crystal_forge -d crystal_forge -f /etc/crystal-forge-tests.sql")
-      # if "FAIL:" in test_output:
-      #     pytest.fail("One or more SQL view tests failed")
-      #
-      # view_check = server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT hostname, status, status_text
-      #     FROM view_systems_status_table
-      #     WHERE hostname = 'agent';
-      #   "
-      # """)
-      # if "agent" not in view_check:
-      #     pytest.fail("Agent hostname not found in view_systems_status_table")
-      #
-      # t0 = time.time()
-      # server.succeed("""
-      #   psql -U crystal_forge -d crystal_forge -c "
-      #     SELECT COUNT(*) FROM view_systems_current_state;
-      #     SELECT COUNT(*) FROM view_systems_status_table;
-      #     SELECT COUNT(*) FROM view_commit_deployment_timeline;
-      #   "
-      # """)
-      # dt = time.time() - t0
-      # server.log(f"View query performance: {dt:.2f} seconds")
-      # if dt > 5.0:
-      #     pytest.fail(f"Views are too slow: {dt:.2f} seconds")
+      server.succeed("systemctl list-timers | grep crystal-forge-postgres-jobs") \
+        or pytest.fail("crystal-forge-postgres-jobs timer is not configured")
+
+      server.succeed("systemctl start crystal-forge-postgres-jobs.service")
+      server.succeed("journalctl -u crystal-forge-postgres-jobs.service | grep 'All jobs completed successfully'") \
+        or pytest.fail("crystal-forge-postgres-jobs.service did not complete successfully")
+
+      server.succeed("systemctl start crystal-forge-postgres-jobs.service")
+      server.succeed("journalctl -u crystal-forge-postgres-jobs.service | tail -20 | grep 'All jobs completed successfully'") \
+        or pytest.fail("postgres jobs are not idempotent - failed on second run")
     '';
   }
