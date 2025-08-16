@@ -21,26 +21,6 @@
     mkdir -p $out
     cp -r $src/* $out/
   '';
-
-  sqlTestsPath = pkgs.writeText "crystal-forge-view-tests.sql" (builtins.readFile ./tests/view-tests.sql);
-
-  # Create a proper derivation for the test package
-  testPackage = pkgs.stdenv.mkDerivation {
-    pname = "crystal-forge-tests";
-    version = "1.0.0";
-
-    src = ./tests;
-
-    dontBuild = true;
-
-    installPhase = ''
-      mkdir -p $out
-
-      # Copy all files from the tests directory
-      cp -r $src/* $out/
-    '';
-  };
-  testScript = builtins.readFile "${testPackage}/run_tests.py";
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-agent-integration";
@@ -56,7 +36,6 @@ in
         networking.useDHCP = true;
         networking.firewall.allowedTCPPorts = [3000];
 
-        environment.etc."crystal-forge-tests.sql".source = sqlTestsPath;
         environment.etc."agent.key".source = "${keyPath}/agent.key";
         environment.etc."agent.pub".source = "${pubPath}/agent.pub";
         environment.etc."cf_flake".source = cfFlakePath;
@@ -145,8 +124,8 @@ in
     globalTimeout = 600;
     extraPythonPackages = p: [p.pytest];
     testScript = ''
-      import pytest
 
+      import pytest
       start_all()
       server.wait_for_unit("postgresql")
       server.wait_for_unit("crystal-forge-server.service")
