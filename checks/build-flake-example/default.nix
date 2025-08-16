@@ -470,20 +470,24 @@ in
               echo "" >> {report_file}
             ''')
 
-            # Add test completion timestamp
             builder.succeed(f'''
               echo "========================================" >> {report_file}
               echo "Test completed successfully at: $(date)" >> {report_file}
               echo "========================================" >> {report_file}
             ''')
 
-            # Copy the report to the result directory that will be available after the test
-            builder.succeed("mkdir -p /tmp/reports/")
-            builder.succeed(f"cp {report_file} /tmp/reports/")
+            # Copy the report to the proper result directory
+            # NixOS tests automatically extract files from /tmp/xchg/
+            builder.succeed("mkdir -p /tmp/xchg")
+            builder.succeed(f"cp {report_file} /tmp/xchg/crystal-forge-test-report.txt")
+
+            # Also copy any logs that might be useful
+            builder.succeed("journalctl -u crystal-forge-server.service > /tmp/xchg/server.log")
+            builder.succeed("journalctl -u crystal-forge-builder.service > /tmp/xchg/builder.log")
+            builder.succeed("journalctl -u postgresql > /tmp/xchg/postgresql.log")
 
             builder.log("✅ Crystal Forge NixOS build integration test completed successfully!")
             builder.log(f"📊 Test report saved to: {report_file}")
-            builder.log("📁 Report will be available in the test result output")
-            builder.copy_from_vm("/tmp/reports/crystal-forge-test-report.txt")
+            builder.log("📁 Reports will be available in the test result output")
     '';
   }
