@@ -40,38 +40,69 @@
     }).config.system.build.toplevel;
 
   # Create a flake that references the pre-built system
+  # Create a flake that references the pre-built system
   toyFlakeDir = pkgs.runCommand "toyflake-dir" {} ''
     mkdir -p $out
 
     # Write the flake.nix that references pre-built system
     cat > $out/flake.nix << 'EOF'
     {
-      inputs = {};
-      outputs = { self }:
+      inputs = {
+        nixpkgs.url = "path:${pkgs.path}";
+      };
+      outputs = { self, nixpkgs }:
       let
         system = "${system}";
-        pkgs = import <nixpkgs> { inherit system; };
+        pkgs = nixpkgs.legacyPackages.${system};
       in {
-        packages.''${system}.hello = ${helloPackage};
-        defaultPackage.''${system} = self.packages.''${system}.hello;
+        packages.${system}.hello = pkgs.writeShellApplication {
+          name = "hello";
+          text = "echo hello-from-flake\n";
+        };
 
-        nixosConfigurations.cf-test-sys = {
-          config.system.build.toplevel = ${nixosSystemToplevel};
+        packages.${system}.default = self.packages.${system}.hello;
+
+        nixosConfigurations.cf-test-sys = nixpkgs.lib.nixosSystem {
+          inherit system;
+          modules = [{
+            boot.isContainer = true;
+            fileSystems."/" = {
+              device = "none";
+              fsType = "tmpfs";
+            };
+            services.getty.autologinUser = "root";
+            environment.systemPackages = [ self.packages.${system}.hello ];
+            system.stateVersion = "25.05";
+            services.udisks2.enable = false;
+            security.polkit.enable = false;
+            documentation.enable = false;
+            documentation.nixos.enable = false;
+            system.nssModules = pkgs.lib.mkForce [];
+          }];
         };
       };
     }
     EOF
 
-    # Create an empty flake.lock
+    # Create a flake.lock with nixpkgs
     cat > $out/flake.lock << 'EOF'
     {
       "nodes": {
-        "root": {
-          "inputs": {},
+        "nixpkgs": {
           "locked": {
             "lastModified": 1,
             "narHash": "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-            "type": "file"
+            "path": "${pkgs.path}",
+            "type": "path"
+          },
+          "original": {
+            "path": "${pkgs.path}",
+            "type": "path"
+          }
+        },
+        "root": {
+          "inputs": {
+            "nixpkgs": "nixpkgs"
           }
         }
       },
@@ -125,6 +156,7 @@ in
         networking.firewall.allowedTCPPorts = [8080];
 
         environment.systemPackages = [pkgs.git pkgs.python3];
+
         # Create git user for proper permissions
         users.users.git = {
           isSystemUser = true;
@@ -140,6 +172,12 @@ in
           "L+ /srv/git/test-flake.git - - - - ${testFlakeGit}"
         ];
 
+        # Configure git to trust the repository directory
+        environment.etc."gitconfig".text = ''
+          [safe]
+              directory = /srv/git/test-flake.git
+        '';
+
         # Use a simple HTTP server that can serve git repositories
         systemd.services.git-http-server = {
           enable = true;
@@ -153,6 +191,21 @@ in
             Group = "git";
             WorkingDirectory = "/srv/git";
             ExecStart = "${pkgs.git}/bin/git daemon --verbose --export-all --base-path=/srv/git --reuseaddr --port=8080";
+            Environment = "HOME=/srv/git";
+          };
+        };
+
+        # Ensure proper ownership after the symlink is created
+        systemd.services.fix-git-ownership = {
+          enable = true;
+          description = "Fix Git Repository Ownership";
+          after = ["systemd-tmpfiles-setup.service"];
+          before = ["git-http-server.service"];
+          wantedBy = ["multi-user.target"];
+
+          serviceConfig = {
+            Type = "oneshot";
+            ExecStart = "${pkgs.bash}/bin/bash -c 'chown -R git:git /srv/git/test-flake.git'";
           };
         };
       };
