@@ -35,32 +35,14 @@ in
     nodes = {
       server = lib.crystal-forge.makeServerNode {
         inherit pkgs systemBuildClosure keyPath pubPath cfFlakePath;
-        imports = [inputs.self.nixosModules.crystal-forge];
+        extraConfig = {imports = [inputs.self.nixosModules.crystal-forge];};
         port = 3000;
       };
 
-      agent = {
-        config,
-        pkgs,
-        ...
-      }: {
-        imports = [inputs.self.nixosModules.crystal-forge];
-
-        networking.useDHCP = true;
-        networking.firewall.enable = false;
-
-        environment.etc."agent.key".source = "${keyPath}/agent.key";
-        environment.etc."agent.pub".source = "${pubPath}/agent.pub";
-
-        services.crystal-forge = {
-          enable = true;
-          client = {
-            enable = true;
-            server_host = "server";
-            server_port = 3000;
-            private_key = "/etc/agent.key";
-          };
-        };
+      agent = lib.crystal-forge.makeAgentNode {
+        inherit pkgs inputs keyPath pubPath;
+        serverHost = "server";
+        extraConfig = {imports = [inputs.self.nixosModules.crystal-forge];};
       };
     };
 

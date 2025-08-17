@@ -266,7 +266,6 @@ in rec {
     port ? 3000,
     agents ? [],
     extraConfig ? {},
-    imports ? [],
     ...
   }: let
     # Generate keypairs for agents if not provided
@@ -295,7 +294,6 @@ in rec {
       agentKeyPairs;
   in
     {
-      inherit imports;
       networking.useDHCP = true;
       networking.firewall.allowedTCPPorts = [port];
       virtualisation.writableStore = true;
@@ -371,6 +369,35 @@ in rec {
           ];
         })
       ];
+    }
+    // extraConfig;
+
+  makeAgentNode = {
+    pkgs,
+    keyPath,
+    pubPath,
+    serverHost ? "server",
+    serverPort ? 3000,
+    enableFirewall ? false,
+    extraConfig ? {},
+    ...
+  }:
+    {
+      networking.useDHCP = true;
+      networking.firewall.enable = false;
+
+      environment.etc."agent.key".source = "${keyPath}/agent.key";
+      environment.etc."agent.pub".source = "${pubPath}/agent.pub";
+
+      services.crystal-forge = {
+        enable = true;
+        client = {
+          enable = true;
+          server_host = "server";
+          server_port = 3000;
+          private_key = "/etc/agent.key";
+        };
+      };
     }
     // extraConfig;
 
