@@ -22,9 +22,9 @@
 
   # Use a fixed, eval-time path for the flake source
   # This avoids reading from a derivation output during evaluation
-  srcPath = builtins.path {
-    path = ../../.;
-    name = "flake-src";
+  srcPath = builtins.fetchGit {
+    url = "https://gitlab.com/crystal-forge/crystal-forge.git";
+    rev = "f155b4ec2f706828d75dab9c4b7ff3a891bdd3d2";
   };
 
   # Parse the flake.lock file to get dependency information
