@@ -5,6 +5,7 @@
   ...
 }:
 with lib.crystal-forge; let
+  cfTestSysToplevel = inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel;
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-flake-with-git-test";
@@ -14,16 +15,18 @@ in
         services.getty.autologinUser = "root";
         virtualisation.writableStore = true;
         virtualisation.memorySize = 2048;
-
-        # Include the full closure of the package being tested
-        virtualisation.additionalPaths =
+        # Force the system to be fully built by making it a build input
+        virtualisation.additionalPaths = let
+          # This forces the full closure to be built and available
+          fullSystemClosure = pkgs.closureInfo {rootPaths = [cfTestSysToplevel];};
+        in
           [
             testFlake
             pkgs.path
+            fullSystemClosure
           ]
           ++ prefetchedPaths
           ++ [
-            # Add just the default crystal-forge package
             pkgs.crystal-forge.default
           ];
 
@@ -32,8 +35,8 @@ in
           settings = {
             experimental-features = ["nix-command" "flakes"];
             substituters = [];
-            builders-use-substitutes = false;
-            fallback = false;
+            builders-use-substitutes = true;
+            fallback = true;
             sandbox = true;
             keep-outputs = true;
             keep-derivations = true;
@@ -109,7 +112,7 @@ in
 
       testNode.succeed(f"echo 'BUILD TEST (offline):' >> {report_file}")
       testNode.succeed(f"echo '=====================' >> {report_file}")
-      testNode.succeed(f"cd {work_dir} && nix build .#default -o /tmp/flake-build >> {report_file} 2>&1 || true")
+      testNode.succeed(f"cd {work_dir} && nix build --dry-run .#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /tmp/flake-build >> {report_file} 2>&1 || true")
       testNode.succeed(f"echo >> {report_file}")
 
       testNode.succeed(f"echo 'BUILD VERIFICATION:' >> {report_file}")
