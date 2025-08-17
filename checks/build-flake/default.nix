@@ -82,18 +82,12 @@ in
 
       work_dir = "/root/test-flake"
       testNode.succeed(f"rm -rf {work_dir}")
-      testNode.succeed(f"cp -rL /etc/test-flake {work_dir}")
-      testNode.succeed(f"chmod -R u+rwX {work_dir}")
 
-      # Init repo and force-track flake files even if ignored anywhere
-      testNode.succeed(f"cd {work_dir} && (git init -b main || (git init && git checkout -b main))")
+      # Clone the test flake instead of copying and re-initializing
+      testNode.succeed(f"git clone /etc/test-flake {work_dir}")
       testNode.succeed(f"cd {work_dir} && git config --global safe.directory '*'")
       testNode.succeed(f"cd {work_dir} && git config user.name 'Test User'")
       testNode.succeed(f"cd {work_dir} && git config user.email 'test@example.com'")
-      testNode.succeed(f"cd {work_dir} && git add -f flake.nix || true")
-      testNode.succeed(f"cd {work_dir} && [ -f flake.lock ] && git add -f flake.lock || true")
-      testNode.succeed(f"cd {work_dir} && git add -A")
-      testNode.succeed(f"cd {work_dir} && (git commit -m seed || true)")
 
       # Sanity log
       testNode.succeed(f"cd {work_dir} && git status --porcelain=v1 >> {report_file}")
@@ -113,7 +107,7 @@ in
       testNode.succeed(f"echo 'BUILD TEST (offline):' >> {report_file}")
       testNode.succeed(f"echo '=====================' >> {report_file}")
       testNode.succeed(f"cd {work_dir} && nix build --dry-run .#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /tmp/flake-build >> {report_file} 2>&1 || true")
-      testNode.succeed(f"cd {work_dir} && nix build --offline .#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /tmp/flake-build >> {report_file} 2>&1 || true")
+      testNode.succeed(f"cd {work_dir} && nix build --offline /etc/test-flake#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /tmp/flake-build >> {report_file} 2>&1 || true")
       testNode.succeed(f"echo >> {report_file}")
 
       testNode.succeed(f"echo 'BUILD VERIFICATION:' >> {report_file}")
