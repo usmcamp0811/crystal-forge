@@ -6,6 +6,12 @@
 }:
 with lib.crystal-forge; let
   cfTestSysToplevel = inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel;
+  systemBuildClosure = pkgs.closureInfo {
+    rootPaths = [
+      cfTestSysToplevel
+      cfTestSysToplevel.drvPath
+    ];
+  };
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-flake-with-git-test";
@@ -28,6 +34,7 @@ in
           ++ prefetchedPaths
           ++ [
             pkgs.crystal-forge.default
+            systemBuildClosure
           ];
 
         nix = {
@@ -113,6 +120,7 @@ in
       testNode.succeed(f"echo 'BUILD TEST (offline):' >> {report_file}")
       testNode.succeed(f"echo '=====================' >> {report_file}")
       testNode.succeed(f"cd {work_dir} && nix build --dry-run .#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /tmp/flake-build >> {report_file} 2>&1 || true")
+      testNode.succeed(f"cd {work_dir} && nix build --offline .#nixosConfigurations.cf-test-sys.config.system.build.toplevel -o /tmp/flake-build >> {report_file} 2>&1 || true")
       testNode.succeed(f"echo >> {report_file}")
 
       testNode.succeed(f"echo 'BUILD VERIFICATION:' >> {report_file}")
