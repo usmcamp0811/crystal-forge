@@ -257,6 +257,123 @@ in rec {
     };
   };
 
+  makeServerNode = {
+    pkgs,
+    systemBuildClosure,
+    keyPath ? null,
+    pubPath ? null,
+    cfFlakePath ? null,
+    port ? 3000,
+    agents ? [],
+    extraConfig ? {},
+    imports ? [],
+    ...
+  }: let
+    # Generate keypairs for agents if not provided
+    agentKeyPairs =
+      map (agentName: {
+        name = agentName;
+        keyPair = lib.crystal-forge.mkKeyPair {
+          inherit pkgs;
+          name = agentName;
+        };
+      })
+      agents;
+
+    # Generate systems configuration from agents
+    agentSystems =
+      map (agent: {
+        hostname = agent.name;
+        public_key = lib.crystal-forge.mkPublicKey {
+          inherit pkgs;
+          name = agent.name;
+          keyPair = agent.keyPair;
+        };
+        environment = "test";
+        flake_name = "dotfiles";
+      })
+      agentKeyPairs;
+  in
+    {
+      inherit imports;
+      networking.useDHCP = true;
+      networking.firewall.allowedTCPPorts = [port];
+      virtualisation.writableStore = true;
+      virtualisation.memorySize = 2048;
+      virtualisation.additionalPaths = [systemBuildClosure];
+
+      environment.etc = lib.mkMerge [
+        (lib.mkIf (keyPath != null) {"agent.key".source = "${keyPath}/agent.key";})
+        (lib.mkIf (pubPath != null) {"agent.pub".source = "${pubPath}/agent.pub";})
+        (lib.mkIf (cfFlakePath != null) {"cf_flake".source = cfFlakePath;})
+      ];
+
+      services.postgresql = {
+        enable = true;
+        authentication = lib.concatStringsSep "\n" [
+          "local all root trust"
+          "local all postgres peer"
+          "host all all 127.0.0.1/32 trust"
+          "host all all ::1/128 trust"
+        ];
+        initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+          CREATE USER crystal_forge LOGIN;
+          CREATE DATABASE crystal_forge OWNER crystal_forge;
+          GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+        '';
+      };
+
+      services.crystal-forge = lib.mkMerge [
+        {
+          enable = true;
+          local-database = true;
+          log_level = "debug";
+          database = {
+            user = "crystal_forge";
+            host = "localhost";
+            name = "crystal_forge";
+          };
+          flakes.watched = [
+            {
+              name = "dotfiles";
+              repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
+              auto_poll = false;
+            }
+          ];
+          environments = [
+            {
+              name = "test";
+              description = "Test environment for Crystal Forge agents and evaluation";
+              is_active = true;
+              risk_profile = "LOW";
+              compliance_level = "NONE";
+            }
+          ];
+          server = {
+            enable = true;
+            host = "0.0.0.0";
+            port = port;
+          };
+        }
+        # Use generated agent systems if agents provided
+        (lib.mkIf (agents != []) {
+          systems = agentSystems;
+        })
+        # Fallback to single agent if pubPath provided and no agents list
+        (lib.mkIf (pubPath != null && agents == []) {
+          systems = [
+            {
+              hostname = "agent";
+              public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
+              environment = "test";
+              flake_name = "dotfiles";
+            }
+          ];
+        })
+      ];
+    }
+    // extraConfig;
+
   # Export all the computed values for use in tests
   inherit
     lockJson # Parsed flake.lock content
