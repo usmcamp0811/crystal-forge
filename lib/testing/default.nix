@@ -115,7 +115,7 @@
     prefetchedList);
 in rec {
   # Create a git repository from the flake source for testing
-  # This simulates a real git-tracked flake environment
+  # This simulates a real git-tracked flake environment with development history
   testFlake = pkgs.stdenv.mkDerivation {
     name = "flake-as-git";
     src = srcPath;
@@ -124,11 +124,33 @@ in rec {
       mkdir -p "$out"
       cp -r "$src"/. "$out/"
       cd "$out"
+
+      # Make files writable (they're read-only from Nix store)
+      chmod -R u+w .
+
       git init -q
       git config user.name "Nix Build"
       git config user.email "nix@build.local"
+
+      # First commit - initial flake
+      git add -f flake.nix
+      [ -f flake.lock ] && git add -f flake.lock
+      git commit -q -m "Initial flake configuration"
+
+      # Second commit - simulate a change (modify a comment or add content)
+      echo "# Crystal Forge Test Environment" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add documentation comment"
+
+      # Third commit - add all remaining files
       git add -A
-      git commit -q -m "Packaged flake for testing"
+      git commit -q -m "Add remaining project files"
+
+      # Fourth commit - simulate another development change
+      echo "" >> flake.nix
+      echo "# Last updated: $(date)" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Update timestamp"
     '';
     installPhase = "true";
   };
