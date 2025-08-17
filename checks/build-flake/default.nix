@@ -7,10 +7,16 @@
 with lib.crystal-forge; let
   cfTestSysToplevel = inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel;
   systemBuildClosure = pkgs.closureInfo {
-    rootPaths = [
-      cfTestSysToplevel
-      cfTestSysToplevel.drvPath
-    ];
+    rootPaths =
+      [
+        cfTestSysToplevel
+        cfTestSysToplevel.drvPath
+        pkgs.crystal-forge.default
+        pkgs.crystal-forge.default.drvPath
+        testFlake
+        pkgs.path
+      ]
+      ++ prefetchedPaths;
   };
 in
   pkgs.testers.runNixOSTest {
@@ -22,20 +28,7 @@ in
         virtualisation.writableStore = true;
         virtualisation.memorySize = 2048;
         # Force the system to be fully built by making it a build input
-        virtualisation.additionalPaths = let
-          # This forces the full closure to be built and available
-          fullSystemClosure = pkgs.closureInfo {rootPaths = [cfTestSysToplevel];};
-        in
-          [
-            testFlake
-            pkgs.path
-            fullSystemClosure
-          ]
-          ++ prefetchedPaths
-          ++ [
-            pkgs.crystal-forge.default
-            systemBuildClosure
-          ];
+        virtualisation.additionalPaths = [systemBuildClosure];
 
         nix = {
           package = pkgs.nixVersions.stable;
