@@ -1,41 +1,22 @@
 {
   lib,
   inputs,
-  system,
+  system ? null,
   ...
 }: let
-  pkgs = inputs.nixpkgs.legacyPackages.${system};
-in rec {
-  testFlake = pkgs.stdenv.mkDerivation {
-    name = "flake-as-git";
+  actualSystem =
+    if system != null
+    then system
+    else "x86_64-linux";
+  pkgs = inputs.nixpkgs.legacyPackages.${actualSystem};
 
-    # Copy the current directory (but be careful about .git)
-    src = ../../.;
-
-    nativeBuildInputs = with pkgs; [git];
-
-    buildPhase = ''
-      # Create output directory
-      mkdir -p $out
-
-      # Copy all files from source
-      cp -r . $out/
-
-      # Initialize git repo in the output
-      cd $out
-      git init
-      git config user.name "Nix Build"
-      git config user.email "nix@build.local"
-
-      # Add all files and commit
-      git add .
-      git commit -m "Packaged flake for testing"
-    '';
-
-    # No install phase needed since we build directly into $out
-    dontInstall = true;
+  # Use a fixed, eval-time path for the flake source (don’t read from a drv output)
+  srcPath = builtins.path {
+    path = ../../.;
+    name = "flake-src";
   };
-  lockJson = builtins.fromJSON (builtins.readFile "${testFlake}/flake.lock");
+
+  lockJson = builtins.fromJSON (builtins.readFile (srcPath + "/flake.lock"));
   nodes = lockJson.nodes;
 
   prefetchNode = name: node: let
@@ -86,10 +67,8 @@ in rec {
     }
     else null;
 
-  prefetchedList = lib.pipe nodes [
-    (lib.mapAttrsToList prefetchNode)
-    (builtins.filter (x: x != null))
-  ];
+  prefetchedList =
+    lib.pipe nodes [(lib.mapAttrsToList prefetchNode) (builtins.filter (x: x != null))];
 
   prefetchedPaths = map (x: x.path) prefetchedList;
 
@@ -105,4 +84,27 @@ in rec {
         };
       })
     prefetchedList);
+in rec {
+  testFlake = pkgs.stdenv.mkDerivation {
+    name = "flake-as-git";
+    src = srcPath;
+
+    nativeBuildInputs = [pkgs.git];
+
+    # Write directly to $out; keep it simple
+    buildPhase = ''
+      mkdir -p "$out"
+      cp -r "$src"/. "$out/"
+      cd "$out"
+      git init -q
+      git config user.name "Nix Build"
+      git config user.email "nix@build.local"
+      git add -A
+      git commit -q -m "Packaged flake for testing"
+    '';
+
+    installPhase = "true";
+  };
+
+  inherit lockJson nodes prefetchedList prefetchedPaths registryEntries;
 }
