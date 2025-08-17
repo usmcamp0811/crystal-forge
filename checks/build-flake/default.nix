@@ -7,35 +7,6 @@
 with lib.crystal-forge; let
   cfTestSysToplevel = inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel;
 
-  # Convert testFlake to a bare git repository for serving
-  testFlakeGitRepo =
-    pkgs.runCommand "crystal-forge-test-flake.git" {
-      buildInputs = [pkgs.git];
-    } ''
-      set -eu
-      export HOME=$PWD
-      work="$TMPDIR/work"
-
-      # Copy and prepare the testFlake (which already has git history)
-      cp -r ${testFlake} "$work"
-      chmod -R u+rwX "$work"
-
-      cd "$work"
-      git config user.name "Crystal Forge Test"
-      git config user.email "test@crystal-forge.dev"
-
-      # Create bare repository for serving
-      git init --bare "$out"
-      git -C "$out" config receive.denyCurrentBranch ignore
-      git push "$out" HEAD:refs/heads/main || git push "$out" HEAD:refs/heads/master
-      git -C "$out" symbolic-ref HEAD refs/heads/main
-
-      # Enable Git HTTP backend
-      git -C "$out" config http.receivepack true
-      git -C "$out" config http.uploadpack true
-      git -C "$out" update-server-info
-    '';
-
   systemBuildClosure = pkgs.closureInfo {
     rootPaths =
       [
@@ -102,7 +73,7 @@ in
 
         systemd.tmpfiles.rules = [
           "d /srv/git 0755 git git -"
-          "L+ /srv/git/crystal-forge.git - - - - ${testFlakeGitRepo}"
+          "L+ /srv/git/crystal-forge.git - - - - ${testFlake}"
         ];
 
         environment.etc."gitconfig".text = ''

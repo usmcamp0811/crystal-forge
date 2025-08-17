@@ -114,47 +114,83 @@
       })
     prefetchedList);
 in rec {
-  # Create a git repository from the flake source for testing
+  # Create a bare git repository directly from the flake source for serving
   # This simulates a real git-tracked flake environment with development history
-  testFlake = pkgs.stdenv.mkDerivation {
-    name = "flake-as-git";
-    src = srcPath;
-    nativeBuildInputs = [pkgs.git];
-    buildPhase = ''
-      mkdir -p "$out"
-      cp -r "$src"/. "$out/"
-      cd "$out"
+  testFlake =
+    pkgs.runCommand "crystal-forge-test-flake.git" {
+      nativeBuildInputs = [pkgs.git];
+    } ''
+      set -eu
+      export HOME=$PWD
+      work="$TMPDIR/work"
 
-      # Make files writable (they're read-only from Nix store)
+      # Prepare working directory
+      mkdir -p "$work"
+      cp -r ${srcPath}/. "$work/"
+      cd "$work"
       chmod -R u+w .
 
       git init -q
-      git config user.name "Nix Build"
-      git config user.email "nix@build.local"
+      git config user.name "Crystal Forge Test"
+      git config user.email "test@crystal-forge.dev"
 
-      # First commit - initial flake
+      # Create development history with multiple commits
       git add -f flake.nix
       [ -f flake.lock ] && git add -f flake.lock
       git commit -q -m "Initial flake configuration"
 
-      # Second commit - simulate a change (modify a comment or add content)
       echo "# Crystal Forge Test Environment" >> flake.nix
       git add -f flake.nix
       git commit -q -m "Add documentation comment"
 
-      # Third commit - add all remaining files
       git add -A
       git commit -q -m "Add remaining project files"
 
-      # Fourth commit - simulate another development change
       echo "" >> flake.nix
       echo "# Last updated: $(date)" >> flake.nix
       git add -f flake.nix
       git commit -q -m "Update timestamp"
-    '';
-    installPhase = "true";
-  };
 
+      # Create bare repository for serving
+      git init --bare "$out"
+      git -C "$out" config receive.denyCurrentBranch ignore
+      git push "$out" HEAD:refs/heads/main
+      git -C "$out" symbolic-ref HEAD refs/heads/main
+
+      # Enable Git HTTP backend
+      git -C "$out" config http.receivepack true
+      git -C "$out" config http.uploadpack true
+      git -C "$out" update-server-info
+    '';
+
+  # Convert testFlake to a bare git repository for serving
+  testFlakeGitRepo =
+    pkgs.runCommand "crystal-forge-test-flake.git" {
+      buildInputs = [pkgs.git];
+    } ''
+      set -eu
+      export HOME=$PWD
+      work="$TMPDIR/work"
+
+      # Copy and prepare the testFlake (which already has git history)
+      cp -r ${testFlake} "$work"
+      chmod -R u+rwX "$work"
+
+      cd "$work"
+      git config user.name "Crystal Forge Test"
+      git config user.email "test@crystal-forge.dev"
+
+      # Create bare repository for serving
+      git init --bare "$out"
+      git -C "$out" config receive.denyCurrentBranch ignore
+      git push "$out" HEAD:refs/heads/main || git push "$out" HEAD:refs/heads/master
+      git -C "$out" symbolic-ref HEAD refs/heads/main
+
+      # Enable Git HTTP backend
+      git -C "$out" config http.receivepack true
+      git -C "$out" config http.uploadpack true
+      git -C "$out" update-server-info
+    '';
   # Export all the computed values for use in tests
   inherit
     lockJson # Parsed flake.lock content
