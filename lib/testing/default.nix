@@ -163,6 +163,100 @@ in rec {
       git -C "$out" update-server-info
     '';
 
+  # Create a reusable git server node for tests
+  # This provides a standardized git server that can serve repositories over git protocol
+  makeGitServerNode = {
+    port ? 8080,
+    extraConfig ? {},
+    systemBuildClosure,
+    pkgs,
+  }: {
+    services.getty.autologinUser = "root";
+    networking.firewall.allowedTCPPorts = [port];
+    virtualisation.writableStore = true;
+    virtualisation.memorySize = 2048;
+    virtualisation.additionalPaths = [systemBuildClosure];
+
+    environment.systemPackages = [pkgs.git pkgs.jq];
+
+    nix = {
+      package = pkgs.nixVersions.stable;
+      settings = {
+        experimental-features = ["nix-command" "flakes"];
+        substituters = [];
+        builders-use-substitutes = true;
+        fallback = true;
+        sandbox = true;
+        keep-outputs = true;
+        keep-derivations = true;
+      };
+      extraOptions = ''
+        accept-flake-config = true
+        flake-registry = ${pkgs.writeText "empty-registry.json" ''{"flakes":[]}''}
+      '';
+      registry =
+        registryEntries
+        // {
+          nixpkgs = {
+            to = {
+              type = "path";
+              path = pkgs.path;
+            };
+          };
+        };
+    };
+
+    nix.nixPath = ["nixpkgs=${pkgs.path}"];
+
+    # Create git user for proper permissions
+    users.users.git = {
+      isSystemUser = true;
+      group = "git";
+      home = "/srv/git";
+      createHome = true;
+    };
+    users.groups.git = {};
+
+    systemd.tmpfiles.rules = [
+      "d /srv/git 0755 git git -"
+      "L+ /srv/git/crystal-forge.git - - - - ${testFlake}"
+    ];
+
+    environment.etc."gitconfig".text = ''
+      [safe]
+          directory = /srv/git/crystal-forge.git
+    '';
+
+    systemd.services.git-http-server = {
+      enable = true;
+      description = "Git HTTP Server for Crystal Forge";
+      after = ["network.target"];
+      wantedBy = ["multi-user.target"];
+
+      serviceConfig = {
+        Type = "exec";
+        User = "git";
+        Group = "git";
+        WorkingDirectory = "/srv/git";
+        ExecStart = "${pkgs.git}/bin/git daemon --verbose --export-all --base-path=/srv/git --reuseaddr --port=8080";
+        Environment = "HOME=/srv/git";
+      };
+    };
+
+    systemd.services.fix-git-ownership = {
+      enable = true;
+      description = "Fix Git Repository Ownership";
+      after = ["systemd-tmpfiles-setup.service"];
+      before = ["git-http-server.service"];
+      wantedBy = ["multi-user.target"];
+
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = "${pkgs.bash}/bin/bash -c 'chown -R git:git /srv/git/crystal-forge.git'";
+      };
+    };
+  };
+
   # Export all the computed values for use in tests
   inherit
     lockJson # Parsed flake.lock content

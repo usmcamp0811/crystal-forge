@@ -3,112 +3,26 @@
   pkgs,
   lib,
   ...
-}:
-with lib.crystal-forge; let
-  cfTestSysToplevel = inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel;
-
+}: let
   systemBuildClosure = pkgs.closureInfo {
     rootPaths =
       [
-        cfTestSysToplevel
-        cfTestSysToplevel.drvPath
+        inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel
+        inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
         pkgs.crystal-forge.default
         pkgs.crystal-forge.default.drvPath
-        testFlake
+        lib.crystal-forge.testFlake
         pkgs.path
       ]
-      ++ prefetchedPaths;
+      ++ lib.crystal-forge.prefetchedPaths;
   };
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-git-server-test";
 
     nodes = {
-      gitserver = {pkgs, ...}: {
-        services.getty.autologinUser = "root";
-        networking.firewall.allowedTCPPorts = [8080];
-        virtualisation.writableStore = true;
-        virtualisation.memorySize = 2048;
-        virtualisation.additionalPaths = [systemBuildClosure];
-
-        environment.systemPackages = [pkgs.git pkgs.jq];
-
-        nix = {
-          package = pkgs.nixVersions.stable;
-          settings = {
-            experimental-features = ["nix-command" "flakes"];
-            substituters = [];
-            builders-use-substitutes = true;
-            fallback = true;
-            sandbox = true;
-            keep-outputs = true;
-            keep-derivations = true;
-          };
-          extraOptions = ''
-            accept-flake-config = true
-            flake-registry = ${pkgs.writeText "empty-registry.json" ''{"flakes":[]}''}
-          '';
-          registry =
-            registryEntries
-            // {
-              nixpkgs = {
-                to = {
-                  type = "path";
-                  path = pkgs.path;
-                };
-              };
-            };
-        };
-
-        nix.nixPath = ["nixpkgs=${pkgs.path}"];
-
-        # Create git user for proper permissions
-        users.users.git = {
-          isSystemUser = true;
-          group = "git";
-          home = "/srv/git";
-          createHome = true;
-        };
-        users.groups.git = {};
-
-        systemd.tmpfiles.rules = [
-          "d /srv/git 0755 git git -"
-          "L+ /srv/git/crystal-forge.git - - - - ${testFlake}"
-        ];
-
-        environment.etc."gitconfig".text = ''
-          [safe]
-              directory = /srv/git/crystal-forge.git
-        '';
-
-        systemd.services.git-http-server = {
-          enable = true;
-          description = "Git HTTP Server for Crystal Forge";
-          after = ["network.target"];
-          wantedBy = ["multi-user.target"];
-
-          serviceConfig = {
-            Type = "exec";
-            User = "git";
-            Group = "git";
-            WorkingDirectory = "/srv/git";
-            ExecStart = "${pkgs.git}/bin/git daemon --verbose --export-all --base-path=/srv/git --reuseaddr --port=8080";
-            Environment = "HOME=/srv/git";
-          };
-        };
-
-        systemd.services.fix-git-ownership = {
-          enable = true;
-          description = "Fix Git Repository Ownership";
-          after = ["systemd-tmpfiles-setup.service"];
-          before = ["git-http-server.service"];
-          wantedBy = ["multi-user.target"];
-
-          serviceConfig = {
-            Type = "oneshot";
-            ExecStart = "${pkgs.bash}/bin/bash -c 'chown -R git:git /srv/git/crystal-forge.git'";
-          };
-        };
+      gitserver = lib.crystal-forge.makeGitServerNode {
+        inherit pkgs systemBuildClosure;
       };
 
       builder = {pkgs, ...}: {
@@ -135,7 +49,7 @@ in
             flake-registry = ${pkgs.writeText "empty-registry.json" ''{"flakes":[]}''}
           '';
           registry =
-            registryEntries
+            lib.crystal-forge.registryEntries
             // {
               nixpkgs = {
                 to = {
