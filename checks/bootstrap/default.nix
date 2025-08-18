@@ -48,7 +48,7 @@ in
       };
 
       agent = lib.crystal-forge.makeAgentNode {
-        inherit pkgs inputs keyPath pubPath;
+        inherit pkgs systemBuildClosure inputs keyPath pubPath;
         serverHost = "server";
         extraConfig = {imports = [inputs.self.nixosModules.crystal-forge];};
       };
