@@ -34,6 +34,11 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
             f"echo '{escaped_msg}' {operator} /tmp/xchg/test-results.log"
         )
 
+    def _escape_for_shell(self, text: str) -> str:
+        """Properly escape text for shell commands"""
+        # Replace single quotes with '\'' (end quote, escaped quote, start quote)
+        return text.replace("'", "'\"'\"'")
+
     def log(self, message: str, level: str = "INFO") -> None:
         """Log message to both console and VM file"""
         timestamp = time.strftime("%H:%M:%S", time.gmtime())
@@ -70,10 +75,10 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
             filename = f"{service_name.replace('.service', '')}-logs.txt"
 
         self.log_section(f"📄 Capturing {service_name} logs...")
-        
+
         # Ensure the target VM has the xchg directory
         vm.succeed("mkdir -p /tmp/xchg")
-        
+
         # Check if service exists and capture logs with better error handling
         try:
             vm.succeed(f"systemctl status {service_name} > /dev/null 2>&1")
@@ -86,9 +91,11 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
         except Exception as e:
             self.log_warning(f"Could not capture logs for {service_name}: {str(e)}")
             # Create an empty log file to prevent copy errors later
-            vm.succeed(f"echo 'Service {service_name} not found or no logs available' > /tmp/xchg/{filename}")
+            vm.succeed(
+                f"echo 'Service {service_name} not found or no logs available' > /tmp/xchg/{filename}"
+            )
             self.log_files.append(filename)
-        
+
         return filename
 
     def capture_command_output(
@@ -99,14 +106,23 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
             description = f"Command: {command}"
 
         self.log_section(f"📊 Capturing {description}...")
-        
+
         # Ensure the target VM has the xchg directory
         vm.succeed("mkdir -p /tmp/xchg")
-        
-        vm.succeed(f"echo '{description}' > /tmp/xchg/{filename}")
-        vm.succeed(f"echo 'Command: {command}' >> /tmp/xchg/{filename}")
-        vm.succeed(f"echo '--- Output ---' >> /tmp/xchg/{filename}")
-        vm.succeed(f"{command} >> /tmp/xchg/{filename} 2>&1 || echo 'Command failed or no output' >> /tmp/xchg/{filename}")
+
+        # Use here-documents to avoid quoting issues
+        vm.succeed(
+            f"""cat > /tmp/xchg/{filename} << 'EOF'
+{description}
+Command: {command}
+--- Output ---
+EOF"""
+        )
+
+        # Append the actual command output
+        vm.succeed(
+            f"{command} >> /tmp/xchg/{filename} 2>&1 || echo 'Command failed or no output' >> /tmp/xchg/{filename}"
+        )
 
         self.log_files.append(filename)
         self.log_success(f"Command output captured: {filename}")

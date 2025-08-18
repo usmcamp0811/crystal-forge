@@ -93,11 +93,11 @@ in
       server.wait_until_succeeds("journalctl -u crystal-forge-server.service | grep -E 'accepted.*agent'")
       logger.log_success("Agent successfully connected to server")
 
-      # TestPatterns.database_verification(logger, server, "crystal_forge", {
-      #   "hostname": system_info['hostname'],
-      #   "system_hash": system_info['system_hash'],
-      #   "change_reason": "startup",
-      # })
+      TestPatterns.database_verification(logger, server, "crystal_forge", {
+        "hostname": system_info['hostname'],
+        "system_hash": system_info['system_hash'],
+        "change_reason": "startup",
+      })
 
       systems_count = server.succeed(
         "psql -U crystal_forge -d crystal_forge -c 'SELECT COUNT(*) FROM system_states;' -t"
