@@ -71,8 +71,11 @@ in
         "crystal-forge-agent.service",
       ])
 
-      logger.capture_service_logs(server, "crystal-forge-server.service")
-      logger.capture_service_logs(agent, "crystal-forge-agent.service")
+      # Capture service logs with better error handling
+      TestPatterns.capture_service_logs_multi_vm(logger, [
+        (server, "crystal-forge-server.service"),
+        (agent, "crystal-forge-agent.service"),
+      ])
 
       TestPatterns.key_file_verification(logger, agent, {
         "/etc/agent.key": "Agent private key accessible",

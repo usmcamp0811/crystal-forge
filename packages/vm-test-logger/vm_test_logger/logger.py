@@ -69,14 +69,26 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
         if not filename:
             filename = f"{service_name.replace('.service', '')}-logs.txt"
 
-        self.log_section(f"📝 Capturing {service_name} logs...")
-        vm.succeed(f"echo '{service_name} Service Logs:' > /tmp/xchg/{filename}")
-        vm.succeed(
-            f"journalctl -u {service_name} --no-pager >> /tmp/xchg/{filename} || true"
-        )
-
-        self.log_files.append(filename)
-        self.log_success(f"Service logs captured: {filename}")
+        self.log_section(f"📄 Capturing {service_name} logs...")
+        
+        # Ensure the target VM has the xchg directory
+        vm.succeed("mkdir -p /tmp/xchg")
+        
+        # Check if service exists and capture logs with better error handling
+        try:
+            vm.succeed(f"systemctl status {service_name} > /dev/null 2>&1")
+            vm.succeed(f"echo '{service_name} Service Logs:' > /tmp/xchg/{filename}")
+            vm.succeed(
+                f"journalctl -u {service_name} --no-pager >> /tmp/xchg/{filename} 2>&1 || echo 'No logs available for {service_name}' >> /tmp/xchg/{filename}"
+            )
+            self.log_files.append(filename)
+            self.log_success(f"Service logs captured: {filename}")
+        except Exception as e:
+            self.log_warning(f"Could not capture logs for {service_name}: {str(e)}")
+            # Create an empty log file to prevent copy errors later
+            vm.succeed(f"echo 'Service {service_name} not found or no logs available' > /tmp/xchg/{filename}")
+            self.log_files.append(filename)
+        
         return filename
 
     def capture_command_output(
@@ -87,10 +99,14 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
             description = f"Command: {command}"
 
         self.log_section(f"📊 Capturing {description}...")
+        
+        # Ensure the target VM has the xchg directory
+        vm.succeed("mkdir -p /tmp/xchg")
+        
         vm.succeed(f"echo '{description}' > /tmp/xchg/{filename}")
         vm.succeed(f"echo 'Command: {command}' >> /tmp/xchg/{filename}")
         vm.succeed(f"echo '--- Output ---' >> /tmp/xchg/{filename}")
-        vm.succeed(f"{command} >> /tmp/xchg/{filename} || true")
+        vm.succeed(f"{command} >> /tmp/xchg/{filename} 2>&1 || echo 'Command failed or no output' >> /tmp/xchg/{filename}")
 
         self.log_files.append(filename)
         self.log_success(f"Command output captured: {filename}")
@@ -157,7 +173,7 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
         if not filename:
             filename = "database-query.txt"
 
-        self.log_section("🗄️  Executing database query...")
+        self.log_section("🗄️ Executing database query...")
         self.capture_command_output(
             vm,
             f"psql -U {database} -d {database} -c '{query}'",
@@ -167,6 +183,16 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
 
         # Also return the output for immediate use
         return vm.succeed(f"psql -U {database} -d {database} -c '{query}'")
+
+    def copy_logs_from_vm(self, vm: Any, filename: str) -> None:
+        """Copy a single log file from a VM with error handling"""
+        try:
+            # Check if file exists before trying to copy
+            vm.succeed(f"test -f /tmp/xchg/{filename}")
+            vm.copy_from_vm(f"/tmp/xchg/{filename}")
+            self.log_success(f"Successfully copied {filename} from VM")
+        except Exception as e:
+            self.log_warning(f"Could not copy {filename}: {str(e)}")
 
     def finalize_test(self) -> None:
         """Finalize test with summary and file copying"""
@@ -185,9 +211,9 @@ Test started at: {time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime())}
         for log_file in self.log_files:
             self.log_info(log_file)
 
-        # Copy all log files to host
+        # Copy all log files to host with error handling
         for log_file in self.log_files:
-            self.primary_vm.copy_from_vm(f"/tmp/xchg/{log_file}")
+            self.copy_logs_from_vm(self.primary_vm, log_file)
 
 
 class TestPatterns:
@@ -225,3 +251,11 @@ class TestPatterns:
 
         for key, value in expected_data.items():
             logger.assert_in_output(value, output, f"{key} verification")
+
+    @staticmethod
+    def capture_service_logs_multi_vm(
+        logger: TestLogger, vm_services: List[tuple[Any, str]]
+    ) -> None:
+        """Capture service logs from multiple VMs"""
+        for vm, service_name in vm_services:
+            logger.capture_service_logs(vm, service_name)
