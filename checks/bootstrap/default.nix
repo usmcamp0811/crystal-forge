@@ -37,6 +37,10 @@ in
     skipTypeCheck = true;
 
     nodes = {
+      gitserver = lib.crystal-forge.makeGitServerNode {
+        inherit pkgs systemBuildClosure;
+      };
+
       server = lib.crystal-forge.makeServerNode {
         inherit pkgs systemBuildClosure keyPath pubPath cfFlakePath;
         extraConfig = {imports = [inputs.self.nixosModules.crystal-forge];};

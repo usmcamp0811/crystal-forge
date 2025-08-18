@@ -376,6 +376,7 @@ in rec {
     pkgs,
     keyPath,
     pubPath,
+    systemBuildClosure,
     serverHost ? "server",
     serverPort ? 3000,
     enableFirewall ? false,
@@ -383,6 +384,10 @@ in rec {
     ...
   }:
     {
+      virtualisation.writableStore = true;
+      virtualisation.memorySize = 2048;
+      virtualisation.additionalPaths = [systemBuildClosure];
+
       networking.useDHCP = true;
       networking.firewall.enable = false;
 
