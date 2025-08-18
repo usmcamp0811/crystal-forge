@@ -228,13 +228,6 @@ in
         "nixos-derivations.txt"
       )
 
-      # Verify cf-test-sys derivation exists
-      # logger.assert_in_output(
-      #   "cf-test-sys",
-      #   derivations_output,
-      #   "cf-test-sys NixOS derivation in database"
-      # )
-
       # Check for system states linked to our agent
       TestPatterns.database_verification(logger, server, "crystal_forge", {
         "hostname": system_info['hostname'],
