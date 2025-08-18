@@ -188,17 +188,19 @@ EOF"""
         """Execute database query and capture results"""
         if not filename:
             filename = "database-query.txt"
-
         self.log_section("🗄️ Executing database query...")
+
+        # Use double quotes around the query to avoid issues with single quotes in SQL
+        cmd = f'psql -U {database} -d {database} -c "{query}"'
+
         self.capture_command_output(
             vm,
-            f"psql -U {database} -d {database} -c '{query}'",
+            cmd,
             filename,
             f"Database Query: {query[:50]}...",
         )
-
         # Also return the output for immediate use
-        return vm.succeed(f"psql -U {database} -d {database} -c '{query}'")
+        return vm.succeed(cmd)
 
     def copy_logs_from_vm(self, vm: Any, filename: str) -> None:
         """Copy a single log file from a VM with error handling"""

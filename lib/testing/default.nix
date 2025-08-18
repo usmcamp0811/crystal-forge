@@ -300,6 +300,7 @@ in rec {
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
 
+      environment.systemPackages = [pkgs.git pkgs.jq];
       environment.etc = lib.mkMerge [
         (lib.mkIf (keyPath != null) {"agent.key".source = "${keyPath}/agent.key";})
         (lib.mkIf (pubPath != null) {"agent.pub".source = "${pubPath}/agent.pub";})
@@ -333,9 +334,9 @@ in rec {
           };
           flakes.watched = [
             {
-              name = "dotfiles";
-              repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
-              auto_poll = false;
+              name = "crystal-forge";
+              repo_url = "git://gitserver:8080/crystal-forge.git";
+              auto_poll = true;
             }
           ];
           environments = [
@@ -364,7 +365,7 @@ in rec {
               hostname = "agent";
               public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
               environment = "test";
-              flake_name = "dotfiles";
+              flake_name = "crystal-forge";
             }
           ];
         })
