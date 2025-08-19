@@ -22,7 +22,9 @@ class GitServerTests:
             ctx.logger,
             ctx.gitserver,
             [
-                "git-http-server.service",
+                "cgit-gitserver.service",
+                "git-daemon.service",  # Also updated from git-http-server
+                "nginx.service",  # nginx for cgit web interface
                 "multi-user.target",
             ],
         )
@@ -45,20 +47,42 @@ class GitServerTests:
         ctx.logger.log_success("Git repository can be cloned locally")
 
     @staticmethod
-    def _test_flake_operations(ctx: CrystalForgeTestContext) -> None:
-        """Test flake operations from server"""
+    def test_flake_operations(ctx: CrystalForgeTestContext) -> None:
+        """Test flake operations from server using both git:// and HTTP protocols"""
         ctx.logger.log_section("📦 Testing Flake Operations from Server")
 
         # Verify server can access git server
         ctx.server.succeed("ping -c1 gitserver")
         ctx.logger.log_success("Server can reach git server")
 
-        # Test git access from server
+        # Test git:// protocol access
         ctx.server.succeed("git ls-remote git://gitserver:8080/crystal-forge.git")
-        ctx.logger.log_success("Server can access git repository remotely")
+        ctx.logger.log_success("Server can access git repository via git:// protocol")
 
-        # Test flake operations
+        # Test HTTP protocol access via cgit
+        ctx.server.succeed("git ls-remote http://gitserver/crystal-forge.git")
+        ctx.logger.log_success("Server can access git repository via HTTP protocol")
+
+        # Test cgit web interface is accessible
+        ctx.server.succeed("curl -f http://gitserver/")
+        ctx.logger.log_success("cgit web interface is accessible")
+
+        # Test flake operations with git:// protocol
         ctx.server.succeed(
             "nix flake show git://gitserver:8080/crystal-forge.git --no-write-lock-file"
         )
-        ctx.logger.log_success("Server can show flake metadata")
+        ctx.logger.log_success("Server can show flake metadata via git:// protocol")
+
+        # Test flake operations with HTTP protocol
+        ctx.server.succeed(
+            "nix flake show http://gitserver/crystal-forge.git --no-write-lock-file"
+        )
+        ctx.logger.log_success("Server can show flake metadata via HTTP protocol")
+
+        # Test cloning via HTTP (more comprehensive test)
+        ctx.server.succeed(
+            "cd /tmp && git clone http://gitserver/crystal-forge.git test-clone && ls test-clone/flake.nix"
+        )
+        ctx.logger.log_success(
+            "Server can clone repository via HTTP and verify contents"
+        )
