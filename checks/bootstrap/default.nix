@@ -57,7 +57,7 @@ in
     };
 
     globalTimeout = 900; # Increased timeout for flake operations
-    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.cf-test-modules];
+    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
       from vm_test_logger import TestLogger  # type: ignore[import-untyped]

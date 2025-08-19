@@ -23,7 +23,5 @@ pkgs.python3Packages.buildPythonPackage rec {
 
   meta = with lib; {
     description = "Logging utilities for NixOS VM tests";
-    license = licenses.mit;
-    maintainers = [];
   };
 }

@@ -23,7 +23,5 @@ pkgs.python3Packages.buildPythonPackage rec {
 
   meta = with lib; {
     description = "Modular test components for Crystal Forge integration testing";
-    license = licenses.mit;
-    maintainers = [];
   };
 }
