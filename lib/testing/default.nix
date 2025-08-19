@@ -327,6 +327,7 @@ in rec {
           enable = true;
           local-database = true;
           log_level = "debug";
+          build.offline = true;
           database = {
             user = "crystal_forge";
             host = "localhost";
