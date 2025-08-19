@@ -43,7 +43,7 @@ pub async fn list_nixos_configurations_from_commit(
     } else if repo_url.starts_with("git+") {
         format!("{}?rev={}", repo_url, commit_hash)
     } else if repo_url.starts_with("git://") {
-        format!("git+{}?rev={}", repo_url, commit_hash)
+        format!("{}?rev={}", repo_url, commit_hash)
     } else {
         format!(
             "git+{}{}.git?rev={}",
