@@ -104,7 +104,7 @@ class DatabaseAnalyzer:
             "crystal-forge", flakes_output, "Crystal Forge flake in flakes table"
         )
         ctx.logger.assert_in_output(
-            "git://gitserver:8080", flakes_output, "Git server URL in flakes table"
+            "http://gitserver:8080", flakes_output, "Git server URL in flakes table"
         )
 
         flakes_count = ctx.server.succeed(

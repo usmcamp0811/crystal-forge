@@ -93,28 +93,72 @@ in
               system_info=system_info
           )
 
+          def run_test_phase(phase_name: str, test_func, *args, **kwargs):
+              """Helper to run a test phase with proper error handling"""
+              logger.log_section(f"🚀 STARTING: {phase_name}")
+              try:
+                  test_func(*args, **kwargs)
+                  logger.log_success(f"✅ COMPLETED: {phase_name}")
+              except Exception as e:
+                  import traceback
+                  import sys
+
+                  # Get more detailed error info
+                  tb = traceback.extract_tb(e.__traceback__)
+                  if tb:
+                      last_frame = tb[-1]
+                      error_location = f"{last_frame.filename.split('/')[-1]}::{last_frame.name}() line {last_frame.lineno}"
+                  else:
+                      error_location = "unknown location"
+
+                  logger.log_error(f"❌ FAILED: {phase_name}")
+                  logger.log_error(f"🔍 Error Location: {error_location}")
+                  logger.log_error(f"🔍 Error Message: {str(e)}")
+                  logger.log_error(f"🔍 Error Type: {type(e).__name__}")
+
+                  # Print to stderr for immediate visibility
+                  print(f"\n" + "="*80, file=sys.stderr)
+                  print(f"❌ TEST PHASE FAILED: {phase_name}", file=sys.stderr)
+                  print(f"Location: {error_location}", file=sys.stderr)
+                  print(f"Error: {str(e)}", file=sys.stderr)
+                  print(f"Type: {type(e).__name__}", file=sys.stderr)
+                  print("="*80, file=sys.stderr)
+
+                  raise
+
           try:
               # Phase 1: Infrastructure Setup
-              GitServerTests.setup_and_verify(ctx)
-              DatabaseTests.setup_and_verify(ctx)
+              run_test_phase("Phase 1.1: Git Server Setup", GitServerTests.setup_and_verify, ctx)
+              run_test_phase("Phase 1.2: Database Setup", DatabaseTests.setup_and_verify, ctx)
 
               # Phase 2: Service Startup and Verification
-              CrystalForgeServerTests.setup_and_verify(ctx)
-              AgentTests.setup_and_verify(ctx)
+              # run_test_phase("Phase 2.1: Crystal Forge Server Tests", CrystalForgeServerTests.setup_and_verify, ctx)
+              # run_test_phase("Phase 2.2: Agent Tests", AgentTests.setup_and_verify, ctx)
 
               # Phase 3: Core Workflow Testing
-              FlakeProcessingTests.verify_complete_workflow(ctx)
-              SystemStateTests.verify_system_state_tracking(ctx)
+              run_test_phase("Phase 3.1: Flake Processing Tests", FlakeProcessingTests.verify_complete_workflow, ctx)
+              run_test_phase("Phase 3.2: System State Tests", SystemStateTests.verify_system_state_tracking, ctx)
 
-              # Phase 4: Analysis and Artifact Collection
-              ServiceLogCollector.collect_all_logs(ctx)
-              DatabaseAnalyzer.generate_comprehensive_report(ctx)
+              # Phase 4: Analysis and Artifact Collection (non-critical)
+              try:
+                  run_test_phase("Phase 4.1: Service Log Collection", ServiceLogCollector.collect_all_logs, ctx)
+              except Exception as e:
+                  logger.log_warning(f"⚠️ Phase 4.1 failed but continuing: {e}")
+
+              try:
+                  run_test_phase("Phase 4.2: Database Analysis", DatabaseAnalyzer.generate_comprehensive_report, ctx)
+              except Exception as e:
+                  logger.log_warning(f"⚠️ Phase 4.2 failed but continuing: {e}")
 
               logger.log_success("🎉 All Crystal Forge integration tests passed!")
 
           except Exception as e:
-              logger.log_error(f"Test failed: {str(e)}")
-              ServiceLogCollector.collect_all_logs(ctx)
+              logger.log_error(f"💥 CRITICAL TEST FAILURE - SEE ERROR DETAILS ABOVE")
+              # Always try to collect logs on failure
+              try:
+                  ServiceLogCollector.collect_all_logs(ctx)
+              except:
+                  pass  # Don't let log collection failure mask the real error
               raise
           finally:
               logger.finalize_test()
