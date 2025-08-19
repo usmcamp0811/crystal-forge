@@ -16,7 +16,9 @@ from .service_log_collector import ServiceLogCollector
 from .system_state_tests import SystemStateTests
 from .test_context import CrystalForgeTestContext
 from .test_patterns import TestPatterns
-from .test_utilities import TestUtilities
+
+# Import the utility functions directly, not a class
+from .test_utilities import format_duration, sanitize_hostname
 
 __all__ = [
     "CrystalForgeTestContext",
@@ -29,7 +31,9 @@ __all__ = [
     "ServiceLogCollector",
     "DatabaseAnalyzer",
     "TestPatterns",
-    "TestUtilities",
+    # Export the utility functions
+    "format_duration",
+    "sanitize_hostname",
 ]
 
 __version__ = "1.0.0"
