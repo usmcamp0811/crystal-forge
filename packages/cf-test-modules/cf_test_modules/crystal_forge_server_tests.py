@@ -32,6 +32,10 @@ class CrystalForgeServerTests:
     @staticmethod
     def _verify_service_health(ctx: CrystalForgeTestContext) -> None:
         """Verify server service health"""
+        # Wait for the port to be open before running the network test
+        ctx.server.wait_for_open_port(3000)
+        ctx.logger.log_success("Crystal Forge server is listening on port 3000")
+
         from .test_patterns import TestPatterns
 
         TestPatterns.network_test(ctx.logger, ctx.server, "server", 3000)
