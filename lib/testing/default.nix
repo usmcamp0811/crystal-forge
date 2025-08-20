@@ -237,12 +237,6 @@ in rec {
             directory = /srv/git/crystal-forge.git
       '';
 
-      # Enable fcgiwrap (required for cgit)
-      services.fcgiwrap.enable = true;
-
-      # Enable nginx for cgit
-      services.nginx.enable = true;
-
       # Configure cgit web interface
       services.cgit = {
         gitserver = {
@@ -262,9 +256,9 @@ in rec {
             enable-log-filecount = true;
             enable-log-linecount = true;
 
-            # Syntax highlighting (optional, may cause issues in minimal env)
-            # source-filter = "${pkgs.cgit}/lib/cgit/filters/syntax-highlighting.py";
-            # about-filter = "${pkgs.cgit}/lib/cgit/filters/about-formatting.sh";
+            # Syntax highlighting
+            source-filter = "${pkgs.cgit}/lib/cgit/filters/syntax-highlighting.py";
+            about-filter = "${pkgs.cgit}/lib/cgit/filters/about-formatting.sh";
 
             # Cache for performance
             cache-size = 1000;
@@ -282,6 +276,9 @@ in rec {
           group = "cgit";
         };
       };
+
+      # Enable nginx for cgit
+      services.nginx.enable = true;
 
       # Git daemon for git:// protocol access
       systemd.services.git-daemon = {
