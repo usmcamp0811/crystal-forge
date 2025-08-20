@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cf-test-modules"
+version = "1.0.0"
+description = "Modular test components for Crystal Forge integration testing"
+authors = [{name = "Matthew Camp"}]
+requires-python = ">=3.8"
+dependencies = [
+    "pytest",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["cf_test_modules*"]
