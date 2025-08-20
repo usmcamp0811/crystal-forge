@@ -41,21 +41,12 @@ pub async fn list_nixos_configurations_from_commit(
     let flake_uri = if is_path {
         repo_url.to_string()
     } else if repo_url.starts_with("git+") {
-        // Already has git+ prefix, just add rev
         format!("{}?rev={}", repo_url, commit_hash)
-    } else if repo_url.starts_with("git://") {
-        // git:// URLs are used directly without git+ prefix
-        format!("{}?rev={}", repo_url, commit_hash)
-    } else if repo_url.starts_with("https://") || repo_url.starts_with("ssh://") {
-        // These need git+ prefix
-        format!("git+{}?rev={}", repo_url, commit_hash)
     } else {
-        // This branch is for cases where we need to construct a full git URL
-        // from something like "github.com/user/repo"
         format!(
             "git+{}{}.git?rev={}",
             repo_url,
-            if repo_url.ends_with('/') { "" } else { "/" },
+            if repo_url.ends_with('/') { "" } else { "" },
             commit_hash
         )
     };

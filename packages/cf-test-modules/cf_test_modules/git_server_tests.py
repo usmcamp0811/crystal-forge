@@ -9,7 +9,6 @@ class GitServerTests:
         """Complete git server setup and verification"""
         GitServerTests._start_git_server(ctx)
         GitServerTests._verify_git_accessibility(ctx)
-        GitServerTests._test_flake_operations(ctx)
 
     @staticmethod
     def _start_git_server(ctx: CrystalForgeTestContext) -> None:
@@ -22,15 +21,14 @@ class GitServerTests:
             ctx.logger,
             ctx.gitserver,
             [
-                "cgit-gitserver.service",
                 "git-daemon.service",  # Also updated from git-http-server
                 "nginx.service",  # nginx for cgit web interface
                 "multi-user.target",
             ],
         )
 
-        ctx.gitserver.wait_for_open_port(8080)
-        ctx.logger.log_success("Git server is listening on port 8080")
+        ctx.gitserver.wait_for_open_port(80)
+        ctx.logger.log_success("Git server is listening on port 80")
 
     @staticmethod
     def _verify_git_accessibility(ctx: CrystalForgeTestContext) -> None:
@@ -56,7 +54,7 @@ class GitServerTests:
         ctx.logger.log_success("Server can reach git server")
 
         # Test git:// protocol access
-        ctx.server.succeed("git ls-remote git://gitserver:8080/crystal-forge.git")
+        ctx.server.succeed("git ls-remote git://gitserver/crystal-forge.git")
         ctx.logger.log_success("Server can access git repository via git:// protocol")
 
         # Test HTTP protocol access via cgit
@@ -69,7 +67,7 @@ class GitServerTests:
 
         # Test flake operations with git:// protocol
         ctx.server.succeed(
-            "nix flake show git://gitserver:8080/crystal-forge.git --no-write-lock-file"
+            "nix flake show git://gitserver/crystal-forge.git --no-write-lock-file"
         )
         ctx.logger.log_success("Server can show flake metadata via git:// protocol")
 

@@ -391,7 +391,7 @@ in rec {
           flakes.watched = [
             {
               name = "crystal-forge";
-              repo_url = "http://gitserver/crystal-forge.git";
+              repo_url = "http://gitserver/crystal-forge";
               auto_poll = true;
             }
           ];
