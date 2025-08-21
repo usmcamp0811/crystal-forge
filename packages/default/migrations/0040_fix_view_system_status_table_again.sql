@@ -1,3 +1,5 @@
+DROP VIEW view_systems_status_table;
+
 CREATE OR REPLACE VIEW view_systems_status_table AS
 WITH latest_system_states AS (
     SELECT DISTINCT ON (hostname)
