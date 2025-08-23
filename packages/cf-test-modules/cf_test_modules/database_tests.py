@@ -20,6 +20,7 @@ class DatabaseTests:
     @staticmethod
     def run_view_tests(ctx: CrystalForgeTestContext) -> None:
         """Run database view tests - should be called after Crystal Forge server has started"""
+        DatabaseTests._check_database_ready(ctx)
         DatabaseTests._run_view_tests(ctx)
 
     @staticmethod
