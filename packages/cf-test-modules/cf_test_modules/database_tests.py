@@ -15,6 +15,11 @@ class DatabaseTests:
         """Complete database setup and verification"""
         DatabaseTests._setup_postgresql(ctx)
         DatabaseTests._verify_database_functionality(ctx)
+        # Note: View tests moved to run_view_tests() which should be called after server startup
+
+    @staticmethod
+    def run_view_tests(ctx: CrystalForgeTestContext) -> None:
+        """Run database view tests - should be called after Crystal Forge server has started"""
         DatabaseTests._run_view_tests(ctx)
 
     @staticmethod
@@ -70,10 +75,16 @@ class DatabaseTests:
         """Check if the database is ready for testing"""
         # Check if the crystal-forge database user exists
         try:
-            ctx.server.succeed(
+            result = ctx.server.succeed(
                 "sudo -u postgres psql -t -c \"SELECT 1 FROM pg_roles WHERE rolname = 'crystal-forge';\""
-            )
-            ctx.logger.log_info("crystal-forge database user exists")
+            ).strip()
+            if result:
+                ctx.logger.log_info("crystal-forge database user exists")
+            else:
+                ctx.logger.log_warning(
+                    "crystal-forge database user not found (server not started yet)"
+                )
+                return False
         except Exception:
             ctx.logger.log_warning(
                 "crystal-forge database user not found (server not started yet)"
@@ -82,10 +93,16 @@ class DatabaseTests:
 
         # Check if the database exists
         try:
-            ctx.server.succeed(
+            result = ctx.server.succeed(
                 "sudo -u postgres psql -t -c \"SELECT 1 FROM pg_database WHERE datname = 'crystal_forge';\""
-            )
-            ctx.logger.log_info("crystal_forge database exists")
+            ).strip()
+            if result:
+                ctx.logger.log_info("crystal_forge database exists")
+            else:
+                ctx.logger.log_warning(
+                    "crystal_forge database not found (server not started yet)"
+                )
+                return False
         except Exception:
             ctx.logger.log_warning(
                 "crystal_forge database not found (server not started yet)"
