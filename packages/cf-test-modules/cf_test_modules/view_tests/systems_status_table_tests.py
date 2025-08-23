@@ -1,9 +1,9 @@
-# view_tests/systems_status_table_tests.py
-# :contentReference[oaicite:1]{index=1}
 from __future__ import annotations
 
 from ..test_context import CrystalForgeTestContext
 from .base import BaseViewTests
+
+SQL_EXISTS = "systems_status_view_exists"
 
 
 class SystemsStatusTableTests(BaseViewTests):
@@ -13,7 +13,7 @@ class SystemsStatusTableTests(BaseViewTests):
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
         ctx.logger.log_section("🔍 Testing view_systems_status_table")
 
-        if not SystemsStatusTableTests._test_view_exists(ctx):
+        if not SystemsStatusTableTests._view_exists(ctx, SQL_EXISTS):
             ctx.logger.log_warning("View does not exist - skipping remaining tests")
             return
 
@@ -33,15 +33,9 @@ class SystemsStatusTableTests(BaseViewTests):
     # ---------------- Agent-driven example ----------------
     @staticmethod
     def _test_status_logic_via_agent(ctx: CrystalForgeTestContext) -> None:
-        """
-        Drive data creation via the CF test agent, then verify the view.
-        Assumes a runnable agent binary is available (e.g., set in env or flake input).
-        Adjust runner_cmd/args to your environment.
-        """
-        runner_cmd = "/run/current-system/sw/bin/cf-test-agent"  # adjust if different
+        runner_cmd = "/run/current-system/sw/bin/test-agent"  # adjust if different
         sudo_user = "crystalforge"  # run as service user that talks to server API
 
-        # Example scenario: Recent heartbeat + recent system state -> 'online'
         agent_cfg = {
             "scenario": "system_status",
             "hostname": "test-online",
@@ -54,7 +48,6 @@ class SystemsStatusTableTests(BaseViewTests):
             "agent": {"compatible": True, "version": "1.2.3", "build": "abc123def"},
             "state_at": {"minutes_ago": 5},
             "heartbeat_at": {"minutes_ago": 2},
-            # add any other knobs your agent supports
         }
 
         query_sql = """
@@ -74,7 +67,6 @@ class SystemsStatusTableTests(BaseViewTests):
                 return f"hostname mismatch: {host}"
             if status != "online":
                 return f"status mismatch: expected online, got {status}"
-            # text can vary; check non-empty
             if not text:
                 return "connectivity_status_text is empty"
             return None
@@ -87,7 +79,7 @@ class SystemsStatusTableTests(BaseViewTests):
             query_sql=query_sql,
             test_name="Agent-driven: recent heartbeat + state => online",
             assert_fn=assert_online,
-            config_arg="--config",  # change if your agent expects a different flag
-            extra_args=["--once"],  # optional: run one cycle and exit
-            wait_after_secs=1,  # small delay to let server persist rows
+            config_arg="--config",
+            extra_args=["--once"],
+            wait_after_secs=1,
         )
