@@ -13,14 +13,19 @@ import inspect
 import os
 import sys
 from pathlib import Path
+from typing import Callable, Dict, List, Tuple
 
 # When run directly, add parent directory to path so cf_test_modules imports resolve
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from cf_test_modules import (  # :contentReference[oaicite:3]{index=3}
+    AgentTests,
+    CrystalForgeServerTests,
     CrystalForgeTestContext,
     DatabaseTests,
+    FlakeProcessingTests,
+    SystemStateTests,
 )
 from cf_test_modules.devshell_adapter import (  # :contentReference[oaicite:4]{index=4}
     DevShellLogger,
@@ -29,6 +34,77 @@ from cf_test_modules.devshell_adapter import (  # :contentReference[oaicite:4]{i
 from cf_test_modules.test_exceptions import (
     AssertionFailedException,
 )  # :contentReference[oaicite:5]{index=5}
+
+# --------------------------------------------------------------------------------------
+# --- phase registry & groups ---
+# --------------------------------------------------------------------------------------
+PHASES: List[Tuple[str, Callable, str]] = [
+    ("Phase DB.1: Database Setup", DatabaseTests.setup_and_verify, "db.setup"),
+    ("Phase DB.2: Database View Tests", DatabaseTests.run_view_tests, "db.views"),
+    (
+        "Phase 2.1: Crystal Forge Server Tests",
+        CrystalForgeServerTests.setup_and_verify,
+        "server",
+    ),
+    ("Phase 2.2: Agent Tests", AgentTests.setup_and_verify, "agent"),
+    (
+        "Phase 3.1: Flake Processing Tests",
+        FlakeProcessingTests.verify_complete_workflow,
+        "flake",
+    ),
+    (
+        "Phase 3.2: System State Tests",
+        SystemStateTests.verify_system_state_tracking,
+        "system",
+    ),
+]
+ALL_TAGS: List[str] = [t for _, _, t in PHASES]
+TAG_TO_PHASE: Dict[str, Tuple[str, Callable]] = {t: (n, f) for (n, f, t) in PHASES}
+
+GROUPS: Dict[str, List[str]] = {
+    "db": ["db.setup", "db.views"],
+    "core": ["server", "agent", "flake", "system"],
+    "all": ALL_TAGS,
+}
+
+
+def _resolve_phase_spec(spec: str | None) -> List[Tuple[str, Callable]]:
+    if not spec:
+        spec = "db"
+    tokens = [s.strip().lower() for s in spec.split(",") if s.strip()]
+    ordered: List[Tuple[str, Callable]] = []
+    seen: set[str] = set()
+    for tok in tokens:
+        keys = GROUPS.get(tok, [tok])
+        for key in keys:
+            if key in TAG_TO_PHASE and key not in seen:
+                ordered.append(TAG_TO_PHASE[key])
+                seen.add(key)
+    return ordered
+
+
+def _log_suite_header(ctx: CrystalForgeTestContext) -> None:
+    mode = (ctx.system_info or {}).get("mode", "").lower()
+    if mode not in {"devshell", "nixos", "vm"}:
+        mode = (
+            "nixos"
+            if (_try_import_test_driver() and _find_machine_in_callstack("server"))
+            else "devshell"
+        )
+    ctx.logger.log_section(
+        f"🚀 Crystal Forge Tests - {'VM Mode' if mode in {'nixos','vm'} else 'DevShell Mode'}"
+    )
+
+
+def run_selected_phases(ctx: CrystalForgeTestContext, spec: str | None) -> None:
+    logger = ctx.logger
+    _log_suite_header(ctx)
+    try:
+        for name, fn in _resolve_phase_spec(spec):
+            run_phase(logger, name, fn, ctx)
+        logger.log_success("🎉 Selected phases completed!")
+    finally:
+        logger.log_section("📋 Test execution completed")
 
 
 # --------------------------------------------------------------------------------------
@@ -238,6 +314,12 @@ def main():
         default="auto",
         help="Execution mode selection",
     )
+    parser.add_argument(
+        "--phases",
+        default="db",
+        help="Comma-separated phase tags or groups "
+        "(db, core, all, server, agent, flake, system, db.setup, db.views)",
+    )
     args = parser.parse_args()
 
     mode = detect_mode(args.mode)
@@ -248,10 +330,9 @@ def main():
             sys.exit(1)
         ctx = create_ctx_for_devshell()
     else:
-        # nixos-test-driver path
         ctx = create_ctx_for_nixos()
 
-    run_database_tests(ctx)
+    run_selected_phases(ctx, args.phases)
 
 
 if __name__ == "__main__":
