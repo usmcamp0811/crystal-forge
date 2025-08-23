@@ -1,5 +1,5 @@
 from .test_context import CrystalForgeTestContext
-from .view_tests import SystemsStatusTableTests
+from .view_tests import DeploymentStatusViewTests, SystemsStatusTableTests
 
 
 class DatabaseTests:
@@ -56,6 +56,7 @@ class DatabaseTests:
 
         # Run view test suites
         SystemsStatusTableTests.run_all_tests(ctx)
+        DeploymentStatusViewTests.run_all_tests(ctx)
 
     @staticmethod
     def _check_database_ready(ctx: CrystalForgeTestContext) -> bool:
