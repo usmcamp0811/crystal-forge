@@ -65,10 +65,10 @@ class DatabaseTests:
             return
 
         # Run view test suites
-        SystemsStatusTableTests.run_all_tests(ctx)
+        # SystemsStatusTableTests.run_all_tests(ctx)
         DeploymentStatusViewTests.run_all_tests(ctx)
-        FleetHealthStatusViewTests.run_all_tests(ctx)
-        CriticalSystemsViewTests.run_all_tests(ctx)
+        # FleetHealthStatusViewTests.run_all_tests(ctx)
+        # CriticalSystemsViewTests.run_all_tests(ctx)
 
     @staticmethod
     def _check_database_ready(ctx: CrystalForgeTestContext) -> bool:

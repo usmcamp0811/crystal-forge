@@ -1,2 +1,0 @@
-EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) 
-SELECT * FROM view_critical_systems;

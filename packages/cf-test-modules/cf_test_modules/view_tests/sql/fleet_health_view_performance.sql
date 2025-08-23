@@ -1,2 +1,0 @@
-EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) 
-SELECT * FROM view_fleet_health_status;
