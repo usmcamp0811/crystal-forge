@@ -12,6 +12,43 @@ class CriticalSystemsViewTests:
     """Test suite for view_critical_systems"""
 
     @staticmethod
+    def run_all_tests(ctx: CrystalForgeTestContext) -> None:
+        """Run all tests for the critical systems view"""
+        ctx.logger.log_section("🚨 Testing view_critical_systems")
+
+        # Test 1: Verify view exists and is queryable
+        if not CriticalSystemsViewTests._test_view_exists(ctx):
+            ctx.logger.log_warning("View does not exist - skipping remaining tests")
+            return
+
+        # Test 2: Test basic structure and columns
+        CriticalSystemsViewTests._test_basic_structure(ctx)
+
+        # Test 3: Test critical vs offline status logic
+        CriticalSystemsViewTests._test_status_logic(ctx)
+
+        # Test 4: Test hours_ago calculation
+        CriticalSystemsViewTests._test_hours_ago_calculation(ctx)
+
+        # Test 5: Test data filtering (WHERE conditions)
+        CriticalSystemsViewTests._test_data_filtering(ctx)
+
+        # Test 6: Test sorting order
+        CriticalSystemsViewTests._test_sorting_order(ctx)
+
+        # Test 7: Test edge cases and boundaries
+        CriticalSystemsViewTests._test_edge_cases(ctx)
+
+        # Test 8: Test comprehensive critical scenarios
+        CriticalSystemsViewTests._test_critical_scenarios(ctx)
+
+        # Test 9: Test view performance
+        CriticalSystemsViewTests._test_view_performance(ctx)
+
+        # Clean up test data
+        CriticalSystemsViewTests.cleanup_test_data(ctx)
+
+    @staticmethod
     def _get_sql_path(filename: str) -> Path:
         """Get the path to a SQL file in the same directory as this Python file"""
         current_dir = Path(__file__).parent
@@ -53,33 +90,6 @@ class CriticalSystemsViewTests:
         if not CriticalSystemsViewTests._test_view_exists(ctx):
             ctx.logger.log_warning("View does not exist - skipping remaining tests")
             return
-
-        # Test 2: Test basic structure and columns
-        CriticalSystemsViewTests._test_basic_structure(ctx)
-
-        # Test 3: Test critical vs offline status logic
-        CriticalSystemsViewTests._test_status_logic(ctx)
-
-        # Test 4: Test hours_ago calculation
-        CriticalSystemsViewTests._test_hours_ago_calculation(ctx)
-
-        # Test 5: Test data filtering (WHERE conditions)
-        CriticalSystemsViewTests._test_data_filtering(ctx)
-
-        # Test 6: Test sorting order
-        CriticalSystemsViewTests._test_sorting_order(ctx)
-
-        # Test 7: Test edge cases and boundaries
-        CriticalSystemsViewTests._test_edge_cases(ctx)
-
-        # Test 8: Test comprehensive critical scenarios
-        CriticalSystemsViewTests._test_critical_scenarios(ctx)
-
-        # Test 9: Test view performance
-        CriticalSystemsViewTests._test_view_performance(ctx)
-
-        # Clean up test data
-        CriticalSystemsViewTests.cleanup_test_data(ctx)
 
     @staticmethod
     def _test_view_exists(ctx: CrystalForgeTestContext) -> bool:
