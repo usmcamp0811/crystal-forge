@@ -58,7 +58,7 @@ class ServiceLogCollector:
         # Network connectivity information
         ctx.logger.capture_command_output(
             ctx.server,
-            "ss -tlnp | grep -E ':(3000|5432)'",
+            f"ss -tlnp | grep -E ':({ctx.cf_server_port}|{ctx.db_port})'",
             "server-network-ports.txt",
             "Server network ports",
         )
