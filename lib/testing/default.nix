@@ -361,14 +361,17 @@ in rec {
         (lib.mkIf (pubPath != null) {"agent.pub".source = "${pubPath}/agent.pub";})
         (lib.mkIf (cfFlakePath != null) {"cf_flake".source = cfFlakePath;})
       ];
-
+      environment.variables = {
+        PGHOST = "/run/postgresql";
+        PGUSER = "postgres";
+      };
       services.postgresql = {
         enable = true;
         authentication = lib.concatStringsSep "\n" [
-          "local all root trust"
-          "local all postgres peer"
-          "host all all 127.0.0.1/32 trust"
-          "host all all ::1/128 trust"
+          "local   all   postgres   trust"
+          "local   all   all        peer"
+          "host    all   all 127.0.0.1/32 trust"
+          "host    all   all ::1/128      trust"
         ];
         initialScript = pkgs.writeText "init-crystal-forge.sql" ''
           CREATE USER crystal_forge LOGIN;
