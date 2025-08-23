@@ -1,7 +1,7 @@
 CREATE OR REPLACE VIEW view_fleet_health_status AS
 SELECT
     health_status,
-    COUNT(*) AS count,
+    COUNT(*) AS count
 FROM (
     SELECT
         hostname,
@@ -18,7 +18,7 @@ FROM (
         view_systems_status_table
     WHERE
         last_seen IS NOT NULL
-        AND last_seen != 'Unknown') health_data
+        AND last_seen != 'Unknown') AS health_data
 GROUP BY
     health_status
 ORDER BY
