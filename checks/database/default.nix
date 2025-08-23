@@ -49,62 +49,11 @@ in
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
-      from vm_test_logger import TestLogger  # type: ignore[import-untyped]
-      from cf_test_modules import (  # type: ignore[import-untyped]
-          CrystalForgeTestContext,
-          DatabaseTests,
-      )
-      from cf_test_modules.test_exceptions import AssertionFailedException  # type: ignore[import-untyped]
+      # Import the universal test runner
+      from cf_test_modules.devshell_test_runner import run_database_tests  # type: ignore[import-untyped]
 
-      def run_database_tests():
-          # Boot VMs and set up logging
-          logger = TestLogger("Crystal Forge Database Tests", server)
-          start_all()
-          logger.setup_logging()
-
-          # Minimal system_info without agent/gitserver nodes
-          hostname = server.succeed("hostname -s").strip()
-          system_info = {"hostname": hostname}
-
-          # Only run DB-related tests
-          ctx = CrystalForgeTestContext(
-              gitserver=None,
-              server=server,
-              agent=None,
-              logger=logger,
-              system_info=system_info,
-              exit_on_failure=True,
-          )
-
-          def run_phase(name, func, *args, **kwargs):
-              logger.log_section(f"🚀 STARTING: {name}")
-              try:
-                  func(*args, **kwargs)
-                  logger.log_success(f"✅ COMPLETED: {name}")
-              except AssertionFailedException as e:
-                  logger.log_error(f"❌ ASSERTION FAILED: {name}")
-                  logger.log_error(f"📝 {e}")
-                  raise
-              except Exception as e:
-                  import traceback
-                  tb = traceback.extract_tb(e.__traceback__)
-                  if tb:
-                      last = tb[-1]
-                      loc = f"{last.filename.split('/')[-1]}::{last.name}() line {last.lineno}"
-                  else:
-                      loc = "unknown"
-                  logger.log_error(f"❌ FAILED: {name}")
-                  logger.log_error(f"📍 {loc}")
-                  logger.log_error(f"📝 {e}")
-                  raise
-
-          try:
-              run_phase("Phase DB.1: Database Setup", DatabaseTests.setup_and_verify, ctx)
-              run_phase("Phase DB.2: Database View Tests", DatabaseTests.run_view_tests, ctx)
-              logger.log_success("🎉 Database-related tests passed!")
-          finally:
-              logger.finalize_test()
-
+      # The universal runner will auto-detect it's in NixOS test mode
+      # and use the appropriate VM interfaces and TestLogger
       run_database_tests()
     '';
   }
