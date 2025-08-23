@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from ..test_context import CrystalForgeTestContext
+from ..test_exceptions import AssertionFailedException
 
 
 class DeploymentStatusViewTests:
@@ -58,6 +59,8 @@ class DeploymentStatusViewTests:
         for i, line in enumerate(sql.split("\n"), 1):
             ctx.logger.log_error(f"{i:3}: {line}")
         ctx.logger.log_error("-" * 50)
+        if ctx.exit_on_failure:
+            raise AssertionFailedException(test_name, reason, sql)
 
     @staticmethod
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
