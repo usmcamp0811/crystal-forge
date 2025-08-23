@@ -3,19 +3,19 @@ SELECT
     COUNT(*) AS count,
     CASE update_status
     WHEN 'up_to_date' THEN
-        '🟢 Up to Date'
+        'Up to Date'
     WHEN 'behind' THEN
-        '🔴 Behind'
+        'Behind'
     WHEN 'evaluation_failed' THEN
-        '🟤 Evaluation Failed'
+        'Evaluation Failed'
     WHEN 'no_evaluation' THEN
-        '⚪ No Evaluation'
+        'No Evaluation'
     WHEN 'no_deployment' THEN
-        '⚪ No Deployment'
+        'No Deployment'
     WHEN 'never_seen' THEN
-        '⚫ Never Seen'
+        'Never Seen'
     WHEN 'unknown' THEN
-        '❓ Unknown'
+        'Unknown'
     ELSE
         '❓ Unknown'
     END AS status_display
