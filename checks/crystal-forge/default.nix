@@ -130,7 +130,6 @@ in
               # Phase 1: Infrastructure Setup
               run_test_phase("Phase 1.1: Git Server Setup", GitServerTests.setup_and_verify, ctx)
               run_test_phase("Phase 1.2: Database Setup", DatabaseTests.setup_and_verify, ctx)
-              run_test_phase("Phase 1.3: Database Views", DatabaseTests.run_view_tests, ctx)
 
               # Phase 2: Service Startup and Verification
               run_test_phase("Phase 2.1: Crystal Forge Server Tests", CrystalForgeServerTests.setup_and_verify, ctx)

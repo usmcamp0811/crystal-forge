@@ -15,12 +15,6 @@ class DatabaseTests:
         """Complete database setup and verification"""
         DatabaseTests._setup_postgresql(ctx)
         DatabaseTests._verify_database_functionality(ctx)
-        # Note: View tests moved to run_view_tests() which should be called after server startup
-
-    @staticmethod
-    def run_view_tests(ctx: CrystalForgeTestContext) -> None:
-        """Run database view tests - should be called after Crystal Forge server has started"""
-        DatabaseTests._check_database_ready(ctx)
         DatabaseTests._run_view_tests(ctx)
 
     @staticmethod
@@ -60,8 +54,9 @@ class DatabaseTests:
         """Run all view tests"""
         ctx.logger.log_section("🔍 Running Database View Tests")
 
-        # Check if database is ready for testing
-        if not DatabaseTests._check_database_ready(ctx):
+        if not DatabaseTests._wait_for_database_ready(
+            ctx, timeout_secs=60, interval_secs=3
+        ):
             ctx.logger.log_warning("Database not ready for view testing - skipping")
             return
 
@@ -111,3 +106,19 @@ class DatabaseTests:
             return False
 
         return True
+
+    @staticmethod
+    def _wait_for_database_ready(
+        ctx: CrystalForgeTestContext, timeout_secs: int = 60, interval_secs: int = 3
+    ) -> bool:
+        import time
+
+        deadline = time.time() + timeout_secs
+        while time.time() < deadline:
+            try:
+                if DatabaseTests._check_database_ready(ctx):
+                    return True
+            except Exception:
+                pass
+            time.sleep(interval_secs)
+        return False
