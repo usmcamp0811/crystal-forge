@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create test flake
 INSERT INTO flakes (name, repo_url) VALUES ('test-flake', 'http://test.git');
@@ -46,4 +45,3 @@ SELECT
 FROM view_systems_status_table 
 WHERE hostname = 'test-update-sys';
 
-ROLLBACK;

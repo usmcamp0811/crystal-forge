@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create multiple test systems in different health states
 INSERT INTO system_states (
@@ -29,4 +28,3 @@ FROM view_fleet_health_status
 WHERE health_status IN ('Healthy', 'Warning', 'Critical', 'Offline')
 ORDER BY count DESC;
 
-ROLLBACK;

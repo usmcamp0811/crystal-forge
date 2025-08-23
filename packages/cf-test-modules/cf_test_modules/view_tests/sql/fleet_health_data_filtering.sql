@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create test systems with edge case last_seen values
 INSERT INTO system_states (
@@ -32,4 +31,3 @@ FROM view_systems_status_table
 WHERE hostname LIKE 'test-filter-%'
 ORDER BY hostname;
 
-ROLLBACK;

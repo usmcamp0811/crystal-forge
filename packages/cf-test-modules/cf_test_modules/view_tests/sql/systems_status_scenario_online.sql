@@ -1,4 +1,3 @@
-BEGIN;
 
 INSERT INTO system_states (
     hostname, derivation_path, change_reason, os, kernel,
@@ -33,4 +32,3 @@ SELECT
 FROM view_systems_status_table 
 WHERE hostname = 'test-online';
 
-ROLLBACK;

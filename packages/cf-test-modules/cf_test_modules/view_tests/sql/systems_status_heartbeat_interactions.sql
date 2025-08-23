@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create a system with multiple states and heartbeats
 INSERT INTO system_states (
@@ -38,4 +37,3 @@ SELECT
 FROM view_systems_status_table 
 WHERE hostname = 'test-multi';
 
-ROLLBACK;

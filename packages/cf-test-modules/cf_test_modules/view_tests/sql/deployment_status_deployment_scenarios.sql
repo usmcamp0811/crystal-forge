@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create test flake
 INSERT INTO flakes (name, repo_url) VALUES ('test-scenarios-flake', 'http://scenarios.git');
@@ -42,4 +41,3 @@ FROM view_deployment_status
 WHERE status_display IN ('Up to Date', 'Behind', 'Never Seen')
 ORDER BY count DESC;
 
-ROLLBACK;

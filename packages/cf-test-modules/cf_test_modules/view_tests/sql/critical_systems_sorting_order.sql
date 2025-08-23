@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create test systems with different hours_ago values
 INSERT INTO system_states (
@@ -32,4 +31,3 @@ FROM view_critical_systems
 WHERE hostname LIKE 'test-sort-%'
 ORDER BY hours_ago;
 
-ROLLBACK;

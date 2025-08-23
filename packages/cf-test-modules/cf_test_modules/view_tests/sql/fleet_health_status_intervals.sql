@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create test systems with different last_seen timestamps
 INSERT INTO system_states (
@@ -49,4 +48,3 @@ ORDER BY
         WHEN 'Offline' THEN 4
     END;
 
-ROLLBACK;

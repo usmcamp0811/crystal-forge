@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create test system with known timestamp
 INSERT INTO system_states (
@@ -23,4 +22,3 @@ SELECT
 FROM view_critical_systems
 WHERE hostname = 'test-hours-calc';
 
-ROLLBACK;

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
+import shlex
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Union
 
 from ..test_context import CrystalForgeTestContext
 from ..test_exceptions import AssertionFailedException
+
+JSONLike = Union[Dict[str, Any], List[Any]]
 
 
 class BaseViewTests:
@@ -18,7 +22,7 @@ class BaseViewTests:
         p = BaseViewTests._get_sql_path(filename)
         return p.read_text(encoding="utf-8").strip()
 
-    # ---------- Exec (new) ----------
+    # ---------- Exec ----------
     @staticmethod
     def _execute_sql(
         ctx: CrystalForgeTestContext,
@@ -40,7 +44,7 @@ class BaseViewTests:
             )
             raise
 
-    # ---------- Back-compat shim ----------
+    # Back-compat shim (legacy tests call this)
     @staticmethod
     def _execute_sql_with_logging(
         ctx: CrystalForgeTestContext,
@@ -127,8 +131,11 @@ class BaseViewTests:
         sql: str,
         test_name: str,
         label: str = "value",
+        case_sensitive: bool = True,
     ) -> None:
-        if actual != expected:
+        a = actual if case_sensitive else actual.lower()
+        e = expected if case_sensitive else expected.lower()
+        if a != e:
             BaseViewTests._fail(
                 ctx, sql, test_name, f"Expected {label} '{expected}', got '{actual}'"
             )
@@ -172,6 +179,7 @@ class BaseViewTests:
         *,
         sql: str,
         test_name: str,
+        label: str = "set",
     ) -> None:
         fset = set(found)
         subset = set(expected_subset)
@@ -180,10 +188,10 @@ class BaseViewTests:
                 ctx,
                 sql,
                 test_name,
-                f"Expected set to include {sorted(subset)}, got {sorted(fset)}",
+                f"Expected {label} to include {sorted(subset)}, got {sorted(fset)}",
             )
 
-    # ---------- High-level ----------
+    # ---------- High-level (SQL path) ----------
     @staticmethod
     def _view_exists(
         ctx: CrystalForgeTestContext,
@@ -234,3 +242,103 @@ class BaseViewTests:
     ) -> None:
         sql = BaseViewTests._load_sql(sql_cleanup_file)
         BaseViewTests._execute_sql(ctx, sql, "Cleanup", db=db)
+
+    # ========================================================================
+    #                       Agent-driven test helpers
+    # ========================================================================
+    @staticmethod
+    def _remote_write_tmp(
+        ctx: CrystalForgeTestContext, content: str, *, suffix: str = ".json"
+    ) -> str:
+        """Write content to a remote temp file, return path."""
+        path = ctx.server.succeed(
+            f"mktemp --suffix={shlex.quote(suffix)} /tmp/cf-test-XXXXXXXX"
+        ).strip()
+        # use single-quoted EOF to avoid interpolation on remote
+        ctx.server.succeed(
+            f"cat > {shlex.quote(path)} <<'__CF_EOF__'\n{content}\n__CF_EOF__"
+        )
+        return path
+
+    @staticmethod
+    def _run_test_agent(
+        ctx: CrystalForgeTestContext,
+        *,
+        runner_cmd: str,
+        config: Union[str, JSONLike, Path],
+        sudo_user: Optional[str] = None,
+        extra_args: Optional[List[str]] = None,
+        config_arg: Optional[str] = None,
+        wait_after_secs: int = 0,
+        test_name: str = "Run test agent",
+    ) -> None:
+        """
+        Run the Crystal Forge test agent with a supplied config.
+        - runner_cmd: executable, e.g. '/run/current-system/sw/bin/cf-test-agent'
+        - config: path|json-serializable|raw string (YAML/JSON) written to /tmp and passed to agent
+        - config_arg: if provided, pass like '--config <path>'; if None, appended as last arg
+        - sudo_user: run as that user (e.g. 'crystalforge')
+        """
+        if isinstance(config, (dict, list)):
+            config_str = json.dumps(config, ensure_ascii=False, indent=2)
+        elif isinstance(config, Path):
+            # Read local file and copy to remote tmp
+            config_str = Path(config).read_text(encoding="utf-8")
+        else:
+            config_str = str(config)
+
+        cfg_path = BaseViewTests._remote_write_tmp(ctx, config_str, suffix=".json")
+        su = f"sudo -u {sudo_user} " if sudo_user else ""
+        args = extra_args or []
+        if config_arg:
+            args = [*args, config_arg, cfg_path]
+        else:
+            args = [*args, cfg_path]
+
+        cmd = f"{su}{runner_cmd} {' '.join(map(shlex.quote, args))}"
+        try:
+            ctx.logger.log_info(f"▶︎ {test_name}: {runner_cmd}")
+            ctx.server.succeed(cmd)
+            if wait_after_secs > 0:
+                ctx.server.succeed(f"sleep {int(wait_after_secs)}")
+        except Exception as e:
+            BaseViewTests._fail(ctx, config_str, test_name, f"Agent run failed: {e}")
+
+    @staticmethod
+    def _agent_scenario(
+        ctx: CrystalForgeTestContext,
+        *,
+        runner_cmd: str,
+        agent_config: Union[str, JSONLike, Path],
+        query_sql: str,
+        test_name: str,
+        assert_fn: Optional[Callable[[List[List[str]]], Optional[str]]] = None,
+        db: str = "crystal_forge",
+        sudo_user: Optional[str] = None,
+        config_arg: Optional[str] = "--config",
+        extra_args: Optional[List[str]] = None,
+        wait_after_secs: int = 0,
+    ) -> List[List[str]]:
+        """
+        End-to-end scenario:
+          1) run test agent with config
+          2) query the DB view
+          3) (optional) custom assertion on rows
+        assert_fn: receives parsed rows; return None if OK, else return error string
+        """
+        BaseViewTests._run_test_agent(
+            ctx,
+            runner_cmd=runner_cmd,
+            config=agent_config,
+            sudo_user=sudo_user,
+            extra_args=extra_args,
+            config_arg=config_arg,
+            wait_after_secs=wait_after_secs,
+            test_name=f"{test_name} (agent)",
+        )
+        rows = BaseViewTests._query_rows(ctx, query_sql, f"{test_name} (query)", db=db)
+        if assert_fn:
+            err = assert_fn(rows)
+            if err:
+                BaseViewTests._fail(ctx, query_sql, test_name, err)
+        return rows

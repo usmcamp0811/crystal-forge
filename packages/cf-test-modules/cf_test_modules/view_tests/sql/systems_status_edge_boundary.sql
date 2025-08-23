@@ -1,4 +1,3 @@
-BEGIN;
 
 INSERT INTO system_states (
     hostname, derivation_path, change_reason, os, kernel,
@@ -14,4 +13,3 @@ INSERT INTO system_states (
 SELECT connectivity_status FROM view_systems_status_table 
 WHERE hostname = 'test-boundary';
 
-ROLLBACK;

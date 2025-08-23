@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Test exactly at 1-hour boundary (should be included)
 INSERT INTO system_states (
@@ -29,4 +28,3 @@ FROM view_critical_systems
 WHERE hostname LIKE 'test-edge-%'
 ORDER BY hostname;
 
-ROLLBACK;

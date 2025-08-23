@@ -1,4 +1,3 @@
-BEGIN;
 
 -- Create test systems with specific timestamps
 INSERT INTO system_states (
@@ -37,4 +36,3 @@ FROM view_critical_systems
 WHERE hostname LIKE 'test-critical-%' OR hostname LIKE 'test-offline-%'
 ORDER BY hostname;
 
-ROLLBACK;
