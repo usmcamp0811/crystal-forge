@@ -36,23 +36,12 @@ in
     skipLint = true;
     skipTypeCheck = true;
     nodes = {
-      gitserver = lib.crystal-forge.makeGitServerNode {
-        inherit pkgs systemBuildClosure;
-        port = 8080;
-      };
-
       server = lib.crystal-forge.makeServerNode {
         inherit pkgs systemBuildClosure keyPath pubPath cfFlakePath;
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
         };
         port = 3000;
-      };
-
-      agent = lib.crystal-forge.makeAgentNode {
-        inherit pkgs systemBuildClosure inputs keyPath pubPath;
-        serverHost = "server";
-        extraConfig = {imports = [inputs.self.nixosModules.crystal-forge];};
       };
     };
 
@@ -72,13 +61,16 @@ in
           logger = TestLogger("Crystal Forge Database Tests", server)
           start_all()
           logger.setup_logging()
-          system_info = logger.gather_system_info(agent)
+
+          # Minimal system_info without agent/gitserver nodes
+          hostname = server.succeed("hostname -s").strip()
+          system_info = {"hostname": hostname}
 
           # Only run DB-related tests
           ctx = CrystalForgeTestContext(
-              gitserver=gitserver,
+              gitserver=None,
               server=server,
-              agent=agent,
+              agent=None,
               logger=logger,
               system_info=system_info,
               exit_on_failure=True,

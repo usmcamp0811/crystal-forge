@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "cf-test-modules"
 version = "1.0.0"
 description = "Modular test components for Crystal Forge integration testing"
-authors = [{name = "Matthew Camp"}]
+authors = [{ name = "Matthew Camp" }]
 requires-python = ">=3.8"
 dependencies = [
     "pytest",
@@ -17,6 +17,14 @@ dev = [
     "pytest",
 ]
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["cf_test_modules*"]
+
+[tool.setuptools.package-data]
+cf_test_modules = [
+  "view_tests/sql/*.sql"
+]

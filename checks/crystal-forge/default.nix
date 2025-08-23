@@ -64,7 +64,6 @@ in
       from cf_test_modules import (  # type: ignore[import-untyped]
           CrystalForgeTestContext,
           GitServerTests,
-          DatabaseTests,
           CrystalForgeServerTests,
           AgentTests,
           FlakeProcessingTests,
@@ -72,99 +71,69 @@ in
           ServiceLogCollector,
           DatabaseAnalyzer
       )
-
-      # Add this to your testScript in default.nix
+      from cf_test_modules.test_exceptions import AssertionFailedException  # type: ignore[import-untyped]
 
       def run_crystal_forge_integration_test():
-          """Main test orchestrator function"""
-
-          # Initialize components
           logger = TestLogger("Crystal Forge Agent Integration with Git Server", server)
           start_all()
           logger.setup_logging()
-
-          # Gather system information early
           system_info = logger.gather_system_info(agent)
 
-          # NEW: Configure exit-on-failure behavior
-          # Set to True to exit immediately on any assertion failure
-          # Set to False to continue running all tests even after failures
-          exit_on_failure = True  # Change this to False for full test suite runs
-
-          # Create test context with exit_on_failure option
+          exit_on_failure = True
           ctx = CrystalForgeTestContext(
               gitserver=gitserver,
               server=server,
               agent=agent,
               logger=logger,
               system_info=system_info,
-              exit_on_failure=exit_on_failure  # NEW parameter
+              exit_on_failure=exit_on_failure,
           )
 
           def run_test_phase(phase_name: str, test_func, *args, **kwargs):
-              """Helper to run a test phase with proper error handling"""
               logger.log_section(f"🚀 STARTING: {phase_name}")
               try:
                   test_func(*args, **kwargs)
                   logger.log_success(f"✅ COMPLETED: {phase_name}")
               except AssertionFailedException as e:
-                  # Handle assertion failures specially
                   logger.log_error(f"❌ ASSERTION FAILED: {phase_name}")
                   logger.log_error(f"🎯 Test: {e.test_name}")
                   logger.log_error(f"📝 Reason: {e.reason}")
                   if e.sql_query:
                       logger.log_error(f"🗄️ SQL involved: {e.sql_query[:200]}...")
-
-                  # For assertion failures, always re-raise (respects exit_on_failure)
                   raise
               except Exception as e:
-                  # Handle other exceptions as before
-                  import traceback
-                  import sys
-
+                  import traceback, sys
                   tb = traceback.extract_tb(e.__traceback__)
                   if tb:
                       last_frame = tb[-1]
                       error_location = f"{last_frame.filename.split('/')[-1]}::{last_frame.name}() line {last_frame.lineno}"
                   else:
                       error_location = "unknown location"
-
                   logger.log_error(f"❌ FAILED: {phase_name}")
                   logger.log_error(f"📍 Error Location: {error_location}")
                   logger.log_error(f"📝 Error Message: {str(e)}")
                   logger.log_error(f"🔍 Error Type: {type(e).__name__}")
-
                   print(f"\n" + "="*80, file=sys.stderr)
                   print(f"❌ TEST PHASE FAILED: {phase_name}", file=sys.stderr)
                   print(f"Location: {error_location}", file=sys.stderr)
                   print(f"Error: {str(e)}", file=sys.stderr)
                   print(f"Type: {type(e).__name__}", file=sys.stderr)
                   print("="*80, file=sys.stderr)
-
                   raise
 
           try:
-              # Your existing test phases...
               run_test_phase("Phase 1.1: Git Server Setup", GitServerTests.setup_and_verify, ctx)
-              run_test_phase("Phase 1.2: Database Setup", DatabaseTests.setup_and_verify, ctx)
               run_test_phase("Phase 2.1: Crystal Forge Server Tests", CrystalForgeServerTests.setup_and_verify, ctx)
-              run_test_phase("Phase 2.1b: Database View Tests", DatabaseTests.run_view_tests, ctx)
               run_test_phase("Phase 2.2: Agent Tests", AgentTests.setup_and_verify, ctx)
               run_test_phase("Phase 3.1: Flake Processing Tests", FlakeProcessingTests.verify_complete_workflow, ctx)
               run_test_phase("Phase 3.2: System State Tests", SystemStateTests.verify_system_state_tracking, ctx)
 
-              # Analysis phases (non-critical) - these could use exit_on_failure=False
               try:
-                  # Temporarily disable exit_on_failure for non-critical phases
                   original_exit_setting = ctx.exit_on_failure
                   ctx.exit_on_failure = False
-
                   run_test_phase("Phase 4.1: Service Log Collection", ServiceLogCollector.collect_all_logs, ctx)
                   run_test_phase("Phase 4.2: Database Analysis", DatabaseAnalyzer.generate_comprehensive_report, ctx)
-
-                  # Restore original setting
                   ctx.exit_on_failure = original_exit_setting
-
               except Exception as e:
                   logger.log_warning(f"⚠️ Analysis phases failed but continuing: {e}")
 
@@ -174,8 +143,6 @@ in
               logger.log_error(f"💥 TEST ASSERTION FAILURE")
               logger.log_error(f"Test: {e.test_name}")
               logger.log_error(f"Reason: {e.reason}")
-
-              # Always try to collect logs on failure
               try:
                   ServiceLogCollector.collect_all_logs(ctx)
               except:
@@ -191,7 +158,6 @@ in
           finally:
               logger.finalize_test()
 
-      # Execute the main test
       run_crystal_forge_integration_test()
     '';
   }

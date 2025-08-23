@@ -7,61 +7,11 @@ from pathlib import Path
 
 from ..test_context import CrystalForgeTestContext
 from ..test_exceptions import AssertionFailedException
+from .base import BaseViewTests
 
 
-class FleetHealthStatusViewTests:
+class FleetHealthStatusViewTests(BaseViewTests):
     """Test suite for view_fleet_health_status"""
-
-    @staticmethod
-    def _get_sql_path(filename: str) -> Path:
-        """Get the path to a SQL file in the sql directory"""
-        current_dir = Path(__file__).parent
-        return current_dir / f"sql/{filename}.sql"
-
-    @staticmethod
-    def _load_sql(filename: str) -> str:
-        """Load SQL content from a file"""
-        sql_path = FleetHealthStatusViewTests._get_sql_path(filename)
-        try:
-            with open(sql_path, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        except FileNotFoundError:
-            raise FileNotFoundError(f"SQL file not found: {sql_path}")
-        except Exception as e:
-            raise RuntimeError(f"Error loading SQL file {sql_path}: {e}")
-
-    @staticmethod
-    def _execute_sql_with_logging(
-        ctx: CrystalForgeTestContext, sql: str, test_name: str
-    ) -> str:
-        """Execute SQL and log it if there's a failure"""
-        try:
-            return ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{sql}"'
-            )
-        except Exception as e:
-            ctx.logger.log_error(f"❌ {test_name} - SQL execution failed")
-            ctx.logger.log_error(f"SQL that failed:")
-            ctx.logger.log_error("-" * 50)
-            for i, line in enumerate(sql.split("\n"), 1):
-                ctx.logger.log_error(f"{i:3}: {line}")
-            ctx.logger.log_error("-" * 50)
-            raise e
-
-    @staticmethod
-    def _log_sql_on_failure(
-        ctx: CrystalForgeTestContext, sql: str, test_name: str, reason: str
-    ) -> None:
-        """Log SQL when test fails due to unexpected results"""
-        ctx.logger.log_error(f"❌ {test_name} - {reason}")
-        ctx.logger.log_error(f"SQL that produced unexpected results:")
-        ctx.logger.log_error("-" * 50)
-        for i, line in enumerate(sql.split("\n"), 1):
-            ctx.logger.log_error(f"{i:3}: {line}")
-        ctx.logger.log_error("-" * 50)
-
-        if ctx.exit_on_failure:
-            raise AssertionFailedException(test_name, reason, sql)
 
     @staticmethod
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
