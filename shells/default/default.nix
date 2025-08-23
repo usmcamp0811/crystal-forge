@@ -37,6 +37,8 @@ in
       export DB_NAME="''${DB_NAME:-crystal_forge}"
       export DB_USER="''${DB_USER:-crystal_forge}"
       export DB_PASSWORD="''${DB_PASSWORD:-password}"
+      export DATABASE_URL="postgres://$DB_USER:password@$DB_HOST:$DB_PORT/$DB_NAME"
+      export CF_TEST_MODE=devshell
 
       # Add test modules to Python path so you can import them
       export PYTHONPATH="${pkgs.crystal-forge.cf-test-modules}/lib/python3.12/site-packages:''${PYTHONPATH:-}"
