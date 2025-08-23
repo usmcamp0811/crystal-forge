@@ -137,9 +137,9 @@ class BaseViewTests:
     def _create_test_derivation(
         ctx: CrystalForgeTestContext,
         *,
+        derivation_name: str,
         commit_id: Optional[int] = None,
         derivation_type: str = "nixos",
-        derivation_name: str,
         derivation_path: Optional[str] = None,
         status_id: int = 3,  # dry-run-pending by default
         pname: Optional[str] = None,
@@ -148,13 +148,13 @@ class BaseViewTests:
         db: str = "crystal_forge",
     ) -> int:
         """Create a test derivation and return its ID"""
-        
+
         # Handle NULL values properly in SQL
         commit_id_sql = str(commit_id) if commit_id is not None else "NULL"
         derivation_path_sql = f"'{derivation_path}'" if derivation_path else "NULL"
         pname_sql = f"'{pname}'" if pname else "NULL"
         version_sql = f"'{version}'" if version else "NULL"
-        
+
         sql = f"""
             INSERT INTO derivations (
                 commit_id, derivation_type, derivation_name, derivation_path,
@@ -182,9 +182,9 @@ class BaseViewTests:
         db: str = "crystal_forge",
     ) -> None:
         """Update derivation status with optional fields"""
-        
+
         updates = [f"status_id = {status_id}"]
-        
+
         if derivation_path:
             updates.append(f"derivation_path = '{derivation_path}'")
         if started_at:
@@ -192,8 +192,9 @@ class BaseViewTests:
         if completed_at:
             updates.append("completed_at = NOW()")
         if error_message:
-            updates.append(f"error_message = '{error_message.replace(\"'\", \"''\")}'")
-            
+            escaped = error_message.replace("'", "''")
+            updates.append(f"error_message = '{escaped}'")
+
         sql = f"""
             UPDATE derivations 
             SET {', '.join(updates)}
@@ -215,7 +216,7 @@ class BaseViewTests:
         db: str = "crystal_forge",
     ) -> Dict[str, int]:
         """Create a complete flake->commit->derivation build scenario"""
-        
+
         # Map status names to IDs (based on your EvaluationStatus enum)
         status_map = {
             "dry-run-pending": 3,
@@ -226,21 +227,28 @@ class BaseViewTests:
             "build-failed": 12,
             "complete": 11,
         }
-        
+
         status_id = status_map.get(build_status, 5)  # default to dry-run-complete
-        
+
         # Create flake
         flake_id = BaseViewTests._create_test_flake(
             ctx, name=flake_name, repo_url=repo_url, test_name=f"{test_name} - flake"
         )
-        
+
         # Create commit
         commit_id = BaseViewTests._create_test_commit(
-            ctx, flake_id=flake_id, commit_hash=commit_hash, test_name=f"{test_name} - commit"
+            ctx,
+            flake_id=flake_id,
+            commit_hash=commit_hash,
+            test_name=f"{test_name} - commit",
         )
-        
+
         # Create derivation
-        derivation_path = f"/nix/store/{commit_hash[:8]}-{system_name}.drv" if status_id >= 5 else None
+        derivation_path = (
+            f"/nix/store/{commit_hash[:8]}-{system_name}.drv"
+            if status_id >= 5
+            else None
+        )
         derivation_id = BaseViewTests._create_test_derivation(
             ctx,
             commit_id=commit_id,
@@ -248,9 +256,9 @@ class BaseViewTests:
             derivation_name=system_name,
             derivation_path=derivation_path,
             status_id=status_id,
-            test_name=f"{test_name} - derivation"
+            test_name=f"{test_name} - derivation",
         )
-        
+
         # Update with completion details if needed
         if status_id in [5, 6, 10, 11, 12]:  # terminal states
             BaseViewTests._update_derivation_status(
@@ -261,9 +269,9 @@ class BaseViewTests:
                 started_at=True,
                 completed_at=True,
                 error_message=error_message,
-                test_name=f"{test_name} - completion"
+                test_name=f"{test_name} - completion",
             )
-        
+
         return {
             "flake_id": flake_id,
             "commit_id": commit_id,
@@ -504,7 +512,7 @@ class BaseViewTests:
         db: str = "crystal_forge",
     ) -> None:
         """Clean up test data by hostname and optionally flake/commit patterns"""
-        
+
         # Clean up agent-side data
         if hostname_patterns:
             hostname_where = " OR ".join(
@@ -521,9 +529,11 @@ class BaseViewTests:
                 -- Clean up system states
                 DELETE FROM system_states WHERE {hostname_where};
             """
-            
+
             try:
-                BaseViewTests._execute_sql(ctx, cleanup_sql, "Cleanup agent data", db=db)
+                BaseViewTests._execute_sql(
+                    ctx, cleanup_sql, "Cleanup agent data", db=db
+                )
                 ctx.logger.log_info("Agent data cleanup completed")
             except Exception as e:
                 ctx.logger.log_warning(f"Could not clean up agent data: {e}")
@@ -531,10 +541,10 @@ class BaseViewTests:
         # Clean up server-side data
         if flake_patterns:
             flake_where = " OR ".join(
-                f"name LIKE '{pattern}' OR repo_url LIKE '{pattern}'" 
+                f"name LIKE '{pattern}' OR repo_url LIKE '{pattern}'"
                 for pattern in flake_patterns
             )
-            
+
             server_cleanup_sql = f"""
                 -- Clean up in dependency order: derivations -> commits -> flakes
                 DELETE FROM derivations 
@@ -551,9 +561,11 @@ class BaseViewTests:
                 
                 DELETE FROM flakes WHERE {flake_where};
             """
-            
+
             try:
-                BaseViewTests._execute_sql(ctx, server_cleanup_sql, "Cleanup server data", db=db)
+                BaseViewTests._execute_sql(
+                    ctx, server_cleanup_sql, "Cleanup server data", db=db
+                )
                 ctx.logger.log_info("Server data cleanup completed")
             except Exception as e:
                 ctx.logger.log_warning(f"Could not clean up server data: {e}")
@@ -636,10 +648,10 @@ class BaseViewTests:
         ctx: CrystalForgeTestContext,
         *,
         test_name: str,
-        server_setup: Optional[Callable[[], Dict[str, Any]]] = None,
         agent_actions: List[Dict[str, Any]],
         query_sql: str,
         assertion_func: Callable[[List[List[str]]], Optional[str]],
+        server_setup: Optional[Callable[[], Dict[str, Any]]] = None,
         wait_after_agent: float = 1.0,
         db: str = "crystal_forge",
     ) -> List[List[str]]:
@@ -656,18 +668,21 @@ class BaseViewTests:
         if server_setup:
             try:
                 server_data = server_setup()
-                ctx.logger.log_info(f"Server setup completed: {list(server_data.keys())}")
+                ctx.logger.log_info(
+                    f"Server setup completed: {list(server_data.keys())}"
+                )
             except Exception as e:
-                BaseViewTests._fail(ctx, "server setup", test_name, f"Server setup failed: {e}")
+                BaseViewTests._fail(
+                    ctx, "server setup", test_name, f"Server setup failed: {e}"
+                )
 
         # Execute agent actions (potentially using server_data for derivation paths etc.)
         for i, action in enumerate(agent_actions):
             action_name = f"{test_name} - action {i+1}"
             # Allow actions to reference server_data
-            if server_data and 'derivation' not in action:
-                # Auto-inject derivation path from server data if available
-                if 'derivation_path' in server_data:
-                    action['derivation'] = server_data['derivation_path']
+            if server_data and "derivation" not in action:
+                if "derivation_path" in server_data:
+                    action["derivation"] = server_data["derivation_path"]
             BaseViewTests._run_test_agent(ctx, test_name=action_name, **action)
 
         # Wait for data to be processed
