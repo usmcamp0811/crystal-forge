@@ -18,7 +18,22 @@ class CriticalSystemsViewTests:
         return current_dir / f"sql/{filename}.sql"
 
     @staticmethod
-    def _load_sql(filename: str) -> str:
+    def _execute_sql_with_logging(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str
+    ) -> str:
+        """Execute SQL and log it if there's a failure"""
+        try:
+            return ctx.server.succeed(
+                f'sudo -u postgres psql crystal_forge -t -c "{sql}"'
+            )
+        except Exception as e:
+            ctx.logger.log_error(f"❌ {test_name} - SQL execution failed")
+            ctx.logger.log_error(f"SQL that failed:")
+            ctx.logger.log_error("-" * 50)
+            for i, line in enumerate(sql.split("\n"), 1):
+                ctx.logger.log_error(f"{i:3}: {line}")
+            ctx.logger.log_error("-" * 50)
+            raise e
         """Load SQL content from a file"""
         sql_path = CriticalSystemsViewTests._get_sql_path(filename)
         try:
@@ -30,7 +45,7 @@ class CriticalSystemsViewTests:
             raise RuntimeError(f"Error loading SQL file {sql_path}: {e}")
 
     @staticmethod
-    def run_all_tests(ctx: CrystalForgeTestContext) -> None:
+    def _load_sql(filename: str) -> str:
         """Run all tests for the critical systems view"""
         ctx.logger.log_section("🚨 Testing view_critical_systems")
 
@@ -76,8 +91,8 @@ class CriticalSystemsViewTests:
             view_exists_sql = CriticalSystemsViewTests._load_sql(
                 "critical_systems_view_exists"
             )
-            view_check_result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{view_exists_sql}"'
+            view_check_result = CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, view_exists_sql, "View existence check"
             ).strip()
 
             if view_check_result == "t":
@@ -107,8 +122,8 @@ class CriticalSystemsViewTests:
             basic_structure_sql = CriticalSystemsViewTests._load_sql(
                 "critical_systems_basic_structure"
             )
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{basic_structure_sql}"'
+            result = CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, basic_structure_sql, "Basic structure test"
             )
 
             # Just verify we can query all expected columns without error
@@ -129,8 +144,8 @@ class CriticalSystemsViewTests:
             status_logic_sql = CriticalSystemsViewTests._load_sql(
                 "critical_systems_status_logic"
             )
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{status_logic_sql}"'
+            result = CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, status_logic_sql, "Status logic test"
             )
 
             lines = [
@@ -180,8 +195,8 @@ class CriticalSystemsViewTests:
             hours_calculation_sql = CriticalSystemsViewTests._load_sql(
                 "critical_systems_hours_calculation"
             )
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{hours_calculation_sql}"'
+            result = CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, hours_calculation_sql, "Hours calculation test"
             )
 
             lines = [
@@ -237,8 +252,8 @@ class CriticalSystemsViewTests:
             data_filtering_sql = CriticalSystemsViewTests._load_sql(
                 "critical_systems_data_filtering"
             )
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{data_filtering_sql}"'
+            result = CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, data_filtering_sql, "Data filtering test"
             )
 
             lines = [
@@ -279,8 +294,8 @@ class CriticalSystemsViewTests:
             sorting_order_sql = CriticalSystemsViewTests._load_sql(
                 "critical_systems_sorting_order"
             )
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{sorting_order_sql}"'
+            result = CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, sorting_order_sql, "Sorting order test"
             )
 
             lines = [
@@ -327,8 +342,8 @@ class CriticalSystemsViewTests:
             edge_cases_sql = CriticalSystemsViewTests._load_sql(
                 "critical_systems_edge_cases"
             )
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{edge_cases_sql}"'
+            result = CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, edge_cases_sql, "Edge cases test"
             )
 
             lines = [
@@ -377,8 +392,8 @@ class CriticalSystemsViewTests:
             critical_scenarios_sql = CriticalSystemsViewTests._load_sql(
                 "critical_systems_critical_scenarios"
             )
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{critical_scenarios_sql}"'
+            result = CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, critical_scenarios_sql, "Critical scenarios test"
             )
 
             lines = [
@@ -461,8 +476,8 @@ class CriticalSystemsViewTests:
 
         try:
             cleanup_sql = CriticalSystemsViewTests._load_sql("critical_systems_cleanup")
-            ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
+            CriticalSystemsViewTests._execute_sql_with_logging(
+                ctx, cleanup_sql, "Cleanup test data"
             )
             ctx.logger.log_success("Critical systems view test data cleanup completed")
         except Exception as e:

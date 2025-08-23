@@ -2,11 +2,50 @@
 Tests for the view_deployment_status view
 """
 
+import os
+from pathlib import Path
+
 from ..test_context import CrystalForgeTestContext
 
 
 class DeploymentStatusViewTests:
     """Test suite for view_deployment_status"""
+
+    @staticmethod
+    def _get_sql_path(filename: str) -> Path:
+        """Get the path to a SQL file in the sql directory"""
+        current_dir = Path(__file__).parent
+        return current_dir / f"sql/{filename}.sql"
+
+    @staticmethod
+    def _load_sql(filename: str) -> str:
+        """Load SQL content from a file"""
+        sql_path = DeploymentStatusViewTests._get_sql_path(filename)
+        try:
+            with open(sql_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"SQL file not found: {sql_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading SQL file {sql_path}: {e}")
+
+    @staticmethod
+    def _execute_sql_with_logging(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str
+    ) -> str:
+        """Execute SQL and log it if there's a failure"""
+        try:
+            return ctx.server.succeed(
+                f'sudo -u postgres psql crystal_forge -t -c "{sql}"'
+            )
+        except Exception as e:
+            ctx.logger.log_error(f"❌ {test_name} - SQL execution failed")
+            ctx.logger.log_error(f"SQL that failed:")
+            ctx.logger.log_error("-" * 50)
+            for i, line in enumerate(sql.split("\n"), 1):
+                ctx.logger.log_error(f"{i:3}: {line}")
+            ctx.logger.log_error("-" * 50)
+            raise e
 
     @staticmethod
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
@@ -43,9 +82,11 @@ class DeploymentStatusViewTests:
 
         try:
             # Check if view exists
-            view_check_result = ctx.server.succeed(
-                "sudo -u postgres psql crystal_forge -t -c "
-                "\"SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'view_deployment_status');\""
+            view_exists_sql = DeploymentStatusViewTests._load_sql(
+                "deployment_status_view_exists"
+            )
+            view_check_result = DeploymentStatusViewTests._execute_sql_with_logging(
+                ctx, view_exists_sql, "View existence check"
             ).strip()
 
             if view_check_result == "t":
@@ -73,19 +114,12 @@ class DeploymentStatusViewTests:
         """Test basic aggregation functionality"""
         ctx.logger.log_info("Testing basic aggregation functionality...")
 
-        aggregation_test_sql = """
-        -- Test that the view returns proper structure
-        SELECT 
-            count,
-            status_display,
-            LENGTH(status_display) as display_length
-        FROM view_deployment_status
-        LIMIT 3;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{aggregation_test_sql}"'
+            basic_aggregation_sql = DeploymentStatusViewTests._load_sql(
+                "deployment_status_basic_aggregation"
+            )
+            result = DeploymentStatusViewTests._execute_sql_with_logging(
+                ctx, basic_aggregation_sql, "Basic aggregation test"
             )
 
             lines = [
@@ -142,52 +176,12 @@ class DeploymentStatusViewTests:
             "unknown": "Unknown",
         }
 
-        mapping_test_sql = """
-        -- Create test data with known statuses and verify mappings
-        BEGIN;
-        
-        -- Create test flake and system
-        INSERT INTO flakes (name, repo_url) VALUES ('test-deploy-flake', 'http://test-deploy.git');
-        INSERT INTO systems (hostname, flake_id, derivation, public_key, is_active) 
-        VALUES ('test-deploy-mapping', (SELECT id FROM flakes WHERE name = 'test-deploy-flake'), 'nixosConfigurations.test', 'test-deploy-key', true);
-        
-        -- Create commit
-        INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES 
-        ((SELECT id FROM flakes WHERE name = 'test-deploy-flake'), 'mapping123', NOW() - INTERVAL '1 hour');
-        
-        -- Create derivation status if not exists
-        INSERT INTO derivation_statuses (name, description, is_terminal, is_success, display_order) VALUES 
-        ('test-mapping-complete', 'Test Mapping Complete', true, true, 101) ON CONFLICT (name) DO NOTHING;
-        
-        -- Create derivation
-        INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id) VALUES 
-        ((SELECT id FROM commits WHERE git_commit_hash = 'mapping123'), 'nixos', 'test-deploy-mapping', '/nix/store/mapping-path', (SELECT id FROM derivation_statuses WHERE name = 'test-mapping-complete'));
-        
-        -- Create system state to make it "up_to_date"
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES (
-            'test-deploy-mapping', '/nix/store/mapping-path', 'startup', '25.05', '6.6.89',
-            8192, 3600, 'Test CPU', 4, '10.0.0.400', '25.05', true,
-            NOW() - INTERVAL '10 minutes'
-        );
-        
-        -- Query to see if our test system shows up with correct mapping
-        SELECT 
-            count,
-            status_display
-        FROM view_deployment_status
-        WHERE status_display IN ('Up to Date', 'Behind', 'Evaluation Failed', 'No Evaluation', 'No Deployment', 'Never Seen', 'Unknown');
-        
-        ROLLBACK;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{mapping_test_sql}"'
+            status_mappings_sql = DeploymentStatusViewTests._load_sql(
+                "deployment_status_status_mappings"
+            )
+            result = DeploymentStatusViewTests._execute_sql_with_logging(
+                ctx, status_mappings_sql, "Status display mappings test"
             )
 
             lines = [
@@ -226,29 +220,12 @@ class DeploymentStatusViewTests:
         """Test that results are returned in the correct priority order"""
         ctx.logger.log_info("Testing sorting order...")
 
-        sorting_test_sql = """
-        -- Get all statuses in order to verify sorting
-        SELECT 
-            status_display,
-            count,
-            ROW_NUMBER() OVER() as row_num
-        FROM view_deployment_status
-        ORDER BY 
-            CASE status_display
-                WHEN 'Up to Date' THEN 1
-                WHEN 'Behind' THEN 2 
-                WHEN 'Evaluation Failed' THEN 3
-                WHEN 'No Evaluation' THEN 4
-                WHEN 'No Deployment' THEN 5
-                WHEN 'Never Seen' THEN 6
-                WHEN 'Unknown' THEN 7
-                ELSE 8
-            END;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{sorting_test_sql}"'
+            sorting_order_sql = DeploymentStatusViewTests._load_sql(
+                "deployment_status_sorting_order"
+            )
+            result = DeploymentStatusViewTests._execute_sql_with_logging(
+                ctx, sorting_order_sql, "Sorting order test"
             )
 
             lines = [
@@ -303,57 +280,12 @@ class DeploymentStatusViewTests:
         """Test various deployment scenarios and their aggregation"""
         ctx.logger.log_info("Testing deployment scenarios...")
 
-        scenarios_test_sql = """
-        BEGIN;
-        
-        -- Create test flake
-        INSERT INTO flakes (name, repo_url) VALUES ('test-scenarios-flake', 'http://scenarios.git');
-        
-        -- Create multiple test systems with different scenarios
-        INSERT INTO systems (hostname, flake_id, derivation, public_key, is_active) VALUES 
-        ('scenario-uptodate', (SELECT id FROM flakes WHERE name = 'test-scenarios-flake'), 'nixosConfigurations.uptodate', 'key1', true),
-        ('scenario-behind', (SELECT id FROM flakes WHERE name = 'test-scenarios-flake'), 'nixosConfigurations.behind', 'key2', true),
-        ('scenario-never', (SELECT id FROM flakes WHERE name = 'test-scenarios-flake'), 'nixosConfigurations.never', 'key3', true);
-        
-        -- Create commits
-        INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES 
-        ((SELECT id FROM flakes WHERE name = 'test-scenarios-flake'), 'old456', NOW() - INTERVAL '2 hours'),
-        ((SELECT id FROM flakes WHERE name = 'test-scenarios-flake'), 'new789', NOW() - INTERVAL '1 hour');
-        
-        -- Create derivation status
-        INSERT INTO derivation_statuses (name, description, is_terminal, is_success, display_order) VALUES 
-        ('test-scenarios-complete', 'Scenarios Complete', true, true, 102) ON CONFLICT (name) DO NOTHING;
-        
-        -- Create derivations
-        INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id) VALUES 
-        -- Up to date system - latest derivation
-        ((SELECT id FROM commits WHERE git_commit_hash = 'new789'), 'nixos', 'scenario-uptodate', '/nix/store/uptodate-new', (SELECT id FROM derivation_statuses WHERE name = 'test-scenarios-complete')),
-        -- Behind system - old derivation  
-        ((SELECT id FROM commits WHERE git_commit_hash = 'old456'), 'nixos', 'scenario-behind', '/nix/store/behind-old', (SELECT id FROM derivation_statuses WHERE name = 'test-scenarios-complete')),
-        ((SELECT id FROM commits WHERE git_commit_hash = 'new789'), 'nixos', 'scenario-behind', '/nix/store/behind-new', (SELECT id FROM derivation_statuses WHERE name = 'test-scenarios-complete'));
-        
-        -- Create system states
-        INSERT INTO system_states (hostname, derivation_path, change_reason, timestamp) VALUES 
-        -- Up to date system running latest
-        ('scenario-uptodate', '/nix/store/uptodate-new', 'startup', NOW() - INTERVAL '10 minutes'),
-        -- Behind system running old
-        ('scenario-behind', '/nix/store/behind-old', 'startup', NOW() - INTERVAL '10 minutes');
-        -- scenario-never has no system_states (never seen)
-        
-        -- Query deployment status
-        SELECT 
-            status_display,
-            count
-        FROM view_deployment_status
-        WHERE status_display IN ('Up to Date', 'Behind', 'Never Seen')
-        ORDER BY count DESC;
-        
-        ROLLBACK;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{scenarios_test_sql}"'
+            deployment_scenarios_sql = DeploymentStatusViewTests._load_sql(
+                "deployment_status_deployment_scenarios"
+            )
+            result = DeploymentStatusViewTests._execute_sql_with_logging(
+                ctx, deployment_scenarios_sql, "Deployment scenarios test"
             )
 
             lines = [
@@ -386,48 +318,47 @@ class DeploymentStatusViewTests:
         """Test view performance with EXPLAIN ANALYZE"""
         ctx.logger.log_info("Testing deployment status view performance...")
 
-        performance_sql = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM view_deployment_status;"
+        try:
+            # Test performance analysis
+            view_performance_sql = DeploymentStatusViewTests._load_sql(
+                "deployment_status_view_performance"
+            )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f'sudo -u postgres psql crystal_forge -c "{view_performance_sql}"',
+                "deployment-status-view-performance.txt",
+                "Deployment status view performance analysis",
+            )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f'sudo -u postgres psql crystal_forge -c "{performance_sql}"',
-            "deployment-status-view-performance.txt",
-            "Deployment status view performance analysis",
-        )
+            # Test simple timing
+            view_timing_sql = DeploymentStatusViewTests._load_sql(
+                "deployment_status_view_timing"
+            )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f'sudo -u postgres psql crystal_forge -c "{view_timing_sql}"',
+                "deployment-status-view-timing.txt",
+                "Deployment status view timing test",
+            )
 
-        # Test simple timing
-        timing_sql = "\\\\timing on\\nSELECT COUNT(*) FROM view_deployment_status;\\nSELECT * FROM view_deployment_status;"
+            ctx.logger.log_success(
+                "Deployment status view performance testing completed"
+            )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f'sudo -u postgres psql crystal_forge -c "{timing_sql}"',
-            "deployment-status-view-timing.txt",
-            "Deployment status view timing test",
-        )
-
-        ctx.logger.log_success("Deployment status view performance testing completed")
+        except Exception as e:
+            ctx.logger.log_error(f"❌ View performance test ERROR: {e}")
 
     @staticmethod
     def cleanup_test_data(ctx: CrystalForgeTestContext) -> None:
         """Clean up any test data that might have been left behind"""
         ctx.logger.log_info("Cleaning up deployment status view test data...")
 
-        cleanup_sql = """
-        DELETE FROM agent_heartbeats 
-        WHERE system_state_id IN (
-            SELECT id FROM system_states WHERE hostname LIKE 'test-deploy-%' OR hostname LIKE 'scenario-%'
-        );
-        DELETE FROM derivations WHERE derivation_name LIKE 'test-deploy-%' OR derivation_name LIKE 'scenario-%';
-        DELETE FROM commits WHERE git_commit_hash IN ('mapping123', 'old456', 'new789');
-        DELETE FROM systems WHERE hostname LIKE 'test-deploy-%' OR hostname LIKE 'scenario-%';
-        DELETE FROM flakes WHERE name LIKE 'test-%flake';
-        DELETE FROM system_states WHERE hostname LIKE 'test-deploy-%' OR hostname LIKE 'scenario-%';
-        DELETE FROM derivation_statuses WHERE name LIKE 'test-%';
-        """
-
         try:
-            ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
+            cleanup_sql = DeploymentStatusViewTests._load_sql(
+                "deployment_status_cleanup"
+            )
+            DeploymentStatusViewTests._execute_sql_with_logging(
+                ctx, cleanup_sql, "Cleanup test data"
             )
             ctx.logger.log_success("Deployment status view test data cleanup completed")
         except Exception as e:
