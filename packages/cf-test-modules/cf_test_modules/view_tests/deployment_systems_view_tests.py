@@ -48,6 +48,18 @@ class DeploymentStatusViewTests:
             raise e
 
     @staticmethod
+    def _log_sql_on_failure(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str, reason: str
+    ) -> None:
+        """Log SQL when test fails due to unexpected results"""
+        ctx.logger.log_error(f"❌ {test_name} - {reason}")
+        ctx.logger.log_error(f"SQL that produced unexpected results:")
+        ctx.logger.log_error("-" * 50)
+        for i, line in enumerate(sql.split("\n"), 1):
+            ctx.logger.log_error(f"{i:3}: {line}")
+        ctx.logger.log_error("-" * 50)
+
+    @staticmethod
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
         """Run all tests for the deployment status view"""
         ctx.logger.log_section("📊 Testing view_deployment_status")
@@ -147,10 +159,22 @@ class DeploymentStatusViewTests:
                             f"  Sample: {count_value} systems with status '{status_display}'"
                         )
                     else:
+                        DeploymentStatusViewTests._log_sql_on_failure(
+                            ctx,
+                            basic_aggregation_sql,
+                            "Basic aggregation test",
+                            f"Invalid data structure - count_numeric: {count_is_numeric}, has_display: {has_display_text}, length_ok: {length_reasonable}",
+                        )
                         ctx.logger.log_error(
                             "❌ Basic aggregation test FAILED - Invalid data structure"
                         )
                 else:
+                    DeploymentStatusViewTests._log_sql_on_failure(
+                        ctx,
+                        basic_aggregation_sql,
+                        "Basic aggregation test",
+                        f"Insufficient columns - got {len(parts)} columns, expected 3",
+                    )
                     ctx.logger.log_error(
                         "❌ Basic aggregation test FAILED - Insufficient columns"
                     )
@@ -266,6 +290,12 @@ class DeploymentStatusViewTests:
                     ctx.logger.log_success("✅ Sorting order test PASSED")
                     ctx.logger.log_info(f"  Order: {' → '.join(actual_order[:5])}...")
                 else:
+                    DeploymentStatusViewTests._log_sql_on_failure(
+                        ctx,
+                        sorting_order_sql,
+                        "Sorting order test",
+                        f"Incorrect sort order - expected priority order, got: {actual_order}",
+                    )
                     ctx.logger.log_error("❌ Sorting order test FAILED")
                     ctx.logger.log_error(f"  Actual order: {actual_order}")
 

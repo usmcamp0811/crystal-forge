@@ -2,11 +2,62 @@
 Tests for the view_fleet_health_status view
 """
 
+import os
+from pathlib import Path
+
 from ..test_context import CrystalForgeTestContext
 
 
 class FleetHealthStatusViewTests:
     """Test suite for view_fleet_health_status"""
+
+    @staticmethod
+    def _get_sql_path(filename: str) -> Path:
+        """Get the path to a SQL file in the sql directory"""
+        current_dir = Path(__file__).parent
+        return current_dir / f"sql/{filename}.sql"
+
+    @staticmethod
+    def _load_sql(filename: str) -> str:
+        """Load SQL content from a file"""
+        sql_path = FleetHealthStatusViewTests._get_sql_path(filename)
+        try:
+            with open(sql_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"SQL file not found: {sql_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading SQL file {sql_path}: {e}")
+
+    @staticmethod
+    def _execute_sql_with_logging(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str
+    ) -> str:
+        """Execute SQL and log it if there's a failure"""
+        try:
+            return ctx.server.succeed(
+                f'sudo -u postgres psql crystal_forge -t -c "{sql}"'
+            )
+        except Exception as e:
+            ctx.logger.log_error(f"❌ {test_name} - SQL execution failed")
+            ctx.logger.log_error(f"SQL that failed:")
+            ctx.logger.log_error("-" * 50)
+            for i, line in enumerate(sql.split("\n"), 1):
+                ctx.logger.log_error(f"{i:3}: {line}")
+            ctx.logger.log_error("-" * 50)
+            raise e
+
+    @staticmethod
+    def _log_sql_on_failure(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str, reason: str
+    ) -> None:
+        """Log SQL when test fails due to unexpected results"""
+        ctx.logger.log_error(f"❌ {test_name} - {reason}")
+        ctx.logger.log_error(f"SQL that produced unexpected results:")
+        ctx.logger.log_error("-" * 50)
+        for i, line in enumerate(sql.split("\n"), 1):
+            ctx.logger.log_error(f"{i:3}: {line}")
+        ctx.logger.log_error("-" * 50)
 
     @staticmethod
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
@@ -46,9 +97,11 @@ class FleetHealthStatusViewTests:
 
         try:
             # Check if view exists
-            view_check_result = ctx.server.succeed(
-                "sudo -u postgres psql crystal_forge -t -c "
-                "\"SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'view_fleet_health_status');\""
+            view_exists_sql = FleetHealthStatusViewTests._load_sql(
+                "fleet_health_view_exists"
+            )
+            view_check_result = FleetHealthStatusViewTests._execute_sql_with_logging(
+                ctx, view_exists_sql, "View existence check"
             ).strip()
 
             if view_check_result == "t":
@@ -78,19 +131,12 @@ class FleetHealthStatusViewTests:
         """Test basic aggregation functionality"""
         ctx.logger.log_info("Testing basic aggregation functionality...")
 
-        aggregation_test_sql = """
-        -- Test that the view returns proper structure
-        SELECT 
-            health_status,
-            count,
-            LENGTH(health_status) as status_length
-        FROM view_fleet_health_status
-        LIMIT 5;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{aggregation_test_sql}"'
+            basic_aggregation_sql = FleetHealthStatusViewTests._load_sql(
+                "fleet_health_basic_aggregation"
+            )
+            result = FleetHealthStatusViewTests._execute_sql_with_logging(
+                ctx, basic_aggregation_sql, "Basic aggregation test"
             )
 
             lines = [
@@ -118,10 +164,22 @@ class FleetHealthStatusViewTests:
                             f"  Sample: {count_value} systems with health '{health_status}'"
                         )
                     else:
+                        FleetHealthStatusViewTests._log_sql_on_failure(
+                            ctx,
+                            basic_aggregation_sql,
+                            "Basic aggregation test",
+                            f"Invalid data structure - count_numeric: {count_is_numeric}, has_health: {has_health_status}, length_ok: {length_reasonable}",
+                        )
                         ctx.logger.log_error(
                             "❌ Basic aggregation test FAILED - Invalid data structure"
                         )
                 else:
+                    FleetHealthStatusViewTests._log_sql_on_failure(
+                        ctx,
+                        basic_aggregation_sql,
+                        "Basic aggregation test",
+                        f"Insufficient columns - got {len(parts)} columns, expected 3",
+                    )
                     ctx.logger.log_error(
                         "❌ Basic aggregation test FAILED - Insufficient columns"
                     )
@@ -136,64 +194,12 @@ class FleetHealthStatusViewTests:
         """Test that health status intervals are correctly applied"""
         ctx.logger.log_info("Testing health status time intervals...")
 
-        intervals_test_sql = """
-        BEGIN;
-        
-        -- Create test systems with different last_seen timestamps
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        -- Healthy: last seen 5 minutes ago
-        ('test-fleet-healthy', '/nix/store/healthy', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.0.100', '25.05', true,
-         NOW() - INTERVAL '5 minutes'),
-        -- Warning: last seen 30 minutes ago  
-        ('test-fleet-warning', '/nix/store/warning', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.0.101', '25.05', true,
-         NOW() - INTERVAL '30 minutes'),
-        -- Critical: last seen 2 hours ago
-        ('test-fleet-critical', '/nix/store/critical', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.0.102', '25.05', true,
-         NOW() - INTERVAL '2 hours'),
-        -- Offline: last seen 8 hours ago
-        ('test-fleet-offline', '/nix/store/offline', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.0.103', '25.05', true,
-         NOW() - INTERVAL '8 hours');
-
-        -- Add heartbeats with same timestamps to ensure last_seen calculation
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'test-fleet-healthy' ORDER BY timestamp DESC LIMIT 1),
-         NOW() - INTERVAL '5 minutes', '1.0.0', 'hash1'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-fleet-warning' ORDER BY timestamp DESC LIMIT 1),
-         NOW() - INTERVAL '30 minutes', '1.0.0', 'hash2'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-fleet-critical' ORDER BY timestamp DESC LIMIT 1),
-         NOW() - INTERVAL '2 hours', '1.0.0', 'hash3'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-fleet-offline' ORDER BY timestamp DESC LIMIT 1),
-         NOW() - INTERVAL '8 hours', '1.0.0', 'hash4');
-        
-        -- Query fleet health status for our test systems
-        SELECT 
-            health_status,
-            count
-        FROM view_fleet_health_status
-        WHERE health_status IN ('Healthy', 'Warning', 'Critical', 'Offline')
-        ORDER BY 
-            CASE health_status
-                WHEN 'Healthy' THEN 1
-                WHEN 'Warning' THEN 2
-                WHEN 'Critical' THEN 3
-                WHEN 'Offline' THEN 4
-            END;
-        
-        ROLLBACK;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{intervals_test_sql}"'
+            status_intervals_sql = FleetHealthStatusViewTests._load_sql(
+                "fleet_health_status_intervals"
+            )
+            result = FleetHealthStatusViewTests._execute_sql_with_logging(
+                ctx, status_intervals_sql, "Health status intervals test"
             )
 
             lines = [
@@ -217,6 +223,12 @@ class FleetHealthStatusViewTests:
                 ctx.logger.log_success("✅ Health status intervals test PASSED")
                 ctx.logger.log_info(f"  Found statuses: {', '.join(found_statuses)}")
             else:
+                FleetHealthStatusViewTests._log_sql_on_failure(
+                    ctx,
+                    status_intervals_sql,
+                    "Health status intervals test",
+                    f"Expected statuses {expected_statuses} not found. Found: {found_statuses}",
+                )
                 ctx.logger.log_warning(
                     "⚠️ Expected health statuses not found in test results"
                 )
@@ -232,26 +244,12 @@ class FleetHealthStatusViewTests:
         """Test that results are returned in the correct priority order"""
         ctx.logger.log_info("Testing sorting order...")
 
-        sorting_test_sql = """
-        -- Get all health statuses in order to verify sorting
-        SELECT 
-            health_status,
-            count,
-            ROW_NUMBER() OVER() as row_num
-        FROM view_fleet_health_status
-        ORDER BY 
-            CASE health_status
-                WHEN 'Healthy' THEN 1
-                WHEN 'Warning' THEN 2
-                WHEN 'Critical' THEN 3
-                WHEN 'Offline' THEN 4
-                ELSE 5
-            END;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{sorting_test_sql}"'
+            sorting_order_sql = FleetHealthStatusViewTests._load_sql(
+                "fleet_health_sorting_order"
+            )
+            result = FleetHealthStatusViewTests._execute_sql_with_logging(
+                ctx, sorting_order_sql, "Sorting order test"
             )
 
             lines = [
@@ -284,6 +282,12 @@ class FleetHealthStatusViewTests:
                     ctx.logger.log_success("✅ Sorting order test PASSED")
                     ctx.logger.log_info(f"  Order: {' → '.join(actual_order)}")
                 else:
+                    FleetHealthStatusViewTests._log_sql_on_failure(
+                        ctx,
+                        sorting_order_sql,
+                        "Sorting order test",
+                        f"Incorrect sort order - expected priority order, got: {actual_order}",
+                    )
                     ctx.logger.log_error("❌ Sorting order test FAILED")
                     ctx.logger.log_error(f"  Actual order: {actual_order}")
 
@@ -298,47 +302,12 @@ class FleetHealthStatusViewTests:
         """Test that data filtering works correctly (last_seen conditions)"""
         ctx.logger.log_info("Testing data filtering...")
 
-        filtering_test_sql = """
-        BEGIN;
-        
-        -- Create test systems with edge case last_seen values
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        -- System with NULL primary_ip_address but valid timestamp
-        ('test-filter-null-ip', '/nix/store/null-ip', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, NULL, '25.05', true,
-         NOW() - INTERVAL '10 minutes'),
-        -- System that should be filtered out (no last_seen data)
-        ('test-filter-no-data', '/nix/store/no-data', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.0.200', '25.05', true,
-         NOW() - INTERVAL '10 minutes');
-        
-        -- Add heartbeat only for the first system
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'test-filter-null-ip' ORDER BY timestamp DESC LIMIT 1),
-         NOW() - INTERVAL '10 minutes', '1.0.0', 'filtertest');
-        
-        -- The second system will have no heartbeats, so last_seen might be just the system_state timestamp
-        
-        -- Check what our test systems look like in the base view
-        SELECT 
-            hostname,
-            last_seen,
-            ip_address
-        FROM view_systems_status_table 
-        WHERE hostname LIKE 'test-filter-%'
-        ORDER BY hostname;
-        
-        ROLLBACK;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{filtering_test_sql}"'
+            data_filtering_sql = FleetHealthStatusViewTests._load_sql(
+                "fleet_health_data_filtering"
+            )
+            result = FleetHealthStatusViewTests._execute_sql_with_logging(
+                ctx, data_filtering_sql, "Data filtering test"
             )
 
             lines = [
@@ -364,6 +333,12 @@ class FleetHealthStatusViewTests:
                     f"  {valid_last_seen_count} have valid last_seen values"
                 )
             else:
+                FleetHealthStatusViewTests._log_sql_on_failure(
+                    ctx,
+                    data_filtering_sql,
+                    "Data filtering test",
+                    "No test systems found for data filtering test",
+                )
                 ctx.logger.log_warning(
                     "⚠️ No test systems found for data filtering test"
                 )
@@ -376,44 +351,12 @@ class FleetHealthStatusViewTests:
         """Test various health scenarios and their aggregation"""
         ctx.logger.log_info("Testing health scenarios...")
 
-        scenarios_test_sql = """
-        BEGIN;
-        
-        -- Create multiple test systems in different health states
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        ('health-scenario-1', '/nix/store/scenario1', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.1.1', '25.05', true, NOW() - INTERVAL '5 minutes'),
-        ('health-scenario-2', '/nix/store/scenario2', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.1.2', '25.05', true, NOW() - INTERVAL '5 minutes'),
-        ('health-scenario-3', '/nix/store/scenario3', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.1.3', '25.05', true, NOW() - INTERVAL '45 minutes'),
-        ('health-scenario-4', '/nix/store/scenario4', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.1.4', '25.05', true, NOW() - INTERVAL '3 hours'),
-        ('health-scenario-5', '/nix/store/scenario5', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.1.5', '25.05', true, NOW() - INTERVAL '6 hours');
-
-        -- Add heartbeats to create different health statuses
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'health-scenario-1'), NOW() - INTERVAL '5 minutes', '1.0.0', 'healthy1'),
-        ((SELECT id FROM system_states WHERE hostname = 'health-scenario-2'), NOW() - INTERVAL '5 minutes', '1.0.0', 'healthy2'),
-        ((SELECT id FROM system_states WHERE hostname = 'health-scenario-3'), NOW() - INTERVAL '45 minutes', '1.0.0', 'warning1'),
-        ((SELECT id FROM system_states WHERE hostname = 'health-scenario-4'), NOW() - INTERVAL '3 hours', '1.0.0', 'critical1'),
-        ((SELECT id FROM system_states WHERE hostname = 'health-scenario-5'), NOW() - INTERVAL '6 hours', '1.0.0', 'offline1');
-        
-        -- Query fleet health status
-        SELECT 
-            health_status,
-            count
-        FROM view_fleet_health_status
-        WHERE health_status IN ('Healthy', 'Warning', 'Critical', 'Offline')
-        ORDER BY count DESC;
-        
-        ROLLBACK;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{scenarios_test_sql}"'
+            health_scenarios_sql = FleetHealthStatusViewTests._load_sql(
+                "fleet_health_health_scenarios"
+            )
+            result = FleetHealthStatusViewTests._execute_sql_with_logging(
+                ctx, health_scenarios_sql, "Health scenarios test"
             )
 
             lines = [
@@ -437,6 +380,12 @@ class FleetHealthStatusViewTests:
                     ctx.logger.log_info(f"  {status}: {count} systems")
                 ctx.logger.log_info(f"  Total systems in health view: {total_systems}")
             else:
+                FleetHealthStatusViewTests._log_sql_on_failure(
+                    ctx,
+                    health_scenarios_sql,
+                    "Health scenarios test",
+                    "No health scenarios found in test data",
+                )
                 ctx.logger.log_warning("⚠️ No health scenarios found in test data")
 
         except Exception as e:
@@ -447,43 +396,45 @@ class FleetHealthStatusViewTests:
         """Test view performance with EXPLAIN ANALYZE"""
         ctx.logger.log_info("Testing fleet health status view performance...")
 
-        performance_sql = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM view_fleet_health_status;"
+        try:
+            # Test performance analysis
+            view_performance_sql = FleetHealthStatusViewTests._load_sql(
+                "fleet_health_view_performance"
+            )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f'sudo -u postgres psql crystal_forge -c "{view_performance_sql}"',
+                "fleet-health-status-view-performance.txt",
+                "Fleet health status view performance analysis",
+            )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f'sudo -u postgres psql crystal_forge -c "{performance_sql}"',
-            "fleet-health-status-view-performance.txt",
-            "Fleet health status view performance analysis",
-        )
+            # Test simple timing
+            view_timing_sql = FleetHealthStatusViewTests._load_sql(
+                "fleet_health_view_timing"
+            )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f'sudo -u postgres psql crystal_forge -c "{view_timing_sql}"',
+                "fleet-health-status-view-timing.txt",
+                "Fleet health status view timing test",
+            )
 
-        # Test simple timing
-        timing_sql = "\\\\timing on\\nSELECT COUNT(*) FROM view_fleet_health_status;\\nSELECT * FROM view_fleet_health_status;"
+            ctx.logger.log_success(
+                "Fleet health status view performance testing completed"
+            )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f'sudo -u postgres psql crystal_forge -c "{timing_sql}"',
-            "fleet-health-status-view-timing.txt",
-            "Fleet health status view timing test",
-        )
-
-        ctx.logger.log_success("Fleet health status view performance testing completed")
+        except Exception as e:
+            ctx.logger.log_error(f"❌ View performance test ERROR: {e}")
 
     @staticmethod
     def cleanup_test_data(ctx: CrystalForgeTestContext) -> None:
         """Clean up any test data that might have been left behind"""
         ctx.logger.log_info("Cleaning up fleet health status view test data...")
 
-        cleanup_sql = """
-        DELETE FROM agent_heartbeats 
-        WHERE system_state_id IN (
-            SELECT id FROM system_states WHERE hostname LIKE 'test-fleet-%' OR hostname LIKE 'health-scenario-%' OR hostname LIKE 'test-filter-%'
-        );
-        DELETE FROM system_states WHERE hostname LIKE 'test-fleet-%' OR hostname LIKE 'health-scenario-%' OR hostname LIKE 'test-filter-%';
-        """
-
         try:
-            ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
+            cleanup_sql = FleetHealthStatusViewTests._load_sql("fleet_health_cleanup")
+            FleetHealthStatusViewTests._execute_sql_with_logging(
+                ctx, cleanup_sql, "Cleanup test data"
             )
             ctx.logger.log_success(
                 "Fleet health status view test data cleanup completed"

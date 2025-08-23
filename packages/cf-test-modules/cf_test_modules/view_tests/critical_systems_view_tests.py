@@ -12,6 +12,54 @@ class CriticalSystemsViewTests:
     """Test suite for view_critical_systems"""
 
     @staticmethod
+    def _get_sql_path(filename: str) -> Path:
+        """Get the path to a SQL file in the sql directory"""
+        current_dir = Path(__file__).parent
+        return current_dir / f"sql/{filename}.sql"
+
+    @staticmethod
+    def _load_sql(filename: str) -> str:
+        """Load SQL content from a file"""
+        sql_path = CriticalSystemsViewTests._get_sql_path(filename)
+        try:
+            with open(sql_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"SQL file not found: {sql_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading SQL file {sql_path}: {e}")
+
+    @staticmethod
+    def _execute_sql_with_logging(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str
+    ) -> str:
+        """Execute SQL and log it if there's a failure"""
+        try:
+            return ctx.server.succeed(
+                f'sudo -u postgres psql crystal_forge -t -c "{sql}"'
+            )
+        except Exception as e:
+            ctx.logger.log_error(f"❌ {test_name} - SQL execution failed")
+            ctx.logger.log_error(f"SQL that failed:")
+            ctx.logger.log_error("-" * 50)
+            for i, line in enumerate(sql.split("\n"), 1):
+                ctx.logger.log_error(f"{i:3}: {line}")
+            ctx.logger.log_error("-" * 50)
+            raise e
+
+    @staticmethod
+    def _log_sql_on_failure(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str, reason: str
+    ) -> None:
+        """Log SQL when test fails due to unexpected results"""
+        ctx.logger.log_error(f"❌ {test_name} - {reason}")
+        ctx.logger.log_error(f"SQL that produced unexpected results:")
+        ctx.logger.log_error("-" * 50)
+        for i, line in enumerate(sql.split("\n"), 1):
+            ctx.logger.log_error(f"{i:3}: {line}")
+        ctx.logger.log_error("-" * 50)
+
+    @staticmethod
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
         """Run all tests for the critical systems view"""
         ctx.logger.log_section("🚨 Testing view_critical_systems")
@@ -47,49 +95,6 @@ class CriticalSystemsViewTests:
 
         # Clean up test data
         CriticalSystemsViewTests.cleanup_test_data(ctx)
-
-    @staticmethod
-    def _get_sql_path(filename: str) -> Path:
-        """Get the path to a SQL file in the same directory as this Python file"""
-        current_dir = Path(__file__).parent
-        return current_dir / f"sql/{filename}.sql"
-
-    @staticmethod
-    def _execute_sql_with_logging(
-        ctx: CrystalForgeTestContext, sql: str, test_name: str
-    ) -> str:
-        """Execute SQL and log it if there's a failure"""
-        try:
-            return ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{sql}"'
-            )
-        except Exception as e:
-            ctx.logger.log_error(f"❌ {test_name} - SQL execution failed")
-            ctx.logger.log_error(f"SQL that failed:")
-            ctx.logger.log_error("-" * 50)
-            for i, line in enumerate(sql.split("\n"), 1):
-                ctx.logger.log_error(f"{i:3}: {line}")
-            ctx.logger.log_error("-" * 50)
-            raise e
-        """Load SQL content from a file"""
-        sql_path = CriticalSystemsViewTests._get_sql_path(filename)
-        try:
-            with open(sql_path, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        except FileNotFoundError:
-            raise FileNotFoundError(f"SQL file not found: {sql_path}")
-        except Exception as e:
-            raise RuntimeError(f"Error loading SQL file {sql_path}: {e}")
-
-    @staticmethod
-    def _load_sql(filename: str) -> str:
-        """Run all tests for the critical systems view"""
-        ctx.logger.log_section("🚨 Testing view_critical_systems")
-
-        # Test 1: Verify view exists and is queryable
-        if not CriticalSystemsViewTests._test_view_exists(ctx):
-            ctx.logger.log_warning("View does not exist - skipping remaining tests")
-            return
 
     @staticmethod
     def _test_view_exists(ctx: CrystalForgeTestContext) -> bool:
@@ -191,6 +196,12 @@ class CriticalSystemsViewTests:
             if all_correct:
                 ctx.logger.log_success("✅ Status logic test PASSED")
             else:
+                CriticalSystemsViewTests._log_sql_on_failure(
+                    ctx,
+                    status_logic_sql,
+                    "Status logic test",
+                    "Expected status results not found",
+                )
                 ctx.logger.log_error("❌ Status logic test FAILED")
 
         except Exception as e:
@@ -234,18 +245,42 @@ class CriticalSystemsViewTests:
                                 f"  {hostname}: {hours_ago} hours ago (expected ~2.5)"
                             )
                         else:
+                            CriticalSystemsViewTests._log_sql_on_failure(
+                                ctx,
+                                hours_calculation_sql,
+                                "Hours calculation test",
+                                f"Hours ago value {hours_ago} outside expected range 2.3-2.7",
+                            )
                             ctx.logger.log_error(
                                 f"❌ Hours ago calculation test FAILED - got {hours_ago}, expected ~2.5"
                             )
                     else:
+                        CriticalSystemsViewTests._log_sql_on_failure(
+                            ctx,
+                            hours_calculation_sql,
+                            "Hours calculation test",
+                            f"Invalid hours_ago value: {hours_ago}",
+                        )
                         ctx.logger.log_error(
                             f"❌ Hours ago calculation test FAILED - invalid hours_ago value: {hours_ago}"
                         )
                 else:
+                    CriticalSystemsViewTests._log_sql_on_failure(
+                        ctx,
+                        hours_calculation_sql,
+                        "Hours calculation test",
+                        "Insufficient columns in result",
+                    )
                     ctx.logger.log_error(
                         "❌ Hours ago calculation test FAILED - insufficient columns"
                     )
             else:
+                CriticalSystemsViewTests._log_sql_on_failure(
+                    ctx,
+                    hours_calculation_sql,
+                    "Hours calculation test",
+                    "No results returned",
+                )
                 ctx.logger.log_error(
                     "❌ Hours ago calculation test FAILED - no results"
                 )
@@ -289,6 +324,12 @@ class CriticalSystemsViewTests:
                 ctx.logger.log_info(f"  Included: {', '.join(found_hostnames)}")
                 ctx.logger.log_info(f"  Correctly excluded recent system")
             else:
+                CriticalSystemsViewTests._log_sql_on_failure(
+                    ctx,
+                    data_filtering_sql,
+                    "Data filtering test",
+                    f"Incorrect filtering - found: {found_hostnames}, expected to include: {expected_included}, exclude: {expected_excluded}",
+                )
                 ctx.logger.log_error("❌ Data filtering test FAILED")
                 ctx.logger.log_error(f"  Found: {found_hostnames}")
 
@@ -334,6 +375,12 @@ class CriticalSystemsViewTests:
                     for hostname, hours in hours_values:
                         ctx.logger.log_info(f"  {hostname}: {hours} hours ago")
                 else:
+                    CriticalSystemsViewTests._log_sql_on_failure(
+                        ctx,
+                        sorting_order_sql,
+                        "Sorting order test",
+                        f"Results not in ascending order: {hours_values}",
+                    )
                     ctx.logger.log_error(
                         "❌ Sorting order test FAILED - not in ascending order"
                     )
@@ -388,6 +435,12 @@ class CriticalSystemsViewTests:
             if all_correct:
                 ctx.logger.log_success("✅ Edge cases test PASSED")
             else:
+                CriticalSystemsViewTests._log_sql_on_failure(
+                    ctx,
+                    edge_cases_sql,
+                    "Edge cases test",
+                    f"Expected edge case results not found. Expected: {expected}, Got: {edge_results}",
+                )
                 ctx.logger.log_error("❌ Edge cases test FAILED")
 
         except Exception as e:
@@ -433,6 +486,12 @@ class CriticalSystemsViewTests:
                 ctx.logger.log_info(f"  Critical: {actual_critical} systems")
                 ctx.logger.log_info(f"  Offline: {actual_offline} systems")
             else:
+                CriticalSystemsViewTests._log_sql_on_failure(
+                    ctx,
+                    critical_scenarios_sql,
+                    "Critical scenarios test",
+                    f"Expected {expected_critical} Critical and {expected_offline} Offline, got {actual_critical} Critical and {actual_offline} Offline",
+                )
                 ctx.logger.log_error("❌ Critical scenarios test FAILED")
                 ctx.logger.log_error(
                     f"  Expected: {expected_critical} Critical, {expected_offline} Offline"
