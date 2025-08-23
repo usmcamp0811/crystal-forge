@@ -63,7 +63,7 @@ class FleetHealthStatusViewTests(BaseViewTests):
 
                 # Test basic query
                 ctx.server.succeed(
-                    "sudo -u postgres psql crystal_forge -c "
+                    "psql crystal_forge -c "
                     '"SELECT COUNT(*) FROM view_fleet_health_status;"'
                 )
                 ctx.logger.log_success(
@@ -357,7 +357,7 @@ class FleetHealthStatusViewTests(BaseViewTests):
             )
             ctx.logger.capture_command_output(
                 ctx.server,
-                f'sudo -u postgres psql crystal_forge -c "{view_performance_sql}"',
+                f'psql crystal_forge -c "{view_performance_sql}"',
                 "fleet-health-status-view-performance.txt",
                 "Fleet health status view performance analysis",
             )
@@ -368,7 +368,7 @@ class FleetHealthStatusViewTests(BaseViewTests):
             )
             ctx.logger.capture_command_output(
                 ctx.server,
-                f'sudo -u postgres psql crystal_forge -c "{view_timing_sql}"',
+                f'psql crystal_forge -c "{view_timing_sql}"',
                 "fleet-health-status-view-timing.txt",
                 "Fleet health status view timing test",
             )

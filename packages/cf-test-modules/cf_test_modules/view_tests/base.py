@@ -51,7 +51,7 @@ class BaseViewTests:
     ) -> str:
         """Execute SQL query and return raw output"""
         flags = "-t -A" if tuples_only else "-A"
-        cmd = f"sudo -u postgres psql {db} {flags} -F '{field_separator}' -c \"{sql}\""
+        cmd = f"psql {db} {flags} -F '{field_separator}' -c \"{sql}\""
 
         try:
             return ctx.server.succeed(cmd)
@@ -584,7 +584,7 @@ class BaseViewTests:
         # Save performance analysis
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u postgres psql {db} -c "{perf_sql}"',
+            f'psql {db} -c "{perf_sql}"',
             f"{view_name.replace('view_', '')}-performance.txt",
             f"{view_name} performance analysis",
         )
@@ -592,7 +592,7 @@ class BaseViewTests:
         # Save timing test
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u postgres psql {db} -c "{timing_sql}"',
+            f'psql {db} -c "{timing_sql}"',
             f"{view_name.replace('view_', '')}-timing.txt",
             f"{view_name} timing test",
         )

@@ -69,7 +69,7 @@ class CriticalSystemsViewTests(BaseViewTests):
 
                 # Test basic query
                 ctx.server.succeed(
-                    "sudo -u postgres psql crystal_forge -c "
+                    "psql crystal_forge -c "
                     '"SELECT COUNT(*) FROM view_critical_systems;"'
                 )
                 ctx.logger.log_success("Basic critical systems view query successful")
@@ -469,7 +469,7 @@ class CriticalSystemsViewTests(BaseViewTests):
             )
             ctx.logger.capture_command_output(
                 ctx.server,
-                f'sudo -u postgres psql crystal_forge -c "{view_performance_sql}"',
+                f'psql crystal_forge -c "{view_performance_sql}"',
                 "critical-systems-view-performance.txt",
                 "Critical systems view performance analysis",
             )
@@ -480,7 +480,7 @@ class CriticalSystemsViewTests(BaseViewTests):
             )
             ctx.logger.capture_command_output(
                 ctx.server,
-                f'sudo -u postgres psql crystal_forge -c "{view_timing_sql}"',
+                f'psql crystal_forge -c "{view_timing_sql}"',
                 "critical-systems-view-timing.txt",
                 "Critical systems view timing test",
             )
