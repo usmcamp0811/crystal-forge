@@ -16,10 +16,10 @@
     mkdir -p $out
     cp ${keyPair}/agent.pub $out/
   '';
-  cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
-    mkdir -p $out
-    cp -r $src/* $out/
-  '';
+  # cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
+  #   mkdir -p $out
+  #   cp -r $src/* $out/
+  # '';
   systemBuildClosure = pkgs.closureInfo {
     rootPaths =
       [
@@ -42,7 +42,7 @@ in
       };
 
       server = lib.crystal-forge.makeServerNode {
-        inherit pkgs systemBuildClosure keyPath pubPath cfFlakePath;
+        inherit pkgs systemBuildClosure keyPath pubPath;
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
         };

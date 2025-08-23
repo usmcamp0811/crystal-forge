@@ -45,7 +45,7 @@
       export PYTHONPATH="${cfTestModules}/${pkgs.python3.sitePackages}:''${PYTHONPATH:-}"
 
       # Run the test runner
-      exec python3 "${cfTestModules}/${pkgs.python3.sitePackages}/cf_test_modules/devshell_test_runner.py" "$@"
+      exec python3 "${cfTestModules}/${pkgs.python3.sitePackages}/cf_test_modules/test_runner.py" "$@"
     '';
   };
 
