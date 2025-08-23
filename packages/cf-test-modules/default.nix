@@ -72,8 +72,8 @@
 
       echo "✅ PostgreSQL connection OK"
 
-      # Check if Crystal Forge server is running (optional)
-      if curl -s -f "http://''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3445}/health" >/dev/null 2>&1; then
+      # Check if Crystal Forge server is running (optional) - FIXED URL
+      if curl -s -f "http://''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3445}/status" >/dev/null 2>&1; then
         echo "✅ Crystal Forge server connection OK"
       else
         echo "⚠️  Cannot reach Crystal Forge server (tests will continue but some may fail)"
