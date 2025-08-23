@@ -2,11 +2,32 @@
 Tests for the view_critical_systems view
 """
 
+import os
+from pathlib import Path
+
 from ..test_context import CrystalForgeTestContext
 
 
 class CriticalSystemsViewTests:
     """Test suite for view_critical_systems"""
+
+    @staticmethod
+    def _get_sql_path(filename: str) -> Path:
+        """Get the path to a SQL file in the same directory as this Python file"""
+        current_dir = Path(__file__).parent
+        return current_dir / f"sql/{filename}.sql"
+
+    @staticmethod
+    def _load_sql(filename: str) -> str:
+        """Load SQL content from a file"""
+        sql_path = CriticalSystemsViewTests._get_sql_path(filename)
+        try:
+            with open(sql_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"SQL file not found: {sql_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading SQL file {sql_path}: {e}")
 
     @staticmethod
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
@@ -52,9 +73,11 @@ class CriticalSystemsViewTests:
 
         try:
             # Check if view exists
+            view_exists_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_view_exists"
+            )
             view_check_result = ctx.server.succeed(
-                "sudo -u postgres psql crystal_forge -t -c "
-                "\"SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'view_critical_systems');\""
+                f'sudo -u postgres psql crystal_forge -t -c "{view_exists_sql}"'
             ).strip()
 
             if view_check_result == "t":
@@ -80,21 +103,12 @@ class CriticalSystemsViewTests:
         """Test basic structure and columns"""
         ctx.logger.log_info("Testing basic structure and columns...")
 
-        structure_test_sql = """
-        -- Test that the view returns expected columns
-        SELECT 
-            hostname,
-            status,
-            hours_ago,
-            ip,
-            version
-        FROM view_critical_systems
-        LIMIT 1;
-        """
-
         try:
+            basic_structure_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_basic_structure"
+            )
             result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{structure_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{basic_structure_sql}"'
             )
 
             # Just verify we can query all expected columns without error
@@ -111,52 +125,12 @@ class CriticalSystemsViewTests:
         """Test critical vs offline status logic"""
         ctx.logger.log_info("Testing critical vs offline status logic...")
 
-        status_logic_test_sql = """
-        BEGIN;
-        
-        -- Create test systems with specific timestamps
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        -- Critical: last seen 2 hours ago (between 1-4 hours)
-        ('test-critical-2hr', '/nix/store/critical-2hr', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.2.1', '25.05', true,
-         NOW() - INTERVAL '2 hours'),
-        -- Critical: last seen 3 hours ago (between 1-4 hours)
-        ('test-critical-3hr', '/nix/store/critical-3hr', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.2.2', '25.05', true,
-         NOW() - INTERVAL '3 hours'),
-        -- Offline: last seen 6 hours ago (more than 4 hours)
-        ('test-offline-6hr', '/nix/store/offline-6hr', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.2.3', '25.05', true,
-         NOW() - INTERVAL '6 hours');
-
-        -- Add heartbeats with matching timestamps
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'test-critical-2hr'), NOW() - INTERVAL '2 hours', '1.2.3', 'critical2hr'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-critical-3hr'), NOW() - INTERVAL '3 hours', '1.2.4', 'critical3hr'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-offline-6hr'), NOW() - INTERVAL '6 hours', '1.2.5', 'offline6hr');
-        
-        -- Query our test systems from the critical systems view
-        SELECT 
-            hostname,
-            status,
-            hours_ago,
-            ip,
-            version
-        FROM view_critical_systems
-        WHERE hostname LIKE 'test-critical-%' OR hostname LIKE 'test-offline-%'
-        ORDER BY hostname;
-        
-        ROLLBACK;
-        """
-
         try:
+            status_logic_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_status_logic"
+            )
             result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{status_logic_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{status_logic_sql}"'
             )
 
             lines = [
@@ -202,38 +176,12 @@ class CriticalSystemsViewTests:
         """Test hours_ago calculation accuracy"""
         ctx.logger.log_info("Testing hours_ago calculation...")
 
-        hours_calculation_test_sql = """
-        BEGIN;
-        
-        -- Create test system with known timestamp
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        ('test-hours-calc', '/nix/store/hours-calc', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.3.1', '25.05', true,
-         NOW() - INTERVAL '2.5 hours');
-
-        -- Add heartbeat
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'test-hours-calc'), NOW() - INTERVAL '2.5 hours', '1.0.0', 'hourscalc');
-        
-        -- Query hours_ago calculation
-        SELECT 
-            hostname,
-            hours_ago,
-            status
-        FROM view_critical_systems
-        WHERE hostname = 'test-hours-calc';
-        
-        ROLLBACK;
-        """
-
         try:
+            hours_calculation_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_hours_calculation"
+            )
             result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{hours_calculation_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{hours_calculation_sql}"'
             )
 
             lines = [
@@ -285,50 +233,12 @@ class CriticalSystemsViewTests:
         """Test data filtering (WHERE conditions)"""
         ctx.logger.log_info("Testing data filtering...")
 
-        filtering_test_sql = """
-        BEGIN;
-        
-        -- Create test systems with different conditions
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        -- Should be included: 2 hours ago (critical)
-        ('test-filter-include', '/nix/store/filter-include', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.4.1', '25.05', true,
-         NOW() - INTERVAL '2 hours'),
-        -- Should be excluded: 30 minutes ago (too recent)
-        ('test-filter-exclude', '/nix/store/filter-exclude', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.4.2', '25.05', true,
-         NOW() - INTERVAL '30 minutes'),
-        -- Should be included: 8 hours ago (offline)
-        ('test-filter-offline', '/nix/store/filter-offline', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.4.3', '25.05', true,
-         NOW() - INTERVAL '8 hours');
-
-        -- Add heartbeats
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'test-filter-include'), NOW() - INTERVAL '2 hours', '1.0.0', 'include'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-filter-exclude'), NOW() - INTERVAL '30 minutes', '1.0.0', 'exclude'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-filter-offline'), NOW() - INTERVAL '8 hours', '1.0.0', 'offline');
-        
-        -- Query filtered results
-        SELECT 
-            hostname,
-            status,
-            hours_ago
-        FROM view_critical_systems
-        WHERE hostname LIKE 'test-filter-%'
-        ORDER BY hostname;
-        
-        ROLLBACK;
-        """
-
         try:
+            data_filtering_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_data_filtering"
+            )
             result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{filtering_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{data_filtering_sql}"'
             )
 
             lines = [
@@ -365,47 +275,12 @@ class CriticalSystemsViewTests:
         """Test that results are returned in the correct priority order"""
         ctx.logger.log_info("Testing sorting order...")
 
-        sorting_test_sql = """
-        BEGIN;
-        
-        -- Create test systems with different hours_ago values
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        ('test-sort-1hr', '/nix/store/sort-1hr', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.5.1', '25.05', true,
-         NOW() - INTERVAL '1.5 hours'),
-        ('test-sort-3hr', '/nix/store/sort-3hr', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.5.2', '25.05', true,
-         NOW() - INTERVAL '3 hours'),
-        ('test-sort-6hr', '/nix/store/sort-6hr', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.5.3', '25.05', true,
-         NOW() - INTERVAL '6 hours');
-
-        -- Add heartbeats
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'test-sort-1hr'), NOW() - INTERVAL '1.5 hours', '1.0.0', 'sort1'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-sort-3hr'), NOW() - INTERVAL '3 hours', '1.0.0', 'sort3'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-sort-6hr'), NOW() - INTERVAL '6 hours', '1.0.0', 'sort6');
-        
-        -- Query with expected sort order (hours_ago ascending)
-        SELECT 
-            hostname,
-            hours_ago,
-            status
-        FROM view_critical_systems
-        WHERE hostname LIKE 'test-sort-%'
-        ORDER BY hours_ago;
-        
-        ROLLBACK;
-        """
-
         try:
+            sorting_order_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_sorting_order"
+            )
             result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{sorting_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{sorting_order_sql}"'
             )
 
             lines = [
@@ -448,42 +323,10 @@ class CriticalSystemsViewTests:
         """Test edge cases and boundary conditions"""
         ctx.logger.log_info("Testing edge cases and boundary conditions...")
 
-        edge_cases_sql = """
-        BEGIN;
-        
-        -- Test exactly at 1-hour boundary (should be included)
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        ('test-edge-1hr', '/nix/store/edge-1hr', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.6.1', '25.05', true,
-         NOW() - INTERVAL '1 hour'),
-        -- Test exactly at 4-hour boundary (should be critical, not offline)
-        ('test-edge-4hr', '/nix/store/edge-4hr', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.6.2', '25.05', true,
-         NOW() - INTERVAL '4 hours');
-
-        -- Add heartbeats
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'test-edge-1hr'), NOW() - INTERVAL '1 hour', '1.0.0', 'edge1'),
-        ((SELECT id FROM system_states WHERE hostname = 'test-edge-4hr'), NOW() - INTERVAL '4 hours', '1.0.0', 'edge4');
-        
-        -- Query edge case systems
-        SELECT 
-            hostname,
-            status,
-            hours_ago
-        FROM view_critical_systems
-        WHERE hostname LIKE 'test-edge-%'
-        ORDER BY hostname;
-        
-        ROLLBACK;
-        """
-
         try:
+            edge_cases_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_edge_cases"
+            )
             result = ctx.server.succeed(
                 f'sudo -u postgres psql crystal_forge -t -c "{edge_cases_sql}"'
             )
@@ -530,45 +373,12 @@ class CriticalSystemsViewTests:
         """Test comprehensive critical scenarios"""
         ctx.logger.log_info("Testing comprehensive critical scenarios...")
 
-        scenarios_sql = """
-        BEGIN;
-        
-        -- Create multiple systems in different critical/offline states
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        ('scenario-crit-1', '/nix/store/scenario-crit-1', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.1', '25.05', true, NOW() - INTERVAL '1.2 hours'),
-        ('scenario-crit-2', '/nix/store/scenario-crit-2', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.2', '25.05', true, NOW() - INTERVAL '2.5 hours'),
-        ('scenario-crit-3', '/nix/store/scenario-crit-3', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.3', '25.05', true, NOW() - INTERVAL '3.8 hours'),
-        ('scenario-off-1', '/nix/store/scenario-off-1', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.4', '25.05', true, NOW() - INTERVAL '5 hours'),
-        ('scenario-off-2', '/nix/store/scenario-off-2', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.5', '25.05', true, NOW() - INTERVAL '12 hours');
-
-        -- Add heartbeats
-        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
-        ((SELECT id FROM system_states WHERE hostname = 'scenario-crit-1'), NOW() - INTERVAL '1.2 hours', '1.0.0', 'sc1'),
-        ((SELECT id FROM system_states WHERE hostname = 'scenario-crit-2'), NOW() - INTERVAL '2.5 hours', '1.0.0', 'sc2'),
-        ((SELECT id FROM system_states WHERE hostname = 'scenario-crit-3'), NOW() - INTERVAL '3.8 hours', '1.0.0', 'sc3'),
-        ((SELECT id FROM system_states WHERE hostname = 'scenario-off-1'), NOW() - INTERVAL '5 hours', '1.0.0', 'so1'),
-        ((SELECT id FROM system_states WHERE hostname = 'scenario-off-2'), NOW() - INTERVAL '12 hours', '1.0.0', 'so2');
-        
-        -- Query scenarios
-        SELECT 
-            status,
-            COUNT(*) as count
-        FROM view_critical_systems
-        WHERE hostname LIKE 'scenario-%'
-        GROUP BY status
-        ORDER BY status;
-        
-        ROLLBACK;
-        """
-
         try:
+            critical_scenarios_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_critical_scenarios"
+            )
             result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{scenarios_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{critical_scenarios_sql}"'
             )
 
             lines = [
@@ -614,55 +424,43 @@ class CriticalSystemsViewTests:
         """Test view performance with EXPLAIN ANALYZE"""
         ctx.logger.log_info("Testing critical systems view performance...")
 
-        performance_sql = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM view_critical_systems;"
+        try:
+            # Test performance analysis
+            view_performance_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_view_performance"
+            )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f'sudo -u postgres psql crystal_forge -c "{view_performance_sql}"',
+                "critical-systems-view-performance.txt",
+                "Critical systems view performance analysis",
+            )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f'sudo -u postgres psql crystal_forge -c "{performance_sql}"',
-            "critical-systems-view-performance.txt",
-            "Critical systems view performance analysis",
-        )
+            # Test simple timing
+            view_timing_sql = CriticalSystemsViewTests._load_sql(
+                "critical_systems_view_timing"
+            )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f'sudo -u postgres psql crystal_forge -c "{view_timing_sql}"',
+                "critical-systems-view-timing.txt",
+                "Critical systems view timing test",
+            )
 
-        # Test simple timing
-        timing_sql = "\\\\timing on\\nSELECT COUNT(*) FROM view_critical_systems;\\nSELECT * FROM view_critical_systems;"
+            ctx.logger.log_success(
+                "Critical systems view performance testing completed"
+            )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f'sudo -u postgres psql crystal_forge -c "{timing_sql}"',
-            "critical-systems-view-timing.txt",
-            "Critical systems view timing test",
-        )
-
-        ctx.logger.log_success("Critical systems view performance testing completed")
+        except Exception as e:
+            ctx.logger.log_error(f"❌ View performance test ERROR: {e}")
 
     @staticmethod
     def cleanup_test_data(ctx: CrystalForgeTestContext) -> None:
         """Clean up any test data that might have been left behind"""
         ctx.logger.log_info("Cleaning up critical systems view test data...")
 
-        cleanup_sql = """
-        DELETE FROM agent_heartbeats 
-        WHERE system_state_id IN (
-            SELECT id FROM system_states 
-            WHERE hostname LIKE 'test-critical-%' 
-               OR hostname LIKE 'test-offline-%'
-               OR hostname LIKE 'test-hours-%'
-               OR hostname LIKE 'test-filter-%'
-               OR hostname LIKE 'test-sort-%'
-               OR hostname LIKE 'test-edge-%'
-               OR hostname LIKE 'scenario-%'
-        );
-        DELETE FROM system_states 
-        WHERE hostname LIKE 'test-critical-%' 
-           OR hostname LIKE 'test-offline-%'
-           OR hostname LIKE 'test-hours-%'
-           OR hostname LIKE 'test-filter-%'
-           OR hostname LIKE 'test-sort-%'
-           OR hostname LIKE 'test-edge-%'
-           OR hostname LIKE 'scenario-%';
-        """
-
         try:
+            cleanup_sql = CriticalSystemsViewTests._load_sql("critical_systems_cleanup")
             ctx.server.succeed(
                 f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
             )
