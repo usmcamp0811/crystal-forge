@@ -1,4 +1,4 @@
-CREATE OR REPLACE VIEW view_fleet_health_status AS CREATE OR REPLACE VIEW view_fleet_health_status AS
+CREATE OR REPLACE VIEW view_fleet_health_status AS
 SELECT
     health_status,
     COUNT(*) AS count,

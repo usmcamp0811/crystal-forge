@@ -24,10 +24,13 @@ class SystemsStatusTableTests:
         # Test 3: Test heartbeat vs system state interactions
         SystemsStatusTableTests._test_heartbeat_system_state_interactions(ctx)
 
-        # Test 4: Test edge cases and boundary conditions
+        # Test 4: Test update status logic
+        SystemsStatusTableTests._test_update_status_logic(ctx)
+
+        # Test 5: Test edge cases and boundary conditions
         SystemsStatusTableTests._test_edge_cases(ctx)
 
-        # Test 5: Verify view performance
+        # Test 6: Verify view performance
         SystemsStatusTableTests._test_view_performance(ctx)
 
         # Clean up test data
@@ -92,7 +95,7 @@ class SystemsStatusTableTests:
     @staticmethod
     def _test_status_logic_scenarios(ctx: CrystalForgeTestContext) -> None:
         """Test specific status logic scenarios with assertions"""
-        ctx.logger.log_info("Testing status logic scenarios with assertions...")
+        ctx.logger.log_info("Testing connectivity status logic scenarios...")
 
         test_scenarios = [
             {
@@ -109,8 +112,8 @@ class SystemsStatusTableTests:
                     NOW() - INTERVAL '10 minutes'
                 );
                 """,
-                "expected_status": "starting",
-                "expected_status_text": "System starting up",
+                "expected_connectivity_status": "starting",
+                "expected_connectivity_status_text": "System starting up",
             },
             {
                 "name": "Old system state, no heartbeat (should be 'offline')",
@@ -126,8 +129,8 @@ class SystemsStatusTableTests:
                     NOW() - INTERVAL '2 hours'
                 );
                 """,
-                "expected_status": "offline",
-                "expected_status_text": "No heartbeats",
+                "expected_connectivity_status": "offline",
+                "expected_connectivity_status_text": "No heartbeats",
             },
             {
                 "name": "Recent heartbeat, recent system state (should be 'online')",
@@ -152,8 +155,8 @@ class SystemsStatusTableTests:
                     'abc123def'
                 );
                 """,
-                "expected_status": "online",
-                "expected_status_text": "Active",
+                "expected_connectivity_status": "online",
+                "expected_connectivity_status_text": "Active",
             },
             {
                 "name": "Old heartbeat, recent system state (should be 'starting')",
@@ -178,8 +181,8 @@ class SystemsStatusTableTests:
                     'abc123def'
                 );
                 """,
-                "expected_status": "starting",
-                "expected_status_text": "System restarted",
+                "expected_connectivity_status": "starting",
+                "expected_connectivity_status_text": "System restarted",
             },
             {
                 "name": "Old heartbeat, old system state (should be 'stale')",
@@ -204,8 +207,8 @@ class SystemsStatusTableTests:
                     'abc123def'
                 );
                 """,
-                "expected_status": "stale",
-                "expected_status_text": "Heartbeat overdue",
+                "expected_connectivity_status": "stale",
+                "expected_connectivity_status_text": "Heartbeat overdue",
             },
         ]
 
@@ -220,10 +223,12 @@ class SystemsStatusTableTests:
             
             SELECT 
                 hostname,
-                status,
-                status_text,
+                connectivity_status,
+                connectivity_status_text,
+                update_status,
+                overall_status,
                 last_seen,
-                version,
+                agent_version,
                 uptime,
                 ip_address
             FROM view_systems_status_table 
@@ -268,36 +273,145 @@ class SystemsStatusTableTests:
                 # Parse the result line (pipe-separated values)
                 parts = [part.strip() for part in matching_line.split("|")]
 
-                if len(parts) < 3:
+                if len(parts) < 4:
                     ctx.logger.log_error(f"Invalid result format: {matching_line}")
                     continue
 
                 actual_hostname = parts[0]
-                actual_status = parts[1]
-                actual_status_text = parts[2]
+                actual_connectivity_status = parts[1]
+                actual_connectivity_status_text = parts[2]
+                actual_update_status = parts[3]
 
                 # Assertions
                 hostname_match = actual_hostname == test_hostname
-                status_match = actual_status == scenario["expected_status"]
-                status_text_match = (
-                    actual_status_text == scenario["expected_status_text"]
+                connectivity_status_match = (
+                    actual_connectivity_status
+                    == scenario["expected_connectivity_status"]
+                )
+                connectivity_status_text_match = (
+                    actual_connectivity_status_text
+                    == scenario["expected_connectivity_status_text"]
                 )
 
-                if hostname_match and status_match and status_text_match:
+                if (
+                    hostname_match
+                    and connectivity_status_match
+                    and connectivity_status_text_match
+                ):
                     ctx.logger.log_success(f"✅ Scenario '{scenario['name']}' PASSED")
                 else:
                     ctx.logger.log_error(f"❌ Scenario '{scenario['name']}' FAILED")
                     ctx.logger.log_error(
-                        f"  Expected: hostname={test_hostname}, status={scenario['expected_status']}, status_text={scenario['expected_status_text']}"
+                        f"  Expected: hostname={test_hostname}, connectivity_status={scenario['expected_connectivity_status']}, connectivity_status_text={scenario['expected_connectivity_status_text']}"
                     )
                     ctx.logger.log_error(
-                        f"  Actual:   hostname={actual_hostname}, status={actual_status}, status_text={actual_status_text}"
+                        f"  Actual:   hostname={actual_hostname}, connectivity_status={actual_connectivity_status}, connectivity_status_text={actual_connectivity_status_text}"
                     )
 
             except Exception as e:
                 ctx.logger.log_error(f"❌ Scenario '{scenario['name']}' ERROR: {e}")
 
-        ctx.logger.log_success("Status logic scenarios testing completed")
+        ctx.logger.log_success("Connectivity status logic scenarios testing completed")
+
+    @staticmethod
+    def _test_update_status_logic(ctx: CrystalForgeTestContext) -> None:
+        """Test update status logic scenarios"""
+        ctx.logger.log_info("Testing update status logic scenarios...")
+
+        # Create test flake and system for update status testing
+        update_test_sql = """
+        BEGIN;
+        
+        -- Create test flake
+        INSERT INTO flakes (name, repo_url) VALUES ('test-flake', 'http://test.git');
+        
+        -- Create test system
+        INSERT INTO systems (hostname, flake_id, derivation, public_key, is_active) 
+        VALUES ('test-update-sys', (SELECT id FROM flakes WHERE name = 'test-flake'), 'nixosConfigurations.test', 'test-key', true);
+        
+        -- Create commits
+        INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES 
+        ((SELECT id FROM flakes WHERE name = 'test-flake'), 'abc123old', NOW() - INTERVAL '2 hours'),
+        ((SELECT id FROM flakes WHERE name = 'test-flake'), 'def456new', NOW() - INTERVAL '1 hour');
+        
+        -- Create derivation statuses if not exist
+        INSERT INTO derivation_statuses (name, description, is_terminal, is_success, display_order) VALUES 
+        ('test-complete', 'Test Complete', true, true, 100) ON CONFLICT (name) DO NOTHING;
+        
+        -- Create derivations for both commits
+        INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id) VALUES 
+        ((SELECT id FROM commits WHERE git_commit_hash = 'abc123old'), 'nixos', 'test-update-sys', '/nix/store/old-path', (SELECT id FROM derivation_statuses WHERE name = 'test-complete')),
+        ((SELECT id FROM commits WHERE git_commit_hash = 'def456new'), 'nixos', 'test-update-sys', '/nix/store/new-path', (SELECT id FROM derivation_statuses WHERE name = 'test-complete'));
+        
+        -- System is running old derivation
+        INSERT INTO system_states (
+            hostname, derivation_path, change_reason, os, kernel,
+            memory_gb, uptime_secs, cpu_brand, cpu_cores,
+            primary_ip_address, nixos_version, agent_compatible,
+            timestamp
+        ) VALUES (
+            'test-update-sys', '/nix/store/old-path', 'startup', '25.05', '6.6.89',
+            8192, 3600, 'Test CPU', 4, '10.0.0.250', '25.05', true,
+            NOW() - INTERVAL '10 minutes'
+        );
+        
+        -- Query the view
+        SELECT 
+            hostname,
+            connectivity_status,
+            update_status,
+            update_status_text,
+            overall_status,
+            current_derivation_path,
+            latest_derivation_path,
+            drift_hours
+        FROM view_systems_status_table 
+        WHERE hostname = 'test-update-sys';
+        
+        ROLLBACK;
+        """
+
+        try:
+            result = ctx.server.succeed(
+                f'sudo -u crystal-forge psql crystal_forge -t -c "{update_test_sql}"'
+            )
+
+            lines = [
+                line.strip() for line in result.strip().split("\n") if line.strip()
+            ]
+
+            if lines:
+                parts = [part.strip() for part in lines[0].split("|")]
+                if len(parts) >= 3:
+                    hostname = parts[0]
+                    connectivity_status = parts[1]
+                    update_status = parts[2]
+
+                    # Verify update status logic
+                    hostname_correct = hostname == "test-update-sys"
+                    update_behind = (
+                        update_status == "behind"
+                    )  # Should be behind since running old derivation
+
+                    if hostname_correct and update_behind:
+                        ctx.logger.log_success("✅ Update status logic test PASSED")
+                        ctx.logger.log_info(
+                            f"  System correctly identified as: {update_status}"
+                        )
+                    else:
+                        ctx.logger.log_error("❌ Update status logic test FAILED")
+                        ctx.logger.log_error(
+                            f"  Expected: behind, Got: {update_status}"
+                        )
+                else:
+                    ctx.logger.log_error(
+                        "❌ Insufficient columns in update status result"
+                    )
+            else:
+                ctx.logger.log_error("❌ No results returned for update status test")
+
+        except Exception as e:
+            ctx.logger.log_error(f"❌ Update status logic test ERROR: {e}")
 
     @staticmethod
     def _test_heartbeat_system_state_interactions(ctx: CrystalForgeTestContext) -> None:
@@ -337,9 +451,9 @@ class SystemsStatusTableTests:
         -- Query the view and validate it uses the latest system state and heartbeat
         SELECT 
             hostname,
-            status,
-            status_text,
-            version,
+            connectivity_status,
+            connectivity_status_text,
+            agent_version,
             ip_address,
             uptime
         FROM view_systems_status_table 
@@ -361,15 +475,15 @@ class SystemsStatusTableTests:
                 parts = [part.strip() for part in lines[0].split("|")]
                 if len(parts) >= 5:
                     hostname = parts[0]
-                    status = parts[1]
-                    status_text = parts[2]
-                    version = parts[3]
+                    connectivity_status = parts[1]
+                    connectivity_status_text = parts[2]
+                    agent_version = parts[3]
                     ip_address = parts[4]
 
                     # Assertions for latest state/heartbeat usage
                     hostname_correct = hostname == "test-multi"
-                    status_should_be_online = status == "online"
-                    version_is_latest = version == "1.2.0"
+                    status_should_be_online = connectivity_status == "online"
+                    version_is_latest = agent_version == "1.2.0"
                     ip_is_latest = ip_address == "10.0.0.301"
 
                     if (
@@ -385,7 +499,7 @@ class SystemsStatusTableTests:
                             f"  Uses latest system state IP: {ip_address}"
                         )
                         ctx.logger.log_info(
-                            f"  Uses latest heartbeat version: {version}"
+                            f"  Uses latest heartbeat version: {agent_version}"
                         )
                     else:
                         ctx.logger.log_error(
@@ -396,7 +510,7 @@ class SystemsStatusTableTests:
                             f"  status_should_be_online: {status_should_be_online}"
                         )
                         ctx.logger.log_error(
-                            f"  version_is_latest: {version_is_latest} (got {version})"
+                            f"  version_is_latest: {version_is_latest} (got {agent_version})"
                         )
                         ctx.logger.log_error(
                             f"  ip_is_latest: {ip_is_latest} (got {ip_address})"
@@ -431,7 +545,7 @@ class SystemsStatusTableTests:
                     NOW() - INTERVAL '30 minutes'
                 );
                 """,
-                "expected_status": "offline",
+                "expected_connectivity_status": "offline",
             },
             {
                 "name": "System with NULL optional fields",
@@ -447,7 +561,7 @@ class SystemsStatusTableTests:
                     NOW() - INTERVAL '5 minutes'
                 );
                 """,
-                "expected_status": "starting",
+                "expected_connectivity_status": "starting",
             },
         ]
 
@@ -457,7 +571,7 @@ class SystemsStatusTableTests:
             
             {test_case['setup_sql']}
             
-            SELECT status FROM view_systems_status_table 
+            SELECT connectivity_status FROM view_systems_status_table 
             WHERE hostname LIKE 'test-%' 
             AND hostname = '{test_case['setup_sql'].split("'")[1]}';
             
@@ -469,12 +583,12 @@ class SystemsStatusTableTests:
                     f'sudo -u crystal-forge psql crystal_forge -t -c "{test_sql}"'
                 ).strip()
 
-                if result == test_case["expected_status"]:
+                if result == test_case["expected_connectivity_status"]:
                     ctx.logger.log_success(f"✅ Edge case '{test_case['name']}' PASSED")
                 else:
                     ctx.logger.log_error(f"❌ Edge case '{test_case['name']}' FAILED")
                     ctx.logger.log_error(
-                        f"  Expected: {test_case['expected_status']}, Got: {result}"
+                        f"  Expected: {test_case['expected_connectivity_status']}, Got: {result}"
                     )
 
             except Exception as e:
@@ -516,6 +630,10 @@ class SystemsStatusTableTests:
         WHERE system_state_id IN (
             SELECT id FROM system_states WHERE hostname LIKE 'test-%'
         );
+        DELETE FROM derivations WHERE derivation_name LIKE 'test-%';
+        DELETE FROM commits WHERE git_commit_hash LIKE '%test%' OR git_commit_hash IN ('abc123old', 'def456new');  
+        DELETE FROM systems WHERE hostname LIKE 'test-%';
+        DELETE FROM flakes WHERE name LIKE 'test-%';
         DELETE FROM system_states WHERE hostname LIKE 'test-%';
         """
 
