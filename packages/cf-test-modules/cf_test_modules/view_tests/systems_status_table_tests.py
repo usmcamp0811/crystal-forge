@@ -2,11 +2,62 @@
 Tests for the view_systems_status_table view
 """
 
+import os
+from pathlib import Path
+
 from ..test_context import CrystalForgeTestContext
 
 
 class SystemsStatusTableTests:
     """Test suite for view_systems_status_table"""
+
+    @staticmethod
+    def _get_sql_path(filename: str) -> Path:
+        """Get the path to a SQL file in the sql directory"""
+        current_dir = Path(__file__).parent
+        return current_dir / f"sql/{filename}.sql"
+
+    @staticmethod
+    def _load_sql(filename: str) -> str:
+        """Load SQL content from a file"""
+        sql_path = SystemsStatusTableTests._get_sql_path(filename)
+        try:
+            with open(sql_path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except FileNotFoundError:
+            raise FileNotFoundError(f"SQL file not found: {sql_path}")
+        except Exception as e:
+            raise RuntimeError(f"Error loading SQL file {sql_path}: {e}")
+
+    @staticmethod
+    def _execute_sql_with_logging(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str
+    ) -> str:
+        """Execute SQL and log it if there's a failure"""
+        try:
+            return ctx.server.succeed(
+                f'sudo -u postgres psql crystal_forge -t -c "{sql}"'
+            )
+        except Exception as e:
+            ctx.logger.log_error(f"❌ {test_name} - SQL execution failed")
+            ctx.logger.log_error(f"SQL that failed:")
+            ctx.logger.log_error("-" * 50)
+            for i, line in enumerate(sql.split("\n"), 1):
+                ctx.logger.log_error(f"{i:3}: {line}")
+            ctx.logger.log_error("-" * 50)
+            raise e
+
+    @staticmethod
+    def _log_sql_on_failure(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str, reason: str
+    ) -> None:
+        """Log SQL when test fails due to unexpected results"""
+        ctx.logger.log_error(f"❌ {test_name} - {reason}")
+        ctx.logger.log_error(f"SQL that produced unexpected results:")
+        ctx.logger.log_error("-" * 50)
+        for i, line in enumerate(sql.split("\n"), 1):
+            ctx.logger.log_error(f"{i:3}: {line}")
+        ctx.logger.log_error("-" * 50)
 
     @staticmethod
     def run_all_tests(ctx: CrystalForgeTestContext) -> None:
@@ -53,9 +104,11 @@ class SystemsStatusTableTests:
 
         # Check if view exists - capture output for debugging
         try:
-            view_check_result = ctx.server.succeed(
-                "sudo -u postgres psql crystal_forge -t -c "
-                "\"SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'view_systems_status_table');\""
+            view_exists_sql = SystemsStatusTableTests._load_sql(
+                "systems_status_view_exists"
+            )
+            view_check_result = SystemsStatusTableTests._execute_sql_with_logging(
+                ctx, view_exists_sql, "View existence check"
             ).strip()
 
             if view_check_result == "t":
@@ -100,147 +153,43 @@ class SystemsStatusTableTests:
         test_scenarios = [
             {
                 "name": "Recent system state, no heartbeat (should be 'starting')",
-                "setup_sql": """
-                INSERT INTO system_states (
-                    hostname, derivation_path, change_reason, os, kernel,
-                    memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                    primary_ip_address, nixos_version, agent_compatible,
-                    timestamp
-                ) VALUES (
-                    'test-starting', '/nix/store/test-starting', 'startup', '25.05', '6.6.89',
-                    16384, 3600, 'Test CPU', 8, '10.0.0.200', '25.05', true,
-                    NOW() - INTERVAL '10 minutes'
-                );
-                """,
+                "sql_file": "systems_status_scenario_starting",
                 "expected_connectivity_status": "starting",
                 "expected_connectivity_status_text": "System starting up",
             },
             {
                 "name": "Old system state, no heartbeat (should be 'offline')",
-                "setup_sql": """
-                INSERT INTO system_states (
-                    hostname, derivation_path, change_reason, os, kernel,
-                    memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                    primary_ip_address, nixos_version, agent_compatible,
-                    timestamp
-                ) VALUES (
-                    'test-offline', '/nix/store/test-offline', 'startup', '25.05', '6.6.89',
-                    8192, 3600, 'Test CPU', 4, '10.0.0.201', '25.05', true,
-                    NOW() - INTERVAL '2 hours'
-                );
-                """,
+                "sql_file": "systems_status_scenario_offline",
                 "expected_connectivity_status": "offline",
                 "expected_connectivity_status_text": "No heartbeats",
             },
             {
                 "name": "Recent heartbeat, recent system state (should be 'online')",
-                "setup_sql": """
-                INSERT INTO system_states (
-                    hostname, derivation_path, change_reason, os, kernel,
-                    memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                    primary_ip_address, nixos_version, agent_compatible,
-                    timestamp
-                ) VALUES (
-                    'test-online', '/nix/store/test-online', 'startup', '25.05', '6.6.89',
-                    16384, 7200, 'Test CPU', 8, '10.0.0.202', '25.05', true,
-                    NOW() - INTERVAL '5 minutes'
-                );
-                
-                INSERT INTO agent_heartbeats (
-                    system_state_id, timestamp, agent_version, agent_build_hash
-                ) VALUES (
-                    (SELECT id FROM system_states WHERE hostname = 'test-online' ORDER BY timestamp DESC LIMIT 1),
-                    NOW() - INTERVAL '2 minutes',
-                    '1.2.3',
-                    'abc123def'
-                );
-                """,
+                "sql_file": "systems_status_scenario_online",
                 "expected_connectivity_status": "online",
                 "expected_connectivity_status_text": "Active",
             },
             {
                 "name": "Old heartbeat, recent system state (should be 'starting')",
-                "setup_sql": """
-                INSERT INTO system_states (
-                    hostname, derivation_path, change_reason, os, kernel,
-                    memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                    primary_ip_address, nixos_version, agent_compatible,
-                    timestamp
-                ) VALUES (
-                    'test-restarted', '/nix/store/test-restarted', 'startup', '25.05', '6.6.89',
-                    16384, 1800, 'Test CPU', 8, '10.0.0.203', '25.05', true,
-                    NOW() - INTERVAL '5 minutes'
-                );
-                
-                INSERT INTO agent_heartbeats (
-                    system_state_id, timestamp, agent_version, agent_build_hash
-                ) VALUES (
-                    (SELECT id FROM system_states WHERE hostname = 'test-restarted' ORDER BY timestamp DESC LIMIT 1),
-                    NOW() - INTERVAL '2 hours',
-                    '1.2.3',
-                    'abc123def'
-                );
-                """,
+                "sql_file": "systems_status_scenario_restarted",
                 "expected_connectivity_status": "starting",
                 "expected_connectivity_status_text": "System restarted",
             },
             {
                 "name": "Old heartbeat, old system state (should be 'stale')",
-                "setup_sql": """
-                INSERT INTO system_states (
-                    hostname, derivation_path, change_reason, os, kernel,
-                    memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                    primary_ip_address, nixos_version, agent_compatible,
-                    timestamp
-                ) VALUES (
-                    'test-stale', '/nix/store/test-stale', 'startup', '25.05', '6.6.89',
-                    8192, 86400, 'Test CPU', 4, '10.0.0.204', '25.05', true,
-                    NOW() - INTERVAL '2 hours'
-                );
-                
-                INSERT INTO agent_heartbeats (
-                    system_state_id, timestamp, agent_version, agent_build_hash
-                ) VALUES (
-                    (SELECT id FROM system_states WHERE hostname = 'test-stale' ORDER BY timestamp DESC LIMIT 1),
-                    NOW() - INTERVAL '1 hour',
-                    '1.2.3',
-                    'abc123def'
-                );
-                """,
+                "sql_file": "systems_status_scenario_stale",
                 "expected_connectivity_status": "stale",
                 "expected_connectivity_status_text": "Heartbeat overdue",
             },
         ]
 
-        for i, scenario in enumerate(test_scenarios):
+        for scenario in test_scenarios:
             ctx.logger.log_info(f"Testing scenario: {scenario['name']}")
 
-            # Setup test data and query view
-            test_sql = f"""
-            BEGIN;
-            
-            {scenario['setup_sql']}
-            
-            SELECT 
-                hostname,
-                connectivity_status,
-                connectivity_status_text,
-                update_status,
-                overall_status,
-                last_seen,
-                agent_version,
-                uptime,
-                ip_address
-            FROM view_systems_status_table 
-            WHERE hostname LIKE 'test-%'
-            ORDER BY hostname;
-            
-            ROLLBACK;
-            """
-
             try:
-                result = ctx.server.succeed(
-                    f'sudo -u postgres psql crystal_forge -t -c "{test_sql}"'
+                scenario_sql = SystemsStatusTableTests._load_sql(scenario["sql_file"])
+                result = SystemsStatusTableTests._execute_sql_with_logging(
+                    ctx, scenario_sql, f"Scenario: {scenario['name']}"
                 )
 
                 # Parse and validate results
@@ -249,41 +198,42 @@ class SystemsStatusTableTests:
                 ]
 
                 if not lines:
+                    SystemsStatusTableTests._log_sql_on_failure(
+                        ctx,
+                        scenario_sql,
+                        f"Scenario: {scenario['name']}",
+                        f"No results returned for scenario: {scenario['name']}",
+                    )
                     ctx.logger.log_error(
                         f"No results returned for scenario: {scenario['name']}"
                     )
                     continue
 
-                # Find the line for our test system
-                test_hostname = scenario["setup_sql"].split("'")[
-                    1
-                ]  # Extract hostname from INSERT
-                matching_line = None
-                for line in lines:
-                    if test_hostname in line:
-                        matching_line = line
-                        break
-
-                if not matching_line:
-                    ctx.logger.log_error(
-                        f"No result found for hostname {test_hostname}"
-                    )
-                    continue
-
                 # Parse the result line (pipe-separated values)
-                parts = [part.strip() for part in matching_line.split("|")]
+                parts = [part.strip() for part in lines[0].split("|")]
 
                 if len(parts) < 4:
-                    ctx.logger.log_error(f"Invalid result format: {matching_line}")
+                    SystemsStatusTableTests._log_sql_on_failure(
+                        ctx,
+                        scenario_sql,
+                        f"Scenario: {scenario['name']}",
+                        f"Invalid result format: {lines[0]}",
+                    )
+                    ctx.logger.log_error(f"Invalid result format: {lines[0]}")
                     continue
 
                 actual_hostname = parts[0]
                 actual_connectivity_status = parts[1]
                 actual_connectivity_status_text = parts[2]
-                actual_update_status = parts[3]
+
+                # Determine expected hostname from SQL file content
+                expected_hostname = scenario["sql_file"].split("_")[
+                    -1
+                ]  # e.g., "starting" from "scenario_starting"
+                expected_hostname = f"test-{expected_hostname}"
 
                 # Assertions
-                hostname_match = actual_hostname == test_hostname
+                hostname_match = actual_hostname == expected_hostname
                 connectivity_status_match = (
                     actual_connectivity_status
                     == scenario["expected_connectivity_status"]
@@ -300,9 +250,15 @@ class SystemsStatusTableTests:
                 ):
                     ctx.logger.log_success(f"✅ Scenario '{scenario['name']}' PASSED")
                 else:
+                    SystemsStatusTableTests._log_sql_on_failure(
+                        ctx,
+                        scenario_sql,
+                        f"Scenario: {scenario['name']}",
+                        f"Expected: hostname={expected_hostname}, connectivity_status={scenario['expected_connectivity_status']}, connectivity_status_text={scenario['expected_connectivity_status_text']}",
+                    )
                     ctx.logger.log_error(f"❌ Scenario '{scenario['name']}' FAILED")
                     ctx.logger.log_error(
-                        f"  Expected: hostname={test_hostname}, connectivity_status={scenario['expected_connectivity_status']}, connectivity_status_text={scenario['expected_connectivity_status_text']}"
+                        f"  Expected: hostname={expected_hostname}, connectivity_status={scenario['expected_connectivity_status']}, connectivity_status_text={scenario['expected_connectivity_status_text']}"
                     )
                     ctx.logger.log_error(
                         f"  Actual:   hostname={actual_hostname}, connectivity_status={actual_connectivity_status}, connectivity_status_text={actual_connectivity_status_text}"
@@ -318,62 +274,12 @@ class SystemsStatusTableTests:
         """Test update status logic scenarios"""
         ctx.logger.log_info("Testing update status logic scenarios...")
 
-        # Create test flake and system for update status testing
-        update_test_sql = """
-        BEGIN;
-        
-        -- Create test flake
-        INSERT INTO flakes (name, repo_url) VALUES ('test-flake', 'http://test.git');
-        
-        -- Create test system
-        INSERT INTO systems (hostname, flake_id, derivation, public_key, is_active) 
-        VALUES ('test-update-sys', (SELECT id FROM flakes WHERE name = 'test-flake'), 'nixosConfigurations.test', 'test-key', true);
-        
-        -- Create commits
-        INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES 
-        ((SELECT id FROM flakes WHERE name = 'test-flake'), 'abc123old', NOW() - INTERVAL '2 hours'),
-        ((SELECT id FROM flakes WHERE name = 'test-flake'), 'def456new', NOW() - INTERVAL '1 hour');
-        
-        -- Create derivation statuses if not exist
-        INSERT INTO derivation_statuses (name, description, is_terminal, is_success, display_order) VALUES 
-        ('test-complete', 'Test Complete', true, true, 100) ON CONFLICT (name) DO NOTHING;
-        
-        -- Create derivations for both commits
-        INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id) VALUES 
-        ((SELECT id FROM commits WHERE git_commit_hash = 'abc123old'), 'nixos', 'test-update-sys', '/nix/store/old-path', (SELECT id FROM derivation_statuses WHERE name = 'test-complete')),
-        ((SELECT id FROM commits WHERE git_commit_hash = 'def456new'), 'nixos', 'test-update-sys', '/nix/store/new-path', (SELECT id FROM derivation_statuses WHERE name = 'test-complete'));
-        
-        -- System is running old derivation
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES (
-            'test-update-sys', '/nix/store/old-path', 'startup', '25.05', '6.6.89',
-            8192, 3600, 'Test CPU', 4, '10.0.0.250', '25.05', true,
-            NOW() - INTERVAL '10 minutes'
-        );
-        
-        -- Query the view
-        SELECT 
-            hostname,
-            connectivity_status,
-            update_status,
-            update_status_text,
-            overall_status,
-            current_derivation_path,
-            latest_derivation_path,
-            drift_hours
-        FROM view_systems_status_table 
-        WHERE hostname = 'test-update-sys';
-        
-        ROLLBACK;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{update_test_sql}"'
+            update_logic_sql = SystemsStatusTableTests._load_sql(
+                "systems_status_update_status_logic"
+            )
+            result = SystemsStatusTableTests._execute_sql_with_logging(
+                ctx, update_logic_sql, "Update status logic test"
             )
 
             lines = [
@@ -399,15 +305,33 @@ class SystemsStatusTableTests:
                             f"  System correctly identified as: {update_status}"
                         )
                     else:
+                        SystemsStatusTableTests._log_sql_on_failure(
+                            ctx,
+                            update_logic_sql,
+                            "Update status logic test",
+                            f"Expected: behind, Got: {update_status}",
+                        )
                         ctx.logger.log_error("❌ Update status logic test FAILED")
                         ctx.logger.log_error(
                             f"  Expected: behind, Got: {update_status}"
                         )
                 else:
+                    SystemsStatusTableTests._log_sql_on_failure(
+                        ctx,
+                        update_logic_sql,
+                        "Update status logic test",
+                        "Insufficient columns in update status result",
+                    )
                     ctx.logger.log_error(
                         "❌ Insufficient columns in update status result"
                     )
             else:
+                SystemsStatusTableTests._log_sql_on_failure(
+                    ctx,
+                    update_logic_sql,
+                    "Update status logic test",
+                    "No results returned for update status test",
+                )
                 ctx.logger.log_error("❌ No results returned for update status test")
 
         except Exception as e:
@@ -418,53 +342,12 @@ class SystemsStatusTableTests:
         """Test the interaction between heartbeats and system states"""
         ctx.logger.log_info("Testing heartbeat and system state interactions...")
 
-        interaction_test_sql = """
-        BEGIN;
-        
-        -- Create a system with multiple states and heartbeats
-        INSERT INTO system_states (
-            hostname, derivation_path, change_reason, os, kernel,
-            memory_gb, uptime_secs, cpu_brand, cpu_cores,
-            primary_ip_address, nixos_version, agent_compatible,
-            timestamp
-        ) VALUES 
-        -- Older state
-        ('test-multi', '/nix/store/test-multi-old', 'startup', '25.05', '6.6.89',
-         8192, 3600, 'Test CPU', 4, '10.0.0.300', '25.05', true,
-         NOW() - INTERVAL '2 hours'),
-        -- Newer state 
-        ('test-multi', '/nix/store/test-multi-new', 'config_change', '25.05', '6.6.89',
-         16384, 7200, 'Test CPU', 8, '10.0.0.301', '25.05', true,
-         NOW() - INTERVAL '10 minutes');
-
-        -- Add heartbeats for both states
-        INSERT INTO agent_heartbeats (
-            system_state_id, timestamp, agent_version, agent_build_hash
-        ) VALUES 
-        -- Old heartbeat on old state
-        ((SELECT id FROM system_states WHERE hostname = 'test-multi' ORDER BY timestamp ASC LIMIT 1),
-         NOW() - INTERVAL '1.5 hours', '1.0.0', 'old123'),
-        -- Recent heartbeat on new state  
-        ((SELECT id FROM system_states WHERE hostname = 'test-multi' ORDER BY timestamp DESC LIMIT 1),
-         NOW() - INTERVAL '5 minutes', '1.2.0', 'new456');
-
-        -- Query the view and validate it uses the latest system state and heartbeat
-        SELECT 
-            hostname,
-            connectivity_status,
-            connectivity_status_text,
-            agent_version,
-            ip_address,
-            uptime
-        FROM view_systems_status_table 
-        WHERE hostname = 'test-multi';
-        
-        ROLLBACK;
-        """
-
         try:
-            result = ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -t -c "{interaction_test_sql}"'
+            interactions_sql = SystemsStatusTableTests._load_sql(
+                "systems_status_heartbeat_interactions"
+            )
+            result = SystemsStatusTableTests._execute_sql_with_logging(
+                ctx, interactions_sql, "Heartbeat/System State interaction test"
             )
 
             lines = [
@@ -502,6 +385,12 @@ class SystemsStatusTableTests:
                             f"  Uses latest heartbeat version: {agent_version}"
                         )
                     else:
+                        SystemsStatusTableTests._log_sql_on_failure(
+                            ctx,
+                            interactions_sql,
+                            "Heartbeat/System State interaction test",
+                            f"hostname_correct: {hostname_correct}, status_should_be_online: {status_should_be_online}, version_is_latest: {version_is_latest} (got {agent_version}), ip_is_latest: {ip_is_latest} (got {ip_address})",
+                        )
                         ctx.logger.log_error(
                             "❌ Heartbeat/System State interaction test FAILED"
                         )
@@ -516,8 +405,20 @@ class SystemsStatusTableTests:
                             f"  ip_is_latest: {ip_is_latest} (got {ip_address})"
                         )
                 else:
+                    SystemsStatusTableTests._log_sql_on_failure(
+                        ctx,
+                        interactions_sql,
+                        "Heartbeat/System State interaction test",
+                        "Insufficient columns in result",
+                    )
                     ctx.logger.log_error("❌ Insufficient columns in result")
             else:
+                SystemsStatusTableTests._log_sql_on_failure(
+                    ctx,
+                    interactions_sql,
+                    "Heartbeat/System State interaction test",
+                    "No results returned for interaction test",
+                )
                 ctx.logger.log_error("❌ No results returned for interaction test")
 
         except Exception as e:
@@ -533,59 +434,32 @@ class SystemsStatusTableTests:
         edge_case_tests = [
             {
                 "name": "System exactly at 30-minute boundary",
-                "setup_sql": """
-                INSERT INTO system_states (
-                    hostname, derivation_path, change_reason, os, kernel,
-                    memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                    primary_ip_address, nixos_version, agent_compatible,
-                    timestamp
-                ) VALUES (
-                    'test-boundary', '/nix/store/test-boundary', 'startup', '25.05', '6.6.89',
-                    8192, 1800, 'Test CPU', 4, '10.0.0.400', '25.05', true,
-                    NOW() - INTERVAL '30 minutes'
-                );
-                """,
+                "sql_file": "systems_status_edge_boundary",
                 "expected_connectivity_status": "offline",
             },
             {
                 "name": "System with NULL optional fields",
-                "setup_sql": """
-                INSERT INTO system_states (
-                    hostname, derivation_path, change_reason, os, kernel,
-                    memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                    primary_ip_address, nixos_version, agent_compatible,
-                    timestamp
-                ) VALUES (
-                    'test-nulls', '/nix/store/test-nulls', 'startup', NULL, NULL,
-                    NULL, NULL, NULL, NULL, NULL, NULL, true,
-                    NOW() - INTERVAL '5 minutes'
-                );
-                """,
+                "sql_file": "systems_status_edge_nulls",
                 "expected_connectivity_status": "starting",
             },
         ]
 
         for test_case in edge_case_tests:
-            test_sql = f"""
-            BEGIN;
-            
-            {test_case['setup_sql']}
-            
-            SELECT connectivity_status FROM view_systems_status_table 
-            WHERE hostname LIKE 'test-%' 
-            AND hostname = '{test_case['setup_sql'].split("'")[1]}';
-            
-            ROLLBACK;
-            """
-
             try:
-                result = ctx.server.succeed(
-                    f'sudo -u postgres psql crystal_forge -t -c "{test_sql}"'
+                edge_case_sql = SystemsStatusTableTests._load_sql(test_case["sql_file"])
+                result = SystemsStatusTableTests._execute_sql_with_logging(
+                    ctx, edge_case_sql, f"Edge case: {test_case['name']}"
                 ).strip()
 
                 if result == test_case["expected_connectivity_status"]:
                     ctx.logger.log_success(f"✅ Edge case '{test_case['name']}' PASSED")
                 else:
+                    SystemsStatusTableTests._log_sql_on_failure(
+                        ctx,
+                        edge_case_sql,
+                        f"Edge case: {test_case['name']}",
+                        f"Expected: {test_case['expected_connectivity_status']}, Got: {result}",
+                    )
                     ctx.logger.log_error(f"❌ Edge case '{test_case['name']}' FAILED")
                     ctx.logger.log_error(
                         f"  Expected: {test_case['expected_connectivity_status']}, Got: {result}"
@@ -599,47 +473,43 @@ class SystemsStatusTableTests:
         """Test view performance with EXPLAIN ANALYZE"""
         ctx.logger.log_info("Testing view performance...")
 
-        performance_sql = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM view_systems_status_table;"
+        try:
+            # Test performance analysis
+            view_performance_sql = SystemsStatusTableTests._load_sql(
+                "systems_status_view_performance"
+            )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f'sudo -u postgres psql crystal_forge -c "{view_performance_sql}"',
+                "view-performance-analysis.txt",
+                "View performance analysis",
+            )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f'sudo -u postgres psql crystal_forge -c "{performance_sql}"',
-            "view-performance-analysis.txt",
-            "View performance analysis",
-        )
+            # Test simple timing
+            view_timing_sql = SystemsStatusTableTests._load_sql(
+                "systems_status_view_timing"
+            )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f'sudo -u postgres psql crystal_forge -c "{view_timing_sql}"',
+                "view-timing-test.txt",
+                "View timing test",
+            )
 
-        # Also test a simple timing
-        timing_sql = "\\\\timing on\\nSELECT COUNT(*) FROM view_systems_status_table;\\nSELECT * FROM view_systems_status_table LIMIT 5;"
+            ctx.logger.log_success("Performance testing completed")
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f'sudo -u postgres psql crystal_forge -c "{timing_sql}"',
-            "view-timing-test.txt",
-            "View timing test",
-        )
-
-        ctx.logger.log_success("Performance testing completed")
+        except Exception as e:
+            ctx.logger.log_error(f"❌ View performance test ERROR: {e}")
 
     @staticmethod
     def cleanup_test_data(ctx: CrystalForgeTestContext) -> None:
         """Clean up any test data that might have been left behind"""
         ctx.logger.log_info("Cleaning up view test data...")
 
-        cleanup_sql = """
-        DELETE FROM agent_heartbeats 
-        WHERE system_state_id IN (
-            SELECT id FROM system_states WHERE hostname LIKE 'test-%'
-        );
-        DELETE FROM derivations WHERE derivation_name LIKE 'test-%';
-        DELETE FROM commits WHERE git_commit_hash LIKE '%test%' OR git_commit_hash IN ('abc123old', 'def456new');  
-        DELETE FROM systems WHERE hostname LIKE 'test-%';
-        DELETE FROM flakes WHERE name LIKE 'test-%';
-        DELETE FROM system_states WHERE hostname LIKE 'test-%';
-        """
-
         try:
-            ctx.server.succeed(
-                f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
+            cleanup_sql = SystemsStatusTableTests._load_sql("systems_status_cleanup")
+            SystemsStatusTableTests._execute_sql_with_logging(
+                ctx, cleanup_sql, "Cleanup test data"
             )
             ctx.logger.log_success("View test data cleanup completed")
         except Exception as e:
