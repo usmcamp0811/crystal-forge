@@ -99,7 +99,9 @@ class CriticalSystemsViewTests:
 
             # Just verify we can query all expected columns without error
             ctx.logger.log_success("✅ Basic structure test PASSED")
-            ctx.logger.log_info("  All expected columns (hostname, status, hours_ago, ip, version) are accessible")
+            ctx.logger.log_info(
+                "  All expected columns (hostname, status, hours_ago, ip, version) are accessible"
+            )
 
         except Exception as e:
             ctx.logger.log_error(f"❌ Basic structure test ERROR: {e}")
@@ -157,8 +159,10 @@ class CriticalSystemsViewTests:
                 f'sudo -u crystal-forge psql crystal_forge -t -c "{status_logic_test_sql}"'
             )
 
-            lines = [line.strip() for line in result.strip().split("\n") if line.strip()]
-            
+            lines = [
+                line.strip() for line in result.strip().split("\n") if line.strip()
+            ]
+
             status_results = {}
             for line in lines:
                 parts = [part.strip() for part in line.split("|")]
@@ -169,9 +173,9 @@ class CriticalSystemsViewTests:
 
             # Verify expected statuses
             expected_results = {
-                'test-critical-2hr': 'Critical',
-                'test-critical-3hr': 'Critical', 
-                'test-offline-6hr': 'Offline'
+                "test-critical-2hr": "Critical",
+                "test-critical-3hr": "Critical",
+                "test-offline-6hr": "Offline",
             }
 
             all_correct = True
@@ -180,7 +184,9 @@ class CriticalSystemsViewTests:
                 if actual_status == expected_status:
                     ctx.logger.log_info(f"  ✅ {hostname}: {actual_status} (correct)")
                 else:
-                    ctx.logger.log_error(f"  ❌ {hostname}: expected {expected_status}, got {actual_status}")
+                    ctx.logger.log_error(
+                        f"  ❌ {hostname}: expected {expected_status}, got {actual_status}"
+                    )
                     all_correct = False
 
             if all_correct:
@@ -230,28 +236,46 @@ class CriticalSystemsViewTests:
                 f'sudo -u crystal-forge psql crystal_forge -t -c "{hours_calculation_test_sql}"'
             )
 
-            lines = [line.strip() for line in result.strip().split("\n") if line.strip()]
-            
+            lines = [
+                line.strip() for line in result.strip().split("\n") if line.strip()
+            ]
+
             if lines:
                 parts = [part.strip() for part in lines[0].split("|")]
                 if len(parts) >= 2:
                     hostname = parts[0]
                     hours_ago = parts[1]
-                    
+
                     # Verify hours_ago is reasonable (should be around 2.5, allowing for test execution time)
-                    if hours_ago and hours_ago != '' and hours_ago.replace('.', '').isdigit():
+                    if (
+                        hours_ago
+                        and hours_ago != ""
+                        and hours_ago.replace(".", "").isdigit()
+                    ):
                         hours_value = float(hours_ago)
                         if 2.3 <= hours_value <= 2.7:  # Allow some tolerance
-                            ctx.logger.log_success("✅ Hours ago calculation test PASSED")
-                            ctx.logger.log_info(f"  {hostname}: {hours_ago} hours ago (expected ~2.5)")
+                            ctx.logger.log_success(
+                                "✅ Hours ago calculation test PASSED"
+                            )
+                            ctx.logger.log_info(
+                                f"  {hostname}: {hours_ago} hours ago (expected ~2.5)"
+                            )
                         else:
-                            ctx.logger.log_error(f"❌ Hours ago calculation test FAILED - got {hours_ago}, expected ~2.5")
+                            ctx.logger.log_error(
+                                f"❌ Hours ago calculation test FAILED - got {hours_ago}, expected ~2.5"
+                            )
                     else:
-                        ctx.logger.log_error(f"❌ Hours ago calculation test FAILED - invalid hours_ago value: {hours_ago}")
+                        ctx.logger.log_error(
+                            f"❌ Hours ago calculation test FAILED - invalid hours_ago value: {hours_ago}"
+                        )
                 else:
-                    ctx.logger.log_error("❌ Hours ago calculation test FAILED - insufficient columns")
+                    ctx.logger.log_error(
+                        "❌ Hours ago calculation test FAILED - insufficient columns"
+                    )
             else:
-                ctx.logger.log_error("❌ Hours ago calculation test FAILED - no results")
+                ctx.logger.log_error(
+                    "❌ Hours ago calculation test FAILED - no results"
+                )
 
         except Exception as e:
             ctx.logger.log_error(f"❌ Hours ago calculation test ERROR: {e}")
@@ -307,8 +331,10 @@ class CriticalSystemsViewTests:
                 f'sudo -u crystal-forge psql crystal_forge -t -c "{filtering_test_sql}"'
             )
 
-            lines = [line.strip() for line in result.strip().split("\n") if line.strip()]
-            
+            lines = [
+                line.strip() for line in result.strip().split("\n") if line.strip()
+            ]
+
             found_hostnames = set()
             for line in lines:
                 parts = [part.strip() for part in line.split("|")]
@@ -317,8 +343,8 @@ class CriticalSystemsViewTests:
                     found_hostnames.add(hostname)
 
             # Should include critical and offline, but exclude the recent one
-            expected_included = {'test-filter-include', 'test-filter-offline'}
-            expected_excluded = {'test-filter-exclude'}
+            expected_included = {"test-filter-include", "test-filter-offline"}
+            expected_excluded = {"test-filter-exclude"}
 
             included_correctly = expected_included.issubset(found_hostnames)
             excluded_correctly = expected_excluded.isdisjoint(found_hostnames)
@@ -330,3 +356,318 @@ class CriticalSystemsViewTests:
             else:
                 ctx.logger.log_error("❌ Data filtering test FAILED")
                 ctx.logger.log_error(f"  Found: {found_hostnames}")
+
+        except Exception as e:
+            ctx.logger.log_error(f"❌ Data filtering test ERROR: {e}")
+
+    @staticmethod
+    def _test_sorting_order(ctx: CrystalForgeTestContext) -> None:
+        """Test that results are returned in the correct priority order"""
+        ctx.logger.log_info("Testing sorting order...")
+
+        sorting_test_sql = """
+        BEGIN;
+        
+        -- Create test systems with different hours_ago values
+        INSERT INTO system_states (
+            hostname, derivation_path, change_reason, os, kernel,
+            memory_gb, uptime_secs, cpu_brand, cpu_cores,
+            primary_ip_address, nixos_version, agent_compatible,
+            timestamp
+        ) VALUES 
+        ('test-sort-1hr', '/nix/store/sort-1hr', 'startup', '25.05', '6.6.89',
+         8192, 3600, 'Test CPU', 4, '10.0.5.1', '25.05', true,
+         NOW() - INTERVAL '1.5 hours'),
+        ('test-sort-3hr', '/nix/store/sort-3hr', 'startup', '25.05', '6.6.89',
+         8192, 3600, 'Test CPU', 4, '10.0.5.2', '25.05', true,
+         NOW() - INTERVAL '3 hours'),
+        ('test-sort-6hr', '/nix/store/sort-6hr', 'startup', '25.05', '6.6.89',
+         8192, 3600, 'Test CPU', 4, '10.0.5.3', '25.05', true,
+         NOW() - INTERVAL '6 hours');
+
+        -- Add heartbeats
+        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
+        ((SELECT id FROM system_states WHERE hostname = 'test-sort-1hr'), NOW() - INTERVAL '1.5 hours', '1.0.0', 'sort1'),
+        ((SELECT id FROM system_states WHERE hostname = 'test-sort-3hr'), NOW() - INTERVAL '3 hours', '1.0.0', 'sort3'),
+        ((SELECT id FROM system_states WHERE hostname = 'test-sort-6hr'), NOW() - INTERVAL '6 hours', '1.0.0', 'sort6');
+        
+        -- Query with expected sort order (hours_ago ascending)
+        SELECT 
+            hostname,
+            hours_ago,
+            status
+        FROM view_critical_systems
+        WHERE hostname LIKE 'test-sort-%'
+        ORDER BY hours_ago;
+        
+        ROLLBACK;
+        """
+
+        try:
+            result = ctx.server.succeed(
+                f'sudo -u crystal-forge psql crystal_forge -t -c "{sorting_test_sql}"'
+            )
+
+            lines = [
+                line.strip() for line in result.strip().split("\n") if line.strip()
+            ]
+
+            # Extract hours_ago values to check sort order
+            hours_values = []
+            for line in lines:
+                parts = [part.strip() for part in line.split("|")]
+                if len(parts) >= 2:
+                    hostname = parts[0]
+                    hours_ago = parts[1]
+                    if hours_ago and hours_ago.replace(".", "").isdigit():
+                        hours_values.append((hostname, float(hours_ago)))
+
+            # Check if sorted in ascending order
+            if len(hours_values) >= 2:
+                is_sorted = all(
+                    hours_values[i][1] <= hours_values[i + 1][1]
+                    for i in range(len(hours_values) - 1)
+                )
+
+                if is_sorted:
+                    ctx.logger.log_success("✅ Sorting order test PASSED")
+                    for hostname, hours in hours_values:
+                        ctx.logger.log_info(f"  {hostname}: {hours} hours ago")
+                else:
+                    ctx.logger.log_error(
+                        "❌ Sorting order test FAILED - not in ascending order"
+                    )
+            else:
+                ctx.logger.log_warning("⚠️ Insufficient data to test sorting order")
+
+        except Exception as e:
+            ctx.logger.log_error(f"❌ Sorting order test ERROR: {e}")
+
+    @staticmethod
+    def _test_edge_cases(ctx: CrystalForgeTestContext) -> None:
+        """Test edge cases and boundary conditions"""
+        ctx.logger.log_info("Testing edge cases and boundary conditions...")
+
+        edge_cases_sql = """
+        BEGIN;
+        
+        -- Test exactly at 1-hour boundary (should be included)
+        INSERT INTO system_states (
+            hostname, derivation_path, change_reason, os, kernel,
+            memory_gb, uptime_secs, cpu_brand, cpu_cores,
+            primary_ip_address, nixos_version, agent_compatible,
+            timestamp
+        ) VALUES 
+        ('test-edge-1hr', '/nix/store/edge-1hr', 'startup', '25.05', '6.6.89',
+         8192, 3600, 'Test CPU', 4, '10.0.6.1', '25.05', true,
+         NOW() - INTERVAL '1 hour'),
+        -- Test exactly at 4-hour boundary (should be critical, not offline)
+        ('test-edge-4hr', '/nix/store/edge-4hr', 'startup', '25.05', '6.6.89',
+         8192, 3600, 'Test CPU', 4, '10.0.6.2', '25.05', true,
+         NOW() - INTERVAL '4 hours');
+
+        -- Add heartbeats
+        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
+        ((SELECT id FROM system_states WHERE hostname = 'test-edge-1hr'), NOW() - INTERVAL '1 hour', '1.0.0', 'edge1'),
+        ((SELECT id FROM system_states WHERE hostname = 'test-edge-4hr'), NOW() - INTERVAL '4 hours', '1.0.0', 'edge4');
+        
+        -- Query edge case systems
+        SELECT 
+            hostname,
+            status,
+            hours_ago
+        FROM view_critical_systems
+        WHERE hostname LIKE 'test-edge-%'
+        ORDER BY hostname;
+        
+        ROLLBACK;
+        """
+
+        try:
+            result = ctx.server.succeed(
+                f'sudo -u crystal-forge psql crystal_forge -t -c "{edge_cases_sql}"'
+            )
+
+            lines = [
+                line.strip() for line in result.strip().split("\n") if line.strip()
+            ]
+
+            edge_results = {}
+            for line in lines:
+                parts = [part.strip() for part in line.split("|")]
+                if len(parts) >= 2:
+                    hostname = parts[0]
+                    status = parts[1]
+                    edge_results[hostname] = status
+
+            # Expected edge case behavior
+            expected = {
+                "test-edge-1hr": "Critical",  # 1 hour = critical
+                "test-edge-4hr": "Critical",  # 4 hours = still critical (not offline)
+            }
+
+            all_correct = True
+            for hostname, expected_status in expected.items():
+                actual_status = edge_results.get(hostname)
+                if actual_status == expected_status:
+                    ctx.logger.log_info(f"  ✅ {hostname}: {actual_status} (correct)")
+                else:
+                    ctx.logger.log_error(
+                        f"  ❌ {hostname}: expected {expected_status}, got {actual_status}"
+                    )
+                    all_correct = False
+
+            if all_correct:
+                ctx.logger.log_success("✅ Edge cases test PASSED")
+            else:
+                ctx.logger.log_error("❌ Edge cases test FAILED")
+
+        except Exception as e:
+            ctx.logger.log_error(f"❌ Edge cases test ERROR: {e}")
+
+    @staticmethod
+    def _test_critical_scenarios(ctx: CrystalForgeTestContext) -> None:
+        """Test comprehensive critical scenarios"""
+        ctx.logger.log_info("Testing comprehensive critical scenarios...")
+
+        scenarios_sql = """
+        BEGIN;
+        
+        -- Create multiple systems in different critical/offline states
+        INSERT INTO system_states (
+            hostname, derivation_path, change_reason, os, kernel,
+            memory_gb, uptime_secs, cpu_brand, cpu_cores,
+            primary_ip_address, nixos_version, agent_compatible,
+            timestamp
+        ) VALUES 
+        ('scenario-crit-1', '/nix/store/scenario-crit-1', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.1', '25.05', true, NOW() - INTERVAL '1.2 hours'),
+        ('scenario-crit-2', '/nix/store/scenario-crit-2', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.2', '25.05', true, NOW() - INTERVAL '2.5 hours'),
+        ('scenario-crit-3', '/nix/store/scenario-crit-3', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.3', '25.05', true, NOW() - INTERVAL '3.8 hours'),
+        ('scenario-off-1', '/nix/store/scenario-off-1', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.4', '25.05', true, NOW() - INTERVAL '5 hours'),
+        ('scenario-off-2', '/nix/store/scenario-off-2', 'startup', '25.05', '6.6.89', 8192, 3600, 'Test CPU', 4, '10.0.7.5', '25.05', true, NOW() - INTERVAL '12 hours');
+
+        -- Add heartbeats
+        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash) VALUES 
+        ((SELECT id FROM system_states WHERE hostname = 'scenario-crit-1'), NOW() - INTERVAL '1.2 hours', '1.0.0', 'sc1'),
+        ((SELECT id FROM system_states WHERE hostname = 'scenario-crit-2'), NOW() - INTERVAL '2.5 hours', '1.0.0', 'sc2'),
+        ((SELECT id FROM system_states WHERE hostname = 'scenario-crit-3'), NOW() - INTERVAL '3.8 hours', '1.0.0', 'sc3'),
+        ((SELECT id FROM system_states WHERE hostname = 'scenario-off-1'), NOW() - INTERVAL '5 hours', '1.0.0', 'so1'),
+        ((SELECT id FROM system_states WHERE hostname = 'scenario-off-2'), NOW() - INTERVAL '12 hours', '1.0.0', 'so2');
+        
+        -- Query scenarios
+        SELECT 
+            status,
+            COUNT(*) as count
+        FROM view_critical_systems
+        WHERE hostname LIKE 'scenario-%'
+        GROUP BY status
+        ORDER BY status;
+        
+        ROLLBACK;
+        """
+
+        try:
+            result = ctx.server.succeed(
+                f'sudo -u crystal-forge psql crystal_forge -t -c "{scenarios_sql}"'
+            )
+
+            lines = [
+                line.strip() for line in result.strip().split("\n") if line.strip()
+            ]
+
+            scenario_counts = {}
+            for line in lines:
+                parts = [part.strip() for part in line.split("|")]
+                if len(parts) >= 2:
+                    status = parts[0]
+                    count = int(parts[1]) if parts[1].isdigit() else 0
+                    scenario_counts[status] = count
+
+            # Verify expected counts
+            expected_critical = 3  # 1.2, 2.5, 3.8 hours
+            expected_offline = 2  # 5, 12 hours
+
+            actual_critical = scenario_counts.get("Critical", 0)
+            actual_offline = scenario_counts.get("Offline", 0)
+
+            if (
+                actual_critical == expected_critical
+                and actual_offline == expected_offline
+            ):
+                ctx.logger.log_success("✅ Critical scenarios test PASSED")
+                ctx.logger.log_info(f"  Critical: {actual_critical} systems")
+                ctx.logger.log_info(f"  Offline: {actual_offline} systems")
+            else:
+                ctx.logger.log_error("❌ Critical scenarios test FAILED")
+                ctx.logger.log_error(
+                    f"  Expected: {expected_critical} Critical, {expected_offline} Offline"
+                )
+                ctx.logger.log_error(
+                    f"  Actual: {actual_critical} Critical, {actual_offline} Offline"
+                )
+
+        except Exception as e:
+            ctx.logger.log_error(f"❌ Critical scenarios test ERROR: {e}")
+
+    @staticmethod
+    def _test_view_performance(ctx: CrystalForgeTestContext) -> None:
+        """Test view performance with EXPLAIN ANALYZE"""
+        ctx.logger.log_info("Testing critical systems view performance...")
+
+        performance_sql = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM view_critical_systems;"
+
+        ctx.logger.capture_command_output(
+            ctx.server,
+            f'sudo -u crystal-forge psql crystal_forge -c "{performance_sql}"',
+            "critical-systems-view-performance.txt",
+            "Critical systems view performance analysis",
+        )
+
+        # Test simple timing
+        timing_sql = "\\\\timing on\\nSELECT COUNT(*) FROM view_critical_systems;\\nSELECT * FROM view_critical_systems;"
+
+        ctx.logger.capture_command_output(
+            ctx.server,
+            f'sudo -u crystal-forge psql crystal_forge -c "{timing_sql}"',
+            "critical-systems-view-timing.txt",
+            "Critical systems view timing test",
+        )
+
+        ctx.logger.log_success("Critical systems view performance testing completed")
+
+    @staticmethod
+    def cleanup_test_data(ctx: CrystalForgeTestContext) -> None:
+        """Clean up any test data that might have been left behind"""
+        ctx.logger.log_info("Cleaning up critical systems view test data...")
+
+        cleanup_sql = """
+        DELETE FROM agent_heartbeats 
+        WHERE system_state_id IN (
+            SELECT id FROM system_states 
+            WHERE hostname LIKE 'test-critical-%' 
+               OR hostname LIKE 'test-offline-%'
+               OR hostname LIKE 'test-hours-%'
+               OR hostname LIKE 'test-filter-%'
+               OR hostname LIKE 'test-sort-%'
+               OR hostname LIKE 'test-edge-%'
+               OR hostname LIKE 'scenario-%'
+        );
+        DELETE FROM system_states 
+        WHERE hostname LIKE 'test-critical-%' 
+           OR hostname LIKE 'test-offline-%'
+           OR hostname LIKE 'test-hours-%'
+           OR hostname LIKE 'test-filter-%'
+           OR hostname LIKE 'test-sort-%'
+           OR hostname LIKE 'test-edge-%'
+           OR hostname LIKE 'scenario-%';
+        """
+
+        try:
+            ctx.server.succeed(
+                f'sudo -u crystal-forge psql crystal_forge -c "{cleanup_sql}"'
+            )
+            ctx.logger.log_success("Critical systems view test data cleanup completed")
+        except Exception as e:
+            ctx.logger.log_warning(
+                f"Could not clean up critical systems view test data: {e}"
+            )

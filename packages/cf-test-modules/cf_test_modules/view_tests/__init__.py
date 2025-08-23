@@ -5,7 +5,7 @@ This module contains tests for all database views in Crystal Forge.
 Each view test suite is in its own file for better organization.
 """
 
-from .critical_system_view_tests import CriticalSystemsViewTests
+from .critical_systems_view_tests import CriticalSystemsViewTests
 from .deployment_systems_view_tests import DeploymentStatusViewTests
 from .fleet_health_status_tests import FleetHealthStatusViewTests
 from .systems_status_table_tests import SystemsStatusTableTests
