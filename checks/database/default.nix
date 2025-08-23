@@ -49,11 +49,11 @@ in
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
-      # Import the universal test runner
-      from cf_test_modules.devshell_test_runner import run_database_tests  # type: ignore[import-untyped]
+      # Use the universal runner but create a VM ctx explicitly
+      from cf_test_modules.test_runner import create_ctx_for_nixos, run_database_tests  # type: ignore[import-untyped]
 
-      # The universal runner will auto-detect it's in NixOS test mode
-      # and use the appropriate VM interfaces and TestLogger
-      run_database_tests()
+      start_all()
+      ctx = create_ctx_for_nixos()
+      run_database_tests(ctx)
     '';
   }
