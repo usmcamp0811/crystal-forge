@@ -11,3 +11,4 @@ class CrystalForgeTestContext:
     agent: Any
     logger: Any
     system_info: Dict[str, str]
+    exit_on_failure: bool = False  # New option to control exit behavior
