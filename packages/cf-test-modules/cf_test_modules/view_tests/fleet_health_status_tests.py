@@ -47,7 +47,7 @@ class FleetHealthStatusViewTests:
         try:
             # Check if view exists
             view_check_result = ctx.server.succeed(
-                "sudo -u crystal-forge psql crystal_forge -t -c "
+                "sudo -u postgres psql crystal_forge -t -c "
                 "\"SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'view_fleet_health_status');\""
             ).strip()
 
@@ -56,7 +56,7 @@ class FleetHealthStatusViewTests:
 
                 # Test basic query
                 ctx.server.succeed(
-                    "sudo -u crystal-forge psql crystal_forge -c "
+                    "sudo -u postgres psql crystal_forge -c "
                     '"SELECT COUNT(*) FROM view_fleet_health_status;"'
                 )
                 ctx.logger.log_success(
@@ -90,7 +90,7 @@ class FleetHealthStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{aggregation_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{aggregation_test_sql}"'
             )
 
             lines = [
@@ -193,7 +193,7 @@ class FleetHealthStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{intervals_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{intervals_test_sql}"'
             )
 
             lines = [
@@ -251,7 +251,7 @@ class FleetHealthStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{sorting_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{sorting_test_sql}"'
             )
 
             lines = [
@@ -338,7 +338,7 @@ class FleetHealthStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{filtering_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{filtering_test_sql}"'
             )
 
             lines = [
@@ -413,7 +413,7 @@ class FleetHealthStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{scenarios_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{scenarios_test_sql}"'
             )
 
             lines = [
@@ -451,7 +451,7 @@ class FleetHealthStatusViewTests:
 
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u crystal-forge psql crystal_forge -c "{performance_sql}"',
+            f'sudo -u postgres psql crystal_forge -c "{performance_sql}"',
             "fleet-health-status-view-performance.txt",
             "Fleet health status view performance analysis",
         )
@@ -461,7 +461,7 @@ class FleetHealthStatusViewTests:
 
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u crystal-forge psql crystal_forge -c "{timing_sql}"',
+            f'sudo -u postgres psql crystal_forge -c "{timing_sql}"',
             "fleet-health-status-view-timing.txt",
             "Fleet health status view timing test",
         )
@@ -483,7 +483,7 @@ class FleetHealthStatusViewTests:
 
         try:
             ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -c "{cleanup_sql}"'
+                f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
             )
             ctx.logger.log_success(
                 "Fleet health status view test data cleanup completed"

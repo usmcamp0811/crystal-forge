@@ -44,7 +44,7 @@ class DeploymentStatusViewTests:
         try:
             # Check if view exists
             view_check_result = ctx.server.succeed(
-                "sudo -u crystal-forge psql crystal_forge -t -c "
+                "sudo -u postgres psql crystal_forge -t -c "
                 "\"SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'view_deployment_status');\""
             ).strip()
 
@@ -53,7 +53,7 @@ class DeploymentStatusViewTests:
 
                 # Test basic query
                 ctx.server.succeed(
-                    "sudo -u crystal-forge psql crystal_forge -c "
+                    "sudo -u postgres psql crystal_forge -c "
                     '"SELECT COUNT(*) FROM view_deployment_status;"'
                 )
                 ctx.logger.log_success("Basic deployment status view query successful")
@@ -85,7 +85,7 @@ class DeploymentStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{aggregation_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{aggregation_test_sql}"'
             )
 
             lines = [
@@ -187,7 +187,7 @@ class DeploymentStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{mapping_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{mapping_test_sql}"'
             )
 
             lines = [
@@ -248,7 +248,7 @@ class DeploymentStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{sorting_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{sorting_test_sql}"'
             )
 
             lines = [
@@ -353,7 +353,7 @@ class DeploymentStatusViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{scenarios_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{scenarios_test_sql}"'
             )
 
             lines = [
@@ -390,7 +390,7 @@ class DeploymentStatusViewTests:
 
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u crystal-forge psql crystal_forge -c "{performance_sql}"',
+            f'sudo -u postgres psql crystal_forge -c "{performance_sql}"',
             "deployment-status-view-performance.txt",
             "Deployment status view performance analysis",
         )
@@ -400,7 +400,7 @@ class DeploymentStatusViewTests:
 
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u crystal-forge psql crystal_forge -c "{timing_sql}"',
+            f'sudo -u postgres psql crystal_forge -c "{timing_sql}"',
             "deployment-status-view-timing.txt",
             "Deployment status view timing test",
         )
@@ -427,7 +427,7 @@ class DeploymentStatusViewTests:
 
         try:
             ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -c "{cleanup_sql}"'
+                f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
             )
             ctx.logger.log_success("Deployment status view test data cleanup completed")
         except Exception as e:

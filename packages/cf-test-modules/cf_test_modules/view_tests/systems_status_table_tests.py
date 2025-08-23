@@ -44,7 +44,7 @@ class SystemsStatusTableTests:
         # First, check if we can connect to the database at all
         try:
             ctx.server.succeed(
-                'sudo -u crystal-forge psql crystal_forge -c "SELECT 1;" > /dev/null'
+                'sudo -u postgres psql crystal_forge -c "SELECT 1;" > /dev/null'
             )
             ctx.logger.log_success("Database connection verified")
         except Exception as e:
@@ -54,7 +54,7 @@ class SystemsStatusTableTests:
         # Check if view exists - capture output for debugging
         try:
             view_check_result = ctx.server.succeed(
-                "sudo -u crystal-forge psql crystal_forge -t -c "
+                "sudo -u postgres psql crystal_forge -t -c "
                 "\"SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'view_systems_status_table');\""
             ).strip()
 
@@ -63,7 +63,7 @@ class SystemsStatusTableTests:
 
                 # Test basic query if view exists
                 ctx.server.succeed(
-                    "sudo -u crystal-forge psql crystal_forge -c "
+                    "sudo -u postgres psql crystal_forge -c "
                     '"SELECT COUNT(*) FROM view_systems_status_table;"'
                 )
                 ctx.logger.log_success("Basic view query successful")
@@ -74,7 +74,7 @@ class SystemsStatusTableTests:
                 # List all views for debugging
                 ctx.logger.capture_command_output(
                     ctx.server,
-                    "sudo -u crystal-forge psql crystal_forge -c \"SELECT table_name FROM information_schema.views WHERE table_schema = 'public';\"",
+                    "sudo -u postgres psql crystal_forge -c \"SELECT table_name FROM information_schema.views WHERE table_schema = 'public';\"",
                     "existing-views.txt",
                     "List of existing views",
                 )
@@ -86,7 +86,7 @@ class SystemsStatusTableTests:
             # Capture more debug info
             ctx.logger.capture_command_output(
                 ctx.server,
-                'sudo -u crystal-forge psql crystal_forge -c "\\d"',
+                'sudo -u postgres psql crystal_forge -c "\\d"',
                 "database-schema.txt",
                 "Database schema debug info",
             )
@@ -240,7 +240,7 @@ class SystemsStatusTableTests:
 
             try:
                 result = ctx.server.succeed(
-                    f'sudo -u crystal-forge psql crystal_forge -t -c "{test_sql}"'
+                    f'sudo -u postgres psql crystal_forge -t -c "{test_sql}"'
                 )
 
                 # Parse and validate results
@@ -373,7 +373,7 @@ class SystemsStatusTableTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{update_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{update_test_sql}"'
             )
 
             lines = [
@@ -464,7 +464,7 @@ class SystemsStatusTableTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{interaction_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{interaction_test_sql}"'
             )
 
             lines = [
@@ -580,7 +580,7 @@ class SystemsStatusTableTests:
 
             try:
                 result = ctx.server.succeed(
-                    f'sudo -u crystal-forge psql crystal_forge -t -c "{test_sql}"'
+                    f'sudo -u postgres psql crystal_forge -t -c "{test_sql}"'
                 ).strip()
 
                 if result == test_case["expected_connectivity_status"]:
@@ -603,7 +603,7 @@ class SystemsStatusTableTests:
 
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u crystal-forge psql crystal_forge -c "{performance_sql}"',
+            f'sudo -u postgres psql crystal_forge -c "{performance_sql}"',
             "view-performance-analysis.txt",
             "View performance analysis",
         )
@@ -613,7 +613,7 @@ class SystemsStatusTableTests:
 
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u crystal-forge psql crystal_forge -c "{timing_sql}"',
+            f'sudo -u postgres psql crystal_forge -c "{timing_sql}"',
             "view-timing-test.txt",
             "View timing test",
         )
@@ -639,7 +639,7 @@ class SystemsStatusTableTests:
 
         try:
             ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -c "{cleanup_sql}"'
+                f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
             )
             ctx.logger.log_success("View test data cleanup completed")
         except Exception as e:

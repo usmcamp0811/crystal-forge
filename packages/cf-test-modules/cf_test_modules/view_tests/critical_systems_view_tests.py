@@ -53,7 +53,7 @@ class CriticalSystemsViewTests:
         try:
             # Check if view exists
             view_check_result = ctx.server.succeed(
-                "sudo -u crystal-forge psql crystal_forge -t -c "
+                "sudo -u postgres psql crystal_forge -t -c "
                 "\"SELECT EXISTS (SELECT 1 FROM information_schema.views WHERE table_name = 'view_critical_systems');\""
             ).strip()
 
@@ -62,7 +62,7 @@ class CriticalSystemsViewTests:
 
                 # Test basic query
                 ctx.server.succeed(
-                    "sudo -u crystal-forge psql crystal_forge -c "
+                    "sudo -u postgres psql crystal_forge -c "
                     '"SELECT COUNT(*) FROM view_critical_systems;"'
                 )
                 ctx.logger.log_success("Basic critical systems view query successful")
@@ -94,7 +94,7 @@ class CriticalSystemsViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{structure_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{structure_test_sql}"'
             )
 
             # Just verify we can query all expected columns without error
@@ -156,7 +156,7 @@ class CriticalSystemsViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{status_logic_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{status_logic_test_sql}"'
             )
 
             lines = [
@@ -233,7 +233,7 @@ class CriticalSystemsViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{hours_calculation_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{hours_calculation_test_sql}"'
             )
 
             lines = [
@@ -328,7 +328,7 @@ class CriticalSystemsViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{filtering_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{filtering_test_sql}"'
             )
 
             lines = [
@@ -405,7 +405,7 @@ class CriticalSystemsViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{sorting_test_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{sorting_test_sql}"'
             )
 
             lines = [
@@ -485,7 +485,7 @@ class CriticalSystemsViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{edge_cases_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{edge_cases_sql}"'
             )
 
             lines = [
@@ -568,7 +568,7 @@ class CriticalSystemsViewTests:
 
         try:
             result = ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -t -c "{scenarios_sql}"'
+                f'sudo -u postgres psql crystal_forge -t -c "{scenarios_sql}"'
             )
 
             lines = [
@@ -618,7 +618,7 @@ class CriticalSystemsViewTests:
 
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u crystal-forge psql crystal_forge -c "{performance_sql}"',
+            f'sudo -u postgres psql crystal_forge -c "{performance_sql}"',
             "critical-systems-view-performance.txt",
             "Critical systems view performance analysis",
         )
@@ -628,7 +628,7 @@ class CriticalSystemsViewTests:
 
         ctx.logger.capture_command_output(
             ctx.server,
-            f'sudo -u crystal-forge psql crystal_forge -c "{timing_sql}"',
+            f'sudo -u postgres psql crystal_forge -c "{timing_sql}"',
             "critical-systems-view-timing.txt",
             "Critical systems view timing test",
         )
@@ -664,7 +664,7 @@ class CriticalSystemsViewTests:
 
         try:
             ctx.server.succeed(
-                f'sudo -u crystal-forge psql crystal_forge -c "{cleanup_sql}"'
+                f'sudo -u postgres psql crystal_forge -c "{cleanup_sql}"'
             )
             ctx.logger.log_success("Critical systems view test data cleanup completed")
         except Exception as e:

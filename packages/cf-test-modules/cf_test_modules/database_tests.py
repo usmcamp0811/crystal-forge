@@ -12,9 +12,14 @@ class DatabaseTests:
 
     @staticmethod
     def setup_and_verify(ctx: CrystalForgeTestContext) -> None:
-        """Complete database setup and verification"""
+        """Complete database setup and verification - NO VIEW TESTS"""
         DatabaseTests._setup_postgresql(ctx)
         DatabaseTests._verify_database_functionality(ctx)
+        # NOTE: View tests are NOT called here - they need to run after server startup
+
+    @staticmethod
+    def run_view_tests(ctx: CrystalForgeTestContext) -> None:
+        """Run database view tests - should be called after Crystal Forge server has started"""
         DatabaseTests._run_view_tests(ctx)
 
     @staticmethod
@@ -54,13 +59,11 @@ class DatabaseTests:
         """Run all view tests"""
         ctx.logger.log_section("🔍 Running Database View Tests")
 
-        if not DatabaseTests._wait_for_database_ready(
-            ctx, timeout_secs=60, interval_secs=3
-        ):
+        # Check if database is ready for testing
+        if not DatabaseTests._check_database_ready(ctx):
             ctx.logger.log_warning("Database not ready for view testing - skipping")
             return
 
-        ctx.server.wait_for_unit("crystal-forge-server.service")
         # Run view test suites
         SystemsStatusTableTests.run_all_tests(ctx)
         DeploymentStatusViewTests.run_all_tests(ctx)
@@ -70,21 +73,21 @@ class DatabaseTests:
     @staticmethod
     def _check_database_ready(ctx: CrystalForgeTestContext) -> bool:
         """Check if the database is ready for testing"""
-        # Check if the crystal-forge database user exists
+        # Check if the crystal_forge database user exists (NOTE: underscore, not hyphen!)
         try:
             result = ctx.server.succeed(
-                "sudo -u postgres psql -t -c \"SELECT 1 FROM pg_roles WHERE rolname = 'crystal-forge';\""
+                "sudo -u postgres psql -t -c \"SELECT 1 FROM pg_roles WHERE rolname = 'crystal_forge';\""
             ).strip()
             if result:
-                ctx.logger.log_info("crystal-forge database user exists")
+                ctx.logger.log_info("crystal_forge database user exists")
             else:
                 ctx.logger.log_warning(
-                    "crystal-forge database user not found (server not started yet)"
+                    "crystal_forge database user not found (server not started yet)"
                 )
                 return False
         except Exception:
             ctx.logger.log_warning(
-                "crystal-forge database user not found (server not started yet)"
+                "crystal_forge database user not found (server not started yet)"
             )
             return False
 
@@ -107,19 +110,3 @@ class DatabaseTests:
             return False
 
         return True
-
-    @staticmethod
-    def _wait_for_database_ready(
-        ctx: CrystalForgeTestContext, timeout_secs: int = 60, interval_secs: int = 3
-    ) -> bool:
-        import time
-
-        deadline = time.time() + timeout_secs
-        while time.time() < deadline:
-            try:
-                if DatabaseTests._check_database_ready(ctx):
-                    return True
-            except Exception:
-                pass
-            time.sleep(interval_secs)
-        return False
