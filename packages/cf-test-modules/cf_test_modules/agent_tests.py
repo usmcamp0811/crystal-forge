@@ -44,10 +44,10 @@ class AgentTests:
             ctx.logger,
             ctx.agent,
             {
-                "/etc/agent.key": "Agent private key accessible",
-                "/etc/agent.pub": "Agent public key accessible on agent",
+                f"{ctx.cf_key_dir}/agent.key": "Agent private key accessible",
+                f"{ctx.cf_key_dir}/agent.pub": "Agent public key accessible on agent",
             },
         )
 
-        ctx.server.succeed("test -r /etc/agent.pub")
+        ctx.server.succeed(f"test -r {ctx.cf_key_dir}/agent.pub")
         ctx.logger.log_success("Agent public key accessible on server")

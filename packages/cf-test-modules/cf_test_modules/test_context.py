@@ -14,16 +14,19 @@ class CrystalForgeTestContext:
     system_info: Dict[str, str]
     exit_on_failure: bool = False
 
-    # Server (derived from env if None)
+    # Server (env-derived if None)
     cf_server_host: Optional[str] = None
     cf_server_port: Optional[int] = None
 
-    # Database (derived from env if None)
+    # Database (env-derived if None)
     db_host: Optional[str] = None
     db_port: Optional[int] = None
     db_user: Optional[str] = None
     db_password: Optional[str] = None
     db_name: Optional[str] = None
+
+    # Keys (env-derived if None) — defaults to /etc when unset
+    cf_key_dir: Optional[str] = None
 
     def __post_init__(self) -> None:
         # Server
@@ -64,10 +67,17 @@ class CrystalForgeTestContext:
                 os.getenv("DB_NAME") or os.getenv("db_name") or "crystal_forge"
             )
 
-        # Surface into system_info for backward compatibility
+        # Keys
+        if self.cf_key_dir is None:
+            self.cf_key_dir = (
+                os.getenv("CF_KEY_DIR") or os.getenv("cf_key_dir") or "/etc"
+            )
+
+        # Back-compat surface
         self.system_info.setdefault("cf_server_host", self.cf_server_host)
         self.system_info.setdefault("cf_server_port", str(self.cf_server_port))
         self.system_info.setdefault("db_host", self.db_host)
         self.system_info.setdefault("db_port", str(self.db_port))
         self.system_info.setdefault("db_user", self.db_user)
         self.system_info.setdefault("db_name", self.db_name)
+        self.system_info.setdefault("cf_key_dir", self.cf_key_dir)
