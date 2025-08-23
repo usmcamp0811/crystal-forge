@@ -60,6 +60,7 @@ class DatabaseTests:
             ctx.logger.log_warning("Database not ready for view testing - skipping")
             return
 
+        ctx.server.wait_for_unit("crystal-forge-server.service")
         # Run view test suites
         SystemsStatusTableTests.run_all_tests(ctx)
         DeploymentStatusViewTests.run_all_tests(ctx)
