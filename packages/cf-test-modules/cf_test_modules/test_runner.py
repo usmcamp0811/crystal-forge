@@ -238,7 +238,7 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["auto", "devshell", "nixos", "vm"],
-        default="auto",
+        default="devshell",
         help="Execution mode selection",
     )
     args = parser.parse_args()
