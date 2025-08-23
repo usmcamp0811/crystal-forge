@@ -134,6 +134,7 @@ in
               # Phase 2: Service Startup and Verification
               run_test_phase("Phase 2.1: Crystal Forge Server Tests", CrystalForgeServerTests.setup_and_verify, ctx)
               run_test_phase("Phase 2.2: Agent Tests", AgentTests.setup_and_verify, ctx)
+              run_test_phase("Phase 2.3: Test Views", DatabaseTests.run_view_tests(ctx)
 
               # Phase 3: Core Workflow Testing
               run_test_phase("Phase 3.1: Flake Processing Tests", FlakeProcessingTests.verify_complete_workflow, ctx)
