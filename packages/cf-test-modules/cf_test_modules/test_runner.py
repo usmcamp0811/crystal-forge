@@ -108,29 +108,23 @@ def create_ctx_for_devshell() -> CrystalForgeTestContext:
     logger = DevShellLogger()
     server_vm = create_devshell_server_vm()
     hostname = os.getenv("HOSTNAME", "devshell-test")
-    system_info = {"hostname": hostname}
 
     return CrystalForgeTestContext(
         gitserver=None,
         server=server_vm,
         agent=None,
         logger=logger,
-        system_info=system_info,
+        system_info={"hostname": hostname, "mode": "devshell"},
         exit_on_failure=True,
     )
 
 
 def create_ctx_for_nixos() -> CrystalForgeTestContext:
-    """
-    Bind directly to the NixOS test-driver Machine objects already created
-    by the test script (server/gitserver/agent if present).
-    """
-    logger = DevShellLogger()  # Reuse simple console logger formatting
+    logger = DevShellLogger()  # reuse simple console logger
     server = _find_machine_in_callstack("server")
     if server is None:
         raise RuntimeError("Could not locate 'server' Machine in test-driver context")
 
-    # Optional peers if present in the test script
     gitserver = _find_machine_in_callstack("gitserver")
     agent = _find_machine_in_callstack("agent")
 
@@ -144,7 +138,7 @@ def create_ctx_for_nixos() -> CrystalForgeTestContext:
         server=server,
         agent=agent,
         logger=logger,
-        system_info={"hostname": hostname},
+        system_info={"hostname": hostname, "mode": "nixos"},
         exit_on_failure=True,
     )
 
@@ -208,14 +202,17 @@ def check_prereqs_devshell(logger: DevShellLogger) -> bool:
 
 def run_database_tests(ctx: CrystalForgeTestContext) -> None:
     logger = ctx.logger
-    logger.log_section(
-        "🚀 Crystal Forge Database Tests - "
-        + (
-            "DevShell Mode"
-            if isinstance(ctx.server.__class__.__name__, str)
-            and ctx.system_info.get("hostname", "").startswith("devshell")
-            else "VM Mode"
+    mode = (ctx.system_info or {}).get("mode", "").lower()
+    if mode not in {"devshell", "nixos", "vm"}:
+        # Fallback if caller forgot to set mode
+        mode = (
+            "nixos"
+            if (_try_import_test_driver() and _find_machine_in_callstack("server"))
+            else "devshell"
         )
+
+    logger.log_section(
+        f"🚀 Crystal Forge Database Tests - {'VM Mode' if mode in {'nixos','vm'} else 'DevShell Mode'}"
     )
 
     try:
@@ -238,7 +235,7 @@ def main():
     parser.add_argument(
         "--mode",
         choices=["auto", "devshell", "nixos", "vm"],
-        default="devshell",
+        default="auto",
         help="Execution mode selection",
     )
     args = parser.parse_args()
