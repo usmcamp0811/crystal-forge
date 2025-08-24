@@ -349,7 +349,13 @@ def scenario_eval_failed(
     client: CFTestClient, hostname: str = "test-eval-failed"
 ) -> Dict[str, Any]:
     """Create a scenario where evaluation failed for the latest commit"""
+    import time
+
+    timestamp = int(time.time())
+
     old_drv = f"/nix/store/working12-nixos-system-{hostname}.drv"
+    old_hash = f"working123-{timestamp}"
+    new_hash = f"broken456-{timestamp}"
 
     row = _one_row(
         client,
@@ -365,13 +371,13 @@ def scenario_eval_failed(
         ),
         cm_old AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl2.id, 'working123', NOW() - INTERVAL '1 day', 0 FROM fl2
+          SELECT fl2.id, %s, NOW() - INTERVAL '1 day', 0 FROM fl2
           ON CONFLICT (flake_id, git_commit_hash) DO UPDATE SET commit_timestamp = EXCLUDED.commit_timestamp
           RETURNING id
         ),
         cm_new AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl2.id, 'broken456', NOW() - INTERVAL '30 minutes', 0 FROM fl2
+          SELECT fl2.id, %s, NOW() - INTERVAL '30 minutes', 0 FROM fl2
           ON CONFLICT (flake_id, git_commit_hash) DO UPDATE SET commit_timestamp = EXCLUDED.commit_timestamp
           RETURNING id
         ),
@@ -428,13 +434,15 @@ def scenario_eval_failed(
         COMMIT;
         SELECT
           (SELECT id FROM public.flakes WHERE repo_url='https://example.com/failed.git') AS flake_id,
-          (SELECT id FROM public.commits WHERE git_commit_hash='working123' ORDER BY id DESC LIMIT 1) AS old_commit_id,
-          (SELECT id FROM public.commits WHERE git_commit_hash='broken456' ORDER BY id DESC LIMIT 1) AS new_commit_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS old_commit_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS new_commit_id,
           (SELECT id FROM public.derivations WHERE derivation_name=%s AND derivation_path=%s ORDER BY id DESC LIMIT 1) AS old_deriv_id,
           (SELECT id FROM public.derivations WHERE derivation_name=%s AND derivation_path IS NULL ORDER BY id DESC LIMIT 1) AS new_deriv_id,
           (SELECT id FROM public.system_states WHERE hostname=%s ORDER BY id DESC LIMIT 1) AS state_id
         """,
         (
+            old_hash,  # cm_old git_commit_hash
+            new_hash,  # cm_new git_commit_hash
             hostname,  # dv_old derivation_name
             old_drv,  # dv_old derivation_path
             hostname,  # dv_new derivation_name
@@ -442,6 +450,8 @@ def scenario_eval_failed(
             old_drv,  # sys derivation
             hostname,  # st hostname
             old_drv,  # st derivation_path
+            old_hash,  # SELECT old_commit_id
+            new_hash,  # SELECT new_commit_id
             hostname,  # SELECT old_deriv_id derivation_name
             old_drv,  # SELECT old_deriv_id derivation_path
             hostname,  # SELECT new_deriv_id derivation_name
@@ -462,7 +472,9 @@ def scenario_eval_failed(
             "commits": (
                 [f"id IN ({row['old_commit_id']}, {row['new_commit_id']})"]
                 if row and "old_commit_id" in row
-                else [f"git_commit_hash IN ('working123', 'broken456')"]
+                else [
+                    f"git_commit_hash LIKE '%working123%' OR git_commit_hash LIKE '%broken456%'"
+                ]
             ),
             "flakes": (
                 [f"id = {row['flake_id']}"]

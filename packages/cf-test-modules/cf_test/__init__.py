@@ -59,7 +59,7 @@ class CFTestClient:
 
     @contextmanager
     def db_connection(self):
-        """Database connection context manager"""
+        # (unchanged)
         if self._conn is None:
             conn_params = {
                 "host": self.config.db_host,
@@ -69,24 +69,19 @@ class CFTestClient:
                 "password": self.config.db_password,
                 "cursor_factory": RealDictCursor,
             }
-
-            # Try different connection methods for NixOS tests
             if self.config.is_nixos_test:
-                # Try Unix socket first (common in NixOS tests)
                 try:
                     conn_params["host"] = "/run/postgresql"
                     conn_params["user"] = "postgres"
                     del conn_params["password"]
                     self._conn = psycopg2.connect(**conn_params)
                 except:
-                    # Fall back to TCP connection
                     conn_params["host"] = self.config.db_host
                     conn_params["user"] = self.config.db_user
                     conn_params["password"] = self.config.db_password
                     self._conn = psycopg2.connect(**conn_params)
             else:
                 self._conn = psycopg2.connect(**conn_params)
-
         try:
             yield self._conn
         finally:
@@ -97,13 +92,13 @@ class CFTestClient:
     def execute_sql(
         self, sql: str, params: Optional[tuple] = None
     ) -> List[Dict[str, Any]]:
-        """Execute SQL and return results as list of dicts"""
+        """Execute SQL and return results as list of dicts; always commit the statement."""
         with self.db_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
-                if cur.description:
-                    return [dict(row) for row in cur.fetchall()]
-                return []
+                rows = [dict(row) for row in cur.fetchall()] if cur.description else []
+                conn.commit()  # ensure DML takes effect across calls
+                return rows
 
     def execute_sql_file(self, sql_file: Union[str, Path]) -> List[Dict[str, Any]]:
         """Execute SQL from file"""
@@ -147,16 +142,33 @@ class CFTestClient:
         return inserted_ids
 
     def cleanup_test_data(self, patterns: Dict[str, List[str]]):
-        """Cleanup test data by patterns"""
+        """Cleanup test data by patterns in correct order for foreign keys"""
         with self.db_connection() as conn:
             with conn.cursor() as cur:
-                for table, pattern_list in patterns.items():
-                    for pattern in pattern_list:
-                        if "WHERE" in pattern.upper():
-                            sql = f"DELETE FROM {table} {pattern}"
-                        else:
-                            sql = f"DELETE FROM {table} WHERE {pattern}"
-                        cur.execute(sql)
+                # Define the correct deletion order based on foreign key dependencies
+                deletion_order = [
+                    "agent_heartbeats",
+                    "system_states",
+                    "systems",
+                    "derivations",
+                    "commits",
+                    "flakes",
+                ]
+
+                for table in deletion_order:
+                    if table in patterns:
+                        for pattern in patterns[table]:
+                            try:
+                                if "WHERE" in pattern.upper():
+                                    sql = f"DELETE FROM {table} {pattern}"
+                                else:
+                                    sql = f"DELETE FROM {table} WHERE {pattern}"
+                                cur.execute(sql)
+                            except Exception as e:
+                                print(
+                                    f"Warning: Failed to delete from {table} with pattern '{pattern}': {e}"
+                                )
+                                # Continue with other deletions
                 conn.commit()
 
     def run_agent_command(self, hostname: str, **kwargs) -> subprocess.CompletedProcess:
