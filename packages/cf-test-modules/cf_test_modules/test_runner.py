@@ -19,21 +19,13 @@ from typing import Callable, Dict, List, Tuple
 if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from cf_test_modules import (  # :contentReference[oaicite:3]{index=3}
-    AgentTests,
-    CrystalForgeServerTests,
-    CrystalForgeTestContext,
-    DatabaseTests,
-    FlakeProcessingTests,
-    SystemStateTests,
-)
-from cf_test_modules.devshell_adapter import (  # :contentReference[oaicite:4]{index=4}
-    DevShellLogger,
-    create_devshell_server_vm,
-)
-from cf_test_modules.test_exceptions import (
-    AssertionFailedException,
-)  # :contentReference[oaicite:5]{index=5}
+from cf_test_modules import (  # moved: re-exported from package root
+    AgentTests, CrystalForgeServerTests, CrystalForgeTestContext,
+    DatabaseTests, FlakeProcessingTests, SystemStateTests)
+from cf_test_modules.exceptions.test_exceptions import \
+    AssertionFailedException  # moved under exceptions/; :contentReference[oaicite:5]{index=5}
+from cf_test_modules.runtime.devshell_adapter import (  # moved: re-exported from package root
+    DevShellLogger, create_devshell_server_vm)
 
 # --------------------------------------------------------------------------------------
 # --- phase registry & groups ---

@@ -6,18 +6,23 @@ This package provides a comprehensive testing framework for Crystal Forge
 with modular components that can be used independently or together.
 """
 
-from .agent_tests import AgentTests
-from .crystal_forge_server_tests import CrystalForgeServerTests
-from .database_analyzer import DatabaseAnalyzer
-from .database_tests import DatabaseTests
-from .flake_processing_tests import FlakeProcessingTests
-from .service_log_collector import ServiceLogCollector
-from .system_state_tests import SystemStateTests
-from .test_context import CrystalForgeTestContext
-from .test_patterns import TestPatterns
+# Reporting
+from .reports.database_analyzer import DatabaseAnalyzer
+from .reports.service_log_collector import ServiceLogCollector
 
-# Import the utility functions directly, not a class
-from .test_utilities import format_duration, sanitize_hostname
+# Runtime / Support
+from .runtime.test_context import CrystalForgeTestContext
+
+# Tests
+from .tests.agent_tests import AgentTests
+from .tests.crystal_forge_server_tests import CrystalForgeServerTests
+from .tests.database_tests import DatabaseTests
+from .tests.flake_processing_tests import FlakeProcessingTests
+from .tests.system_state_tests import SystemStateTests
+
+# Utils
+from .utils.test_patterns import TestPatterns
+from .utils.test_utilities import format_duration, sanitize_hostname
 
 __all__ = [
     "CrystalForgeTestContext",
@@ -29,7 +34,6 @@ __all__ = [
     "ServiceLogCollector",
     "DatabaseAnalyzer",
     "TestPatterns",
-    # Export the utility functions
     "format_duration",
     "sanitize_hostname",
 ]
