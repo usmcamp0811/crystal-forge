@@ -54,6 +54,7 @@ in
       from cf_test_modules.test_runner import create_ctx_for_nixos, run_database_tests  # type: ignore[import-untyped]
 
       start_all()
+
       logger = TestLogger("Crystal Forge Agent Integration with Git Server", server)
       logger.setup_logging()
       system_info = logger.gather_system_info(server)

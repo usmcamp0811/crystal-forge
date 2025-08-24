@@ -40,7 +40,6 @@ class BaseViewTests:
     # =============================================================================
 
     @staticmethod
-    @staticmethod
     def _execute_sql(
         ctx: CrystalForgeTestContext,
         sql: str,
@@ -51,9 +50,17 @@ class BaseViewTests:
         field_separator: str = "|",
     ) -> str:
         """Execute SQL query and return raw output (explicit conn params, safe quoting)."""
-        host = ctx.db_host or "/run/postgresql"
-        port = int(ctx.db_port or 3042)
-        user = ctx.db_user or "crystal_forge"
+        host = getattr(ctx, "db_host", None) or "/run/postgresql"
+        # if using unix-socket dir, default to 5432; else keep ctx/db_port or fallback to 3042
+        if host.startswith("/"):
+            default_port = 5432
+        else:
+            default_port = (
+                3042 if (ctx.system_info or {}).get("mode") == "devshell" else 5432
+            )
+        port = int(getattr(ctx, "db_port", None) or default_port)
+
+        user = getattr(ctx, "db_user", None) or "crystal_forge"
 
         flags = "-t -A" if tuples_only else "-A"
         cmd = (
@@ -499,20 +506,22 @@ class BaseViewTests:
         view_name: str,
         *,
         db: str = "crystal_forge",
+        schema: str = "public",
     ) -> bool:
-        """Check if a database view exists"""
+        """Check if a database view exists in the given schema"""
         sql = f"""
             SELECT EXISTS (
-                SELECT 1 FROM information_schema.views 
-                WHERE table_name = '{view_name}'
+                SELECT 1
+                FROM information_schema.views
+                WHERE table_schema = '{schema}'
+                  AND table_name = '{view_name}'
             );
         """
-
         try:
             result = BaseViewTests._query_scalar(
                 ctx, sql, f"Check {view_name} exists", db=db
             )
-            return result.strip().lower() == "t"
+            return result.strip().lower() in ("t", "true", "1")
         except Exception:
             return False
 
@@ -603,7 +612,7 @@ class BaseViewTests:
         port = int(ctx.db_port or 3042)
         user = ctx.db_user or "crystal_forge"
         psql_base = (
-            "psql "
+            "sudo -u postgres psql "
             f"-h {shlex.quote(host)} "
             f"-p {port} "
             f"-U {shlex.quote(user)} "
