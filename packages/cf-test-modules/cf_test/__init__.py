@@ -311,24 +311,24 @@ def pytest_sessionfinish(session, exitstatus):
         print(f"📦 Test results copied to {nix_out_path}")
 
 
-if __name__ == "__main__":
-    # Simple CLI runner
+def main(argv=None):
+    """Console entrypoint for `cf-test`."""
     import sys
 
-    # Default pytest args
+    import pytest
+
+    cfg = CFTestConfig()  # ensures output dir exists
     args = [
         "--tb=short",
         "--maxfail=5",
         "-v",
-        f"--junit-xml={CFTestConfig().output_dir}/junit.xml",
+        f"--junit-xml={cfg.output_dir}/junit.xml",
     ]
+    if argv is None:
+        argv = sys.argv[1:]
+    args.extend(argv)
+    return pytest.main(args)
 
-    # Add user args
-    args.extend(sys.argv[1:])
 
-    # Run pytest
-    exit_code = pytest.main(args)
-
-    # Fail NixOS test if pytest failed
-    if CFTestConfig().is_nixos_test and exit_code != 0:
-        sys.exit(exit_code)
+if __name__ == "__main__":
+    raise SystemExit(main())
