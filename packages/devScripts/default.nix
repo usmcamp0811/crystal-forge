@@ -200,194 +200,165 @@ with lib.crystal-forge; let
       fi
     '';
   };
+  db-module = {
+    settings.processes.pgweb = {
+      inherit namespace;
+      command = "${pkgs.pgweb}/bin/pgweb --listen=${toString pgweb_port} --bind=0.0.0.0";
+      depends_on."db".condition = "process_healthy";
+      environment.PGWEB_DATABASE_URL = "postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge";
+    };
+    services.postgres."db" = {
+      inherit namespace;
+      enable = true;
+      listen_addresses = "0.0.0.0";
+      port = db_port;
+      initialScript.before = ''
+        CREATE USER crystal_forge LOGIN;
+        CREATE DATABASE crystal_forge OWNER crystal_forge;
+        GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
 
-  cf-dev = pkgs.process-compose-flake.evalModules {
+        CREATE USER root WITH SUPERUSER LOGIN;
+        CREATE USER grafana_user LOGIN;
+        CREATE DATABASE grafana_db OWNER grafana_user;
+        GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana_user;
+      '';
+      initialDatabases = [];
+    };
+    settings.processes.postgres-jobs = {
+      inherit namespace;
+      command = ''
+        nix run "$PROJECT_ROOT#run-postgres-jobs"
+      '';
+      depends_on."db".condition = "process_healthy";
+      environment = {
+        DB_HOST = "127.0.0.1";
+        DB_PORT = toString db_port;
+        DB_NAME = "crystal_forge";
+        DB_USER = "crystal_forge";
+        DB_PASSWORD = db_password;
+      };
+    };
+    services.grafana.grafana = {
+      enable = true;
+      http_port = grafana_port;
+      domain = "localhost";
+      declarativePlugins = with pkgs.grafanaPlugins; [grafana-piechart-panel];
+      providers = [
+        {
+          name = "default";
+          type = "file";
+          disableDeletion = false;
+          updateIntervalSeconds = 10;
+          options = {
+            path = pkgs.linkFarm "grafana-dashboards" [
+              {
+                name = "crystal-forge-dashboard.json";
+                path = crystalForgeDashboard;
+              }
+            ];
+          };
+        }
+      ];
+      datasources = [
+        {
+          name = "CrystalForge DB";
+          uid = "crystal-forge-ds";
+          type = "postgres";
+          access = "proxy";
+          url = "localhost:${toString db_port}";
+          database = "crystal_forge";
+          user = "crystal_forge";
+          secureJsonData = {
+            password = db_password;
+          };
+          jsonData = {
+            sslmode = "disable";
+            maxOpenConns = 100;
+            maxIdleConns = 100;
+            maxIdleConnsAuto = true;
+          };
+        }
+        {
+          name = "Grafana DB";
+          uid = "grafana-db";
+          type = "postgres";
+          access = "proxy";
+          url = "localhost:${toString db_port}";
+          database = "grafana_db";
+          user = "grafana_user";
+          secureJsonData = {
+            password = db_password;
+          };
+          jsonData = {
+            sslmode = "disable";
+            maxOpenConns = 100;
+            maxIdleConns = 100;
+            maxIdleConnsAuto = true;
+          };
+        }
+      ];
+      extraConf."auth.anonymous" = {
+        enabled = true;
+        org_role = "Editor";
+      };
+      extraConf.database = with config.services.postgres.grafana-db; {
+        type = "postgres";
+        host = "localhost:${toString db_port}";
+        name = "grafana_db";
+      };
+    };
+    settings.processes."grafana".depends_on."db".condition = "process_healthy";
+  };
+  agent-module = {
+    settings.processes.agent = {
+      inherit namespace;
+      command = runAgent;
+      depends_on."server".condition = "process_healthy";
+      disabled = false;
+    };
+  };
+  server-module = {
+    settings.processes.server = {
+      inherit namespace;
+      command = runServer;
+      depends_on."db".condition = "process_healthy";
+      readiness_probe = {
+        exec.command = "${pkgs.postgresql}/bin/pg_isready -h 127.0.0.1 -p ${toString db_port} -U crystal_forge -d crystal_forge";
+        initial_delay_seconds = 2;
+        period_seconds = 5;
+        timeout_seconds = 3;
+        success_threshold = 1;
+        failure_threshold = 5;
+      };
+    };
+  };
+
+  full-stack = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
-      {
-        # settings.processes.agent-sim = {
-        #   inherit namespace;
-        #   command = agent-sim;
-        #   disabled = false;
-        #   depends_on."server".condition = "process_healthy";
-        # };
-        # settings.processes.lucas-agent = {
-        #   inherit namespace;
-        #   command = lucas;
-        #   disabled = false;
-        #   depends_on."server".condition = "process_healthy";
-        # };
-        # settings.processes.gray-agent = {
-        #   inherit namespace;
-        #   command = gray;
-        #   disabled = false;
-        #   depends_on."server".condition = "process_healthy";
-        # };
-        settings.processes.server = {
-          inherit namespace;
-          command = runServer;
-          depends_on."db".condition = "process_healthy";
-          readiness_probe = {
-            exec.command = "${pkgs.postgresql}/bin/pg_isready -h 127.0.0.1 -p ${toString db_port} -U crystal_forge -d crystal_forge";
-            initial_delay_seconds = 2;
-            period_seconds = 5;
-            timeout_seconds = 3;
-            success_threshold = 1;
-            failure_threshold = 5;
-          };
-        };
-
-        settings.processes.pgweb = {
-          inherit namespace;
-          command = "${pkgs.pgweb}/bin/pgweb --listen=${toString pgweb_port} --bind=0.0.0.0";
-          depends_on."db".condition = "process_healthy";
-          environment.PGWEB_DATABASE_URL = "postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge";
-        };
-        settings.processes.agent = {
-          inherit namespace;
-          command = runAgent;
-          depends_on."server".condition = "process_healthy";
-          disabled = false;
-        };
-        settings.processes.postgres-jobs = {
-          inherit namespace;
-          command = ''
-            nix run "$PROJECT_ROOT#run-postgres-jobs"
-          '';
-          depends_on."db".condition = "process_healthy";
-          environment = {
-            DB_HOST = "127.0.0.1";
-            DB_PORT = toString db_port;
-            DB_NAME = "crystal_forge";
-            DB_USER = "crystal_forge";
-            DB_PASSWORD = db_password;
-          };
-        };
-        services.grafana.grafana = {
-          enable = true;
-          http_port = grafana_port;
-          domain = "localhost";
-          declarativePlugins = with pkgs.grafanaPlugins; [grafana-piechart-panel];
-          providers = [
-            {
-              name = "default";
-              type = "file";
-              disableDeletion = false;
-              updateIntervalSeconds = 10;
-              options = {
-                path = pkgs.linkFarm "grafana-dashboards" [
-                  {
-                    name = "crystal-forge-dashboard.json";
-                    path = crystalForgeDashboard;
-                  }
-                ];
-              };
-            }
-          ];
-          datasources = [
-            {
-              name = "CrystalForge DB";
-              uid = "crystal-forge-ds";
-              type = "postgres";
-              access = "proxy";
-              url = "localhost:${toString db_port}";
-              database = "crystal_forge";
-              user = "crystal_forge";
-              secureJsonData = {
-                password = db_password;
-              };
-              jsonData = {
-                sslmode = "disable";
-                maxOpenConns = 100;
-                maxIdleConns = 100;
-                maxIdleConnsAuto = true;
-              };
-            }
-            {
-              name = "Grafana DB";
-              uid = "grafana-db";
-              type = "postgres";
-              access = "proxy";
-              url = "localhost:${toString db_port}";
-              database = "grafana_db";
-              user = "grafana_user";
-              secureJsonData = {
-                password = db_password;
-              };
-              jsonData = {
-                sslmode = "disable";
-                maxOpenConns = 100;
-                maxIdleConns = 100;
-                maxIdleConnsAuto = true;
-              };
-            }
-          ];
-          extraConf."auth.anonymous" = {
-            enabled = true;
-            org_role = "Editor";
-          };
-          extraConf.database = with config.services.postgres.grafana-db; {
-            type = "postgres";
-            host = "localhost:${toString db_port}";
-            name = "grafana_db";
-          };
-        };
-        settings.processes."grafana".depends_on."db".condition = "process_healthy";
-        services.postgres."db" = {
-          inherit namespace;
-          enable = true;
-          listen_addresses = "0.0.0.0";
-          port = db_port;
-          initialScript.before = ''
-            CREATE USER crystal_forge LOGIN;
-            CREATE DATABASE crystal_forge OWNER crystal_forge;
-            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-
-            CREATE USER root WITH SUPERUSER LOGIN;
-            CREATE USER grafana_user LOGIN;
-            CREATE DATABASE grafana_db OWNER grafana_user;
-            GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana_user;
-          '';
-          initialDatabases = [];
-        };
-      }
+      db-module
+      server-module
+      agent-module
+    ];
+  };
+  server-only = pkgs.process-compose-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      db-module
+      server-module
     ];
   };
 
   dbOnly = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
-      {
-        settings.processes.pgweb = {
-          inherit namespace;
-          command = "${pkgs.pgweb}/bin/pgweb --listen=${toString pgweb_port} --bind=0.0.0.0";
-          depends_on."db".condition = "process_healthy";
-          environment.PGWEB_DATABASE_URL = "postgres://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge";
-        };
-        services.postgres."db" = {
-          inherit namespace;
-          enable = true;
-          listen_addresses = "0.0.0.0";
-          port = db_port;
-          initialScript.before = ''
-            CREATE USER crystal_forge LOGIN;
-            CREATE DATABASE crystal_forge OWNER crystal_forge;
-            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-
-            CREATE USER root WITH SUPERUSER LOGIN;
-            CREATE USER grafana_user LOGIN;
-            CREATE DATABASE grafana_db OWNER grafana_user;
-            GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana_user;
-          '';
-          initialDatabases = [];
-        };
-      }
     ];
   };
   # Simple agent with default actions
 in
-  cf-dev.config.outputs.package
+  full-stack.config.outputs.package
   // {
     inherit runServer runAgent simulatePush envExports;
-    dbOnly = dbOnly.config.outputs.package;
+    db-only = dbOnly.config.outputs.package;
+    server-only = server-only.config.outputs.package;
   }
