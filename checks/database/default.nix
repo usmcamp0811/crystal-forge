@@ -59,61 +59,74 @@ in
     testScript = ''
       import os, pytest, shutil
 
+      # your logger package
       from vm_test_logger import TestLogger
+
+      def dump_quick(tag: str):
+          server.log(f"=== {tag}: quick dump ===")
+          server.succeed("journalctl -u postgresql -n 200 --no-pager || true")
+          server.succeed("journalctl -u crystal-forge-server -n 200 --no-pager || true")
+          server.succeed("ss -ltnp || true")
+
       start_all()
 
-      logger = TestLogger("Crystal Forge Pytest (driver orchestrated)", server)
+      # logger in VM (writes /tmp/xchg/* and copies to host on finalize)
+      logger = TestLogger("Crystal Forge DB/Server Pytest", server)
       logger.setup_logging()
-      logger.gather_system_info(server)
+      sysinfo = logger.gather_system_info(server)
 
-      # Ensure services up in VM
-      server.wait_for_unit("postgresql.service")
-      server.wait_for_unit("crystal-forge-server.service")
-      server.wait_for_open_port(3042)
-      server.wait_for_open_port(3445)
+      # wait + quick dumps on failure
+      try:
+        logger.wait_for_services(server, ["postgresql.service", "crystal-forge-server.service"])
+        server.wait_for_open_port(3042)
+        server.wait_for_open_port(3445)
+      except Exception:
+        dump_quick("service-wait-failed")
+        raise
 
-      # Forward VM ports -> driver so pytest (running here) hits DB/API via localhost
+      # forward ports to the driver; run pytest in driver; inject Machine for tests
       db_port  = server.forward_port(3042)
       api_port = server.forward_port(3445)
 
-      os.environ["NIXOS_TEST_DRIVER"] = "1"
-      os.environ["CF_TEST_DB_HOST"]     = "127.0.0.1"
-      os.environ["CF_TEST_DB_PORT"]     = str(db_port)
-      os.environ["CF_TEST_DB_NAME"]     = "crystal_forge"
-      os.environ["CF_TEST_DB_USER"]     = "crystal_forge"
-      os.environ["CF_TEST_DB_PASSWORD"] = "password"
-      os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_SERVER_PORT"] = str(api_port)
+      os.environ.update({
+        "NIXOS_TEST_DRIVER": "1",
+        "CF_TEST_DB_HOST": "127.0.0.1",
+        "CF_TEST_DB_PORT": str(db_port),
+        "CF_TEST_DB_NAME": "crystal_forge",
+        "CF_TEST_DB_USER": "crystal_forge",
+        "CF_TEST_DB_PASSWORD": "password",
+        "CF_TEST_SERVER_HOST": "127.0.0.1",
+        "CF_TEST_SERVER_PORT": str(api_port),
+      })
 
-      # Inject Machine so tests can use the `machine` fixture
-      import cf_test   # provided by pkgs.crystal-forge.cf-test-modules
-      cf_test._driver_machine = server
+      import cf_test  # your pytest package
+      cf_test._driver_machine = server  # enables `machine` fixture in tests
 
-      # Run your installed pytest suite from the driver
       os.makedirs("/tmp/cf-test-outputs", exist_ok=True)
-      exit_code = pytest.main([
-        "-vvv",
-        "--maxfail=1",
-        "--junitxml=/tmp/cf-test-outputs/junit.xml",
-        "--pyargs", "cf_test",   # discover tests from your package
-      ])
+      exit_code = 1
+      try:
+        exit_code = pytest.main([
+          "-vvv",
+          "--maxfail=1",
+          "--junitxml=/tmp/cf-test-outputs/junit.xml",
+          "--pyargs", "cf_test",
+        ])
+      finally:
+        # capture useful logs with your logger helpers
+        logger.capture_service_logs(server, "postgresql.service", "postgres.log")
+        logger.capture_service_logs(server, "crystal-forge-server.service", "server.log")
+        logger.capture_command_output(server, "systemctl --no-pager --full status crystal-forge-server", "server.status", "crystal-forge-server status")
+        logger.capture_command_output(server, "systemctl --no-pager --full status postgresql", "postgres.status", "postgresql status")
 
-      # Always grab VM logs
-      server.succeed("""
-        set -eu
-        mkdir -p /tmp/cf-test-outputs
-        journalctl -u crystal-forge-server -u postgresql --no-pager > /tmp/cf-test-outputs/services.log || true
-        systemctl status crystal-forge-server > /tmp/cf-test-outputs/server.status || true
-        tar -C /tmp -czf /tmp/cf-test-outputs.tar.gz cf-test-outputs
-      """)
+        # copy pytest artifacts VM -> host
+        try:
+          server.copy_from_vm("/tmp/cf-test-outputs/junit.xml", "junit.xml")
+        except Exception:
+          pass
 
-      # Copy artifacts VM -> host (becomes test result outputs)
-      server.copy_from_vm("/tmp/cf-test-outputs/junit.xml", "junit.xml")
-      server.copy_from_vm("/tmp/cf-test-outputs/services.log", "services.log")
-      server.copy_from_vm("/tmp/cf-test-outputs/server.status", "server.status")
-      server.copy_from_vm("/tmp/cf-test-outputs.tar.gz", "cf-test-outputs.tar.gz")
+        # finalize (also copies /tmp/xchg/* via logger.copy_logs_from_vm)
+        logger.finalize_test()
 
-      logger.finalize_test()
       assert exit_code == 0, f"pytest failed with exit code {exit_code}"
     '';
   }
