@@ -8,9 +8,7 @@ def _one_row(client: CFTestClient, sql: str, params: Tuple[Any, ...]) -> Dict[st
     return rows[0] if rows else {}
 
 
-# -------------------------
-# SCENARIOS (CTE, atomic)
-# -------------------------
+# All builders COMMIT inside the same execute_sql() call so subsequent queries see the rows.
 
 
 def scenario_never_seen(
@@ -19,27 +17,40 @@ def scenario_never_seen(
     row = _one_row(
         client,
         """
+        -- insert flake + system, then COMMIT; finally select ids
         WITH fl AS (
           INSERT INTO public.flakes (name, repo_url)
           VALUES (%s, %s)
+          ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
           RETURNING id
         ),
         sys AS (
           INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
           SELECT %s, fl.id, TRUE, %s, 'fake-key' FROM fl
+          ON CONFLICT (hostname) DO UPDATE
+            SET flake_id = EXCLUDED.flake_id,
+                derivation = EXCLUDED.derivation,
+                is_active = EXCLUDED.is_active,
+                public_key = EXCLUDED.public_key
           RETURNING id
         )
-        SELECT (SELECT id FROM fl) AS flake_id, (SELECT id FROM sys) AS system_id
+        SELECT 1;
+        COMMIT;
+        SELECT s.id AS system_id, f.id AS flake_id
+        FROM public.systems s
+        JOIN public.flakes f ON f.id = s.flake_id
+        WHERE s.hostname = %s
         """,
         (
             hostname,
             f"https://example.com/{hostname}.git",
             hostname,
             "/nix/store/test.drv",
+            hostname,
         ),
     )
     return {
-        "ids": row,
+        "hostname": hostname,
         "cleanup": {
             "systems": [f"hostname = '{hostname}'"],
             "flakes": [f"id = {row['flake_id']}"] if row else [],
@@ -54,34 +65,38 @@ def scenario_up_to_date(
     row = _one_row(
         client,
         """
+        -- flake, commit, derivation, system, state, heartbeat
         WITH fl AS (
           INSERT INTO public.flakes (name, repo_url)
           VALUES ('prod-app', 'https://example.com/prod.git')
+          ON CONFLICT (repo_url) DO NOTHING
           RETURNING id
-        ),
-        cm AS (
+        ), fl2 AS (
+          SELECT COALESCE((SELECT id FROM fl), (SELECT id FROM public.flakes WHERE repo_url='https://example.com/prod.git')) AS id
+        ), cm AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl.id, %s, NOW() - (%s)::interval, 0 FROM fl
+          SELECT fl2.id, %s, NOW() - (%s)::interval, 0 FROM fl2
           RETURNING id
-        ),
-        dv AS (
+        ), dv AS (
           INSERT INTO public.derivations (
             commit_id, derivation_type, derivation_name, derivation_path,
             status_id, attempt_count, scheduled_at, completed_at
           )
           SELECT cm.id, 'nixos', %s, %s,
-                 %s, 0,
+                 10, 0,
                  NOW() - ('50 minutes')::interval,
                  NOW() - ('45 minutes')::interval
           FROM cm
           RETURNING id
-        ),
-        sys AS (
+        ), sys AS (
           INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
-          SELECT %s, fl.id, TRUE, %s, 'fake-key' FROM fl
+          SELECT %s, fl2.id, TRUE, %s, 'fake-key' FROM fl2
+          ON CONFLICT (hostname) DO UPDATE
+            SET flake_id = EXCLUDED.flake_id,
+                derivation = EXCLUDED.derivation,
+                is_active = EXCLUDED.is_active
           RETURNING id
-        ),
-        st AS (
+        ), st AS (
           INSERT INTO public.system_states (
             hostname, change_reason, derivation_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
@@ -93,34 +108,37 @@ def scenario_up_to_date(
             %s, '25.05', TRUE, NOW() - ('10 minutes')::interval
           )
           RETURNING id
-        ),
-        hb AS (
+        ), hb AS (
           INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
           SELECT st.id, NOW() - ('2 minutes')::interval, %s, 'build123' FROM st
           RETURNING id
         )
+        SELECT 1;
+        COMMIT;
         SELECT
-          (SELECT id FROM fl) AS flake_id,
-          (SELECT id FROM cm) AS commit_id,
-          (SELECT id FROM dv) AS deriv_id,
-          (SELECT id FROM st) AS state_id
+          (SELECT id FROM public.flakes WHERE repo_url='https://example.com/prod.git') AS flake_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS commit_id,
+          (SELECT id FROM public.derivations WHERE derivation_name=%s ORDER BY id DESC LIMIT 1) AS deriv_id,
+          (SELECT id FROM public.system_states WHERE hostname=%s ORDER BY id DESC LIMIT 1) AS state_id
         """,
         (
-            "abc123current",  # cm.git_commit_hash
-            "1 hour",  # cm.commit_timestamp age
+            "abc123current",
+            "1 hour",
             hostname,
-            drv_path,  # dv.derivation_name, dv.derivation_path
-            10,  # dv.status_id (complete)
+            drv_path,
             hostname,
-            drv_path,  # sys.hostname, sys.derivation
+            drv_path,
             hostname,
-            drv_path,  # st.hostname, st.derivation_path
-            "192.168.1.100",  # st.primary_ip_address
-            "2.0.0",  # hb.agent_version
+            drv_path,
+            "192.168.1.100",
+            "2.0.0",
+            "abc123current",
+            hostname,
+            hostname,
         ),
     )
     return {
-        "ids": row,
+        "hostname": hostname,
         "cleanup": {
             "agent_heartbeats": [f"system_state_id = {row['state_id']}"],
             "system_states": [f"hostname = '{hostname}'"],
@@ -143,48 +161,48 @@ def scenario_behind(
         WITH fl AS (
           INSERT INTO public.flakes (name, repo_url)
           VALUES ('behind-app', 'https://example.com/behind.git')
+          ON CONFLICT (repo_url) DO NOTHING
           RETURNING id
-        ),
-        cm_old AS (
+        ), fl2 AS (
+          SELECT COALESCE((SELECT id FROM fl), (SELECT id FROM public.flakes WHERE repo_url='https://example.com/behind.git')) AS id
+        ), cm_old AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl.id, %s, NOW() - ('2 days')::interval, 0 FROM fl
+          SELECT fl2.id, %s, NOW() - ('2 days')::interval, 0 FROM fl2
           RETURNING id
-        ),
-        cm_new AS (
+        ), cm_new AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl.id, %s, NOW() - ('1 hour')::interval, 0 FROM fl
+          SELECT fl2.id, %s, NOW() - ('1 hour')::interval, 0 FROM fl2
           RETURNING id
-        ),
-        dv_old AS (
+        ), dv_old AS (
           INSERT INTO public.derivations (
             commit_id, derivation_type, derivation_name, derivation_path,
             status_id, attempt_count, scheduled_at, completed_at
           )
           SELECT cm_old.id, 'nixos', %s, %s,
-                 %s, 0,
+                 10, 0,
                  NOW() - ('2 days')::interval,
                  NOW() - ('47 hours')::interval
           FROM cm_old
           RETURNING id
-        ),
-        dv_new AS (
+        ), dv_new AS (
           INSERT INTO public.derivations (
             commit_id, derivation_type, derivation_name, derivation_path,
             status_id, attempt_count, scheduled_at, completed_at
           )
           SELECT cm_new.id, 'nixos', %s, %s,
-                 %s, 0,
+                 10, 0,
                  NOW() - ('50 minutes')::interval,
                  NOW() - ('45 minutes')::interval
           FROM cm_new
           RETURNING id
-        ),
-        sys AS (
+        ), sys AS (
           INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
-          SELECT %s, fl.id, TRUE, %s, 'fake-key' FROM fl
+          SELECT %s, fl2.id, TRUE, %s, 'fake-key' FROM fl2
+          ON CONFLICT (hostname) DO UPDATE
+            SET flake_id = EXCLUDED.flake_id,
+                derivation = EXCLUDED.derivation
           RETURNING id
-        ),
-        st AS (
+        ), st AS (
           INSERT INTO public.system_states (
             hostname, change_reason, derivation_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
@@ -196,38 +214,42 @@ def scenario_behind(
             %s, '25.05', TRUE, NOW() - ('5 minutes')::interval
           )
           RETURNING id
-        ),
-        hb AS (
+        ), hb AS (
           INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
           SELECT st.id, NOW() - ('1 minute')::interval, %s, 'build123' FROM st
           RETURNING id
         )
+        SELECT 1;
+        COMMIT;
         SELECT
-          (SELECT id FROM fl) AS flake_id,
-          (SELECT id FROM cm_old) AS old_commit_id,
-          (SELECT id FROM cm_new) AS new_commit_id,
-          (SELECT id FROM dv_new) AS new_deriv_id,
-          (SELECT id FROM st) AS state_id
+          (SELECT id FROM public.flakes WHERE repo_url='https://example.com/behind.git') AS flake_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS old_commit_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS new_commit_id,
+          (SELECT id FROM public.derivations WHERE derivation_name=%s AND derivation_path=%s ORDER BY id DESC LIMIT 1) AS new_deriv_id,
+          (SELECT id FROM public.system_states WHERE hostname=%s ORDER BY id DESC LIMIT 1) AS state_id
         """,
         (
-            "old456commit",  # cm_old.git_commit_hash
-            "new789commit",  # cm_new.git_commit_hash
+            "old456commit",
+            "new789commit",
             hostname,
             old_drv,
-            10,  # dv_old: name, path, status_id
             hostname,
             new_drv,
-            10,  # dv_new: name, path, status_id
             hostname,
-            new_drv,  # systems
+            new_drv,
             hostname,
-            old_drv,  # system_states derivation_path=current is old_drv
-            "192.168.1.101",  # ip
-            "2.0.0",  # heartbeat version
+            old_drv,
+            "192.168.1.101",
+            "2.0.0",
+            "old456commit",
+            "new789commit",
+            hostname,
+            new_drv,
+            hostname,
         ),
     )
     return {
-        "paths": {"old": old_drv, "new": new_drv},
+        "hostname": hostname,
         "cleanup": {
             "agent_heartbeats": [f"system_state_id = {row['state_id']}"],
             "system_states": [f"hostname = '{hostname}'"],
@@ -249,31 +271,33 @@ def scenario_offline(
         WITH fl AS (
           INSERT INTO public.flakes (name, repo_url)
           VALUES ('offline-app', 'https://example.com/offline.git')
+          ON CONFLICT (repo_url) DO NOTHING
           RETURNING id
-        ),
-        cm AS (
+        ), fl2 AS (
+          SELECT COALESCE((SELECT id FROM fl), (SELECT id FROM public.flakes WHERE repo_url='https://example.com/offline.git')) AS id
+        ), cm AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl.id, %s, NOW() - ('2 hours')::interval, 0 FROM fl
+          SELECT fl2.id, %s, NOW() - ('2 hours')::interval, 0 FROM fl2
           RETURNING id
-        ),
-        dv AS (
+        ), dv AS (
           INSERT INTO public.derivations (
             commit_id, derivation_type, derivation_name, derivation_path,
             status_id, attempt_count, scheduled_at, completed_at
           )
           SELECT cm.id, 'nixos', %s, %s,
-                 %s, 0,
+                 10, 0,
                  NOW() - ('90 minutes')::interval,
                  NOW() - ('90 minutes')::interval
           FROM cm
           RETURNING id
-        ),
-        sys AS (
+        ), sys AS (
           INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
-          SELECT %s, fl.id, TRUE, %s, 'fake-key' FROM fl
+          SELECT %s, fl2.id, TRUE, %s, 'fake-key' FROM fl2
+          ON CONFLICT (hostname) DO UPDATE
+            SET flake_id = EXCLUDED.flake_id,
+                derivation = EXCLUDED.derivation
           RETURNING id
-        ),
-        st AS (
+        ), st AS (
           INSERT INTO public.system_states (
             hostname, change_reason, derivation_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
@@ -286,26 +310,31 @@ def scenario_offline(
           )
           RETURNING id
         )
+        SELECT 1;
+        COMMIT;
         SELECT
-          (SELECT id FROM fl) AS flake_id,
-          (SELECT id FROM cm) AS commit_id,
-          (SELECT id FROM dv) AS deriv_id,
-          (SELECT id FROM st) AS state_id
+          (SELECT id FROM public.flakes WHERE repo_url='https://example.com/offline.git') AS flake_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS commit_id,
+          (SELECT id FROM public.derivations WHERE derivation_name=%s AND derivation_path=%s ORDER BY id DESC LIMIT 1) AS deriv_id,
+          (SELECT id FROM public.system_states WHERE hostname=%s ORDER BY id DESC LIMIT 1) AS state_id
         """,
         (
             "offline123",
             hostname,
             drv_path,
-            10,
             hostname,
             drv_path,
             hostname,
             drv_path,
             "192.168.1.102",
+            "offline123",
+            hostname,
+            drv_path,
+            hostname,
         ),
     )
     return {
-        "ids": row,
+        "hostname": hostname,
         "cleanup": {
             "system_states": [f"hostname = '{hostname}'"],
             "systems": [f"hostname = '{hostname}'"],
@@ -326,44 +355,44 @@ def scenario_eval_failed(
         WITH fl AS (
           INSERT INTO public.flakes (name, repo_url)
           VALUES ('failed-app', 'https://example.com/failed.git')
+          ON CONFLICT (repo_url) DO NOTHING
           RETURNING id
-        ),
-        cm_old AS (
+        ), fl2 AS (
+          SELECT COALESCE((SELECT id FROM fl), (SELECT id FROM public.flakes WHERE repo_url='https://example.com/failed.git')) AS id
+        ), cm_old AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl.id, %s, NOW() - ('1 day')::interval, 0 FROM fl
+          SELECT fl2.id, %s, NOW() - ('1 day')::interval, 0 FROM fl2
           RETURNING id
-        ),
-        cm_new AS (
+        ), cm_new AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl.id, %s, NOW() - ('30 minutes')::interval, 0 FROM fl
+          SELECT fl2.id, %s, NOW() - ('30 minutes')::interval, 0 FROM fl2
           RETURNING id
-        ),
-        dv_ok AS (
+        ), dv_ok AS (
           INSERT INTO public.derivations (
             commit_id, derivation_type, derivation_name, derivation_path,
             status_id, attempt_count, scheduled_at, completed_at
           )
           SELECT cm_old.id, 'nixos', %s, %s,
-                 %s, 0,
+                 10, 0,
                  NOW() - ('20 hours')::interval,
                  NOW() - ('20 hours')::interval
           FROM cm_old
           RETURNING id
-        ),
-        dv_fail AS (
+        ), dv_fail AS (
           INSERT INTO public.derivations (
             commit_id, derivation_type, derivation_name, status_id, completed_at, error_message, attempt_count
           )
-          SELECT cm_new.id, 'nixos', %s, %s, NOW() - ('30 minutes')::interval, 'Build failed', 0
+          SELECT cm_new.id, 'nixos', %s, 6, NOW() - ('30 minutes')::interval, 'Build failed', 0
           FROM cm_new
           RETURNING id
-        ),
-        sys AS (
+        ), sys AS (
           INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
-          SELECT %s, fl.id, TRUE, %s, 'fake-key' FROM fl
+          SELECT %s, fl2.id, TRUE, %s, 'fake-key' FROM fl2
+          ON CONFLICT (hostname) DO UPDATE
+            SET flake_id = EXCLUDED.flake_id,
+                derivation = EXCLUDED.derivation
           RETURNING id
-        ),
-        st AS (
+        ), st AS (
           INSERT INTO public.system_states (
             hostname, change_reason, derivation_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
@@ -375,36 +404,36 @@ def scenario_eval_failed(
             %s, '25.05', TRUE, NOW() - ('5 minutes')::interval
           )
           RETURNING id
-        ),
-        hb AS (
+        ), hb AS (
           INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
           SELECT st.id, NOW() - ('2 minutes')::interval, %s, 'build123' FROM st
           RETURNING id
         )
+        SELECT 1;
+        COMMIT;
         SELECT
-          (SELECT id FROM fl) AS flake_id,
-          (SELECT id FROM cm_old) AS old_commit_id,
-          (SELECT id FROM cm_new) AS new_commit_id,
-          (SELECT id FROM st)     AS state_id
+          (SELECT id FROM public.flakes WHERE repo_url='https://example.com/failed.git') AS flake_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS old_commit_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS new_commit_id,
+          (SELECT id FROM public.system_states WHERE hostname=%s ORDER BY id DESC LIMIT 1) AS state_id
         """,
         (
-            "working123",  # cm_old
-            "broken456",  # cm_new
+            "working123",
+            "broken456",
             hostname,
             old_drv,
-            10,  # dv_ok: name, path, status=complete
             hostname,
-            6,  # dv_fail: name, status=failed (6)
             hostname,
-            old_drv,  # systems
+            old_drv,
+            "192.168.1.103",
+            "2.0.0",
+            "working123",
+            "broken456",
             hostname,
-            old_drv,  # state
-            "192.168.1.103",  # ip
-            "2.0.0",  # hb.agent_version
         ),
     )
     return {
-        "ids": row,
+        "hostname": hostname,
         "cleanup": {
             "agent_heartbeats": [f"system_state_id = {row['state_id']}"],
             "system_states": [f"hostname = '{hostname}'"],
