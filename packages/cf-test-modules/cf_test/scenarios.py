@@ -357,42 +357,58 @@ def scenario_eval_failed(
           VALUES ('failed-app', 'https://example.com/failed.git')
           ON CONFLICT (repo_url) DO NOTHING
           RETURNING id
-        ), fl2 AS (
-          SELECT COALESCE((SELECT id FROM fl), (SELECT id FROM public.flakes WHERE repo_url='https://example.com/failed.git')) AS id
-        ), cm_old AS (
+        ),
+        fl2 AS (
+          SELECT COALESCE((SELECT id FROM fl),
+                          (SELECT id FROM public.flakes WHERE repo_url='https://example.com/failed.git')) AS id
+        ),
+        cm_old AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl2.id, %s, NOW() - ('1 day')::interval, 0 FROM fl2
+          SELECT fl2.id, %s, NOW() - INTERVAL '1 day', 0 FROM fl2
+          ON CONFLICT (flake_id, git_commit_hash) DO UPDATE SET commit_timestamp = EXCLUDED.commit_timestamp
           RETURNING id
-        ), cm_new AS (
+        ),
+        cm_new AS (
           INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-          SELECT fl2.id, %s, NOW() - ('30 minutes')::interval, 0 FROM fl2
+          SELECT fl2.id, %s, NOW() - INTERVAL '30 minutes', 0 FROM fl2
+          ON CONFLICT (flake_id, git_commit_hash) DO UPDATE SET commit_timestamp = EXCLUDED.commit_timestamp
           RETURNING id
-        ), dv_ok AS (
+        ),
+        dv_ok AS (
           INSERT INTO public.derivations (
             commit_id, derivation_type, derivation_name, derivation_path,
             status_id, attempt_count, scheduled_at, completed_at
           )
           SELECT cm_old.id, 'nixos', %s, %s,
-                 10, 0,
-                 NOW() - ('20 hours')::interval,
-                 NOW() - ('20 hours')::interval
+                 (SELECT id FROM public.derivation_statuses WHERE name='complete'),
+                 0,
+                 NOW() - INTERVAL '20 hours',
+                 NOW() - INTERVAL '20 hours'
           FROM cm_old
+          ON CONFLICT DO NOTHING
           RETURNING id
-        ), dv_fail AS (
+        ),
+        dv_fail AS (
           INSERT INTO public.derivations (
-            commit_id, derivation_type, derivation_name, status_id, completed_at, error_message, attempt_count
+            commit_id, derivation_type, derivation_name, status_id,
+            completed_at, error_message, attempt_count
           )
-          SELECT cm_new.id, 'nixos', %s, 6, NOW() - ('30 minutes')::interval, 'Build failed', 0
+          SELECT cm_new.id, 'nixos', %s,
+                 (SELECT id FROM public.derivation_statuses WHERE name='failed'),
+                 NOW() - INTERVAL '30 minutes', 'Evaluation failed', 0
           FROM cm_new
+          ON CONFLICT DO NOTHING
           RETURNING id
-        ), sys AS (
+        ),
+        sys AS (
           INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
           SELECT %s, fl2.id, TRUE, %s, 'fake-key' FROM fl2
           ON CONFLICT (hostname) DO UPDATE
             SET flake_id = EXCLUDED.flake_id,
                 derivation = EXCLUDED.derivation
           RETURNING id
-        ), st AS (
+        ),
+        st AS (
           INSERT INTO public.system_states (
             hostname, change_reason, derivation_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
@@ -401,32 +417,33 @@ def scenario_eval_failed(
           VALUES (
             %s, 'startup', %s, 'NixOS', '6.6.89',
             32.0, 3600, 'Intel Xeon', 16,
-            %s, '25.05', TRUE, NOW() - ('5 minutes')::interval
+            %s, '25.05', TRUE, NOW() - INTERVAL '5 minutes'
           )
           RETURNING id
-        ), hb AS (
+        ),
+        hb AS (
           INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
-          SELECT st.id, NOW() - ('2 minutes')::interval, %s, 'build123' FROM st
+          SELECT st.id, NOW() - INTERVAL '2 minutes', %s, 'build123' FROM st
           RETURNING id
         )
-        SELECT 1;
-        COMMIT;
         SELECT
-          (SELECT id FROM public.flakes WHERE repo_url='https://example.com/failed.git') AS flake_id,
-          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS old_commit_id,
-          (SELECT id FROM public.commits WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1) AS new_commit_id,
-          (SELECT id FROM public.system_states WHERE hostname=%s ORDER BY id DESC LIMIT 1) AS state_id
+          (SELECT id FROM public.flakes   WHERE repo_url='https://example.com/failed.git')                          AS flake_id,
+          (SELECT id FROM public.commits  WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1)                        AS old_commit_id,
+          (SELECT id FROM public.commits  WHERE git_commit_hash=%s ORDER BY id DESC LIMIT 1)                        AS new_commit_id,
+          (SELECT id FROM public.system_states WHERE hostname=%s ORDER BY id DESC LIMIT 1)                          AS state_id
         """,
         (
             "working123",
             "broken456",
             hostname,
-            old_drv,
+            old_drv,  # dv_ok
+            hostname,  # dv_fail (derivation_name = hostname)
             hostname,
+            old_drv,  # systems
             hostname,
-            old_drv,
+            old_drv,  # state
             "192.168.1.103",
-            "2.0.0",
+            "2.0.0",  # heartbeat
             "working123",
             "broken456",
             hostname,

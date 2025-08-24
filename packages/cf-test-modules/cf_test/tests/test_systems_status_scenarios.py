@@ -1,3 +1,5 @@
+# packages/cf-test-modules/cf_test/tests/test_systems_status_scenarios.py
+
 import json
 
 import pytest
@@ -12,7 +14,6 @@ from cf_test.scenarios import (
 )
 
 VIEW_STATUS = "public.view_systems_status_table"
-VIEW_CURRENT = "public.view_systems_current_state"
 
 
 @pytest.mark.views
@@ -23,7 +24,11 @@ VIEW_CURRENT = "public.view_systems_current_state"
         (
             scenario_never_seen,
             "test-never-seen",
-            {"overall": None, "connectivity": None, "update": None},
+            {
+                "overall": "never_seen",
+                "connectivity": "never_seen",
+                "update": "never_seen",
+            },
         ),
         (
             scenario_up_to_date,
@@ -55,40 +60,29 @@ def test_status_scenarios(cf_client: CFTestClient, build, hostname, expect):
     data = build(cf_client, hostname=hostname)
     host = data.get("hostname", hostname)
 
-    if build.__name__ == "scenario_never_seen":
-        # should not appear in status table
-        status_rows = cf_client.execute_sql(
-            f"SELECT 1 FROM {VIEW_STATUS} WHERE hostname=%s", (host,)
-        )
-        assert not status_rows
-        # but should be present in current-state view
-        current = cf_client.execute_sql(
-            f"SELECT hostname FROM {VIEW_CURRENT} WHERE hostname=%s", (host,)
-        )
-        assert current and current[0]["hostname"] == host
-    else:
-        row = cf_client.execute_sql(
-            f"""
-            SELECT hostname, connectivity_status, update_status, overall_status,
-                   current_derivation_path, latest_derivation_path, latest_commit_hash
-            FROM {VIEW_STATUS}
-            WHERE hostname = %s
-            """,
-            (host,),
-        )
-        assert row and len(row) == 1
-        r = row[0]
-        if expect["overall"] is not None:
-            assert r["overall_status"] == expect["overall"]
-        if expect["connectivity"] is not None:
-            assert r["connectivity_status"] == expect["connectivity"]
-        if expect["update"] is not None:
-            assert r["update_status"] == expect["update"]
+    row = cf_client.execute_sql(
+        f"""
+        SELECT hostname, connectivity_status, update_status, overall_status,
+               current_derivation_path, latest_derivation_path, latest_commit_hash
+        FROM {VIEW_STATUS}
+        WHERE hostname = %s
+        """,
+        (host,),
+    )
+    assert row and len(row) == 1, "expected exactly one row"
+    r = row[0]
 
-        cf_client.save_artifact(
-            json.dumps(r, indent=2, default=str),
-            f"{host}_scenario_result.json",
-            f"{host} scenario result",
-        )
+    if expect["overall"] is not None:
+        assert r["overall_status"] == expect["overall"]
+    if expect["connectivity"] is not None:
+        assert r["connectivity_status"] == expect["connectivity"]
+    if expect["update"] is not None:
+        assert r["update_status"] == expect["update"]
+
+    cf_client.save_artifact(
+        json.dumps(r, indent=2, default=str),
+        f"{host}_scenario_result.json",
+        f"{host} scenario result",
+    )
 
     cf_client.cleanup_test_data(data["cleanup"])
