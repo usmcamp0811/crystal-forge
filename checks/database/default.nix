@@ -54,6 +54,10 @@ in
 
       start_all()
       ctx = create_ctx_for_nixos()
-      run_database_tests(ctx)
+      try:
+          run_database_tests(ctx)
+      finally:
+          # Always collect logs, even if tests fail
+          ServiceLogCollector.collect_all_logs(ctx)
     '';
   }
