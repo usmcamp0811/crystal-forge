@@ -51,18 +51,21 @@ in
     testScript = ''
       from vm_test_logger import TestLogger  # type: ignore[import-untyped]
       from cf_test_modules.reports.service_log_collector import ServiceLogCollector
-      # Use the universal runner but create a VM ctx explicitly
       from cf_test_modules.test_runner import create_ctx_for_nixos, run_database_tests  # type: ignore[import-untyped]
 
+      start_all()
       logger = TestLogger("Crystal Forge Agent Integration with Git Server", server)
       logger.setup_logging()
       system_info = logger.gather_system_info(server)
-      start_all()
+
       ctx = create_ctx_for_nixos()
+      ctx.logger = logger
+      ctx.system_info.update(system_info)
+
       try:
           run_database_tests(ctx)
       finally:
-          # Always collect logs, even if tests fail
           ServiceLogCollector.collect_all_logs(ctx)
+          logger.finalize_test()
     '';
   }
