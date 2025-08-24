@@ -277,3 +277,62 @@ def clean_test_data(cf_client: CFTestClient):
              OR repo_url LIKE '%/test.git';
         """
     )
+
+
+@pytest.fixture(scope="session")
+def cf_ports(server):
+    """
+    Returns:
+      {
+        'db_vm':   <int>,   # DB port inside the VM
+        'api_vm':  <int>,   # API port inside the VM
+        'db_host': <int>,   # forwarded DB port on the driver/host
+        'api_host':<int>,   # forwarded API port on the driver/host
+      }
+    """
+
+    def _to_int(v, default):
+        try:
+            return int(v)
+        except Exception:
+            return default
+
+    host_db = _to_int(os.getenv("CF_TEST_DB_PORT"), 3042)
+    host_api = _to_int(os.getenv("CF_TEST_SERVER_PORT"), 3445)
+
+    vm_db = _to_int(os.getenv("CF_TEST_VM_DB_PORT", "0"), 0)
+    vm_api = _to_int(os.getenv("CF_TEST_VM_SERVER_PORT", "0"), 0)
+
+    # If not provided by the driver, try to read from the VM’s env
+    if (vm_db == 0 or vm_api == 0) and server is not None:
+        out = server.succeed("printenv CF_TEST_DB_PORT || true").strip()
+        if out.isdigit():
+            vm_db = int(out)
+        out = server.succeed("printenv CF_TEST_SERVER_PORT || true").strip()
+        if out.isdigit():
+            vm_api = int(out)
+
+    # Final fallbacks
+    if vm_db == 0:
+        vm_db = 3042
+    if vm_api == 0:
+        vm_api = 3445
+
+    return {"db_vm": vm_db, "api_vm": vm_api, "db_host": host_db, "api_host": host_api}
+
+
+@pytest.fixture(scope="session")
+def wait_listening():
+    """wait_listening(machine, port) -> blocks until TCP port is in LISTEN state"""
+
+    def _wait(machine, port: int):
+        machine.wait_until_succeeds(
+            f"ss -ltn | awk 'BEGIN{{rc=1}} /:{port}\\b/ {{rc=0}} END{{exit rc}}'"
+        )
+
+    return _wait
+
+
+python
+Copy
+Edit
