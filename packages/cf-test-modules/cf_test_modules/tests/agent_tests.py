@@ -1,4 +1,4 @@
-from .test_context import CrystalForgeTestContext
+from ..runtime.test_context import CrystalForgeTestContext
 
 
 class AgentTests:
@@ -16,7 +16,7 @@ class AgentTests:
         """Start Crystal Forge agent"""
         ctx.logger.log_section("🤖 Starting Crystal Forge Agent")
 
-        from .test_patterns import TestPatterns
+        from ..utils.test_patterns import TestPatterns
 
         TestPatterns.standard_service_startup(
             ctx.logger,
@@ -38,7 +38,7 @@ class AgentTests:
     @staticmethod
     def _verify_key_files(ctx: CrystalForgeTestContext) -> None:
         """Verify key file accessibility"""
-        from .test_patterns import TestPatterns
+        from ..utils.test_patterns import TestPatterns
 
         TestPatterns.key_file_verification(
             ctx.logger,

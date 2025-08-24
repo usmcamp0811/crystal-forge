@@ -1,5 +1,7 @@
 from typing import Any, Dict, List
-from .test_context import CrystalForgeTestContext
+
+from ..runtime.test_context import CrystalForgeTestContext
+
 
 class TestPatterns:
     """Common test patterns as static methods"""
@@ -20,7 +22,9 @@ class TestPatterns:
         logger.test_network_connectivity(source_vm, target_host, port)
 
     @staticmethod
-    def database_verification(logger: Any, vm: Any, database: str, expected_data: Dict[str, str]) -> None:
+    def database_verification(
+        logger: Any, vm: Any, database: str, expected_data: Dict[str, str]
+    ) -> None:
         """Database verification pattern"""
         logger.log_section("✅ Validating expected data in database...")
         output = logger.database_query(vm, database, "SELECT * FROM system_states;")

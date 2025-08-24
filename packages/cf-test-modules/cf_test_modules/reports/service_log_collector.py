@@ -1,4 +1,4 @@
-from .test_context import CrystalForgeTestContext
+from ..runtime.test_context import CrystalForgeTestContext
 
 
 class ServiceLogCollector:

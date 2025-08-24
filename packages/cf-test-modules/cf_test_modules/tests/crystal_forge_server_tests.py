@@ -1,4 +1,4 @@
-from .test_context import CrystalForgeTestContext
+from ..runtime.test_context import CrystalForgeTestContext
 
 
 class CrystalForgeServerTests:
@@ -17,7 +17,7 @@ class CrystalForgeServerTests:
         """Start Crystal Forge server services"""
         ctx.logger.log_section("🖥️ Starting Crystal Forge Server")
 
-        from .test_patterns import TestPatterns
+        from ..utils.test_patterns import TestPatterns
 
         TestPatterns.standard_service_startup(
             ctx.logger,
@@ -38,7 +38,7 @@ class CrystalForgeServerTests:
             f"Crystal Forge server is listening on port {ctx.cf_server_port}"
         )
 
-        from .test_patterns import TestPatterns
+        from ..utils.test_patterns import TestPatterns
 
         TestPatterns.network_test(ctx.logger, ctx.server, "server", ctx.cf_server_port)
 

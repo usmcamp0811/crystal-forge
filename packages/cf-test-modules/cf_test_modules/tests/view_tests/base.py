@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 from uuid import uuid4
 
-from ..test_context import CrystalForgeTestContext
-from ..test_exceptions import AssertionFailedException
+from ...exceptions.test_exceptions import AssertionFailedException
+from ...runtime.test_context import CrystalForgeTestContext
 
 JSONLike = Union[Dict[str, Any], List[Any]]
 

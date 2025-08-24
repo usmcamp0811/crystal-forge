@@ -5,8 +5,8 @@ Tests for the view_fleet_health_status view
 import os
 from pathlib import Path
 
-from ..test_context import CrystalForgeTestContext
-from ..test_exceptions import AssertionFailedException
+from ...exceptions.test_exceptions import AssertionFailedException
+from ...runtime.test_context import CrystalForgeTestContext
 from .base import BaseViewTests
 
 

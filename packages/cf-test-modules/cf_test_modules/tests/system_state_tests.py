@@ -1,5 +1,4 @@
-from .test_context import CrystalForgeTestContext
-
+from ..runtime.test_context import CrystalForgeTestContext
 
 class SystemStateTests:
     """System state tracking tests"""

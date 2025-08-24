@@ -1,7 +1,8 @@
-from .test_context import CrystalForgeTestContext
-from .view_tests import (
+from cf_test_modules.tests.view_tests import (
     DeploymentStatusViewTests,
 )  # CriticalSystemsViewTests,; FleetHealthStatusViewTests,; SystemsStatusTableTests,
+
+from ..runtime.test_context import CrystalForgeTestContext
 
 
 class DatabaseTests:
