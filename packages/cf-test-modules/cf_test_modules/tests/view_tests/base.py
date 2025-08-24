@@ -36,6 +36,80 @@ class BaseViewTests:
         return path.read_text(encoding="utf-8").strip()
 
     # =============================================================================
+    #                            SQL VALIDATION AND ERROR HANDLING
+    # =============================================================================
+
+    @staticmethod
+    def _validate_sql_before_execution(sql: str, test_name: str) -> None:
+        """Basic SQL validation before execution"""
+        sql_clean = sql.strip()
+        
+        if not sql_clean:
+            raise ValueError(f"Empty SQL query in test: {test_name}")
+        
+        # Check for potential issues
+        if sql_clean.count("'") % 2 != 0:
+            raise ValueError(f"Unmatched single quotes in SQL for test: {test_name}")
+        
+        # Check for dangerous patterns (basic safety)
+        dangerous_patterns = ['DROP TABLE', 'DROP DATABASE', 'TRUNCATE', 'DELETE FROM']
+        sql_upper = sql_clean.upper()
+        for pattern in dangerous_patterns:
+            if pattern in sql_upper and 'test_' not in sql_clean.lower():
+                raise ValueError(f"Potentially dangerous SQL pattern '{pattern}' detected in test: {test_name}")
+
+    @staticmethod
+    def _log_detailed_sql_error(ctx: CrystalForgeTestContext, sql: str, error_msg: str, test_name: str) -> None:
+        """Log detailed SQL error information for debugging"""
+        ctx.logger.log_error(f"Detailed SQL error for {test_name}:")
+        
+        # Extract error details
+        lines = error_msg.split('\n')
+        for line in lines:
+            if 'ERROR:' in line or 'DETAIL:' in line or 'HINT:' in line or 'LINE' in line:
+                ctx.logger.log_error(f"  {line.strip()}")
+        
+        # Show SQL context around potential error
+        sql_lines = sql.split('\n')
+        if len(sql_lines) > 10:
+            ctx.logger.log_error("SQL preview (first 10 lines):")
+            for i, line in enumerate(sql_lines[:10], 1):
+                ctx.logger.log_error(f"  {i:3}: {line}")
+            ctx.logger.log_error(f"  ... ({len(sql_lines)-10} more lines)")
+        else:
+            ctx.logger.log_error("Full SQL:")
+            for i, line in enumerate(sql_lines, 1):
+                ctx.logger.log_error(f"  {i:3}: {line}")
+
+    @staticmethod
+    def _log_sql_failure(
+        ctx: CrystalForgeTestContext, sql: str, test_name: str, reason: str
+    ) -> None:
+        """Log SQL failure with formatted output"""
+        ctx.logger.log_error(f"❌ {test_name} - {reason}")
+        ctx.logger.log_error("SQL that failed:")
+        ctx.logger.log_error("-" * 60)
+        for i, line in enumerate(sql.splitlines(), 1):
+            ctx.logger.log_error(f"{i:3}: {line}")
+        ctx.logger.log_error("-" * 60)
+
+        if getattr(ctx, "exit_on_failure", False):
+            raise AssertionFailedException(test_name, reason, sql)
+
+    @staticmethod
+    def _fail(
+        ctx: CrystalForgeTestContext,
+        sql_or_cmd: str,
+        test_name: str,
+        reason: str,
+    ) -> None:
+        """Fail test with detailed error information"""
+        BaseViewTests._log_sql_failure(ctx, sql_or_cmd, test_name, reason)
+
+        if getattr(ctx, "exit_on_failure", False):
+            raise AssertionFailedException(test_name, reason, sql_or_cmd)
+
+    # =============================================================================
     #                            SQL EXECUTION
     # =============================================================================
 
@@ -49,7 +123,7 @@ class BaseViewTests:
         tuples_only: bool = True,
         field_separator: str = "|",
     ) -> str:
-        """Execute SQL query and return raw output (explicit conn params, safe quoting)."""
+        """Execute SQL query and return raw output with better error handling."""
         host = getattr(ctx, "db_host", None) or "/run/postgresql"
         # if using unix-socket dir, default to 5432; else keep ctx/db_port or fallback to 3042
         if host.startswith("/"):
@@ -59,28 +133,86 @@ class BaseViewTests:
                 3042 if (ctx.system_info or {}).get("mode") == "devshell" else 5432
             )
         port = int(getattr(ctx, "db_port", None) or default_port)
-
         user = getattr(ctx, "db_user", None) or "crystal_forge"
 
         flags = "-t -A" if tuples_only else "-A"
-        cmd = (
-            "psql "
-            f"-h {shlex.quote(host)} "
-            f"-p {port} "
-            f"-U {shlex.quote(user)} "
-            f"-d {shlex.quote(db)} "
-            f"{flags} -F {shlex.quote(field_separator)} "
-            "-v ON_ERROR_STOP=1 "
-            f"-c {shlex.quote(sql)}"
+        
+        # Try different authentication methods in order of preference
+        connection_methods = []
+        
+        # Method 1: Unix socket with postgres user (most reliable in VM)
+        if host.startswith("/"):
+            connection_methods.append(
+                f"sudo -u postgres psql -d {shlex.quote(db)} {flags} -F {shlex.quote(field_separator)} -v ON_ERROR_STOP=1"
+            )
+        
+        # Method 2: Password authentication 
+        connection_methods.append(
+            f"PGPASSWORD=password psql -h {shlex.quote(str(host))} -p {port} -U {shlex.quote(user)} -d {shlex.quote(db)} {flags} -F {shlex.quote(field_separator)} -v ON_ERROR_STOP=1"
+        )
+        
+        # Method 3: crystal_forge user with peer auth
+        connection_methods.append(
+            f"sudo -u crystal_forge psql -d {shlex.quote(db)} {flags} -F {shlex.quote(field_separator)} -v ON_ERROR_STOP=1"
         )
 
-        try:
-            return ctx.server.succeed(cmd)
-        except Exception as e:
-            BaseViewTests._log_sql_failure(
-                ctx, sql, test_name, f"SQL execution failed: {e}"
-            )
-            raise
+        # Try to execute SQL with each method
+        last_error = None
+        for i, base_cmd in enumerate(connection_methods):
+            # Create a temporary file for complex SQL to avoid shell escaping issues
+            if len(sql) > 1000 or '\n' in sql:
+                temp_file = f"/tmp/cf_sql_{uuid4().hex[:8]}.sql"
+                try:
+                    # Write SQL to temporary file
+                    ctx.server.succeed(f"cat > {shlex.quote(temp_file)} << 'EOSQL'\n{sql}\nEOSQL")
+                    cmd = f"{base_cmd} -f {shlex.quote(temp_file)}"
+                except Exception as e:
+                    ctx.logger.log_warning(f"Could not create temp SQL file: {e}")
+                    cmd = f"{base_cmd} -c {shlex.quote(sql)}"
+                    temp_file = None
+            else:
+                cmd = f"{base_cmd} -c {shlex.quote(sql)}"
+                temp_file = None
+            
+            try:
+                ctx.logger.log_info(f"Trying SQL connection method {i+1}: {base_cmd.split()[0:3]}")
+                result = ctx.server.succeed(cmd)
+                
+                # Clean up temp file if created
+                if temp_file:
+                    try:
+                        ctx.server.succeed(f"rm -f {shlex.quote(temp_file)}")
+                    except:
+                        pass
+                
+                return result
+                
+            except Exception as e:
+                last_error = e
+                error_msg = str(e)
+                
+                # Clean up temp file if created
+                if temp_file:
+                    try:
+                        ctx.server.succeed(f"rm -f {shlex.quote(temp_file)}")
+                    except:
+                        pass
+                
+                # Log specific error details for debugging
+                if i == 0:  # First method failed
+                    ctx.logger.log_warning(f"Primary connection method failed: {error_msg}")
+                    
+                    # Try to get more details about the SQL error
+                    if "ERROR:" in error_msg or "FATAL:" in error_msg:
+                        BaseViewTests._log_detailed_sql_error(ctx, sql, error_msg, test_name)
+                
+                continue
+        
+        # All methods failed
+        BaseViewTests._log_sql_failure(
+            ctx, sql, test_name, f"All SQL connection methods failed. Last error: {last_error}"
+        )
+        raise last_error
 
     @staticmethod
     def _query_rows(
@@ -91,14 +223,16 @@ class BaseViewTests:
         db: str = "crystal_forge",
         separator: str = "|",
     ) -> List[List[str]]:
-        """Execute SQL and return parsed rows"""
+        """Execute SQL and return parsed rows with validation"""
+        BaseViewTests._validate_sql_before_execution(sql, test_name)
+        
         output = BaseViewTests._execute_sql(
             ctx, sql, test_name, db=db, field_separator=separator
         )
         lines = [line.strip() for line in output.strip().split("\n") if line.strip()]
         return [[cell.strip() for cell in line.split(separator)] for line in lines]
 
-    @staticmethod
+    @staticmethod  
     def _query_scalar(
         ctx: CrystalForgeTestContext,
         sql: str,
@@ -106,7 +240,9 @@ class BaseViewTests:
         *,
         db: str = "crystal_forge",
     ) -> str:
-        """Execute SQL and return single scalar value"""
+        """Execute SQL and return single scalar value with validation"""
+        BaseViewTests._validate_sql_before_execution(sql, test_name)
+        
         rows = BaseViewTests._query_rows(ctx, sql, test_name, db=db)
         if not rows or not rows[0]:
             BaseViewTests._fail(
@@ -300,6 +436,191 @@ class BaseViewTests:
         }
 
     # =============================================================================
+    #                            DATABASE CONNECTION VERIFICATION
+    # =============================================================================
+
+    @staticmethod
+    def verify_database_connection(ctx: CrystalForgeTestContext) -> None:
+        """Verify database connection works before running tests"""
+        ctx.logger.log_info("Verifying database connection...")
+        
+        # Test basic connectivity
+        test_sql = "SELECT 1;"
+        try:
+            result = BaseViewTests._execute_sql(ctx, test_sql, "Database connection test")
+            ctx.logger.log_success(f"✅ Database connection verified: {result.strip()}")
+        except Exception as e:
+            ctx.logger.log_error(f"❌ Database connection failed: {e}")
+            
+            # Try to diagnose the issue
+            ctx.logger.log_info("Diagnosing connection issues...")
+            
+            # Check if PostgreSQL is running
+            try:
+                pg_status = ctx.server.succeed("systemctl is-active postgresql.service")
+                ctx.logger.log_info(f"PostgreSQL service status: {pg_status.strip()}")
+            except:
+                ctx.logger.log_warning("Could not check PostgreSQL service status")
+            
+            # Check if port is listening
+            try:
+                port_check = ctx.server.succeed(f"netstat -ln | grep :{ctx.db_port or 5432}")
+                ctx.logger.log_info(f"Port status: {port_check.strip()}")
+            except:
+                ctx.logger.log_warning(f"Port {ctx.db_port or 5432} not listening")
+            
+            # Check database and user existence
+            try:
+                db_check = ctx.server.succeed(
+                    "sudo -u postgres psql -c \"\\l\" | grep crystal_forge"
+                )
+                ctx.logger.log_info(f"Database exists: {db_check.strip()}")
+                
+                user_check = ctx.server.succeed(
+                    "sudo -u postgres psql -c \"\\du\" | grep crystal_forge"  
+                )
+                ctx.logger.log_info(f"User exists: {user_check.strip()}")
+            except Exception as diag_error:
+                ctx.logger.log_warning(f"Could not diagnose database setup: {diag_error}")
+            
+            raise e
+
+    @staticmethod
+    def debug_database_connection(ctx: CrystalForgeTestContext) -> None:
+        """Debug database connection issues by trying different approaches"""
+        ctx.logger.log_section("🔍 Debugging Database Connection")
+        
+        # Test 1: Check PostgreSQL service
+        try:
+            result = ctx.server.succeed("systemctl status postgresql.service")
+            ctx.logger.log_info("PostgreSQL service is running")
+        except Exception as e:
+            ctx.logger.log_error(f"PostgreSQL service issue: {e}")
+        
+        # Test 2: Check if we can connect as postgres user
+        try:
+            result = ctx.server.succeed("sudo -u postgres psql -c 'SELECT version();'")
+            ctx.logger.log_success(f"✅ Can connect as postgres: {result[:100]}...")
+        except Exception as e:
+            ctx.logger.log_error(f"❌ Cannot connect as postgres: {e}")
+        
+        # Test 3: Check if crystal_forge database exists
+        try:
+            result = ctx.server.succeed("sudo -u postgres psql -l | grep crystal_forge")
+            ctx.logger.log_success(f"✅ crystal_forge database found: {result.strip()}")
+        except Exception as e:
+            ctx.logger.log_warning(f"⚠️ crystal_forge database issue: {e}")
+        
+        # Test 4: Check if crystal_forge user exists  
+        try:
+            result = ctx.server.succeed("sudo -u postgres psql -c '\\du crystal_forge'")
+            ctx.logger.log_success(f"✅ crystal_forge user found: {result.strip()}")
+        except Exception as e:
+            ctx.logger.log_warning(f"⚠️ crystal_forge user issue: {e}")
+        
+        # Test 5: Try connecting as crystal_forge user
+        try:
+            result = ctx.server.succeed("sudo -u crystal_forge psql crystal_forge -c 'SELECT current_user;'")
+            ctx.logger.log_success(f"✅ Can connect as crystal_forge: {result.strip()}")
+        except Exception as e:
+            ctx.logger.log_error(f"❌ Cannot connect as crystal_forge: {e}")
+        
+        # Test 6: Check pg_hba.conf authentication method
+        try:
+            result = ctx.server.succeed("sudo cat /var/lib/postgresql/*/data/pg_hba.conf | grep -v '^#' | grep -v '^$'")
+            ctx.logger.log_info(f"pg_hba.conf authentication config:\n{result}")
+        except Exception as e:
+            ctx.logger.log_warning(f"Could not read pg_hba.conf: {e}")
+        
+        # Test 7: Check PostgreSQL log for errors
+        try:
+            result = ctx.server.succeed("sudo tail -20 /var/lib/postgresql/*/log/postgresql-*.log")
+            ctx.logger.log_info(f"Recent PostgreSQL log:\n{result}")
+        except Exception as e:
+            ctx.logger.log_warning(f"Could not read PostgreSQL log: {e}")
+
+    @staticmethod
+    def test_sql_file(ctx: CrystalForgeTestContext, filename: str) -> bool:
+        """Test if a SQL file can be executed successfully"""
+        ctx.logger.log_info(f"Testing SQL file: {filename}")
+        
+        try:
+            sql = BaseViewTests._load_sql(filename)
+            ctx.logger.log_info(f"Loaded SQL file {filename} ({len(sql)} characters)")
+            
+            # Validate SQL
+            BaseViewTests._validate_sql_before_execution(sql, f"SQL file test: {filename}")
+            
+            # Try to execute
+            result = BaseViewTests._execute_sql(ctx, sql, f"Test {filename}")
+            ctx.logger.log_success(f"✅ SQL file {filename} executed successfully")
+            
+            # Show first few lines of result for debugging
+            result_lines = result.strip().split('\n')[:3]
+            for line in result_lines:
+                ctx.logger.log_info(f"  Result: {line}")
+            
+            return True
+            
+        except FileNotFoundError:
+            ctx.logger.log_error(f"❌ SQL file not found: {filename}")
+            return False
+        except Exception as e:
+            ctx.logger.log_error(f"❌ SQL file {filename} failed: {e}")
+            return False
+
+    @staticmethod
+    def debug_complex_sql_test(ctx: CrystalForgeTestContext) -> None:
+        """Debug the complex deployment states SQL specifically"""
+        ctx.logger.log_section("🔍 Debugging Complex SQL Test")
+        
+        # Test if the view exists first
+        view_exists = BaseViewTests.view_exists(ctx, "view_deployment_status")
+        ctx.logger.log_info(f"view_deployment_status exists: {view_exists}")
+        
+        if not view_exists:
+            ctx.logger.log_warning("View doesn't exist, cannot test complex scenarios")
+            return
+        
+        # Try to test the SQL file
+        if not BaseViewTests.test_sql_file(ctx, "deployment_status_complex_states"):
+            ctx.logger.log_error("Complex states SQL file failed")
+            
+            # Try a simpler version first
+            ctx.logger.log_info("Trying simplified version...")
+            simple_sql = """
+            SELECT 
+                'test' as hostname,
+                'test-flake' as flake_name, 
+                'deployed' as deployment_status,
+                'Test status' as deployment_status_text,
+                'build-complete' as build_status,
+                'abc123' as commit_hash,
+                NULL as error_message;
+            """
+            
+            try:
+                result = BaseViewTests._execute_sql(ctx, simple_sql, "Simple test query")
+                ctx.logger.log_success("✅ Simple query works")
+                ctx.logger.log_info(f"Simple result: {result.strip()}")
+            except Exception as e:
+                ctx.logger.log_error(f"❌ Even simple query failed: {e}")
+        
+        # Test view structure
+        try:
+            ctx.logger.log_info("Testing view structure...")
+            structure_sql = """
+            SELECT column_name, data_type 
+            FROM information_schema.columns 
+            WHERE table_name = 'view_deployment_status'
+            ORDER BY ordinal_position;
+            """
+            result = BaseViewTests._execute_sql(ctx, structure_sql, "View structure test")
+            ctx.logger.log_info(f"View columns:\n{result}")
+        except Exception as e:
+            ctx.logger.log_error(f"Could not get view structure: {e}")
+
+    # =============================================================================
     #                            TEST AGENT OPERATIONS
     # =============================================================================
 
@@ -465,42 +786,10 @@ class BaseViewTests:
             )
 
     # =============================================================================
-    #                            ERROR HANDLING
-    # =============================================================================
-
-    @staticmethod
-    def _log_sql_failure(
-        ctx: CrystalForgeTestContext, sql: str, test_name: str, reason: str
-    ) -> None:
-        """Log SQL failure with formatted output"""
-        ctx.logger.log_error(f"❌ {test_name} - {reason}")
-        ctx.logger.log_error("SQL that failed:")
-        ctx.logger.log_error("-" * 60)
-        for i, line in enumerate(sql.splitlines(), 1):
-            ctx.logger.log_error(f"{i:3}: {line}")
-        ctx.logger.log_error("-" * 60)
-
-        if getattr(ctx, "exit_on_failure", False):
-            raise AssertionFailedException(test_name, reason, sql)
-
-    @staticmethod
-    def _fail(
-        ctx: CrystalForgeTestContext,
-        sql_or_cmd: str,
-        test_name: str,
-        reason: str,
-    ) -> None:
-        """Fail test with detailed error information"""
-        BaseViewTests._log_sql_failure(ctx, sql_or_cmd, test_name, reason)
-
-        if getattr(ctx, "exit_on_failure", False):
-            raise AssertionFailedException(test_name, reason, sql_or_cmd)
-
-    # =============================================================================
     #                            COMMON VIEW OPERATIONS
     # =============================================================================
 
-    @staticmethod
+    @staticmethod  
     def view_exists(
         ctx: CrystalForgeTestContext,
         view_name: str,
@@ -509,6 +798,14 @@ class BaseViewTests:
         schema: str = "public",
     ) -> bool:
         """Check if a database view exists in the given schema"""
+        
+        # First verify we can connect to the database
+        try:
+            BaseViewTests.verify_database_connection(ctx)
+        except Exception as e:
+            ctx.logger.log_error(f"Cannot verify database connection: {e}")
+            return False
+        
         sql = f"""
             SELECT EXISTS (
                 SELECT 1
@@ -518,11 +815,14 @@ class BaseViewTests:
             );
         """
         try:
-            result = BaseViewTests._query_scalar(
+            result = BaseViewTests._execute_sql(
                 ctx, sql, f"Check {view_name} exists", db=db
             )
-            return result.strip().lower() in ("t", "true", "1")
-        except Exception:
+            exists = result.strip().lower() in ("t", "true", "1")
+            ctx.logger.log_info(f"View {view_name} exists: {exists}")
+            return exists
+        except Exception as e:
+            ctx.logger.log_error(f"Error checking if view {view_name} exists: {e}")
             return False
 
     @staticmethod
@@ -620,19 +920,22 @@ class BaseViewTests:
             "-v ON_ERROR_STOP=1 "
         )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f"{psql_base}-c {shlex.quote(perf_sql)}",
-            f"{view_name.replace('view_', '')}-performance.txt",
-            f"{view_name} performance analysis",
-        )
+        try:
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f"{psql_base}-c {shlex.quote(perf_sql)}",
+                f"{view_name.replace('view_', '')}-performance.txt",
+                f"{view_name} performance analysis",
+            )
 
-        ctx.logger.capture_command_output(
-            ctx.server,
-            f"{psql_base}-c {shlex.quote(timing_sql)}",
-            f"{view_name.replace('view_', '')}-timing.txt",
-            f"{view_name} timing test",
-        )
+            ctx.logger.capture_command_output(
+                ctx.server,
+                f"{psql_base}-c {shlex.quote(timing_sql)}",
+                f"{view_name.replace('view_', '')}-timing.txt",
+                f"{view_name} timing test",
+            )
+        except Exception as e:
+            ctx.logger.log_warning(f"Could not capture performance metrics: {e}")
 
     # =============================================================================
     #                            HIGH-LEVEL TEST PATTERNS

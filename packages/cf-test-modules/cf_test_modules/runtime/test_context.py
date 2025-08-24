@@ -38,22 +38,22 @@ class CrystalForgeTestContext:
             )
         if self.cf_server_port is None:
             port_val = (
-                os.getenv("CF_SERVER_PORT") or os.getenv("cf_server_port") or "3445"
+                os.getenv("CF_SERVER_PORT") or os.getenv("cf_server_port") or "5432"
             )
             try:
                 self.cf_server_port = int(port_val)
             except ValueError:
-                self.cf_server_port = 3445
+                self.cf_server_port = 3000
 
         # Database
         if self.db_host is None:
             self.db_host = os.getenv("DB_HOST") or os.getenv("db_host") or "127.0.0.1"
         if self.db_port is None:
-            db_port_val = os.getenv("DB_PORT") or os.getenv("db_port") or "3042"
+            db_port_val = os.getenv("DB_PORT") or os.getenv("db_port") or "5432"
             try:
                 self.db_port = int(db_port_val)
             except ValueError:
-                self.db_port = 3042
+                self.db_port = 5432
         if self.db_user is None:
             self.db_user = (
                 os.getenv("DB_USER") or os.getenv("db_user") or "crystal_forge"
