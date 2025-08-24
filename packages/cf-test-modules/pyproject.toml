@@ -3,29 +3,54 @@ requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "cf-test-modules"
+name = "cf-test"
 version = "1.0.0"
-description = "Modular test components for Crystal Forge integration testing"
-authors = [{ name = "Matthew Camp" }]
+description = "Simple Crystal Forge Testing Framework"
 requires-python = ">=3.8"
 dependencies = [
-    "pytest",
+    "pytest>=7.0.0",
+    "pytest-html>=3.1.0", 
+    "psycopg2-binary>=2.9.0",
+    "pytest-xdist>=2.5.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
+    "black>=22.0.0",       # Code formatting
+    "ruff>=0.1.0",         # Linting
+    "mypy>=1.0.0",         # Type checking
 ]
 
-[tool.setuptools]
-include-package-data = true
+[project.scripts]
+cf-test = "cf_test:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["cf_test_modules", "cf_test_modules.*"]
-
-[tool.setuptools.package-data]
-# moved from cf_test_modules/view_tests/sql/*.sql → cf_test_modules/tests/view_tests/sql/*.sql
-cf_test_modules = [
-  "tests/view_tests/sql/*.sql"
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "database: Database-related tests",
+    "views: Database view tests", 
+    "integration: Integration tests",
+    "agent: Agent-related tests",
+    "smoke: Quick smoke tests",
+    "slow: Tests that take a long time",
 ]
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "--maxfail=10",
+]
+
+[tool.pytest_html]
+self_contained = true
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.ruff]
+line-length = 88
+target-version = "py38"
