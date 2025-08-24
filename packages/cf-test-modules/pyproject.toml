@@ -1,3 +1,4 @@
+# pyproject.toml - Fixed for Nix packaging
 [build-system]
 requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -10,15 +11,9 @@ requires-python = ">=3.8"
 dependencies = [
     "pytest>=7.0.0",
     "pytest-html>=3.1.0", 
-    "psycopg2-binary>=2.9.0",
+    # Use psycopg2 instead of psycopg2-binary for Nix
+    "psycopg2>=2.9.0",
     "pytest-xdist>=2.5.0",
-]
-
-[project.optional-dependencies]
-dev = [
-    "black>=22.0.0",       # Code formatting
-    "ruff>=0.1.0",         # Linting
-    "mypy>=1.0.0",         # Type checking
 ]
 
 [project.scripts]
@@ -43,14 +38,3 @@ addopts = [
     "--tb=short",
     "--maxfail=10",
 ]
-
-[tool.pytest_html]
-self_contained = true
-
-[tool.black]
-line-length = 88
-target-version = ['py38']
-
-[tool.ruff]
-line-length = 88
-target-version = "py38"
