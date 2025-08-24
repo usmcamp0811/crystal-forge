@@ -12,7 +12,7 @@ class CrystalForgeTestContext:
     agent: Any
     logger: Any
     system_info: Dict[str, str]
-    exit_on_failure: bool = False
+    exit_on_failure: bool = True
 
     # Server (env-derived if None)
     cf_server_host: Optional[str] = None

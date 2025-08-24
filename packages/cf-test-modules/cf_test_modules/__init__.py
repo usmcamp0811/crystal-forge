@@ -11,7 +11,6 @@ from .crystal_forge_server_tests import CrystalForgeServerTests
 from .database_analyzer import DatabaseAnalyzer
 from .database_tests import DatabaseTests
 from .flake_processing_tests import FlakeProcessingTests
-from .git_server_tests import GitServerTests
 from .service_log_collector import ServiceLogCollector
 from .system_state_tests import SystemStateTests
 from .test_context import CrystalForgeTestContext
@@ -22,7 +21,6 @@ from .test_utilities import format_duration, sanitize_hostname
 
 __all__ = [
     "CrystalForgeTestContext",
-    "GitServerTests",
     "DatabaseTests",
     "CrystalForgeServerTests",
     "AgentTests",

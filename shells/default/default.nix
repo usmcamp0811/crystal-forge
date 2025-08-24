@@ -44,7 +44,7 @@ in
       export PYTHONPATH="${pkgs.crystal-forge.cf-test-modules}/lib/python3.12/site-packages:''${PYTHONPATH:-}"
 
       alias full-stack='sudo echo && nix run $PROJECT_ROOT#devScripts --'
-      alias server-stack='sudo echo && nix run $PROJECT_ROOT#devScripts.server-only --'
+      alias server-stack='nix run $PROJECT_ROOT#devScripts.server-only --'
       alias db-only='nix run $PROJECT_ROOT#devScripts.db-only --'
       alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
       alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
