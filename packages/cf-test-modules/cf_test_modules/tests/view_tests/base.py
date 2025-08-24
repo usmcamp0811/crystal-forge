@@ -40,6 +40,7 @@ class BaseViewTests:
     # =============================================================================
 
     @staticmethod
+    @staticmethod
     def _execute_sql(
         ctx: CrystalForgeTestContext,
         sql: str,
@@ -49,9 +50,22 @@ class BaseViewTests:
         tuples_only: bool = True,
         field_separator: str = "|",
     ) -> str:
-        """Execute SQL query and return raw output"""
+        """Execute SQL query and return raw output (explicit conn params, safe quoting)."""
+        host = ctx.db_host or "/run/postgresql"
+        port = int(ctx.db_port or 3042)
+        user = ctx.db_user or "crystal_forge"
+
         flags = "-t -A" if tuples_only else "-A"
-        cmd = f"psql {db} {flags} -F '{field_separator}' -c \"{sql}\""
+        cmd = (
+            "psql "
+            f"-h {shlex.quote(host)} "
+            f"-p {port} "
+            f"-U {shlex.quote(user)} "
+            f"-d {shlex.quote(db)} "
+            f"{flags} -F {shlex.quote(field_separator)} "
+            "-v ON_ERROR_STOP=1 "
+            f"-c {shlex.quote(sql)}"
+        )
 
         try:
             return ctx.server.succeed(cmd)
@@ -579,20 +593,34 @@ class BaseViewTests:
     ) -> None:
         """Capture view performance metrics"""
         perf_sql = f"EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) SELECT * FROM {view_name};"
-        timing_sql = f"\\timing on\nSELECT COUNT(*) FROM {view_name};\nSELECT * FROM {view_name} LIMIT 5;"
+        timing_sql = (
+            "\\timing on\n"
+            f"SELECT COUNT(*) FROM {view_name};\n"
+            f"SELECT * FROM {view_name} LIMIT 5;"
+        )
 
-        # Save performance analysis
+        host = ctx.db_host or "/run/postgresql"
+        port = int(ctx.db_port or 3042)
+        user = ctx.db_user or "crystal_forge"
+        psql_base = (
+            "psql "
+            f"-h {shlex.quote(host)} "
+            f"-p {port} "
+            f"-U {shlex.quote(user)} "
+            f"-d {shlex.quote(db)} "
+            "-v ON_ERROR_STOP=1 "
+        )
+
         ctx.logger.capture_command_output(
             ctx.server,
-            f'psql {db} -c "{perf_sql}"',
+            f"{psql_base}-c {shlex.quote(perf_sql)}",
             f"{view_name.replace('view_', '')}-performance.txt",
             f"{view_name} performance analysis",
         )
 
-        # Save timing test
         ctx.logger.capture_command_output(
             ctx.server,
-            f'psql {db} -c "{timing_sql}"',
+            f"{psql_base}-c {shlex.quote(timing_sql)}",
             f"{view_name.replace('view_', '')}-timing.txt",
             f"{view_name} timing test",
         )

@@ -22,9 +22,10 @@ include-package-data = true
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["cf_test_modules*"]
+include = ["cf_test_modules", "cf_test_modules.*"]
 
 [tool.setuptools.package-data]
+# moved from cf_test_modules/view_tests/sql/*.sql → cf_test_modules/tests/view_tests/sql/*.sql
 cf_test_modules = [
-  "view_tests/sql/*.sql"
+  "tests/view_tests/sql/*.sql"
 ]
