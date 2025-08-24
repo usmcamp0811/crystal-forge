@@ -349,160 +349,125 @@ def scenario_eval_failed(
     client: CFTestClient, hostname: str = "test-eval-failed"
 ) -> Dict[str, Any]:
     """Create a scenario where evaluation failed for the latest commit"""
-
     old_drv = f"/nix/store/working12-nixos-system-{hostname}.drv"
 
-    # Use a single transaction for all inserts to avoid isolation issues
-    with client.db_connection() as conn:
-        with conn.cursor() as cur:
-            # Step 1: Insert flake
-            cur.execute(
-                """
-                INSERT INTO public.flakes (name, repo_url)
-                VALUES ('failed-app', 'https://example.com/failed.git')
-                ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
-                RETURNING id
-            """
-            )
-            flake_result = cur.fetchone()
-            if not flake_result:
-                cur.execute(
-                    "SELECT id FROM public.flakes WHERE repo_url = 'https://example.com/failed.git'"
-                )
-                flake_result = cur.fetchone()
-            flake_id = flake_result["id"]
-
-            # Step 2: Insert commits
-            cur.execute(
-                """
-                INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-                VALUES (%s, 'working123', NOW() - INTERVAL '1 day', 0)
-                ON CONFLICT (flake_id, git_commit_hash) DO UPDATE SET commit_timestamp = EXCLUDED.commit_timestamp
-                RETURNING id
-            """,
-                (flake_id,),
-            )
-            old_commit_result = cur.fetchone()
-            if not old_commit_result:
-                cur.execute(
-                    "SELECT id FROM public.commits WHERE flake_id = %s AND git_commit_hash = 'working123'",
-                    (flake_id,),
-                )
-                old_commit_result = cur.fetchone()
-            old_commit_id = old_commit_result["id"]
-
-            cur.execute(
-                """
-                INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-                VALUES (%s, 'broken456', NOW() - INTERVAL '30 minutes', 0)
-                ON CONFLICT (flake_id, git_commit_hash) DO UPDATE SET commit_timestamp = EXCLUDED.commit_timestamp
-                RETURNING id
-            """,
-                (flake_id,),
-            )
-            new_commit_result = cur.fetchone()
-            if not new_commit_result:
-                cur.execute(
-                    "SELECT id FROM public.commits WHERE flake_id = %s AND git_commit_hash = 'broken456'",
-                    (flake_id,),
-                )
-                new_commit_result = cur.fetchone()
-            new_commit_id = new_commit_result["id"]
-
-            # Step 3: Insert derivations
-            # Insert successful derivation for old commit
-            cur.execute(
-                """
-                INSERT INTO public.derivations (
-                    commit_id, derivation_type, derivation_name, derivation_path,
-                    status_id, attempt_count, scheduled_at, completed_at
-                )
-                VALUES (%s, 'nixos', %s, %s, 
-                        (SELECT id FROM public.derivation_statuses WHERE name='complete'),
-                        0, NOW() - INTERVAL '20 hours', NOW() - INTERVAL '20 hours')
-                RETURNING id
-            """,
-                (old_commit_id, hostname, old_drv),
-            )
-            old_deriv_result = cur.fetchone()
-            old_deriv_id = old_deriv_result["id"] if old_deriv_result else None
-
-            # Insert failed derivation for new commit
-            cur.execute(
-                """
-                INSERT INTO public.derivations (
-                    commit_id, derivation_type, derivation_name, derivation_path, status_id,
-                    completed_at, error_message, attempt_count
-                )
-                VALUES (%s, 'nixos', %s, NULL,
-                        (SELECT id FROM public.derivation_statuses WHERE name='failed'),
-                        NOW() - INTERVAL '30 minutes', 'Evaluation failed', 0)
-                RETURNING id
-            """,
-                (new_commit_id, hostname),
-            )
-            new_deriv_result = cur.fetchone()
-            new_deriv_id = new_deriv_result["id"] if new_deriv_result else None
-
-            # Step 4: Insert system (running the old working derivation)
-            cur.execute(
-                """
-                INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
-                VALUES (%s, %s, TRUE, %s, 'fake-key')
-                ON CONFLICT (hostname) DO UPDATE
-                    SET flake_id = EXCLUDED.flake_id,
-                        derivation = EXCLUDED.derivation,
-                        is_active = EXCLUDED.is_active
-                RETURNING id
-            """,
-                (hostname, flake_id, old_drv),
-            )
-            system_result = cur.fetchone()
-            system_id = system_result["id"] if system_result else None
-
-            # Step 5: Insert system state
-            cur.execute(
-                """
-                INSERT INTO public.system_states (
-                    hostname, change_reason, derivation_path, os, kernel,
-                    memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                    primary_ip_address, nixos_version, agent_compatible, "timestamp"
-                )
-                VALUES (
-                    %s, 'startup', %s, 'NixOS', '6.6.89',
-                    32.0, 3600, 'Intel Xeon', 16,
-                    '192.168.1.103', '25.05', TRUE, NOW() - INTERVAL '5 minutes'
-                )
-                RETURNING id
-            """,
-                (hostname, old_drv),
-            )
-            state_result = cur.fetchone()
-            state_id = state_result["id"] if state_result else None
-
-            # Step 6: Insert heartbeat
-            cur.execute(
-                """
-                INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
-                VALUES (%s, NOW() - INTERVAL '2 minutes', '2.0.0', 'build123')
-                RETURNING id
-            """,
-                (state_id,),
-            )
-            heartbeat_result = cur.fetchone()
-            heartbeat_id = heartbeat_result["id"] if heartbeat_result else None
-
-            # Commit all changes
-            conn.commit()
-
+    row = _one_row(
+        client,
+        """
+        WITH fl AS (
+          INSERT INTO public.flakes (name, repo_url)
+          VALUES ('failed-app', 'https://example.com/failed.git')
+          ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+          RETURNING id
+        ),
+        fl2 AS (
+          SELECT COALESCE((SELECT id FROM fl), (SELECT id FROM public.flakes WHERE repo_url='https://example.com/failed.git')) AS id
+        ),
+        cm_old AS (
+          INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
+          SELECT fl2.id, 'working123', NOW() - INTERVAL '1 day', 0 FROM fl2
+          ON CONFLICT (flake_id, git_commit_hash) DO UPDATE SET commit_timestamp = EXCLUDED.commit_timestamp
+          RETURNING id
+        ),
+        cm_new AS (
+          INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
+          SELECT fl2.id, 'broken456', NOW() - INTERVAL '30 minutes', 0 FROM fl2
+          ON CONFLICT (flake_id, git_commit_hash) DO UPDATE SET commit_timestamp = EXCLUDED.commit_timestamp
+          RETURNING id
+        ),
+        dv_old AS (
+          INSERT INTO public.derivations (
+            commit_id, derivation_type, derivation_name, derivation_path,
+            status_id, attempt_count, scheduled_at, completed_at
+          )
+          SELECT cm_old.id, 'nixos', %s, %s,
+                 (SELECT id FROM public.derivation_statuses WHERE name='complete'),
+                 0, NOW() - INTERVAL '20 hours', NOW() - INTERVAL '20 hours'
+          FROM cm_old
+          RETURNING id
+        ),
+        dv_new AS (
+          INSERT INTO public.derivations (
+            commit_id, derivation_type, derivation_name, derivation_path, status_id,
+            completed_at, error_message, attempt_count
+          )
+          SELECT cm_new.id, 'nixos', %s, NULL,
+                 (SELECT id FROM public.derivation_statuses WHERE name='failed'),
+                 NOW() - INTERVAL '30 minutes', 'Evaluation failed', 0
+          FROM cm_new
+          RETURNING id
+        ),
+        sys AS (
+          INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
+          SELECT %s, fl2.id, TRUE, %s, 'fake-key' FROM fl2
+          ON CONFLICT (hostname) DO UPDATE
+            SET flake_id = EXCLUDED.flake_id,
+                derivation = EXCLUDED.derivation,
+                is_active = EXCLUDED.is_active
+          RETURNING id
+        ),
+        st AS (
+          INSERT INTO public.system_states (
+            hostname, change_reason, derivation_path, os, kernel,
+            memory_gb, uptime_secs, cpu_brand, cpu_cores,
+            primary_ip_address, nixos_version, agent_compatible, "timestamp"
+          )
+          VALUES (
+            %s, 'startup', %s, 'NixOS', '6.6.89',
+            32.0, 3600, 'Intel Xeon', 16,
+            '192.168.1.103', '25.05', TRUE, NOW() - INTERVAL '5 minutes'
+          )
+          RETURNING id
+        ),
+        hb AS (
+          INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
+          SELECT st.id, NOW() - INTERVAL '2 minutes', '2.0.0', 'build123' FROM st
+          RETURNING id
+        )
+        SELECT 1;
+        COMMIT;
+        SELECT
+          (SELECT id FROM public.flakes WHERE repo_url='https://example.com/failed.git') AS flake_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash='working123' ORDER BY id DESC LIMIT 1) AS old_commit_id,
+          (SELECT id FROM public.commits WHERE git_commit_hash='broken456' ORDER BY id DESC LIMIT 1) AS new_commit_id,
+          (SELECT id FROM public.derivations WHERE derivation_name=%s AND derivation_path=%s ORDER BY id DESC LIMIT 1) AS old_deriv_id,
+          (SELECT id FROM public.derivations WHERE derivation_name=%s AND derivation_path IS NULL ORDER BY id DESC LIMIT 1) AS new_deriv_id,
+          (SELECT id FROM public.system_states WHERE hostname=%s ORDER BY id DESC LIMIT 1) AS state_id
+        """,
+        (
+            hostname,  # dv_old derivation_name
+            old_drv,  # dv_old derivation_path
+            hostname,  # dv_new derivation_name
+            hostname,  # sys hostname
+            old_drv,  # sys derivation
+            hostname,  # st hostname
+            old_drv,  # st derivation_path
+            hostname,  # SELECT old_deriv_id derivation_name
+            old_drv,  # SELECT old_deriv_id derivation_path
+            hostname,  # SELECT new_deriv_id derivation_name
+            hostname,  # SELECT state_id
+        ),
+    )
     return {
         "hostname": hostname,
         "cleanup": {
-            "agent_heartbeats": [f"id = {heartbeat_id}"] if heartbeat_id else [],
+            "agent_heartbeats": (
+                [f"system_state_id = {row['state_id']}"]
+                if row and "state_id" in row
+                else []
+            ),
             "system_states": [f"hostname = '{hostname}'"],
             "systems": [f"hostname = '{hostname}'"],
             "derivations": [f"derivation_name = '{hostname}'"],
-            "commits": [f"id IN ({old_commit_id}, {new_commit_id})"],
-            "flakes": [f"id = {flake_id}"],
+            "commits": (
+                [f"id IN ({row['old_commit_id']}, {row['new_commit_id']})"]
+                if row and "old_commit_id" in row
+                else [f"git_commit_hash IN ('working123', 'broken456')"]
+            ),
+            "flakes": (
+                [f"id = {row['flake_id']}"]
+                if row and "flake_id" in row
+                else [f"repo_url = 'https://example.com/failed.git'"]
+            ),
         },
     }
