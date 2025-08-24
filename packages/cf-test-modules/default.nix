@@ -60,50 +60,75 @@
     name = "run-cf-tests";
     runtimeInputs = [testRunner];
     text = ''
+      set +e
+
+      CONTINUE=0
+      CLEAN_ARGS=()
+      for a in "$@"; do
+        if [ "$a" = "--continue-on-fail" ]; then
+          CONTINUE=1
+        else
+          CLEAN_ARGS+=("$a")
+        fi
+      done
+
       echo "🧪 Crystal Forge Tests"
       echo "===================="
       echo "Database: ''${DB_USER:-crystal_forge}@''${DB_HOST:-127.0.0.1}:''${DB_PORT:-3042}/''${DB_NAME:-crystal_forge}"
       echo "Server: ''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3445}"
       echo ""
 
-      # Check if PostgreSQL is available
-      if ! pg_isready -h "''${DB_HOST:-127.0.0.1}" -p "''${DB_PORT:-3042}" -U "''${DB_USER:-crystal_forge}" 2>/dev/null; then
+      if ! pg_isready -h "''${DB_HOST:-127.0.0.1}" -p "''${DB_PORT:-3042}" -U "''${DB_USER:-crystal_forge}" >/dev/null 2>&1; then
         echo "❌ Cannot connect to PostgreSQL at ''${DB_HOST:-127.0.0.1}:''${DB_PORT:-3042}"
-        echo ""
-        echo "Please start process-compose first:"
         echo "  nix run .#cf-dev"
-        echo ""
-        echo "Then run this script in another terminal."
         exit 1
       fi
       echo "✅ PostgreSQL connection OK"
 
-      # Check if Crystal Forge server is running (optional)
       if curl -s -f "http://''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3445}/health" >/dev/null 2>&1 || \
          curl -s -f "http://''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3445}/status" >/dev/null 2>&1; then
         echo "✅ Crystal Forge server connection OK"
       else
-        echo "⚠️  Cannot reach Crystal Forge server (tests will continue but some may fail)"
+        echo "⚠️  Cannot reach Crystal Forge server (continuing)"
       fi
-
       echo ""
       echo "🏃 Running tests..."
       echo ""
 
-      # Run the tests with nice defaults
-      if [ $# -eq 0 ]; then
-        # No arguments - run smoke tests first, then all tests
+      if [ "''${#CLEAN_ARGS[@]}" -eq 0 ]; then
         echo "Running smoke tests first..."
-        cf-test-runner -m smoke --tb=line || {
-          echo "❌ Smoke tests failed, stopping"
-          exit 1
-        }
+        if [ "$CONTINUE" -eq 1 ]; then
+          cf-test-runner -m smoke --tb=line --continue-on-fail
+        else
+          cf-test-runner -m smoke --tb=line
+        fi
+        smoke_status=$?
+
+        if [ "$CONTINUE" -ne 1 ] && [ "$smoke_status" -ne 0 ]; then
+          echo "❌ Smoke tests failed, stopping (use --continue-on-fail to run full suite anyway)"
+          exit $smoke_status
+        fi
+
         echo ""
-        echo "✅ Smoke tests passed, running all tests..."
-        cf-test-runner --tb=short --html=test-results/report.html
+        echo "➡️  Running full suite..."
+        if [ "$CONTINUE" -eq 1 ]; then
+          cf-test-runner --tb=short --html=test-results/report.html --continue-on-fail
+        else
+          cf-test-runner --tb=short --html=test-results/report.html
+        fi
+        suite_status=$?
+
+        [ "$smoke_status" -ne 0 ] && exit 1
+        [ "$suite_status" -ne 0 ] && exit 1
+        exit 0
       else
-        # Pass through all arguments
-        cf-test-runner "$@"
+        # direct pass-through mode
+        if [ "$CONTINUE" -eq 1 ]; then
+          cf-test-runner --continue-on-fail "''${CLEAN_ARGS[@]}"
+        else
+          cf-test-runner "''${CLEAN_ARGS[@]}"
+        fi
+        exit $?
       fi
     '';
   };

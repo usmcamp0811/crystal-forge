@@ -18,8 +18,6 @@ dependencies = [
 
 [project.scripts]
 cf-test = "cf_test:main"
-cf-test-run = "cf_test.tests.run_tests:main"
-cf-test-quick = "cf_test.tests.test_quick_validation:main"
 
 [tool.pytest.ini_options]
 minversion = "7.0"

@@ -1,4 +1,3 @@
-# Helper builders for common system states (never_seen, up_to_date, behind, offline, eval_failed)
 from typing import Any, Dict, Tuple
 
 from . import CFTestClient
@@ -11,10 +10,7 @@ def _insert_one(client: CFTestClient, sql: str, params: Tuple[Any, ...]) -> int:
 def mk_flake(client: CFTestClient, name: str, url: str) -> int:
     return _insert_one(
         client,
-        """
-        INSERT INTO flakes (name, repo_url, created_at, updated_at)
-        VALUES (%s, %s, NOW(), NOW()) RETURNING id
-    """,
+        "INSERT INTO flakes (name, repo_url) VALUES (%s, %s) RETURNING id",
         (name, url),
     )
 
@@ -26,8 +22,9 @@ def mk_commit(
         client,
         """
         INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-        VALUES (%s, %s, NOW() - INTERVAL %s, 0) RETURNING id
-    """,
+        VALUES (%s, %s, NOW() - (%s)::interval, 0)
+        RETURNING id
+        """,
         (flake_id, hash_, age),
     )
 
@@ -48,9 +45,9 @@ def mk_derivation(
             commit_id, derivation_type, derivation_name, derivation_path,
             status_id, attempt_count, scheduled_at, completed_at
         )
-        VALUES (%s, 'nixos', %s, %s, %s, 0, NOW() - INTERVAL %s, NOW() - INTERVAL %s)
+        VALUES (%s, 'nixos', %s, %s, %s, 0, NOW() - (%s)::interval, NOW() - (%s)::interval)
         RETURNING id
-    """,
+        """,
         (commit_id, name, path, status_id, sched_age, done_age),
     )
 
@@ -62,7 +59,7 @@ def mk_system(
         """
         INSERT INTO systems (hostname, flake_id, is_active, derivation, public_key)
         VALUES (%s, %s, true, %s, 'fake-key')
-    """,
+        """,
         (hostname, flake_id, drv_path),
     )
 
@@ -82,11 +79,13 @@ def mk_state(
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
             primary_ip_address, nixos_version, agent_compatible, timestamp
         )
-        VALUES (%s, 'heartbeat', %s, 'NixOS', '6.6.89',
-                32.0, 3600, 'Intel Xeon', 16, %s, '25.05', true,
-                NOW() - INTERVAL %s)
+        VALUES (
+            %s, 'heartbeat', %s, 'NixOS', '6.6.89',
+            32.0, 3600, 'Intel Xeon', 16,
+            %s, '25.05', true, NOW() - (%s)::interval
+        )
         RETURNING id
-    """,
+        """,
         (hostname, drv_path, ip, ts_age),
     )
 
@@ -100,14 +99,17 @@ def mk_heartbeat(
     client.execute_sql(
         """
         INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
-        VALUES (%s, NOW() - INTERVAL %s, %s, 'build123')
-    """,
+        VALUES (%s, NOW() - (%s)::interval, %s, 'build123')
+        """,
         (state_id, age, agent_ver),
     )
 
 
+# ---------- Scenarios ----------
+
+
 def scenario_never_seen(
-    client: CFTestClient, hostname="test-never-seen", flake="test-app"
+    client: CFTestClient, hostname: str = "test-never-seen", flake: str = "test-app"
 ) -> Dict[str, Any]:
     flake_id = mk_flake(client, flake, f"https://example.com/{flake}.git")
     mk_system(client, hostname, flake_id, "/nix/store/test.drv")
@@ -120,17 +122,24 @@ def scenario_never_seen(
 
 
 def scenario_up_to_date(
-    client: CFTestClient, hostname="test-uptodate"
+    client: CFTestClient, hostname: str = "test-uptodate"
 ) -> Dict[str, Any]:
     flake_id = mk_flake(client, "prod-app", "https://example.com/prod.git")
     commit_id = mk_commit(client, flake_id, "abc123current", "1 hour")
     drv_path = f"/nix/store/abc123cu-nixos-system-{hostname}.drv"
-    deriv_id = mk_derivation(client, commit_id, hostname, drv_path)
+    deriv_id = mk_derivation(
+        client, commit_id, hostname, drv_path, 10, "50 minutes", "45 minutes"
+    )
     mk_system(client, hostname, flake_id, drv_path)
     state_id = mk_state(client, hostname, drv_path, "192.168.1.100", "10 minutes")
     mk_heartbeat(client, state_id, "2 minutes")
     return {
-        "ids": locals(),
+        "ids": {
+            "flake_id": flake_id,
+            "commit_id": commit_id,
+            "deriv_id": deriv_id,
+            "state_id": state_id,
+        },
         "cleanup": {
             "agent_heartbeats": [f"system_state_id = {state_id}"],
             "system_states": [f"hostname = '{hostname}'"],
@@ -142,20 +151,17 @@ def scenario_up_to_date(
     }
 
 
-def scenario_behind(client: CFTestClient, hostname="test-behind") -> Dict[str, Any]:
+def scenario_behind(
+    client: CFTestClient, hostname: str = "test-behind"
+) -> Dict[str, Any]:
     flake_id = mk_flake(client, "behind-app", "https://example.com/behind.git")
     old_commit_id = mk_commit(client, flake_id, "old456commit", "2 days")
     new_commit_id = mk_commit(client, flake_id, "new789commit", "1 hour")
     old_drv = f"/nix/store/old456co-nixos-system-{hostname}.drv"
     new_drv = f"/nix/store/new789co-nixos-system-{hostname}.drv"
-    mk_derivation(client, old_commit_id, hostname, old_drv, done_age="47 hours")
+    mk_derivation(client, old_commit_id, hostname, old_drv, 10, "2 days", "47 hours")
     new_deriv_id = mk_derivation(
-        client,
-        new_commit_id,
-        hostname,
-        new_drv,
-        sched_age="50 minutes",
-        done_age="45 minutes",
+        client, new_commit_id, hostname, new_drv, 10, "50 minutes", "45 minutes"
     )
     mk_system(client, hostname, flake_id, old_drv)
     state_id = mk_state(client, hostname, old_drv, "192.168.1.101", "5 minutes")
@@ -173,17 +179,13 @@ def scenario_behind(client: CFTestClient, hostname="test-behind") -> Dict[str, A
     }
 
 
-def scenario_offline(client: CFTestClient, hostname="test-offline") -> Dict[str, Any]:
+def scenario_offline(
+    client: CFTestClient, hostname: str = "test-offline"
+) -> Dict[str, Any]:
     flake_id = mk_flake(client, "offline-app", "https://example.com/offline.git")
     commit_id = mk_commit(client, flake_id, "offline123", "2 hours")
     drv_path = f"/nix/store/offline12-nixos-system-{hostname}.drv"
-    client.execute_sql(
-        """
-        INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, completed_at)
-        VALUES (%s, 'nixos', %s, %s, 10, NOW() - INTERVAL '90 minutes')
-    """,
-        (commit_id, hostname, drv_path),
-    )
+    mk_derivation(client, commit_id, hostname, drv_path, 10, "90 minutes", "90 minutes")
     mk_system(client, hostname, flake_id, drv_path)
     state_id = mk_state(client, hostname, drv_path, "192.168.1.102", "45 minutes")
     mk_heartbeat(client, state_id, "35 minutes")
@@ -195,31 +197,25 @@ def scenario_offline(client: CFTestClient, hostname="test-offline") -> Dict[str,
             "derivations": [f"derivation_name = '{hostname}'"],
             "commits": [f"id = {commit_id}"],
             "flakes": [f"id = {flake_id}"],
-        }
+        },
     }
 
 
 def scenario_eval_failed(
-    client: CFTestClient, hostname="test-eval-failed"
+    client: CFTestClient, hostname: str = "test-eval-failed"
 ) -> Dict[str, Any]:
     flake_id = mk_flake(client, "failed-app", "https://example.com/failed.git")
     old_commit_id = mk_commit(client, flake_id, "working123", "1 day")
     new_commit_id = mk_commit(client, flake_id, "broken456", "30 minutes")
     old_drv = f"/nix/store/working12-nixos-system-{hostname}.drv"
-    client.execute_sql(
-        """
-        INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, status_id, completed_at)
-        VALUES (%s, 'nixos', %s, %s, 10, NOW() - INTERVAL '20 hours')
-    """,
-        (old_commit_id, hostname, old_drv),
-    )
-    # failed latest
-    failed_id = _insert_one(
+    mk_derivation(client, old_commit_id, hostname, old_drv, 10, "20 hours", "20 hours")
+    _failed_id = _insert_one(
         client,
         """
         INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, completed_at, error_message)
-        VALUES (%s, 'nixos', %s, 6, NOW() - INTERVAL '30 minutes', 'Build failed') RETURNING id
-    """,
+        VALUES (%s, 'nixos', %s, 6, NOW() - ('30 minutes')::interval, 'Build failed')
+        RETURNING id
+        """,
         (new_commit_id, hostname),
     )
     mk_system(client, hostname, flake_id, old_drv)
@@ -233,5 +229,5 @@ def scenario_eval_failed(
             "derivations": [f"derivation_name = '{hostname}'"],
             "commits": [f"id IN ({old_commit_id}, {new_commit_id})"],
             "flakes": [f"id = {flake_id}"],
-        }
+        },
     }
