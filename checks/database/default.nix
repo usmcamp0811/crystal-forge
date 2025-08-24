@@ -49,9 +49,8 @@ in
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
-
       from vm_test_logger import TestLogger  # type: ignore[import-untyped]
-
+      from cf_test_modules.reports.service_log_collector import ServiceLogCollector
       # Use the universal runner but create a VM ctx explicitly
       from cf_test_modules.test_runner import create_ctx_for_nixos, run_database_tests  # type: ignore[import-untyped]
 
