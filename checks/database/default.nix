@@ -99,13 +99,13 @@ in
       ])
 
       # Always grab VM logs
-      server.succeed('''
+      server.succeed("""
         set -eu
         mkdir -p /tmp/cf-test-outputs
         journalctl -u crystal-forge-server -u postgresql --no-pager > /tmp/cf-test-outputs/services.log || true
         systemctl status crystal-forge-server > /tmp/cf-test-outputs/server.status || true
         tar -C /tmp -czf /tmp/cf-test-outputs.tar.gz cf-test-outputs
-      ''')
+      """)
 
       # Copy artifacts VM -> host (becomes test result outputs)
       server.copy_from_vm("/tmp/cf-test-outputs/junit.xml", "junit.xml")
