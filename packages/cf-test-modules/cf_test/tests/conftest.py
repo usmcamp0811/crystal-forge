@@ -12,6 +12,14 @@ def cf_config():
 
 
 @pytest.fixture(scope="session")
+def scenarios(cf_client):
+    """Expose scenario builders for quick tests"""
+    from cf_test import scenarios  # lazy import
+
+    return scenarios
+
+
+@pytest.fixture(scope="session")
 def cf_client(cf_config):
     """Crystal Forge test client"""
     client = CFTestClient(cf_config)
