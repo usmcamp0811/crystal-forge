@@ -178,7 +178,7 @@ in rec {
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
 
-      environment.systemPackages = [pkgs.git pkgs.jq];
+      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.cf-test-modules.runTests];
 
       nix = {
         package = pkgs.nixVersions.stable;
@@ -355,7 +355,7 @@ in rec {
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
 
-      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.default];
+      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.default pkgs.crystal-forge.cf-test-modules.runTests];
       environment.etc = lib.mkMerge [
         (lib.mkIf (keyPath != null) {"agent.key".source = "${keyPath}/agent.key";})
         (lib.mkIf (pubPath != null) {"agent.pub".source = "${pubPath}/agent.pub";})
@@ -448,6 +448,7 @@ in rec {
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
 
+      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.cf-test-modules.runTests];
       networking.useDHCP = true;
       networking.firewall.enable = false;
 

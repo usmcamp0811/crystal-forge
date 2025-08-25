@@ -331,8 +331,3 @@ def wait_listening():
         )
 
     return _wait
-
-
-python
-Copy
-Edit

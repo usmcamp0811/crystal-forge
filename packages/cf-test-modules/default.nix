@@ -104,7 +104,7 @@
         fi
         smoke_status=$?
 
-        if [ "$CONTINUE" -ne 1 ] && [ "$smoke_status" -ne 0 ]; then
+        if [ "$CONTINUE" -ne 1 ] && [ "$smoke_status" -ne 0 ]; thennix run .#cf-test-modules.runTests -- -vvv
           echo "❌ Smoke tests failed, stopping (use --continue-on-fail to run full suite anyway)"
           exit $smoke_status
         fi

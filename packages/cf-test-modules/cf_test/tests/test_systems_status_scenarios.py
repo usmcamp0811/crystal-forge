@@ -14,6 +14,7 @@ from cf_test.scenarios import (
 VIEW_STATUS = "public.view_systems_status_table"
 
 
+@pytest.mark.vm_internal
 @pytest.mark.views
 @pytest.mark.database
 @pytest.mark.parametrize(

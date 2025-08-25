@@ -1,7 +1,7 @@
 import pytest
 
 
-@pytest.mark.vm_only
+@pytest.mark.driver
 def test_daemons_running(machine):
     assert machine is not None
     machine.wait_until_succeeds("systemctl is-active --quiet postgresql")
