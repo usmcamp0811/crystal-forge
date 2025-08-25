@@ -56,6 +56,7 @@
   };
 
   # Convenience script with health checks
+  #TODO: Clean up order marks and things
   runTests = pkgs.writeShellApplication {
     name = "run-cf-tests";
     runtimeInputs = [testRunner];
@@ -104,7 +105,7 @@
         fi
         smoke_status=$?
 
-        if [ "$CONTINUE" -ne 1 ] && [ "$smoke_status" -ne 0 ]; thennix run .#cf-test-modules.runTests -- -vvv
+        if [ "$CONTINUE" -ne 1 ] && [ "$smoke_status" -ne 0 ]; then
           echo "❌ Smoke tests failed, stopping (use --continue-on-fail to run full suite anyway)"
           exit $smoke_status
         fi
