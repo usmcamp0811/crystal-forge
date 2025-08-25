@@ -102,8 +102,9 @@ in
           # Run your pytest suite inside the server VM and tee output into /tmp/xchg
           logger.log_section("🏃 Running tests...")
 
+          # ✅ needs a separator after `pipefail`; also capture stderr
           server.succeed(
-              "bash -lc 'cf-test-runner -m vm_internal -vvv | tee /tmp/xchg/pytest-output.txt'"
+              "bash -lc 'set -euo pipefail; cf-test-runner -m vm_internal -vvv 2>&1 | tee /tmp/xchg/pytest-output.txt'"
           )
           logger.log_files.append("pytest-output.txt")
 
