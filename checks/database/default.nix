@@ -60,54 +60,65 @@ in
 
     testScript = ''
       import os
-      import sys
+      from vm_test_logger import with_logging, TestPatterns
 
-      # Import cf_test and inject VM machines for pytest
-      import cf_test
-      cf_test._driver_machines = {"server": server}
+      SERVER_PORT = ${toString CF_TEST_SERVER_PORT}
+      DB_PORT = ${toString CF_TEST_DB_PORT}
 
-      # Set up environment for cf_test
-      os.environ.update({
-          "NIXOS_TEST_DRIVER": "1",
-          "CF_TEST_DB_HOST": "127.0.0.1",
-          "CF_TEST_DB_PORT": "5432",  # Use the actual Crystal Forge DB port
-          "CF_TEST_DB_NAME": "crystal_forge",
-          "CF_TEST_DB_USER": "crystal_forge",
-          "CF_TEST_DB_PASSWORD": "crystal_forge_password",
-          "CF_TEST_SERVER_HOST": "127.0.0.1",
-          "CF_TEST_SERVER_PORT": str(${toString CF_TEST_SERVER_PORT}),
-      })
+      @with_logging("Crystal Forge Agent Integration", primary_vm_name="server")
+      def run(logger):
+          start_all()
 
-      # Wait for services to be ready
-      print("🔄 Waiting for PostgreSQL service...")
-      server.wait_for_unit("postgresql.service")
+          # Basic system info + wait for core services
+          logger.gather_system_info(server)
+          TestPatterns.standard_service_startup(
+              logger, server,
+              ["postgresql.service", "crystal-forge-server.service"]
+          )
 
-      # Wait a bit more for the database to be fully ready
-      print("🔄 Checking database connectivity...")
-      server.succeed("timeout 30 sh -c 'until pg_isready -h 127.0.0.1 -p 5432; do sleep 1; done'")
+          # Verify ports & binaries
+          # TestPatterns.network_test(logger, server, "127.0.0.1", SERVER_PORT)
+          logger.capture_command_output(
+              server,
+              "command -v run-cf-tests || which run-cf-tests",
+              "which-run-cf-tests.txt",
+              "Verify run-cf-tests is present",
+          )
 
-      print("🔄 Waiting for Crystal Forge server service...")
-      server.wait_for_unit("crystal-forge-server.service")
+          # Extra diagnostics before tests
+          logger.capture_command_output(
+              server,
+              "ss -ltn",
+              "listening-ports.txt",
+              "Listening TCP ports",
+          )
+          logger.capture_command_output(
+              server,
+              "systemctl --no-pager --full status crystal-forge-server.service || true",
+              "crystal-forge-server-status.txt",
+              "crystal-forge-server status",
+          )
 
-      print("🔄 Waiting for server to be listening...")
-      server.succeed("timeout 30 sh -c 'until ss -ltn | grep :3000; do sleep 1; done'")
+          # Run your pytest suite inside the server VM and tee output into /tmp/xchg
+          logger.log_section("🏃 Running tests...")
+          server.succeed(
+              "bash -lc 'run-cf-tests -m vm_internal -vvv | tee /tmp/xchg/pytest-output.txt'"
+          )
+          logger.log_files.append("pytest-output.txt")
 
-      print("✅ All services ready!")
+          # Try to collect any pytest HTML reports if generated
+          server.succeed(
+              "bash -lc 'mkdir -p /tmp/xchg && "
+              "find / -maxdepth 4 -type f -name \"report*.html\" -exec cp -t /tmp/xchg {} + 2>/dev/null || true'"
+          )
+          # Best-effort add common report names
+          for name in ["report.html", "pytest-report.html"]:
+              logger.log_files.append(name)
 
-      # Run cf_test
-      print("🧪 Running cf_test pytest suite...")
-      import pytest
-      exit_code = pytest.main([
-          "-v",
-          "--tb=short",
-          "-m", "smoke or database",
-          f"{cf_test.__path__[0]}"
-      ])
+          # Capture useful service logs (safe if absent)
+          logger.capture_service_logs(server, "crystal-forge-server.service")
+          logger.capture_service_logs(server, "postgresql.service")
 
-      if exit_code == 0:
-          print("✅ All tests passed!")
-      else:
-          print(f"❌ Tests failed with exit code {exit_code}")
-          sys.exit(exit_code)
+      run()
     '';
   }

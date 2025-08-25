@@ -42,12 +42,12 @@
     text = ''
       # Set default environment variables for devshell testing
       export DB_HOST="''${DB_HOST:-127.0.0.1}"
-      export DB_PORT="''${DB_PORT:-3042}"
+      export DB_PORT="''${DB_PORT:-5432}"
       export DB_USER="''${DB_USER:-crystal_forge}"
       export DB_PASSWORD="''${DB_PASSWORD:-password}"
       export DB_NAME="''${DB_NAME:-crystal_forge}"
       export CF_SERVER_HOST="''${CF_SERVER_HOST:-127.0.0.1}"
-      export CF_SERVER_PORT="''${CF_SERVER_PORT:-3445}"
+      export CF_SERVER_PORT="''${CF_SERVER_PORT:-3000}"
       export HOSTNAME="''${HOSTNAME:-$(hostname -s)}"
 
       # Run cf-test with all arguments passed through
@@ -75,19 +75,19 @@
 
       echo "🧪 Crystal Forge Tests"
       echo "===================="
-      echo "Database: ''${DB_USER:-crystal_forge}@''${DB_HOST:-127.0.0.1}:''${DB_PORT:-3042}/''${DB_NAME:-crystal_forge}"
-      echo "Server: ''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3445}"
+      echo "Database: ''${DB_USER:-crystal_forge}@''${DB_HOST:-127.0.0.1}:''${DB_PORT:-5432}/''${DB_NAME:-crystal_forge}"
+      echo "Server: ''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3000}"
       echo ""
 
-      if ! pg_isready -h "''${DB_HOST:-127.0.0.1}" -p "''${DB_PORT:-3042}" -U "''${DB_USER:-crystal_forge}" >/dev/null 2>&1; then
-        echo "❌ Cannot connect to PostgreSQL at ''${DB_HOST:-127.0.0.1}:''${DB_PORT:-3042}"
+      if ! pg_isready -h "''${DB_HOST:-127.0.0.1}" -p "''${DB_PORT:-5432}" -U "''${DB_USER:-crystal_forge}" >/dev/null 2>&1; then
+        echo "❌ Cannot connect to PostgreSQL at ''${DB_HOST:-127.0.0.1}:''${DB_PORT:-5432}"
         echo "  nix run .#cf-dev"
         exit 1
       fi
       echo "✅ PostgreSQL connection OK"
 
-      if curl -s -f "http://''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3445}/health" >/dev/null 2>&1 || \
-         curl -s -f "http://''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3445}/status" >/dev/null 2>&1; then
+      if curl -s -f "http://''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3000}/health" >/dev/null 2>&1 || \
+         curl -s -f "http://''${CF_SERVER_HOST:-127.0.0.1}:''${CF_SERVER_PORT:-3000}/status" >/dev/null 2>&1; then
         echo "✅ Crystal Forge server connection OK"
       else
         echo "⚠️  Cannot reach Crystal Forge server (continuing)"

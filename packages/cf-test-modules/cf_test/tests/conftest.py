@@ -297,8 +297,8 @@ def cf_ports(server):
         except Exception:
             return default
 
-    host_db = _to_int(os.getenv("CF_TEST_DB_PORT"), 3042)
-    host_api = _to_int(os.getenv("CF_TEST_SERVER_PORT"), 3445)
+    host_db = _to_int(os.getenv("CF_TEST_DB_PORT"), 5432)
+    host_api = _to_int(os.getenv("CF_TEST_SERVER_PORT"), 3000)
 
     vm_db = _to_int(os.getenv("CF_TEST_VM_DB_PORT", "0"), 0)
     vm_api = _to_int(os.getenv("CF_TEST_VM_SERVER_PORT", "0"), 0)
@@ -314,9 +314,9 @@ def cf_ports(server):
 
     # Final fallbacks
     if vm_db == 0:
-        vm_db = 3042
+        vm_db = 5432
     if vm_api == 0:
-        vm_api = 3445
+        vm_api = 3000
 
     return {"db_vm": vm_db, "api_vm": vm_api, "db_host": host_db, "api_host": host_api}
 
