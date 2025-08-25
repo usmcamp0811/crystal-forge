@@ -101,8 +101,9 @@ in
 
           # Run your pytest suite inside the server VM and tee output into /tmp/xchg
           logger.log_section("🏃 Running tests...")
+
           server.succeed(
-              "bash -lc 'run-cf-tests -m vm_internal -vvv | tee /tmp/xchg/pytest-output.txt'"
+              "bash -lc 'cf-test-runner -m vm_internal -vvv | tee /tmp/xchg/pytest-output.txt'"
           )
           logger.log_files.append("pytest-output.txt")
 

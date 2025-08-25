@@ -35,12 +35,15 @@
     name = "cf-test-runner";
     runtimeInputs = with pkgs; [
       python3
-      postgresql # for pg_isready and psql
-      curl # for server health checks
-      cfTest # Include our test package
+      postgresql # pg_isready/psql
+      curl
+      cfTest # the packaged cf_test module
     ];
     text = ''
-      # Set default environment variables for devshell testing
+      # Resolve tests dir at build time via Nix
+      TESTS_DIR='${cfTest}/${pkgs.python3.sitePackages}/cf_test/tests'
+
+      # Default env (overridable)
       export DB_HOST="''${DB_HOST:-127.0.0.1}"
       export DB_PORT="''${DB_PORT:-5432}"
       export DB_USER="''${DB_USER:-crystal_forge}"
@@ -50,8 +53,8 @@
       export CF_SERVER_PORT="''${CF_SERVER_PORT:-3000}"
       export HOSTNAME="''${HOSTNAME:-$(hostname -s)}"
 
-      # Run cf-test with all arguments passed through
-      exec cf-test "$@"
+      # Always pass the tests directory to pytest (via cf-test entrypoint)
+      exec cf-test "$@" "$TESTS_DIR"
     '';
   };
 
@@ -62,6 +65,11 @@
     runtimeInputs = [testRunner];
     text = ''
       set +e
+      set -o pipefail
+
+      # Resolved at build-time via Nix (no runtime probing)
+      TESTS_DIR='${cfTest}/${pkgs.python3.sitePackages}/cf_test/tests'
+      mkdir -p test-results
 
       CONTINUE=0
       CLEAN_ARGS=()
@@ -98,11 +106,7 @@
 
       if [ "''${#CLEAN_ARGS[@]}" -eq 0 ]; then
         echo "Running smoke tests first..."
-        if [ "$CONTINUE" -eq 1 ]; then
-          cf-test-runner -m smoke --tb=line --continue-on-fail
-        else
-          cf-test-runner -m smoke --tb=line
-        fi
+        cf-test-runner -m smoke --tb=line "$TESTS_DIR"
         smoke_status=$?
 
         if [ "$CONTINUE" -ne 1 ] && [ "$smoke_status" -ne 0 ]; then
@@ -113,9 +117,9 @@
         echo ""
         echo "➡️  Running full suite..."
         if [ "$CONTINUE" -eq 1 ]; then
-          cf-test-runner --tb=short --html=test-results/report.html --continue-on-fail
+          cf-test-runner --tb=short --html=test-results/report.html --continue-on-fail "$TESTS_DIR"
         else
-          cf-test-runner --tb=short --html=test-results/report.html
+          cf-test-runner --tb=short --html=test-results/report.html "$TESTS_DIR"
         fi
         suite_status=$?
 
@@ -123,7 +127,15 @@
         [ "$suite_status" -ne 0 ] && exit 1
         exit 0
       else
-        # direct pass-through mode
+        # pass-through: if no test path provided, add our tests dir
+        has_positional=0
+        for a in "''${CLEAN_ARGS[@]}"; do
+          case "$a" in -*) ;; *) has_positional=1; break;; esac
+        done
+        if [ "$has_positional" -eq 0 ]; then
+          CLEAN_ARGS+=("$TESTS_DIR")
+        fi
+
         if [ "$CONTINUE" -eq 1 ]; then
           cf-test-runner --continue-on-fail "''${CLEAN_ARGS[@]}"
         else
