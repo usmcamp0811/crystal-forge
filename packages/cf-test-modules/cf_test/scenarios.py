@@ -221,12 +221,16 @@ def scenario_never_seen(
     client: CFTestClient, hostname: str = "test-never-seen"
 ) -> Dict[str, Any]:
     """System that has never been seen - only has flake and system entry"""
+    import time
+
+    timestamp = int(time.time())
+
     return _create_base_scenario(
         client,
         hostname=hostname,
-        flake_name=hostname,
-        repo_url=f"https://example.com/{hostname}.git",
-        git_hash="never123seen",
+        flake_name=f"{hostname}-{timestamp}",
+        repo_url=f"https://example.com/{hostname}-{timestamp}.git",
+        git_hash=f"never123seen-{timestamp}",
         commit_age_hours=1,
         heartbeat_age_minutes=None,  # No heartbeat = never seen
     )
