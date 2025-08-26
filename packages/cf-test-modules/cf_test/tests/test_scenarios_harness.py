@@ -21,7 +21,7 @@ def test_validate_scenario_eval_failed(cf_client):
 
     hostname = "validate-scenario"
 
-    # Pre-clean (commit hashes are timestamp-suffixed)
+    # Pre-clean in CORRECT order - must respect foreign key constraints
     cf_client.execute_sql(
         "DELETE FROM agent_heartbeats WHERE system_state_id IN (SELECT id FROM system_states WHERE hostname = %s)",
         (hostname,),
@@ -34,6 +34,7 @@ def test_validate_scenario_eval_failed(cf_client):
     cf_client.execute_sql(
         "DELETE FROM commits WHERE git_commit_hash LIKE 'working123-%' OR git_commit_hash LIKE 'broken456-%'"
     )
+    # Delete flakes LAST after all references are gone
     cf_client.execute_sql(
         "DELETE FROM flakes WHERE repo_url = 'https://example.com/failed.git'"
     )
@@ -84,7 +85,12 @@ def test_validate_scenario_eval_failed(cf_client):
         "SELECT * FROM systems WHERE hostname = %s", (hostname,)
     )
     assert len(systems) == 1
-    expected_deriv_path = f"/nix/store/working12-nixos-system-{hostname}.drv"
+    # The system should be pointing to the old working derivation
+    expected_deriv_path = (
+        old_deriv["derivation_path"]
+        if old_deriv["derivation_path"]
+        else f"/nix/store/fallback-{hostname}.drv"
+    )
     assert systems[0]["derivation"] == expected_deriv_path
 
     states = cf_client.execute_sql(

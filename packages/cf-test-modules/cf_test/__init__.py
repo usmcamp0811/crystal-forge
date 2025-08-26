@@ -146,13 +146,14 @@ class CFTestClient:
         with self.db_connection() as conn:
             with conn.cursor() as cur:
                 # Define the correct deletion order based on foreign key dependencies
+                # Must delete in reverse dependency order: children first, then parents
                 deletion_order = [
-                    "agent_heartbeats",
-                    "system_states",
-                    "systems",
-                    "derivations",
-                    "commits",
-                    "flakes",
+                    "agent_heartbeats",  # references system_states
+                    "system_states",  # references systems (via hostname)
+                    "derivations",  # references commits
+                    "systems",  # references flakes
+                    "commits",  # references flakes
+                    "flakes",  # no dependencies
                 ]
 
                 for table in deletion_order:
