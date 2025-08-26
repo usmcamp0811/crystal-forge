@@ -1,4 +1,3 @@
-# pyproject.toml - Fixed for Nix packaging
 [build-system]
 requires = ["setuptools>=45", "wheel"]
 build-backend = "setuptools.build_meta"
@@ -10,8 +9,7 @@ description = "Simple Crystal Forge Testing Framework"
 requires-python = ">=3.8"
 dependencies = [
     "pytest>=7.0.0",
-    "pytest-html>=3.1.0", 
-    # Use psycopg2 instead of psycopg2-binary for Nix
+    "pytest-html>=3.1.0",
     "psycopg2>=2.9.0",
     "pytest-xdist>=2.5.0",
 ]
@@ -21,21 +19,30 @@ cf-test = "cf_test:main"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
+# Force cache to a writable dir to avoid Nix store warnings
+cache_dir = "/tmp/cf-test-cache"
+
 testpaths = ["tests"]
 python_files = ["test_*.py", "*_test.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+# Register every marker used across package tests
 markers = [
     "database: Database-related tests",
-    "views: Database view tests", 
+    "views: Database view tests",
     "integration: Integration tests",
     "agent: Agent-related tests",
     "smoke: Quick smoke tests",
     "slow: Tests that take a long time",
+    "vm_only: requires NixOS test driver",
+    "vm_internal: internal VM-mode checks",
+    "driver: requires NixOS driver machine fixture(s)",
+    "harness: scenario harness validation",
 ]
+
 addopts = [
     "--strict-markers",
     "--tb=short",
     "--maxfail=10",
 ]
-

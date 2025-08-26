@@ -206,12 +206,20 @@ def agents(machines) -> List[Any]:
 def pytest_configure(config: pytest.Config) -> None:
     """
     Register custom markers used by this test suite.
-
-    Markers
-    -------
-    vm_only : Test requires the NixOS VM driver / Machine fixtures.
     """
-    config.addinivalue_line("markers", "vm_only: requires NixOS test driver")
+    for mark, desc in [
+        ("vm_only", "requires NixOS test driver"),
+        ("vm_internal", "internal VM-mode checks"),
+        ("driver", "requires NixOS driver machine fixture(s)"),
+        ("harness", "scenario harness validation"),
+        ("slow", "Tests that take a long time"),
+        ("smoke", "Quick smoke tests"),
+        ("database", "Database-related tests"),
+        ("views", "Database view tests"),
+        ("integration", "Integration tests"),
+        ("agent", "Agent-related tests"),
+    ]:
+        config.addinivalue_line("markers", f"{mark}: {desc}")
 
 
 def pytest_collection_modifyitems(
