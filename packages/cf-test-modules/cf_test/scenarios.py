@@ -34,8 +34,8 @@ def _create_base_scenario(
 
     Args:
         hostname: System hostname
-        flake_name: Name for the flake
-        repo_url: Git repository URL
+        flake_name: Logical name for the flake (stored as flakes.name)
+        repo_url: Git repository URL (unique)
         git_hash: Git commit hash
         commit_age_hours: How many hours ago the commit was made
         derivation_status: Status name ('complete', 'failed', etc.)
@@ -58,20 +58,21 @@ def _create_base_scenario(
         raise ValueError(f"Unknown derivation status: {derivation_status}")
     status_id = status_rows[0]["id"]
 
-    # Insert flake
+    # Insert flake (schema uses 'name', not 'flake_name')
     flake_row = _one_row(
         client,
         """
         INSERT INTO public.flakes (name, repo_url)
         VALUES (%s, %s)
-        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+        ON CONFLICT (repo_url) DO UPDATE
+        SET name = EXCLUDED.name
         RETURNING id
         """,
         (flake_name, repo_url),
     )
     flake_id = flake_row["id"]
 
-    # Insert main commit
+    # Insert commit
     commit_row = _one_row(
         client,
         """
@@ -104,15 +105,12 @@ def _create_base_scenario(
             additional_commit_ids.append(extra_row["id"])
 
     # Insert derivation
-    scheduled_at = commit_ts + timedelta(minutes=5)
+    scheduled_at = commit_ts + timedelta(minutes=1)
     completed_at = (
-        commit_ts + timedelta(minutes=10) if derivation_status == "complete" else None
+        commit_ts + timedelta(minutes=2)
+        if derivation_status == "complete"
+        else commit_ts + timedelta(minutes=3)
     )
-
-    if derivation_status == "failed":
-        completed_at = commit_ts + timedelta(minutes=10)
-        drv_path = None  # Failed evaluations don't have derivation paths
-
     deriv_row = _one_row(
         client,
         """
@@ -220,7 +218,13 @@ def _create_base_scenario(
 def scenario_never_seen(
     client: CFTestClient, hostname: str = "test-never-seen"
 ) -> Dict[str, Any]:
-    """System that has never been seen - only has flake and system entry"""
+    """Pre-registered/tracked system that has **never sent a heartbeat**.
+
+    We still create `systems` and `system_states` to represent a known, tracked
+    machine (the app tracks systems before first contact), but we set
+    `heartbeat_age_minutes=None` so **no agent_heartbeats are inserted**.
+    Views should therefore resolve connectivity/update/overall to "never_seen".
+    """
     import time
 
     timestamp = int(time.time())
@@ -274,33 +278,29 @@ def scenario_behind(
         ],
     )
 
-    # Create newer derivation and CAPTURE THE ID
-    new_commit_id = result["additional_commit_ids"][0]
-    now = datetime.now(UTC)
-    new_scheduled = now - timedelta(minutes=50)
-    new_completed = now - timedelta(minutes=45)
-
-    new_deriv_row = _one_row(
-        client,
-        """
-        INSERT INTO public.derivations (
-            commit_id, derivation_type, derivation_name, derivation_path,
-            status_id, attempt_count, scheduled_at, completed_at
-        )
-        VALUES (%s, 'nixos', %s, %s, 
-                (SELECT id FROM public.derivation_statuses WHERE name='complete'),
-                0, %s, %s)
-        RETURNING id
-        """,
-        (new_commit_id, hostname, new_drv, new_scheduled, new_completed),
+    # Update system to point to old derivation path
+    client.execute_sql(
+        "UPDATE public.systems SET derivation = %s WHERE hostname = %s",
+        (old_drv, hostname),
     )
-    new_deriv_id = new_deriv_row["id"]
-
-    # ADD THE NEW DERIVATION TO CLEANUP PATTERNS
-    result["cleanup"]["derivations"].append(f"id = {new_deriv_id}")
-    result["new_derivation_id"] = new_deriv_id
 
     return result
+
+
+def scenario_offline(
+    client: CFTestClient, hostname: str = "test-offline"
+) -> Dict[str, Any]:
+    """System that is offline (no recent heartbeats)"""
+    return _create_base_scenario(
+        client,
+        hostname=hostname,
+        flake_name="offline-app",
+        repo_url="https://example.com/offline.git",
+        git_hash="offline123",
+        commit_age_hours=2,
+        heartbeat_age_minutes=45,  # cutoff is 30m, so this is offline
+        system_ip="192.168.1.102",
+    )
 
 
 def scenario_eval_failed(
@@ -318,24 +318,28 @@ def scenario_eval_failed(
     result = _create_base_scenario(
         client,
         hostname=hostname,
-        flake_name="failed-app",
-        repo_url="https://example.com/failed.git",
+        flake_name="eval-app",
+        repo_url="https://example.com/eval.git",
         git_hash=old_hash,
-        commit_age_hours=24,
-        heartbeat_age_minutes=2,
-        system_ip="192.168.1.103",
-        additional_commits=[
-            {"hash": new_hash, "age_hours": 0.5}  # Recent broken commit
-        ],
+        commit_age_hours=4,
+        heartbeat_age_minutes=3,
     )
 
-    # Create failed derivation for the new commit and CAPTURE THE ID
-    new_commit_id = result["additional_commit_ids"][0]
+    # Insert a newer commit and failed derivation for it
+    [new_commit] = client.execute_sql(
+        """
+        INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
+        VALUES (%s, %s, %s, 0)
+        RETURNING id
+        """,
+        (result["flake_id"], new_hash, datetime.now(UTC) - timedelta(hours=1)),
+    )
+    new_commit_id = new_commit["id"]
+
     now = datetime.now(UTC)
     failed_completed = now - timedelta(minutes=30)
 
-    failed_deriv_row = _one_row(
-        client,
+    client.execute_sql(
         """
         INSERT INTO public.derivations (
             commit_id, derivation_type, derivation_name, derivation_path,
@@ -344,226 +348,11 @@ def scenario_eval_failed(
         VALUES (%s, 'nixos', %s, NULL,
                 (SELECT id FROM public.derivation_statuses WHERE name='failed'),
                 0, %s, 'Evaluation failed')
-        RETURNING id
         """,
-        (new_commit_id, hostname, failed_completed),
+        (new_commit_id, f"{hostname}-build-failed", failed_completed),
     )
-    failed_deriv_id = failed_deriv_row["id"]
-
-    # ADD THE FAILED DERIVATION TO CLEANUP PATTERNS
-    result["cleanup"]["derivations"].append(f"id = {failed_deriv_id}")
-    result["failed_derivation_id"] = failed_deriv_id
 
     return result
-
-
-def scenario_offline(
-    client: CFTestClient, hostname: str = "test-offline"
-) -> Dict[str, Any]:
-    """System that is offline (no recent heartbeats)"""
-    return _create_base_scenario(
-        client,
-        hostname=hostname,
-        flake_name="offline-app",
-        repo_url="https://example.com/offline.git",
-        git_hash="offline123",
-        commit_age_hours=2,
-        heartbeat_age_minutes=45,  # Old heartbeat = offline
-        system_ip="192.168.1.102",
-    )
-
-
-def scenario_flake_time_series(
-    client: CFTestClient,
-    *,
-    flake_name: str = "scenario-flake",
-    repo_url: str = "https://example.com/scenario-flake.git",
-    num_commits: int = 10,
-    num_systems: int = 9,
-    days: int = 30,
-    heartbeat_interval_minutes: int = 15,
-    heartbeat_hours: int = 24,
-    stagger_window_minutes: int = 60,
-    base_hostname: str = "test-scenario",
-    agent_version: str = "2.0.0",
-) -> Dict[str, Any]:
-    """
-    One flake, N commits over past `days`, M systems, heartbeats every interval, upgrades
-    staggered within ~stagger_window_minutes of each commit. Tweak parameters above to adjust scale.
-    Returns cleanup patterns.
-    """
-    from math import floor
-
-    now = datetime.now(UTC)
-
-    # Ensure flake exists; get flake_id
-    rows = client.execute_sql(
-        """
-        INSERT INTO public.flakes (name, repo_url)
-        VALUES (%s, %s)
-        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
-        RETURNING id
-        """,
-        (flake_name, repo_url),
-    )
-    flake_id = rows[0]["id"]
-
-    # Status id for completed derivations
-    status_rows = client.execute_sql(
-        "SELECT id FROM public.derivation_statuses WHERE name='complete'"
-    )
-    complete_status_id = status_rows[0]["id"]
-
-    # Create system hostnames (stable) and insert/ensure rows
-    hostnames: List[str] = [f"{base_hostname}-{i+1}" for i in range(num_systems)]
-    for i, hn in enumerate(hostnames):
-        client.execute_sql(
-            """
-            INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
-            VALUES (%s, %s, TRUE, %s, 'fake-key')
-            ON CONFLICT (hostname) DO UPDATE
-              SET flake_id = EXCLUDED.flake_id,
-                  is_active = EXCLUDED.is_active
-            RETURNING id
-            """,
-            (hn, flake_id, f"/nix/store/bootstrap-{hn}.drv"),
-        )
-
-    # Build commits spread across past `days`
-    commit_hashes: List[str] = []
-    derivation_paths_by_commit: List[str] = []
-
-    total_hours = max(days, 1) * 24
-    step = total_hours / max(num_commits - 1, 1)
-
-    for idx in range(num_commits):
-        age_hours = int(round(total_hours - idx * step))
-        # Keep most recent commit at least 1 hour old
-        age_hours = max(age_hours, 1)
-        commit_ts = now - timedelta(hours=age_hours)
-        git_hash = f"{flake_name}-c{idx+1:02d}-{int(commit_ts.timestamp())}"
-        commit_hashes.append(git_hash)
-
-        # Insert commit
-        cr = client.execute_sql(
-            """
-            INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-            VALUES (%s, %s, %s, 0)
-            RETURNING id
-            """,
-            (flake_id, git_hash, commit_ts),
-        )
-        commit_id = cr[0]["id"]
-
-        # Insert derivation for this commit
-        drv_path = f"/nix/store/{git_hash[:12]}-nixos-system-{flake_name}.drv"
-        derivation_paths_by_commit.append(drv_path)
-        scheduled_at = commit_ts + timedelta(minutes=5)
-        completed_at = commit_ts + timedelta(minutes=10)
-
-        client.execute_sql(
-            """
-            INSERT INTO public.derivations (
-              commit_id, derivation_type, derivation_name, derivation_path,
-              status_id, attempt_count, scheduled_at, completed_at
-            )
-            VALUES (%s, 'nixos', %s, %s, %s, 0, %s, %s)
-            RETURNING id
-            """,
-            (
-                commit_id,
-                f"{flake_name}-build-{idx+1:02d}",
-                drv_path,
-                complete_status_id,
-                scheduled_at,
-                completed_at,
-            ),
-        )
-
-        # For each commit, every system "upgrades" within ~stagger_window_minutes
-        for sidx, hn in enumerate(hostnames):
-            offset_min = int(
-                round((stagger_window_minutes / max(num_systems - 1, 1)) * sidx)
-            )
-            upgrade_ts = commit_ts + timedelta(minutes=offset_min)
-
-            client.execute_sql(
-                """
-                INSERT INTO public.system_states (
-                  hostname, change_reason, derivation_path, os, kernel,
-                  memory_gb, uptime_secs, cpu_brand, cpu_cores,
-                  primary_ip_address, nixos_version, agent_compatible, "timestamp"
-                )
-                VALUES (
-                  %s, 'startup', %s, 'NixOS', '6.6.89',
-                  32.0, 3600, 'Intel Xeon', 16,
-                  %s, '25.05', TRUE, %s
-                )
-                RETURNING id
-                """,
-                (hn, drv_path, f"192.168.50.{100 + sidx}", upgrade_ts),
-            )
-
-        # Keep systems table pointing at "current" derivation as we progress
-        client.execute_sql(
-            """
-            UPDATE public.systems SET derivation = %s
-            WHERE hostname = ANY(%s)
-            """,
-            (drv_path, hostnames),
-        )
-
-    # Heartbeats every heartbeat_interval over last heartbeat_hours, for latest state per system
-    interval_minutes = heartbeat_interval_minutes
-    beats_per_system = floor(heartbeat_hours * 60 / interval_minutes)
-
-    for hn in hostnames:
-        # Latest state id for the host
-        st = client.execute_sql(
-            """
-            SELECT id FROM public.system_states
-            WHERE hostname = %s
-            ORDER BY "timestamp" DESC
-            LIMIT 1
-            """,
-            (hn,),
-        )
-        if not st:
-            continue
-        state_id = st[0]["id"]
-
-        for k in range(beats_per_system):
-            ts = now - timedelta(minutes=k * interval_minutes)
-            client.execute_sql(
-                """
-                INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
-                VALUES (%s, %s, %s, 'build123')
-                """,
-                (state_id, ts, agent_version),
-            )
-
-    # Cleanup patterns
-    hostname_like = f"{base_hostname}-%"
-    cleanup_patterns = {
-        "agent_heartbeats": [
-            "WHERE system_state_id IN (SELECT id FROM public.system_states WHERE hostname LIKE '%s')"
-            % hostname_like
-        ],
-        "system_states": [f"hostname LIKE '{hostname_like}'"],
-        "systems": [f"hostname LIKE '{hostname_like}'"],
-        "derivations": [f"derivation_name LIKE '{flake_name}-build-%'"],
-        "commits": [f"flake_id = {flake_id}"],
-        "flakes": [f"id = {flake_id}"],
-    }
-
-    return {
-        "flake_id": flake_id,
-        "repo_url": repo_url,
-        "hostnames": hostnames,
-        "commit_hashes": commit_hashes,
-        "cleanup": cleanup_patterns,
-        "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
-    }
 
 
 def scenario_latest_with_two_overdue(
@@ -582,34 +371,24 @@ def scenario_latest_with_two_overdue(
 
     now = datetime.now(UTC)
 
-    [flake_row] = client.execute_sql(
+    # Ensure base flake (schema uses 'name')
+    [flake] = client.execute_sql(
         """
         INSERT INTO public.flakes (name, repo_url)
         VALUES (%s, %s)
-        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+        ON CONFLICT (repo_url) DO UPDATE
+        SET name = EXCLUDED.name
         RETURNING id
         """,
         (flake_name, repo_url),
     )
-    flake_id = flake_row["id"]
+    flake_id = flake["id"]
 
-    [st_row] = client.execute_sql(
+    # Insert two commits, second is latest
+    [complete_status] = client.execute_sql(
         "SELECT id FROM public.derivation_statuses WHERE name='complete'"
     )
-    complete_status_id = st_row["id"]
-
-    hostnames: List[str] = [f"{base_hostname}-{i+1}" for i in range(num_systems)]
-    for hn in hostnames:
-        client.execute_sql(
-            """
-            INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
-            VALUES (%s, %s, TRUE, %s, 'fake-key')
-            ON CONFLICT (hostname) DO UPDATE
-              SET flake_id = EXCLUDED.flake_id,
-                  is_active = EXCLUDED.is_active
-            """,
-            (hn, flake_id, f"/nix/store/bootstrap-{hn}.drv"),
-        )
+    complete_status_id = complete_status["id"]
 
     commits = []
     for i, age_h in enumerate([2, 6]):
@@ -643,38 +422,64 @@ def scenario_latest_with_two_overdue(
                 ts + timedelta(minutes=10),
             ),
         )
-        commits.append((cr["id"], git_hash, drv_path, ts))
+        commits.append({"id": cr["id"], "drv": drv_path, "ts": ts})
+    latest = commits[0]
 
-    latest_drv = commits[0][2]
-
-    for idx, hn in enumerate(hostnames):
-        upgrade_ts = commits[0][3] + timedelta(
-            minutes=int((45 / max(num_systems - 1, 1)) * idx)
+    # Create systems
+    hostnames = [f"{base_hostname}-{i+1}" for i in range(num_systems)]
+    system_ids = []
+    for hn in hostnames:
+        [sysrow] = client.execute_sql(
+            """
+            INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
+            VALUES (%s, %s, TRUE, %s, 'fake-key')
+            ON CONFLICT (hostname) DO UPDATE
+              SET flake_id = EXCLUDED.flake_id,
+                  derivation = EXCLUDED.derivation,
+                  is_active = EXCLUDED.is_active
+            RETURNING id
+            """,
+            (hn, flake_id, latest["drv"]),
         )
-        [state] = client.execute_sql(
+        system_ids.append(sysrow["id"])
+
+        # system_state
+        [st] = client.execute_sql(
             """
             INSERT INTO public.system_states (
-              hostname, change_reason, derivation_path, os, kernel,
-              memory_gb, uptime_secs, cpu_brand, cpu_cores,
-              primary_ip_address, nixos_version, agent_compatible, "timestamp"
+                hostname, change_reason, derivation_path, os, kernel,
+                memory_gb, uptime_secs, cpu_brand, cpu_cores,
+                primary_ip_address, nixos_version, agent_compatible, "timestamp"
             )
             VALUES (%s, 'startup', %s, 'NixOS', '6.6.89',
                     32.0, 3600, 'Intel Xeon', 16,
                     %s, '25.05', TRUE, %s)
             RETURNING id
             """,
-            (hn, latest_drv, f"10.0.0.{100+idx}", upgrade_ts),
+            (
+                hn,
+                latest["drv"],
+                f"192.168.99.{(len(system_ids) % 250) + 10}",
+                latest["ts"] + timedelta(minutes=15),
+            ),
         )
-        heartbeat_age = overdue_minutes if idx < num_overdue else ok_heartbeat_minutes
-        hb_ts = now - timedelta(minutes=heartbeat_age)
+        state_id = st["id"]
+
+        # heartbeats
+        minutes = (
+            overdue_minutes if len(system_ids) <= num_overdue else ok_heartbeat_minutes
+        )
+        hb_ts = now - timedelta(minutes=minutes)
         client.execute_sql(
             """
             INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
             VALUES (%s, %s, %s, 'build123')
             """,
-            (state["id"], hb_ts, agent_version),
+            (state_id, hb_ts, agent_version),
         )
 
+    # Ensure systems point at latest derivation
+    latest_drv = latest["drv"]
     client.execute_sql(
         "UPDATE public.systems SET derivation = %s WHERE hostname = ANY(%s)",
         (latest_drv, hostnames),
@@ -701,118 +506,173 @@ def scenario_latest_with_two_overdue(
     }
 
 
-def scenario_mixed_commit_lag(
+def scenario_mixed_commit_lag(client: CFTestClient) -> Dict[str, Any]:
+    """
+    Create four systems:
+      - 2 up_to_date (online)
+      - 1 behind (online)
+      - 1 offline (no recent heartbeat)
+    """
+    base = _create_base_scenario(
+        client,
+        hostname="test-mixed-1",
+        flake_name="mixed-app",
+        repo_url="https://example.com/mixed.git",
+        git_hash="mix123current",
+        commit_age_hours=1,
+        heartbeat_age_minutes=5,
+    )
+    # second up_to_date
+    _create_base_scenario(
+        client,
+        hostname="test-mixed-2",
+        flake_name="mixed-app",
+        repo_url="https://example.com/mixed.git",
+        git_hash="mix123current",
+        commit_age_hours=1,
+        heartbeat_age_minutes=7,
+    )
+    # one behind (online)
+    _create_base_scenario(
+        client,
+        hostname="test-mixed-3",
+        flake_name="mixed-app",
+        repo_url="https://example.com/mixed.git",
+        git_hash="old000behind",
+        commit_age_hours=24,
+        heartbeat_age_minutes=4,
+    )
+    # one offline
+    _create_base_scenario(
+        client,
+        hostname="test-mixed-4",
+        flake_name="mixed-app",
+        repo_url="https://example.com/mixed.git",
+        git_hash="mix123current",
+        commit_age_hours=1,
+        heartbeat_age_minutes=65,
+    )
+
+    return {
+        "hostnames": ["test-mixed-1", "test-mixed-2", "test-mixed-3", "test-mixed-4"],
+        "cleanup": {
+            "agent_heartbeats": [
+                "WHERE system_state_id IN (SELECT id FROM public.system_states WHERE hostname LIKE 'test-mixed-%')"
+            ],
+            "system_states": ["hostname LIKE 'test-mixed-%'"],
+            "systems": ["hostname LIKE 'test-mixed-%'"],
+            "derivations": ["derivation_name LIKE 'test-mixed-%'"],
+            "commits": ["git_commit_hash IN ('mix123current','old000behind')"],
+            "flakes": ["repo_url = 'https://example.com/mixed.git'"],
+        },
+        "cleanup_fn": _cleanup_fn(
+            client,
+            {
+                "agent_heartbeats": [
+                    "WHERE system_state_id IN (SELECT id FROM public.system_states WHERE hostname LIKE 'test-mixed-%')"
+                ],
+                "system_states": ["hostname LIKE 'test-mixed-%'"],
+                "systems": ["hostname LIKE 'test-mixed-%'"],
+                "derivations": ["derivation_name LIKE 'test-mixed-%'"],
+                "commits": ["git_commit_hash IN ('mix123current','old000behind')"],
+                "flakes": ["repo_url = 'https://example.com/mixed.git'"],
+            },
+        ),
+    }
+
+
+def scenario_flake_time_series(
     client: CFTestClient,
     *,
-    flake_name: str = "scenario-mixed-lag",
-    repo_url: str = "https://example.com/scenario-mixed-lag.git",
-    commit_lags: Sequence[int] = (0, 1, 3, 3),
-    heartbeat_max_age_minutes: int = 15,
-    base_hostname: str = "test-mixed",
+    flake_name: str = "scenario-timeseries",
+    repo_url: str = "https://example.com/scenario-timeseries.git",
+    days: int = 30,
+    heartbeat_interval_minutes: int = 15,
+    heartbeat_hours: int = 24,
+    stagger_window_minutes: int = 60,
+    base_hostname: str = "test-scenario",
     agent_version: str = "2.0.0",
 ) -> Dict[str, Any]:
-    from hashlib import sha256
+    """
+    One flake, N commits over past `days`, M systems, heartbeats every interval, upgrades
+    staggered within ~stagger_window_minutes of each commit. Tweak parameters above to adjust scale.
+    Returns cleanup patterns.
+    """
+    from math import floor
 
     now = datetime.now(UTC)
-
-    [flake_row] = client.execute_sql(
+    start = now - timedelta(days=days)
+    [flake] = client.execute_sql(
         """
         INSERT INTO public.flakes (name, repo_url)
         VALUES (%s, %s)
-        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+        ON CONFLICT (repo_url) DO UPDATE
+        SET name = EXCLUDED.name
         RETURNING id
         """,
         (flake_name, repo_url),
     )
-    flake_id = flake_row["id"]
+    flake_id = flake["id"]
 
-    [st_row] = client.execute_sql(
-        "SELECT id FROM public.derivation_statuses WHERE name='complete'"
-    )
-    complete_status_id = st_row["id"]
-
-    hostnames: List[str] = [f"{base_hostname}-{i+1}" for i in range(len(commit_lags))]
-    for hn in hostnames:
-        client.execute_sql(
-            """
-            INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
-            VALUES (%s, %s, TRUE, %s, 'fake-key')
-            ON CONFLICT (hostname) DO UPDATE
-              SET flake_id = EXCLUDED.flake_id,
-                  is_active = EXCLUDED.is_active
-            """,
-            (hn, flake_id, f"/nix/store/bootstrap-{hn}.drv"),
-        )
-
-    max_lag = max(commit_lags) if commit_lags else 0
-    num_commits = max_lag + 1
-    commits = []
-    for i in range(num_commits):
-        ts = now - timedelta(minutes=90 * (num_commits - 1 - i))
-        git_hash = f"{flake_name}-c{i+1:02d}-{int(ts.timestamp())}"
+    # Commits: one every ~day
+    commit_ids: List[int] = []
+    for d in range(days):
+        ts = start + timedelta(days=d, minutes=floor(d * 1.7) % stagger_window_minutes)
         [cr] = client.execute_sql(
             """
             INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
             VALUES (%s, %s, %s, 0)
             RETURNING id
             """,
-            (flake_id, git_hash, ts),
+            (flake_id, f"{flake_name}-c{d:03d}", ts),
         )
-        slug = sha256(f"{git_hash}-{cr['id']}".encode()).hexdigest()[:12]
-        drv_path = f"/nix/store/{slug}-nixos-system-{flake_name}.drv"
+        commit_ids.append(cr["id"])
 
-        client.execute_sql(
+    # 5 systems staggered across commits, all with regular heartbeats
+    hostnames = [f"test-timeseries-{i+1}" for i in range(5)]
+    for i, hn in enumerate(hostnames):
+        commit_id = commit_ids[-1 - (i % 3)]  # spread a bit
+        drv = f"/nix/store/{commit_id:012d}-nixos-system-{flake_name}.drv"
+
+        [sysrow] = client.execute_sql(
             """
-            INSERT INTO public.derivations (
-              commit_id, derivation_type, derivation_name, derivation_path,
-              status_id, attempt_count, scheduled_at, completed_at
-            )
-            VALUES (%s, 'nixos', %s, %s, %s, 0, %s, %s)
+            INSERT INTO public.systems (hostname, flake_id, is_active, derivation, public_key)
+            VALUES (%s, %s, TRUE, %s, 'fake-key')
+            ON CONFLICT (hostname) DO UPDATE
+              SET flake_id = EXCLUDED.flake_id,
+                  derivation = EXCLUDED.derivation,
+                  is_active = EXCLUDED.is_active
+            RETURNING id
             """,
-            (
-                cr["id"],
-                f"{flake_name}-build-{i+1:02d}",
-                drv_path,
-                complete_status_id,
-                ts + timedelta(minutes=5),
-                ts + timedelta(minutes=10),
-            ),
+            (hn, flake_id, drv),
         )
-        commits.append((cr["id"], git_hash, drv_path, ts))
 
-    drv_by_index = [c[2] for c in commits]
-
-    for idx, (hn, lag) in enumerate(zip(hostnames, commit_lags)):
-        commit_index = len(drv_by_index) - 1 - lag
-        commit_index = max(0, min(commit_index, len(drv_by_index) - 1))
-        drv_path = drv_by_index[commit_index]
-        upgrade_ts = commits[commit_index][3] + timedelta(minutes=idx * 5)
-        [state] = client.execute_sql(
+        [st] = client.execute_sql(
             """
             INSERT INTO public.system_states (
-              hostname, change_reason, derivation_path, os, kernel,
-              memory_gb, uptime_secs, cpu_brand, cpu_cores,
-              primary_ip_address, nixos_version, agent_compatible, "timestamp"
+                hostname, change_reason, derivation_path, os, kernel,
+                memory_gb, uptime_secs, cpu_brand, cpu_cores,
+                primary_ip_address, nixos_version, agent_compatible, "timestamp"
             )
             VALUES (%s, 'startup', %s, 'NixOS', '6.6.89',
                     32.0, 3600, 'Intel Xeon', 16,
                     %s, '25.05', TRUE, %s)
             RETURNING id
             """,
-            (hn, drv_path, f"10.0.1.{100+idx}", upgrade_ts),
+            (hn, drv, f"10.1.0.{i+10}", now - timedelta(hours=1)),
         )
-        hb_ts = now - timedelta(minutes=min(heartbeat_max_age_minutes, 10))
-        client.execute_sql(
-            """
-            INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
-            VALUES (%s, %s, %s, 'build123')
-            """,
-            (state["id"], hb_ts, agent_version),
-        )
-        client.execute_sql(
-            "UPDATE public.systems SET derivation = %s WHERE hostname = %s",
-            (drv_path, hn),
-        )
+        state_id = st["id"]
+
+        # Heartbeats over last `heartbeat_hours` hours every `heartbeat_interval_minutes`
+        for minutes_ago in range(0, heartbeat_hours * 60, heartbeat_interval_minutes):
+            hb_ts = now - timedelta(minutes=minutes_ago)
+            client.execute_sql(
+                """
+                INSERT INTO public.agent_heartbeats (system_state_id, "timestamp", agent_version, agent_build_hash)
+                VALUES (%s, %s, %s, 'build123')
+                """,
+                (state_id, hb_ts, agent_version),
+            )
 
     hostname_like = f"{base_hostname}-%"
     cleanup_patterns = {
