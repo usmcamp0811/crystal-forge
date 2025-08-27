@@ -122,11 +122,17 @@ pub fn post_system_heartbeat(current_system: &OsStr, context: &str) -> Result<()
     let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
-    // Send to heartbeat endpoint
+    // Send to heartbeat endpoint - USE SAME URL LOGIC AS STATE ENDPOINT
     let client = Client::new();
+    let (scheme, port_suffix) = match client_cfg.server_port {
+        443 => ("https", "".to_string()),       // Omit :443 for HTTPS
+        80 => ("http", "".to_string()),         // Omit :80 for HTTP
+        port => ("http", format!(":{}", port)), // Include port for non-standard
+    };
+
     let url = format!(
-        "http://{}:{}/agent/heartbeat",
-        client_cfg.server_host, client_cfg.server_port
+        "{}://{}{}/agent/heartbeat",
+        scheme, client_cfg.server_host, port_suffix
     );
 
     println!("Posting heartbeat to: {}", url);
