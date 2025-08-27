@@ -200,11 +200,14 @@ def test_all_scenarios(
         )
 
     # Save results for debugging without relying on CFTestClient helpers
+    # Append debug output (NDJSON) instead of overwriting
     try:
-        Path("/tmp/cf_view_scenario_results.json").write_text(
-            json.dumps({"scenario": scenario_id, "rows": rows}, default=str, indent=2),
-            encoding="utf-8",
-        )
+        log_path = Path("/tmp/cf_view_scenario_results.json")
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps({"scenario": scenario_id, "rows": rows}, default=str) + "\n"
+            )
     except Exception:
         pass
 
