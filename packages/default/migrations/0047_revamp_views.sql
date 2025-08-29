@@ -213,3 +213,153 @@ ORDER BY
     commits_behind DESC NULLS LAST,
     hostname;
 
+-- Commit build status view
+-- Shows all commits with their derivation build status for filtering and analysis
+CREATE OR REPLACE VIEW view_commit_build_status AS
+WITH commit_derivation_summary AS (
+    SELECT
+        c.id AS commit_id,
+        c.flake_id,
+        c.git_commit_hash,
+        c.commit_timestamp,
+        c.attempt_count AS commit_attempt_count,
+        f.name AS flake_name,
+        f.repo_url,
+        d.id AS derivation_id,
+        d.derivation_type,
+        d.derivation_name,
+        d.derivation_path,
+        d.scheduled_at AS derivation_scheduled_at,
+        d.started_at AS derivation_started_at,
+        d.completed_at AS derivation_completed_at,
+        d.attempt_count AS derivation_attempt_count,
+        d.evaluation_duration_ms,
+        d.error_message,
+        d.pname,
+        d.version,
+        ds.name AS derivation_status,
+        ds.description AS derivation_status_description,
+        ds.is_terminal,
+        ds.is_success,
+        ds.display_order
+    FROM
+        commits c
+        JOIN flakes f ON c.flake_id = f.id
+        LEFT JOIN derivations d ON c.id = d.commit_id
+        LEFT JOIN derivation_statuses ds ON d.status_id = ds.id
+),
+derivation_counts AS (
+    SELECT
+        commit_id,
+        COUNT(
+            CASE WHEN derivation_id IS NOT NULL THEN
+                1
+            END) AS total_derivations,
+    COUNT(
+        CASE WHEN is_success = TRUE THEN
+            1
+        END) AS successful_derivations,
+    COUNT(
+        CASE WHEN is_success = FALSE
+            AND is_terminal = TRUE THEN
+            1
+        END) AS failed_derivations,
+    COUNT(
+        CASE WHEN is_terminal = FALSE THEN
+            1
+        END) AS in_progress_derivations,
+    COUNT(
+        CASE WHEN derivation_type = 'nixos' THEN
+            1
+        END) AS nixos_derivations,
+    COUNT(
+        CASE WHEN derivation_type = 'package' THEN
+            1
+        END) AS package_derivations,
+    AVG(
+        CASE WHEN evaluation_duration_ms IS NOT NULL THEN
+            evaluation_duration_ms
+        END) AS avg_evaluation_duration_ms,
+    MAX(derivation_attempt_count) AS max_derivation_attempts,
+    STRING_AGG(DISTINCT derivation_status, ', ' ORDER BY derivation_status) AS all_statuses
+FROM
+    commit_derivation_summary
+GROUP BY
+    commit_id
+)
+SELECT
+    cds.commit_id,
+    cds.flake_name,
+    cds.repo_url,
+    cds.git_commit_hash,
+    LEFT (cds.git_commit_hash,
+        8) AS short_hash,
+    cds.commit_timestamp,
+    cds.commit_attempt_count,
+    -- Individual derivation fields (when querying specific derivations)
+    cds.derivation_id,
+    cds.derivation_type,
+    cds.derivation_name,
+    cds.derivation_path,
+    cds.derivation_scheduled_at,
+    cds.derivation_started_at,
+    cds.derivation_completed_at,
+    cds.derivation_attempt_count,
+    cds.evaluation_duration_ms,
+    cds.error_message,
+    cds.pname,
+    cds.version,
+    cds.derivation_status,
+    cds.derivation_status_description,
+    cds.is_terminal,
+    cds.is_success,
+    -- Commit-level aggregations
+    COALESCE(dc.total_derivations, 0) AS total_derivations,
+    COALESCE(dc.successful_derivations, 0) AS successful_derivations,
+    COALESCE(dc.failed_derivations, 0) AS failed_derivations,
+    COALESCE(dc.in_progress_derivations, 0) AS in_progress_derivations,
+    COALESCE(dc.nixos_derivations, 0) AS nixos_derivations,
+    COALESCE(dc.package_derivations, 0) AS package_derivations,
+    ROUND(COALESCE(dc.avg_evaluation_duration_ms, 0) / 1000.0, 2) AS avg_evaluation_duration_seconds,
+    COALESCE(dc.max_derivation_attempts, 0) AS max_derivation_attempts,
+    dc.all_statuses,
+    -- Commit-level status assessment
+    CASE WHEN dc.total_derivations = 0 THEN
+        'no_builds'
+    WHEN dc.in_progress_derivations > 0 THEN
+        'building'
+    WHEN dc.failed_derivations > 0
+        AND dc.successful_derivations = 0 THEN
+        'failed'
+    WHEN dc.failed_derivations > 0
+        AND dc.successful_derivations > 0 THEN
+        'partial'
+    WHEN dc.successful_derivations = dc.total_derivations THEN
+        'complete'
+    ELSE
+        'unknown'
+    END AS commit_build_status,
+    CASE WHEN dc.total_derivations = 0 THEN
+        'No derivations scheduled for this commit'
+    WHEN dc.in_progress_derivations > 0 THEN
+        CONCAT(dc.in_progress_derivations, ' of ', dc.total_derivations, ' derivations still building')
+    WHEN dc.failed_derivations > 0
+        AND dc.successful_derivations = 0 THEN
+        CONCAT('All ', dc.total_derivations, ' derivations failed')
+    WHEN dc.failed_derivations > 0
+        AND dc.successful_derivations > 0 THEN
+        CONCAT(dc.successful_derivations, ' successful, ', dc.failed_derivations, ' failed of ', dc.total_derivations, ' total')
+    WHEN dc.successful_derivations = dc.total_derivations THEN
+        CONCAT('All ', dc.total_derivations, ' derivations completed successfully')
+    ELSE
+        'Build status unclear'
+    END AS commit_build_description
+FROM
+    commit_derivation_summary cds
+    LEFT JOIN derivation_counts dc ON cds.commit_id = dc.commit_id
+ORDER BY
+    cds.commit_timestamp DESC,
+    cds.flake_name,
+    cds.derivation_type,
+    cds.derivation_name;
+
