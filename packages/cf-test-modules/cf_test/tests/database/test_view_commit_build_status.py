@@ -7,16 +7,83 @@ import pytest
 
 from cf_test import CFTestClient, CFTestConfig
 from cf_test.scenarios import (
+    _cleanup_fn,
     _create_base_scenario,
+    _one_row,
+    scenario_agent_restart,
     scenario_behind,
+    scenario_build_timeout,
+    scenario_compliance_drift,
     scenario_eval_failed,
+    scenario_flake_time_series,
+    scenario_flaky_agent,
     scenario_mixed_commit_lag,
+    scenario_never_seen,
+    scenario_offline,
+    scenario_partial_rebuild,
+    scenario_rollback,
     scenario_up_to_date,
 )
 
 VIEW_COMMIT_BUILD_STATUS = "view_commit_build_status"
 
 BUILD_STATUS_SCENARIO_CONFIGS = [
+    {
+        "id": "agent_restart",
+        "builder": scenario_agent_restart,
+        "expected": {
+            "commit_count": 1,
+            "has_complete_builds": True,
+            "has_derivations": True,
+        },
+    },
+    {
+        "id": "build_timeout",
+        "builder": scenario_build_timeout,
+        "expected": {
+            "commit_build_status": "building",  # Has derivations stuck in progress
+            "in_progress_derivations": 4,  # Main + 3 additional stuck derivations
+            "total_derivations": 4,
+        },
+    },
+    {
+        "id": "rollback",
+        "builder": scenario_rollback,
+        "expected": {
+            "commit_count": 2,  # Old stable + new problematic commits
+            "has_complete_builds": True,  # Both commits built successfully
+            "has_derivations": True,
+        },
+    },
+    {
+        "id": "partial_rebuild",
+        "builder": scenario_partial_rebuild,
+        "expected": {
+            "commit_build_status": "partial",  # Mixed success/failure among packages
+            "successful_derivations": 2,  # Main nixos + pkg-success + pkg-retry-success
+            "failed_derivations": 2,  # pkg-failed-once + pkg-still-failing
+            "in_progress_derivations": 1,  # pkg-building
+            "total_derivations": 6,  # Main + 5 packages
+        },
+    },
+    {
+        "id": "compliance_drift",
+        "builder": scenario_compliance_drift,
+        "expected": {
+            "commit_count": 8,  # Original ancient + 7 newer commits
+            "has_complete_builds": True,
+            "has_derivations": True,
+        },
+    },
+    {
+        "id": "flaky_agent",
+        "builder": scenario_flaky_agent,
+        "expected": {
+            "commit_count": 1,
+            "has_complete_builds": True,
+            "has_derivations": True,
+        },
+    },
     {
         "id": "up_to_date",
         "builder": scenario_up_to_date,

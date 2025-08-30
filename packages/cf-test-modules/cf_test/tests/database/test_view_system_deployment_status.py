@@ -7,17 +7,98 @@ import pytest
 
 from cf_test import CFTestClient, CFTestConfig
 from cf_test.scenarios import (
+    _cleanup_fn,
     _create_base_scenario,
+    _one_row,
+    scenario_agent_restart,
     scenario_behind,
+    scenario_build_timeout,
+    scenario_compliance_drift,
     scenario_eval_failed,
+    scenario_flake_time_series,
+    scenario_flaky_agent,
     scenario_mixed_commit_lag,
     scenario_never_seen,
+    scenario_offline,
+    scenario_partial_rebuild,
+    scenario_rollback,
     scenario_up_to_date,
 )
 
 VIEW_DEPLOYMENT_STATUS = "view_system_deployment_status"
 
 DEPLOYMENT_SCENARIO_CONFIGS = [
+    {
+        "id": "agent_restart",
+        "builder": scenario_agent_restart,
+        "expected": [
+            {
+                "hostname": "test-agent-restart",
+                "deployment_status": "up_to_date",  # Single commit, system matches
+                "commits_behind": 0,
+                "status_description": "Running latest commit",
+            }
+        ],
+    },
+    {
+        "id": "build_timeout",
+        "builder": scenario_build_timeout,
+        "expected": [
+            {
+                "hostname": "test-build-timeout",
+                "deployment_status": "up_to_date",  # Single commit scenario
+                "commits_behind": 0,
+                "status_description": "Running latest commit",
+            }
+        ],
+    },
+    {
+        "id": "rollback",
+        "builder": scenario_rollback,
+        "expected": [
+            {
+                "hostname": "test-rollback",
+                "deployment_status": "behind",  # Rolled back to older commit
+                "commits_behind": 1,  # Behind by the newer problematic commit
+                "status_description": "Behind by 1 commit(s)",
+            }
+        ],
+    },
+    {
+        "id": "partial_rebuild",
+        "builder": scenario_partial_rebuild,
+        "expected": [
+            {
+                "hostname": "test-partial-rebuild",
+                "deployment_status": "up_to_date",  # Single commit scenario
+                "commits_behind": 0,
+                "status_description": "Running latest commit",
+            }
+        ],
+    },
+    {
+        "id": "compliance_drift",
+        "builder": scenario_compliance_drift,
+        "expected": [
+            {
+                "hostname": "test-compliance-drift",
+                "deployment_status": "behind",  # Ancient commit with many newer ones
+                "status_description": "Behind by 7 commit(s)",  # 7 newer commits created
+            }
+        ],
+    },
+    {
+        "id": "flaky_agent",
+        "builder": scenario_flaky_agent,
+        "expected": [
+            {
+                "hostname": "test-flaky-agent",
+                "deployment_status": "up_to_date",  # Single commit scenario
+                "commits_behind": 0,
+                "status_description": "Running latest commit",
+            }
+        ],
+    },
     {
         "id": "never_seen",
         "builder": scenario_never_seen,
