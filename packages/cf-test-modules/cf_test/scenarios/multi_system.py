@@ -490,3 +490,388 @@ def scenario_multiple_orphaned_systems(
         "cleanup": cleanup_patterns,
         "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
     }
+
+
+def scenario_multi_system_progression_with_failure(
+    client: CFTestClient, base_hostname: str = "test-progression"
+) -> Dict[str, Any]:
+    """
+    Creates 5 systems that get updated through 10 successful commits,
+    then shows systems in unknown state when 11th commit fails to build.
+
+    Timeline:
+    - Commits 1-10: Successful builds, systems get updated progressively
+    - Commit 11: Build fails, no derivation created
+    - Systems show derivation_path from commit 10 but are now "unknown"
+      because they can't find newer successful builds
+    """
+
+    import time
+
+    now = datetime.now(UTC)
+    timestamp = int(time.time())
+
+    # Create flake
+    flake_row = _one_row(
+        client,
+        """
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
+        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        (
+            f"progression-test-{timestamp}",
+            f"https://example.com/progression-{timestamp}.git",
+        ),
+    )
+    flake_id = flake_row["id"]
+
+    # Create 11 commits over time (10 successful + 1 failed)
+    commit_ids = []
+    derivation_ids = []
+
+    for i in range(11):
+        commit_time = now - timedelta(hours=24 - (i * 2))  # Every 2 hours over 24 hours
+        commit_hash = f"progression-{timestamp}-commit-{i:02d}"
+
+        commit_row = _one_row(
+            client,
+            """
+            INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
+            VALUES (%s, %s, %s, 0)
+            RETURNING id
+            """,
+            (flake_id, commit_hash, commit_time),
+        )
+        commit_ids.append(commit_row["id"])
+
+        # Create derivations for commits 0-9 (successful builds)
+        # Commit 10 (index 10) will have NO derivation (build failed)
+        if i < 10:
+            for sys_num in range(5):
+                hostname = f"{base_hostname}-{sys_num}"
+                deriv_path = f"/nix/store/{commit_hash}-nixos-system-{hostname}.drv"
+
+                deriv_row = _one_row(
+                    client,
+                    """
+                    INSERT INTO derivations (
+                        commit_id, derivation_type, derivation_name, derivation_path,
+                        status_id, attempt_count, scheduled_at, completed_at
+                    )
+                    VALUES (
+                        %s, 'nixos', %s, %s,
+                        (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                        0, %s, %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        commit_row["id"],
+                        hostname,
+                        deriv_path,
+                        commit_time + timedelta(minutes=10),
+                        commit_time + timedelta(minutes=20),
+                    ),
+                )
+                derivation_ids.append(deriv_row["id"])
+        else:
+            # Commit 10: Create failed derivations (no derivation_path)
+            for sys_num in range(5):
+                hostname = f"{base_hostname}-{sys_num}"
+
+                failed_deriv_row = _one_row(
+                    client,
+                    """
+                    INSERT INTO derivations (
+                        commit_id, derivation_type, derivation_name, derivation_path,
+                        status_id, attempt_count, scheduled_at, completed_at, error_message
+                    )
+                    VALUES (
+                        %s, 'nixos', %s, NULL,
+                        (SELECT id FROM derivation_statuses WHERE name = 'failed'),
+                        2, %s, %s, 'Build failed: dependency conflict'
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        commit_row["id"],
+                        hostname,
+                        commit_time + timedelta(minutes=10),
+                        commit_time + timedelta(minutes=15),
+                    ),
+                )
+                derivation_ids.append(failed_deriv_row["id"])
+
+    # Create 5 systems
+    system_ids = []
+    state_ids = []
+    heartbeat_ids = []
+
+    for sys_num in range(5):
+        hostname = f"{base_hostname}-{sys_num}"
+
+        # Create system pointing to flake
+        system_row = _one_row(
+            client,
+            """
+            INSERT INTO systems (hostname, flake_id, is_active, derivation, public_key)
+            VALUES (%s, %s, TRUE, 'placeholder-derivation', 'progression-key')
+            RETURNING id
+            """,
+            (hostname, flake_id),
+        )
+        system_ids.append(system_row["id"])
+
+        # Create system state progression - each system gets updated through commits 0-9
+        # System gets "stuck" on commit 9 because commit 10 failed to build
+        for commit_idx in range(10):  # Only through successful commits
+            commit_hash = f"progression-{timestamp}-commit-{commit_idx:02d}"
+            deriv_path = f"/nix/store/{commit_hash}-nixos-system-{hostname}.drv"
+
+            # Stagger system updates - each system gets updated a bit after the commit
+            deployment_time = (
+                now - timedelta(hours=24 - (commit_idx * 2))
+            ) + timedelta(
+                minutes=30
+                + (sys_num * 10)  # System 0 updates first, system 4 updates last
+            )
+
+            # Only keep the latest state per system
+            if commit_idx == 9:  # Final successful deployment
+                state_row = _one_row(
+                    client,
+                    """
+                    INSERT INTO system_states (
+                        hostname, change_reason, derivation_path, os, kernel,
+                        memory_gb, uptime_secs, cpu_brand, cpu_cores,
+                        primary_ip_address, nixos_version, agent_compatible, timestamp
+                    )
+                    VALUES (
+                        %s, 'config_change', %s, 'NixOS', '6.6.89',
+                        32.0, 3600, 'Intel Xeon', 16,
+                        %s, '25.05', TRUE, %s
+                    )
+                    RETURNING id
+                    """,
+                    (
+                        hostname,
+                        deriv_path,
+                        f"192.168.1.{100 + sys_num}",
+                        deployment_time,
+                    ),
+                )
+                state_ids.append(state_row["id"])
+
+        # Add recent heartbeats to show systems are online but stuck
+        heartbeat_row = _one_row(
+            client,
+            """
+            INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
+            VALUES (%s, %s, '2.1.0', 'progression-build')
+            RETURNING id
+            """,
+            (state_ids[-1], now - timedelta(minutes=5 + sys_num)),
+        )
+        heartbeat_ids.append(heartbeat_row["id"])
+
+    # The result:
+    # - Systems are running derivations from commit 9 (last successful)
+    # - But there's a newer commit 10 that failed to build
+    # - Systems will show as "unknown" because their current derivation_path
+    #   exists but there are newer commits they can't upgrade to
+
+    hostnames = [f"{base_hostname}-{i}" for i in range(5)]
+
+    cleanup_patterns = {
+        "agent_heartbeats": [f"id IN ({','.join(map(str, heartbeat_ids))})"],
+        "system_states": [f"hostname LIKE '{base_hostname}-%'"],
+        "systems": [f"hostname LIKE '{base_hostname}-%'"],
+        "derivations": [f"id IN ({','.join(map(str, derivation_ids))})"],
+        "commits": [f"id IN ({','.join(map(str, commit_ids))})"],
+        "flakes": [f"id = {flake_id}"],
+    }
+
+    return {
+        "hostnames": hostnames,
+        "flake_id": flake_id,
+        "commit_ids": commit_ids,
+        "derivation_ids": derivation_ids,
+        "system_ids": system_ids,
+        "state_ids": state_ids,
+        "heartbeat_ids": heartbeat_ids,
+        "successful_commits": commit_ids[:10],
+        "failed_commit": commit_ids[10],
+        "commit_hashes": [
+            f"progression-{timestamp}-commit-{i:02d}" for i in range(11)
+        ],  # Add this line
+        "cleanup": cleanup_patterns,
+        "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
+    }
+
+
+def scenario_progressive_system_updates(
+    client: CFTestClient, base_hostname: str = "test-progressive"
+) -> Dict[str, Any]:
+    """
+    Simpler version: 3 systems that get updated at different paces,
+    creating a realistic deployment timeline where systems lag behind each other.
+    """
+
+    import time
+
+    now = datetime.now(UTC)
+    timestamp = int(time.time())
+
+    # Create flake
+    flake_row = _one_row(
+        client,
+        """
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
+        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        (
+            f"progressive-{timestamp}",
+            f"https://example.com/progressive-{timestamp}.git",
+        ),
+    )
+    flake_id = flake_row["id"]
+
+    # Create 5 commits over 10 hours
+    commit_data = []
+    for i in range(5):
+        commit_time = now - timedelta(hours=10 - (i * 2))
+        commit_hash = f"progressive-{timestamp}-{i}"
+
+        commit_row = _one_row(
+            client,
+            """
+            INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
+            VALUES (%s, %s, %s, 0)
+            RETURNING id
+            """,
+            (flake_id, commit_hash, commit_time),
+        )
+
+        commit_data.append(
+            {"id": commit_row["id"], "hash": commit_hash, "time": commit_time}
+        )
+
+    # Create systems with different update patterns
+    system_patterns = [
+        ("fast", 0),  # Always on latest (commit 4)
+        ("medium", 1),  # One behind (commit 3)
+        ("slow", 3),  # Three behind (commit 1)
+    ]
+
+    system_ids = []
+    derivation_ids = []
+
+    for pattern_name, commits_behind in system_patterns:
+        hostname = f"{base_hostname}-{pattern_name}"
+        current_commit_idx = len(commit_data) - 1 - commits_behind
+        current_commit = commit_data[current_commit_idx]
+
+        # Create all derivations for this system up to its current commit
+        for commit_idx in range(current_commit_idx + 1):
+            commit = commit_data[commit_idx]
+            deriv_path = f"/nix/store/{commit['hash']}-nixos-system-{hostname}.drv"
+
+            deriv_row = _one_row(
+                client,
+                """
+                INSERT INTO derivations (
+                    commit_id, derivation_type, derivation_name, derivation_path,
+                    status_id, attempt_count, scheduled_at, completed_at
+                )
+                VALUES (
+                    %s, 'nixos', %s, %s,
+                    (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                    0, %s, %s
+                )
+                RETURNING id
+                """,
+                (
+                    commit["id"],
+                    hostname,
+                    deriv_path,
+                    commit["time"] + timedelta(minutes=10),
+                    commit["time"] + timedelta(minutes=20),
+                ),
+            )
+            derivation_ids.append(deriv_row["id"])
+
+        # Create system
+        system_row = _one_row(
+            client,
+            """
+            INSERT INTO systems (hostname, flake_id, is_active, derivation, public_key)
+            VALUES (%s, %s, TRUE, %s, 'progressive-key')
+            RETURNING id
+            """,
+            (
+                hostname,
+                flake_id,
+                f"/nix/store/{current_commit['hash']}-nixos-system-{hostname}.drv",
+            ),
+        )
+        system_ids.append(system_row["id"])
+
+        # Create system state showing current deployment
+        state_row = _one_row(
+            client,
+            """
+            INSERT INTO system_states (
+                hostname, change_reason, derivation_path, os, kernel,
+                memory_gb, uptime_secs, cpu_brand, cpu_cores,
+                primary_ip_address, nixos_version, agent_compatible, timestamp
+            )
+            VALUES (
+                %s, 'config_change', %s, 'NixOS', '6.6.89',
+                16.0, 7200, 'Intel Xeon', 8,
+                %s, '25.05', TRUE, %s
+            )
+            RETURNING id
+            """,
+            (
+                hostname,
+                f"/nix/store/{current_commit['hash']}-nixos-system-{hostname}.drv",
+                f"192.168.1.{150 + len(system_ids)}",
+                current_commit["time"] + timedelta(minutes=45),
+            ),
+        )
+
+        # Add heartbeat
+        _one_row(
+            client,
+            """
+            INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
+            VALUES (%s, %s, '2.0.0', 'progressive-build')
+            """,
+            (state_row["id"], now - timedelta(minutes=3 + len(system_ids))),
+        )
+
+    hostnames = [f"{base_hostname}-{name}" for name, _ in system_patterns]
+
+    cleanup_patterns = {
+        "agent_heartbeats": [
+            f"system_state_id IN (SELECT id FROM system_states WHERE hostname LIKE '{base_hostname}-%')"
+        ],
+        "system_states": [f"hostname LIKE '{base_hostname}-%'"],
+        "systems": [f"hostname LIKE '{base_hostname}-%'"],
+        "derivations": [f"id IN ({','.join(map(str, derivation_ids))})"],
+        "commits": [f"id IN ({','.join(str(c['id']) for c in commit_data)})"],
+        "flakes": [f"id = {flake_id}"],
+    }
+
+    return {
+    "hostnames": hostnames,
+    "flake_id": flake_id,
+    "commit_data": commit_data,
+    "commit_hashes": [c["hash"] for c in commit_data],  # Add this line
+    "cleanup": cleanup_patterns,
+    "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
+    }

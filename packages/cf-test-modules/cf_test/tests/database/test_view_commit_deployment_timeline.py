@@ -6,20 +6,38 @@ from typing import Any, Dict, List
 import pytest
 
 from cf_test import CFTestClient, CFTestConfig
-from cf_test.scenarios import (
-    _create_base_scenario,
-    scenario_agent_restart,
-    scenario_behind,
-    scenario_compliance_drift,
-    scenario_eval_failed,
-    scenario_orphaned_deployments,
-    scenario_rollback,
-    scenario_up_to_date,
-)
+from cf_test.scenarios import (_create_base_scenario, scenario_agent_restart,
+                               scenario_behind, scenario_compliance_drift,
+                               scenario_eval_failed,
+                               scenario_multi_system_progression_with_failure,
+                               scenario_orphaned_deployments,
+                               scenario_progressive_system_updates,
+                               scenario_rollback, scenario_up_to_date)
 
 VIEW_DEPLOYMENT_TIMELINE = "view_commit_deployment_timeline"
 
 DEPLOYMENT_TIMELINE_SCENARIO_CONFIGS = [
+    {
+        "id": "multi_system_progression_with_failure",
+        "builder": scenario_multi_system_progression_with_failure,
+        "expected": {
+            "commit_count": 11,  # 10 successful + 1 failed commit
+            "has_successful_evaluations": True,
+            "has_failed_evaluations": True,
+            "has_deployments": True,
+            "systems_deployed_count": 5,  # All 5 systems should show deployments
+        },
+    },
+    {
+        "id": "progressive_system_updates", 
+        "builder": scenario_progressive_system_updates,
+        "expected": {
+            "commit_count": 5,  # 5 commits with staggered system updates
+            "has_successful_evaluations": True,
+            "has_deployments": True,
+            "has_multiple_deployment_times": True,  # Systems deploy at different times
+        },
+    },
     {
         "id": "orphaned_deployments",
         "builder": scenario_orphaned_deployments,
@@ -93,30 +111,20 @@ def _get_commit_hashes_from_timeline_scenario(
     scenario_data: Dict[str, Any], scenario_id: str
 ) -> List[str]:
     """Extract commit hashes from scenario data"""
-    cleanup = scenario_data.get("cleanup", {})
-    commit_patterns = cleanup.get("commits", [])
-
-    # Extract hash patterns from commit cleanup
+    # Check for commit hashes stored directly in scenario data
+    if "commit_hashes" in scenario_data:
+        return scenario_data["commit_hashes"]
+    
+    # Check for commit_data (used by progressive_system_updates)
+    if "commit_data" in scenario_data:
+        return [c["hash"] for c in scenario_data["commit_data"]]
+    
+    # Check for individual commit hashes
     hashes = []
-    for pattern in commit_patterns:
-        if "git_commit_hash" in pattern and "=" in pattern:
-            # Pattern like "git_commit_hash = 'abc123'"
-            parts = pattern.split("=")
-            if len(parts) >= 2:
-                hash_part = parts[1].strip().strip("'\"")
-                if hash_part and not hash_part.startswith("IN"):
-                    hashes.append(hash_part)
-        elif "git_commit_hash IN" in pattern:
-            # Pattern like "git_commit_hash IN ('hash1','hash2')"
-            start = pattern.find("(") + 1
-            end = pattern.find(")")
-            if start > 0 and end > start:
-                hash_list = pattern[start:end]
-                for h in hash_list.split(","):
-                    clean_hash = h.strip().strip("'\"")
-                    if clean_hash:
-                        hashes.append(clean_hash)
-
+    for attr in ["git_hash", "current_commit_hash", "latest_commit_hash"]:
+        if attr in scenario_data and scenario_data[attr]:
+            hashes.append(scenario_data[attr])
+    
     return hashes
 
 

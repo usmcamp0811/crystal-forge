@@ -7,19 +7,13 @@ import pytest
 
 from cf_test import CFTestClient, CFTestConfig
 from cf_test.scenarios import (
-    _cleanup_fn,
     _create_base_scenario,
-    _one_row,
     scenario_agent_restart,
     scenario_behind,
     scenario_build_timeout,
     scenario_compliance_drift,
     scenario_eval_failed,
-    scenario_flake_time_series,
     scenario_flaky_agent,
-    scenario_mixed_commit_lag,
-    scenario_never_seen,
-    scenario_offline,
     scenario_partial_rebuild,
     scenario_rollback,
     scenario_up_to_date,

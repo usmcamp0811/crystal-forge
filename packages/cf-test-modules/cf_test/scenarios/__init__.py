@@ -4,7 +4,9 @@ from .multi_system import (
     scenario_flake_time_series,
     scenario_latest_with_two_overdue,
     scenario_mixed_commit_lag,
+    scenario_multi_system_progression_with_failure,
     scenario_multiple_orphaned_systems,
+    scenario_progressive_system_updates,
 )
 from .single_system import (
     scenario_agent_restart,
@@ -41,6 +43,9 @@ __all__ = [
     "scenario_mixed_commit_lag",
     "scenario_flake_time_series",
     "scenario_multiple_orphaned_systems",
+    "scenario_multi_system_progression_with_failure",
+    "scenario_orphaned_deployments",
+    "scenario_progressive_system_updates",
     "_discover_scenarios",
     "_coerce_arg",
     "_filter_kwargs",
