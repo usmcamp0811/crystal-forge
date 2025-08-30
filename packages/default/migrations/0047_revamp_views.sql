@@ -390,3 +390,64 @@ FROM
 
 COMMENT ON VIEW public.view_config_timeline IS 'Shows commit evaluation timeline in a formate to be easily parsed into the config timeline in Grafana.';
 
+CREATE OR REPLACE VIEW public.view_commit_nixos_table AS
+WITH base AS (
+    SELECT
+        c.id AS commit_id,
+        c.git_commit_hash,
+        LEFT (c.git_commit_hash,
+            8) AS short_hash,
+        c.commit_timestamp,
+        f.name AS flake_name,
+        d.id AS derivation_id,
+        d.derivation_name,
+        ds.name AS derivation_status,
+        ds.display_order AS status_order,
+        ds.is_terminal,
+        ds.is_success
+    FROM
+        commits c
+        JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN derivations d ON d.commit_id = c.id
+            AND d.derivation_type = 'nixos'
+        LEFT JOIN derivation_statuses ds ON ds.id = d.status_id
+),
+agg AS (
+    SELECT
+        commit_id,
+        COUNT(*) FILTER (WHERE derivation_id IS NOT NULL) AS total,
+        COUNT(*) FILTER (WHERE is_success) AS successful,
+        COUNT(*) FILTER (WHERE is_terminal
+                AND NOT is_success) AS failed,
+            COUNT(*) FILTER (WHERE NOT is_terminal) AS in_progress
+        FROM
+            base
+    GROUP BY
+        commit_id
+)
+SELECT
+    b.commit_id,
+    b.git_commit_hash,
+    b.short_hash,
+    b.commit_timestamp,
+    b.flake_name,
+    b.derivation_name,
+    b.derivation_status,
+    b.status_order,
+    a.total,
+    a.successful,
+    a.failed,
+    a.in_progress,
+    CASE WHEN a.total > 0 THEN
+        ROUND(100.0 * a.successful / a.total, 1)
+    ELSE
+        0
+    END AS progress_pct
+FROM
+    base b
+    LEFT JOIN agg a USING (commit_id)
+ORDER BY
+    b.commit_timestamp DESC,
+    b.status_order,
+    b.derivation_name;
+
