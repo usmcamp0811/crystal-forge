@@ -29,17 +29,16 @@ heartbeat_analysis AS (
         lss.last_state_change,
         lhb.last_heartbeat,
         GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)) AS most_recent_activity,
-    CASE
-    -- Online: Either heartbeat OR state change within 30 minutes
-    WHEN COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz) > (NOW() - INTERVAL '30 minutes')
-        OR COALESCE(lss.last_state_change, '1970-01-01'::timestamptz) > (NOW() - INTERVAL '30 minutes') THEN
-        'online'
-        -- Stale: Most recent activity between 30 minutes and 1 hour ago
-    WHEN GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)) > (NOW() - INTERVAL '1 hour') THEN
-        'stale'
-        -- Offline: No activity for over 1 hour
+    CASE WHEN most_recent_activity IS NULL THEN
+        'Offline'
+    WHEN most_recent_activity > NOW() - INTERVAL '15 minutes' THEN
+        'Healthy'
+    WHEN most_recent_activity > NOW() - INTERVAL '1 hour' THEN
+        'Warning'
+    WHEN most_recent_activity > NOW() - INTERVAL '4 hours' THEN
+        'Critical'
     ELSE
-        'offline'
+        'Offline'
     END AS heartbeat_status,
     -- Calculate minutes since last activity for detailed info
     EXTRACT(EPOCH FROM (NOW() - GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)))) / 60 AS minutes_since_last_activity
