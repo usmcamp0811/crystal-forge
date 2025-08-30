@@ -771,7 +771,7 @@ def scenario_build_timeout(
     client.execute_sql(
         """
         UPDATE derivations 
-        SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'dry-run-in-progress'),
+        SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'pending'),
             started_at = %s,
             completed_at = NULL
         WHERE id = %s
@@ -781,9 +781,9 @@ def scenario_build_timeout(
     
     # Add additional derivations in various stuck states
     stuck_derivations = [
-        ("package-1", "build-in-progress", now - timedelta(hours=4)),
-        ("package-2", "dry-run-in-progress", now - timedelta(hours=7)),
-        ("package-3", "build-pending", now - timedelta(hours=3)),
+        ("package-1", "pending", now - timedelta(hours=4)),
+        ("package-2", "pending", now - timedelta(hours=7)),
+        ("package-3", "pending", now - timedelta(hours=3)),
     ]
     
     additional_deriv_ids = []
@@ -826,25 +826,27 @@ def scenario_rollback(
 ) -> Dict[str, Any]:
     """System that deploys newer commit, then rolls back to older one"""
     
+    import time
     now = datetime.now(UTC)
+    timestamp = int(time.time())
     
-    # Create flake and commits
+    # Create flake and commits with unique hashes
     flake_row = _one_row(
         client,
         """
         INSERT INTO flakes (name, repo_url)
-        VALUES ('rollback-test', 'https://example.com/rollback.git')
+        VALUES (%s, %s)
         ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
         RETURNING id
         """,
-        ()
+        (f"rollback-test-{timestamp}", f"https://example.com/rollback-{timestamp}.git")
     )
     flake_id = flake_row["id"]
     
     # Create timeline: old commit (stable) -> new commit (problematic) -> rollback to old
     commits_data = [
-        ("old-stable-abc", now - timedelta(days=7), "complete"),
-        ("new-problem-def", now - timedelta(hours=6), "complete"),
+        (f"old-stable-{timestamp}", now - timedelta(days=7), "complete"),
+        (f"new-problem-{timestamp}", now - timedelta(hours=6), "complete"),
     ]
     
     commit_ids = []
@@ -989,7 +991,7 @@ def scenario_partial_rebuild(
         ("pkg-failed-once", "failed", 2, now - timedelta(hours=10)),
         ("pkg-retry-success", "complete", 3, now - timedelta(hours=9)),
         ("pkg-still-failing", "failed", 4, now - timedelta(hours=8)),
-        ("pkg-building", "build-in-progress", 2, now - timedelta(minutes=30)),
+        ("pkg-building", "pending", 2, now - timedelta(minutes=30)),
     ]
     
     package_deriv_ids = []
