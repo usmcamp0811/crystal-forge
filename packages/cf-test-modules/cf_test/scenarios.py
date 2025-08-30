@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from . import CFTestClient
 
 
+# FUCK YOU
 def _one_row(client: CFTestClient, sql: str, params: Tuple[Any, ...]) -> Dict[str, Any]:
     rows = client.execute_sql(sql, params)
     return rows[0] if rows else {}
