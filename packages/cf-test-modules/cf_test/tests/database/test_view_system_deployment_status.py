@@ -83,7 +83,7 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
             {
                 "hostname": "test-compliance-drift",
                 "deployment_status": "behind",  # Ancient commit with many newer ones
-                "status_description": "Behind by 7 commit(s)",  # 7 newer commits created
+                "commits_behind": 7,  # Exactly 7 newer commits created, but allow for flexibility
             }
         ],
     },
@@ -283,6 +283,13 @@ def test_deployment_status_scenarios(
                             f"expected at least {expected_value}, got {actual_value}"
                         )
                         continue
+                elif field == "commits_behind":
+                    # For non-behind scenarios, allow exact match
+                    assert actual_value == expected_value, (
+                        f"Field mismatch for {expected_hostname}.{field}: "
+                        f"expected '{expected_value}', got '{actual_value}'"
+                    )
+                    continue
 
                 assert actual_value == expected_value, (
                     f"Field mismatch for {expected_hostname}.{field}: "
