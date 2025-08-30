@@ -29,17 +29,14 @@ heartbeat_analysis AS (
         lss.last_state_change,
         lhb.last_heartbeat,
         GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)) AS most_recent_activity,
-    CASE
-    -- Online: Either heartbeat OR state change within 30 minutes
-    WHEN COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz) > (NOW() - INTERVAL '30 minutes')
-        OR COALESCE(lss.last_state_change, '1970-01-01'::timestamptz) > (NOW() - INTERVAL '30 minutes') THEN
-        'online'
-        -- Stale: Most recent activity between 30 minutes and 1 hour ago
-    WHEN GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)) > (NOW() - INTERVAL '1 hour') THEN
-        'stale'
-        -- Offline: No activity for over 1 hour
+    CASE WHEN GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)) > NOW() - INTERVAL '15 minutes' THEN
+        'Healthy'
+    WHEN GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)) > NOW() - INTERVAL '1 hour' THEN
+        'Warning'
+    WHEN GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)) > NOW() - INTERVAL '4 hours' THEN
+        'Critical'
     ELSE
-        'offline'
+        'Offline'
     END AS heartbeat_status,
     -- Calculate minutes since last activity for detailed info
     EXTRACT(EPOCH FROM (NOW() - GREATEST (COALESCE(lss.last_state_change, '1970-01-01'::timestamptz), COALESCE(lhb.last_heartbeat, '1970-01-01'::timestamptz)))) / 60 AS minutes_since_last_activity
@@ -55,23 +52,27 @@ SELECT
     last_state_change,
     ROUND(minutes_since_last_activity, 1) AS minutes_since_last_activity,
     CASE heartbeat_status
-    WHEN 'online' THEN
+    WHEN 'Healthy' THEN
         'System is active and responding'
-    WHEN 'stale' THEN
-        'System may be experiencing issues - no recent activity'
-    WHEN 'offline' THEN
-        'System appears to be offline or unreachable'
+    WHEN 'Warning' THEN
+        'System may be experiencing issues - no recent activity for 15–60 minutes'
+    WHEN 'Critical' THEN
+        'No activity for 1–4 hours'
+    WHEN 'Offline' THEN
+        'No activity for >4 hours'
     END AS status_description
 FROM
     heartbeat_analysis
 ORDER BY
     CASE heartbeat_status
-    WHEN 'offline' THEN
+    WHEN 'Offline' THEN
         1
-    WHEN 'stale' THEN
+    WHEN 'Critical' THEN
         2
-    WHEN 'online' THEN
+    WHEN 'Warning' THEN
         3
+    WHEN 'Healthy' THEN
+        4
     END,
     minutes_since_last_activity DESC;
 

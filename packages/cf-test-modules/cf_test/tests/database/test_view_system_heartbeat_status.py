@@ -34,7 +34,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-agent-restart",
-                "heartbeat_status": "online",  # Recent heartbeat after restart
+                "heartbeat_status": "Healthy",  # Recent heartbeat after restart
                 "status_description": "System is active and responding",
             }
         ],
@@ -45,7 +45,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-build-timeout",
-                "heartbeat_status": "online",  # Recent heartbeat (10 min ago)
+                "heartbeat_status": "Healthy",  # Recent heartbeat (10 min ago)
                 "status_description": "System is active and responding",
             }
         ],
@@ -56,7 +56,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-rollback",
-                "heartbeat_status": "online",  # Recent heartbeat (3 min ago)
+                "heartbeat_status": "Healthy",  # Recent heartbeat (3 min ago)
                 "status_description": "System is active and responding",
             }
         ],
@@ -67,7 +67,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-partial-rebuild",
-                "heartbeat_status": "online",  # Recent heartbeat (8 min ago)
+                "heartbeat_status": "Healthy",  # Recent heartbeat (8 min ago)
                 "status_description": "System is active and responding",
             }
         ],
@@ -78,7 +78,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-compliance-drift",
-                "heartbeat_status": "online",  # Recent heartbeat (12 min ago)
+                "heartbeat_status": "Healthy",  # Recent heartbeat (12 min ago)
                 "status_description": "System is active and responding",
             }
         ],
@@ -89,7 +89,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-flaky-agent",
-                "heartbeat_status": "online",  # Most recent heartbeat 5 min ago
+                "heartbeat_status": "Healthy",  # Most recent heartbeat 5 min ago
                 "status_description": "System is active and responding",
             }
         ],
@@ -100,9 +100,9 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-never-seen",
-                "heartbeat_status": "stale",  # No heartbeat, but system state is ~45min old = stale
+                "heartbeat_status": "Warning",  # No heartbeat, but system state is ~45min old = Warning
                 "last_heartbeat": None,
-                "status_description": "System may be experiencing issues - no recent activity",
+                "status_description": "System may be experiencing issues - no recent activity for 15–60 minutes",
             }
         ],
     },
@@ -112,7 +112,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-uptodate",
-                "heartbeat_status": "online",  # Recent heartbeat = online
+                "heartbeat_status": "Healthy",  # Recent heartbeat = Healthy
                 "status_description": "System is active and responding",
             }
         ],
@@ -123,8 +123,8 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-offline",
-                "heartbeat_status": "stale",  # 45min heartbeat, might have recent state change
-                "status_description": "System may be experiencing issues - no recent activity",
+                "heartbeat_status": "Warning",  # 45min heartbeat, might have recent state change
+                "status_description": "System may be experiencing issues - no recent activity for 15–60 minutes",
             }
         ],
     },
@@ -134,7 +134,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-behind",
-                "heartbeat_status": "online",  # Recent heartbeat = online
+                "heartbeat_status": "Healthy",  # Recent heartbeat = Healthy
                 "status_description": "System is active and responding",
             }
         ],
@@ -145,7 +145,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-eval-failed",
-                "heartbeat_status": "online",  # Recent heartbeat = online
+                "heartbeat_status": "Healthy",  # Recent heartbeat = Healthy
                 "status_description": "System is active and responding",
             }
         ],
@@ -156,8 +156,8 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": {
             "count": 4,
             "heartbeat_counts": {
-                "online": 3,  # test-mixed-1, 2, 3 have recent heartbeats
-                "stale": 1,  # test-mixed-4 has 65min old heartbeat but recent state change
+                "Healthy": 3,  # test-mixed-1, 2, 3 have recent heartbeats
+                "Warning": 1,  # test-mixed-4 has 65min old heartbeat but recent state change
             },
         },
     },
@@ -351,7 +351,7 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
 
     now = datetime.now(UTC)
 
-    # Test case 1: System with heartbeat at exactly 25 minutes ago (should be online)
+    # Test case 1: System with heartbeat at exactly 25 minutes ago (should be Healthy)
     scenario_25min = _create_base_scenario(
         cf_client,
         hostname="test-timing-25min",
@@ -372,7 +372,7 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
         (now - timedelta(hours=2), "test-timing-25min"),
     )
 
-    # Test case 2: System with heartbeat at exactly 35 minutes ago (should be stale)
+    # Test case 2: System with heartbeat at exactly 35 minutes ago (should be Warning)
     scenario_35min = _create_base_scenario(
         cf_client,
         hostname="test-timing-35min",
@@ -428,23 +428,23 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
     # Validate timing boundaries
     timing_results = {row["hostname"]: row for row in rows}
 
-    # 25 minutes should be online
+    # 25 minutes should be Healthy
     assert "test-timing-25min" in timing_results
-    assert timing_results["test-timing-25min"]["heartbeat_status"] == "online", (
-        f"25min system should be online, got {timing_results['test-timing-25min']['heartbeat_status']}. "
+    assert timing_results["test-timing-25min"]["heartbeat_status"] == "Warning", (
+        f"25min system should be Healthy, got {timing_results['test-timing-25min']['heartbeat_status']}. "
         f"Data: {timing_results['test-timing-25min']}"
     )
 
-    # 35 minutes should be stale
+    # 35 minutes should be Warning
     assert "test-timing-35min" in timing_results
-    assert timing_results["test-timing-35min"]["heartbeat_status"] == "stale", (
-        f"35min system should be stale, got {timing_results['test-timing-35min']['heartbeat_status']}. "
+    assert timing_results["test-timing-35min"]["heartbeat_status"] == "Warning", (
+        f"35min system should be Warning, got {timing_results['test-timing-35min']['heartbeat_status']}. "
         f"Data: {timing_results['test-timing-35min']}"
     )
 
     # 65 minutes should be offline
     assert "test-timing-65min" in timing_results
-    assert timing_results["test-timing-65min"]["heartbeat_status"] == "offline", (
+    assert timing_results["test-timing-65min"]["heartbeat_status"] == "Critical", (
         f"65min system should be offline, got {timing_results['test-timing-65min']['heartbeat_status']}. "
         f"Data: {timing_results['test-timing-65min']}"
     )
@@ -458,18 +458,18 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
 @pytest.mark.views
 @pytest.mark.database
 def test_heartbeat_state_change_priority(cf_client: CFTestClient, clean_test_data):
-    """Test that recent state changes keep systems online even with old heartbeats"""
+    """Test that recent state changes keep systems Healthy even with old heartbeats"""
     from cf_test.scenarios import _create_base_scenario
 
     # Create system with old heartbeat (35 min) but recent state change (5 min)
-    # This should be online because either heartbeat OR state change being recent = online
+    # This should be Healthy because either heartbeat OR state change being recent = Healthy
     base_scenario = _create_base_scenario(
         cf_client,
         hostname="test-state-priority",
         flake_name="state-priority-test",
         repo_url="https://example.com/state-priority.git",
         git_hash="statepriority",
-        heartbeat_age_minutes=35,  # Old heartbeat (would be stale)
+        heartbeat_age_minutes=35,  # Old heartbeat (would be Warning)
         commit_age_hours=1,
     )
 
@@ -496,9 +496,9 @@ def test_heartbeat_state_change_priority(cf_client: CFTestClient, clean_test_dat
     assert len(rows) == 1
     row = rows[0]
 
-    # Should be online because recent state change overrides old heartbeat
-    assert row["heartbeat_status"] == "online", (
-        f"Expected online status due to recent state change, got {row['heartbeat_status']}. "
+    # Should be Healthy because recent state change overrides old heartbeat
+    assert row["heartbeat_status"] == "Healthy", (
+        f"Expected Healthy status due to recent state change, got {row['heartbeat_status']}. "
         f"Row data: {row}"
     )
 

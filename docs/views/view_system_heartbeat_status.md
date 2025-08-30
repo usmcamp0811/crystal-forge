@@ -34,8 +34,16 @@ The view uses a permissive approach where **either** recent heartbeat activity *
 
 ## Time Boundaries
 
-- **30 minutes**: Threshold between `online` and `stale`
-- **1 hour**: Threshold between `stale` and `offline`
+- **15 minutes**: boundary between `Healthy` and `Warning`
+- **1 hour**: boundary between `Warning` and `Critical`
+- **4 hours**: boundary between `Critical` and `Offline`
+
+**Status ranges**
+
+- `Healthy`: last activity ≤ 15 minutes ago
+- `Warning`: 15–60 minutes ago
+- `Critical`: 1–4 hours ago
+- `Offline`: > 4 hours ago
 
 ## Use Cases
 
