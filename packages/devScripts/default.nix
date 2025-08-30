@@ -84,52 +84,52 @@ with lib.crystal-forge; let
       private_key = "$CF_KEY_DIR/agent.key";
     };
     environments = [
-      {
-        name = "devshell";
-        description = "Development environment for Crystal Forge agents and evaluation";
-        is_active = true;
-        risk_profile = "LOW";
-        compliance_level = "NONE";
-      }
-      {
-        name = "mockenv";
-        description = "An environment full of agents created from shell scripts for testing purposes";
-        is_active = true;
-        risk_profile = "LOW";
-        compliance_level = "NONE";
-      }
+      # {
+      #   name = "devshell";
+      #   description = "Development environment for Crystal Forge agents and evaluation";
+      #   is_active = true;
+      #   risk_profile = "LOW";
+      #   compliance_level = "NONE";
+      # }
+      # {
+      #   name = "mockenv";
+      #   description = "An environment full of agents created from shell scripts for testing purposes";
+      #   is_active = true;
+      #   risk_profile = "LOW";
+      #   compliance_level = "NONE";
+      # }
     ];
     systems = [
-      {
-        hostname = "HOSTNAME_PLACEHOLDER";
-        public_key = "PUBLIC_KEY_PLACEHOLDER";
-        environment = "devshell";
-        flake_name = "dotfiles";
-      }
-      {
-        hostname = "test.gray";
-        public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
-        environment = "mockenv";
-        flake_name = "dotfiles";
-      }
-      {
-        hostname = "test.lucas";
-        public_key = pkgs.crystal-forge.testAgents.test-lucas.publicKey;
-        environment = "mockenv";
-        flake_name = "dotfiles";
-      }
+      # {
+      #   hostname = "HOSTNAME_PLACEHOLDER";
+      #   public_key = "PUBLIC_KEY_PLACEHOLDER";
+      #   environment = "devshell";
+      #   flake_name = "dotfiles";
+      # }
+      # {
+      #   hostname = "test.gray";
+      #   public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
+      #   environment = "mockenv";
+      #   flake_name = "dotfiles";
+      # }
+      # {
+      #   hostname = "test.lucas";
+      #   public_key = pkgs.crystal-forge.testAgents.test-lucas.publicKey;
+      #   environment = "mockenv";
+      #   flake_name = "dotfiles";
+      # }
     ];
     flakes = {
       flake_polling_interval = "1m";
       commit_evaluation_interval = "1m";
       build_processing_interval = "1m";
       watched = [
-        {
-          name = "dotfiles";
-          repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
-          auto_poll = true;
-          branch = "nixos";
-        }
+        # {
+        #   name = "dotfiles";
+        #   repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+        #   auto_poll = true;
+        #   branch = "nixos";
+        # }
       ];
     };
   };
@@ -344,14 +344,15 @@ with lib.crystal-forge; let
   server-only = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
-      db-module
       server-module
+      db-module
     ];
   };
 
   dbOnly = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
+      db-module
     ];
   };
   # Simple agent with default actions
