@@ -248,41 +248,53 @@ def pytest_collection_modifyitems(
 @pytest.fixture(scope="function")
 def clean_test_data(cf_client: CFTestClient):
     """
-    Function-scoped teardown that removes common test artifacts.
-
-    What it deletes
-    ---------------
-    - `agent_heartbeats` referencing synthetic `system_states`
-    - `system_states`, `systems`, `derivations` with hostnames like `test-%` / `vm-test-%`
-    - Synthetic `commits` created by scenarios (e.g., `working123-%`, `broken456-%`)
-    - Synthetic `flakes` pointing at example/test repos
-
-    Notes
-    -----
-    - This fixture *always* runs after the test body (even if it failed), so tests
-      can leave temporary data in the DB without cross-test contamination.
-    - SQL is ordered to respect FK constraints (heartbeats → states → systems, etc.).
+    Broader cleanup to avoid cross-test UNIQUE violations on commits.
+    Removes:
+      - agent_heartbeats/system_states/systems/derivations with test hostnames
+      - commits tied to synthetic flakes (https://example.com/… or *test*)
+      - synthetic commit hashes created by scenarios (working123-*, broken456-*, old-*, newer-*, timing*)
+      - the synthetic flakes themselves
     """
     yield
     cf_client.execute_sql(
         """
+        -- Heartbeats referencing synthetic states
         DELETE FROM agent_heartbeats
           WHERE system_state_id IN (
             SELECT id FROM system_states
             WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%'
           );
 
+        -- Synthetic hosts + derivations
         DELETE FROM system_states WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%';
         DELETE FROM systems       WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%';
         DELETE FROM derivations   WHERE derivation_name LIKE 'test-%' OR derivation_name LIKE 'vm-test-%';
 
+        -- Commit rows created by scenarios:
+        --  (a) anything tied to example.com/* or *test* flakes
+        --  (b) known synthetic hash prefixes used by scenarios
         DELETE FROM commits
-          WHERE git_commit_hash LIKE 'working123-%'
-             OR git_commit_hash LIKE 'broken456-%';
+          WHERE flake_id IN (
+                  SELECT id FROM flakes
+                  WHERE repo_url LIKE 'https://example.com/%'
+                     OR repo_url LIKE '%/failed.git'
+                     OR repo_url LIKE '%/test.git'
+                     OR name ILIKE 'test-%'
+                     OR name ILIKE '%-test%'
+                )
+             OR git_commit_hash LIKE 'working123-%'
+             OR git_commit_hash LIKE 'broken456-%'
+             OR git_commit_hash LIKE 'old-%'
+             OR git_commit_hash LIKE 'newer-%'
+             OR git_commit_hash LIKE 'timing%';
 
+        -- Finally remove the synthetic flakes
         DELETE FROM flakes
-          WHERE repo_url LIKE '%/failed.git'
-             OR repo_url LIKE '%/test.git';
+          WHERE repo_url LIKE 'https://example.com/%'
+             OR repo_url LIKE '%/failed.git'
+             OR repo_url LIKE '%/test.git'
+             OR name ILIKE 'test-%'
+             OR name ILIKE '%-test%';
         """
     )
 
