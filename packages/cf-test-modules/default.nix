@@ -35,15 +35,23 @@
     name = "cf-test-runner";
     runtimeInputs = with pkgs; [
       python3
-      postgresql # pg_isready/psql
+      postgresql
       curl
-      cfTest # the packaged cf_test module
+      cfTest
     ];
     text = ''
-      # Resolve tests dir at build time via Nix
-      TESTS_DIR='${cfTest}/${pkgs.python3.sitePackages}/cf_test/tests'
+      set -euo pipefail
 
-      # Default env (overridable)
+      # Prefer local tree if present; fall back to packaged copy in /nix/store
+      if [ -d "$PWD/cf_test/tests" ]; then
+        TESTS_DIR="$PWD/cf_test/tests"
+        export PYTHONPATH="$PWD:$PWD/cf_test:$PYTHONPATH"
+      else
+        TESTS_DIR='${cfTest}/${pkgs.python3.sitePackages}/cf_test/tests'
+        export PYTHONPATH="${cfTest}/${pkgs.python3.sitePackages}:$PYTHONPATH"
+      fi
+      export PYTHONDONTWRITEBYTECODE=1
+
       export DB_HOST="''${DB_HOST:-127.0.0.1}"
       export DB_PORT="''${DB_PORT:-5432}"
       export DB_USER="''${DB_USER:-crystal_forge}"
@@ -62,13 +70,20 @@
   #TODO: Clean up order marks and things
   runTests = pkgs.writeShellApplication {
     name = "run-cf-tests";
-    runtimeInputs = [testRunner];
+    runtimeInputs = [testRunner cfTest];
     text = ''
       set +e
       set -o pipefail
 
-      # Resolved at build-time via Nix (no runtime probing)
-      TESTS_DIR='${cfTest}/${pkgs.python3.sitePackages}/cf_test/tests'
+      if [ -d "$PWD/cf_test/tests" ]; then
+        TESTS_DIR="$PWD/cf_test/tests"
+        export PYTHONPATH="$PWD:$PWD/cf_test:$PYTHONPATH"
+      else
+        TESTS_DIR='${cfTest}/${pkgs.python3.sitePackages}/cf_test/tests'
+        export PYTHONPATH="${cfTest}/${pkgs.python3.sitePackages}:$PYTHONPATH"
+      fi
+      export PYTHONDONTWRITEBYTECODE=1
+
       mkdir -p test-results
 
       CONTINUE=0
@@ -127,7 +142,6 @@
         [ "$suite_status" -ne 0 ] && exit 1
         exit 0
       else
-        # pass-through: if no test path provided, add our tests dir
         has_positional=0
         for a in "''${CLEAN_ARGS[@]}"; do
           case "$a" in -*) ;; *) has_positional=1; break;; esac
@@ -188,20 +202,21 @@
     ps.pytest-html
     ps.pytest-xdist
     ps.psycopg2
+    cfTest
   ]);
   scenarioRunner = pkgs.writeShellApplication {
     name = "cf-scenarios";
-    runtimeInputs = with pkgs;
-      [
-        postgresql
-        cfTest
-      ]
-      ++ [python];
+    runtimeInputs = with pkgs; [postgresql cfTest] ++ [python];
     text = ''
-      # Ensure Python can import the packaged cf_test module
-      export PYTHONPATH="${cfTest}/${pkgs.python3.sitePackages}:$PYTHONPATH"
+      set -euo pipefail
 
-      # Default DB/Server env (override as needed)
+      if [ -d "$PWD/cf_test" ]; then
+        export PYTHONPATH="$PWD:$PWD/cf_test:$PYTHONPATH"
+      else
+        export PYTHONPATH="${cfTest}/${pkgs.python3.sitePackages}:$PYTHONPATH"
+      fi
+      export PYTHONDONTWRITEBYTECODE=1
+
       export DB_HOST="''${DB_HOST:-127.0.0.1}"
       export DB_PORT="''${DB_PORT:-5432}"
       export DB_USER="''${DB_USER:-crystal_forge}"
@@ -210,7 +225,6 @@
       export CF_SERVER_HOST="''${CF_SERVER_HOST:-127.0.0.1}"
       export CF_SERVER_PORT="''${CF_SERVER_PORT:-3000}"
 
-      # Run the Python CLI: e.g. cf-scenarios -s up_to_date --param num_systems=5
       exec python -m cf_test.scenarios "$@"
     '';
   };
