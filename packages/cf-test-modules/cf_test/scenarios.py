@@ -334,6 +334,8 @@ def scenario_eval_failed(
         """
         INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
         VALUES (%s, %s, %s, 0)
+        ON CONFLICT (flake_id, git_commit_hash) DO UPDATE 
+        SET commit_timestamp = EXCLUDED.commit_timestamp
         RETURNING id
         """,
         (result["flake_id"], new_hash, datetime.now(UTC) - timedelta(hours=1)),

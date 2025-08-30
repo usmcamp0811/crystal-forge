@@ -249,54 +249,87 @@ def pytest_collection_modifyitems(
 def clean_test_data(cf_client: CFTestClient):
     """
     Broader cleanup to avoid cross-test UNIQUE violations on commits.
-    Removes:
-      - agent_heartbeats/system_states/systems/derivations with test hostnames
-      - commits tied to synthetic flakes (https://example.com/… or *test*)
-      - synthetic commit hashes created by scenarios (working123-*, broken456-*, old-*, newer-*, timing*)
-      - the synthetic flakes themselves
+    Removes test data in correct foreign key order.
     """
-    yield
-    cf_client.execute_sql(
-        """
-        -- Heartbeats referencing synthetic states
-        DELETE FROM agent_heartbeats
-          WHERE system_state_id IN (
-            SELECT id FROM system_states
-            WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%'
-          );
+    yield  # Run the test first, then cleanup
 
-        -- Synthetic hosts + derivations
-        DELETE FROM system_states WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%';
-        DELETE FROM systems       WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%';
-        DELETE FROM derivations   WHERE derivation_name LIKE 'test-%' OR derivation_name LIKE 'vm-test-%';
+    # Clean up in proper foreign key dependency order
+    try:
+        # Step 1: Delete agent_heartbeats (references system_states)
+        cf_client.execute_sql(
+            """
+            DELETE FROM agent_heartbeats
+            WHERE system_state_id IN (
+                SELECT id FROM system_states
+                WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%' OR hostname LIKE 'validate-%'
+            )
+            """
+        )
 
-        -- Commit rows created by scenarios:
-        --  (a) anything tied to example.com/* or *test* flakes
-        --  (b) known synthetic hash prefixes used by scenarios
-        DELETE FROM commits
-          WHERE flake_id IN (
-                  SELECT id FROM flakes
-                  WHERE repo_url LIKE 'https://example.com/%'
-                     OR repo_url LIKE '%/failed.git'
-                     OR repo_url LIKE '%/test.git'
-                     OR name ILIKE 'test-%'
-                     OR name ILIKE '%-test%'
-                )
-             OR git_commit_hash LIKE 'working123-%'
-             OR git_commit_hash LIKE 'broken456-%'
-             OR git_commit_hash LIKE 'old-%'
-             OR git_commit_hash LIKE 'newer-%'
-             OR git_commit_hash LIKE 'timing%';
+        # Step 2: Delete system_states (references systems via hostname)
+        cf_client.execute_sql(
+            """
+            DELETE FROM system_states 
+            WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%' OR hostname LIKE 'validate-%'
+            """
+        )
 
-        -- Finally remove the synthetic flakes
-        DELETE FROM flakes
-          WHERE repo_url LIKE 'https://example.com/%'
-             OR repo_url LIKE '%/failed.git'
-             OR repo_url LIKE '%/test.git'
-             OR name ILIKE 'test-%'
-             OR name ILIKE '%-test%';
-        """
-    )
+        # Step 3: Delete systems (references flakes)
+        cf_client.execute_sql(
+            """
+            DELETE FROM systems 
+            WHERE hostname LIKE 'test-%' OR hostname LIKE 'vm-test-%' OR hostname LIKE 'validate-%'
+            """
+        )
+
+        # Step 4: Delete derivations (references commits)
+        cf_client.execute_sql(
+            """
+            DELETE FROM derivations 
+            WHERE derivation_name LIKE 'test-%' 
+               OR derivation_name LIKE 'vm-test-%' 
+               OR derivation_name LIKE 'validate-%'
+               OR commit_id IN (
+                   SELECT c.id FROM commits c
+                   JOIN flakes f ON c.flake_id = f.id
+                   WHERE f.repo_url LIKE 'https://example.com/%'
+                      OR f.repo_url LIKE '%/test.git'
+                      OR f.name ILIKE '%test%'
+               )
+            """
+        )
+
+        # Step 5: Delete commits (references flakes)
+        cf_client.execute_sql(
+            """
+            DELETE FROM commits
+            WHERE flake_id IN (
+                    SELECT id FROM flakes
+                    WHERE repo_url LIKE 'https://example.com/%'
+                       OR repo_url LIKE '%/test.git'
+                       OR name ILIKE '%test%'
+                  )
+               OR git_commit_hash LIKE 'working123-%'
+               OR git_commit_hash LIKE 'broken456-%'
+               OR git_commit_hash LIKE 'old-%'
+               OR git_commit_hash LIKE 'newer-%'
+               OR git_commit_hash LIKE 'timing%'
+            """
+        )
+
+        # Step 6: Finally delete flakes (no dependencies)
+        cf_client.execute_sql(
+            """
+            DELETE FROM flakes
+            WHERE repo_url LIKE 'https://example.com/%'
+               OR repo_url LIKE '%/test.git'
+               OR name ILIKE '%test%'
+            """
+        )
+
+    except Exception as e:
+        print(f"Warning: Cleanup failed: {e}")
+        # Don't fail the test due to cleanup issues
 
 
 @pytest.fixture(scope="session")
