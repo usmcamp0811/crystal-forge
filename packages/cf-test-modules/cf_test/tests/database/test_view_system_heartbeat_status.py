@@ -7,26 +7,99 @@ import pytest
 
 from cf_test import CFTestClient, CFTestConfig
 from cf_test.scenarios import (
-    scenario_never_seen,
-    scenario_up_to_date,
-    scenario_offline,
+    scenario_agent_restart,
     scenario_behind,
+    scenario_build_timeout,
+    scenario_compliance_drift,
     scenario_eval_failed,
+    scenario_flake_time_series,
+    scenario_flaky_agent,
     scenario_mixed_commit_lag,
+    scenario_never_seen,
+    scenario_offline,
+    scenario_partial_rebuild,
+    scenario_rollback,
+    scenario_up_to_date,
 )
 
 VIEW_HEARTBEAT_STATUS = "view_system_heartbeat_status"
 
 HEARTBEAT_SCENARIO_CONFIGS = [
     {
+        "id": "agent_restart",
+        "builder": scenario_agent_restart,
+        "expected": [
+            {
+                "hostname": "test-agent-restart",
+                "heartbeat_status": "online",  # Recent heartbeat after restart
+                "status_description": "System is active and responding",
+            }
+        ],
+    },
+    {
+        "id": "build_timeout",
+        "builder": scenario_build_timeout,
+        "expected": [
+            {
+                "hostname": "test-build-timeout",
+                "heartbeat_status": "online",  # Recent heartbeat (10 min ago)
+                "status_description": "System is active and responding",
+            }
+        ],
+    },
+    {
+        "id": "rollback",
+        "builder": scenario_rollback,
+        "expected": [
+            {
+                "hostname": "test-rollback",
+                "heartbeat_status": "online",  # Recent heartbeat (3 min ago)
+                "status_description": "System is active and responding",
+            }
+        ],
+    },
+    {
+        "id": "partial_rebuild",
+        "builder": scenario_partial_rebuild,
+        "expected": [
+            {
+                "hostname": "test-partial-rebuild",
+                "heartbeat_status": "online",  # Recent heartbeat (8 min ago)
+                "status_description": "System is active and responding",
+            }
+        ],
+    },
+    {
+        "id": "compliance_drift",
+        "builder": scenario_compliance_drift,
+        "expected": [
+            {
+                "hostname": "test-compliance-drift",
+                "heartbeat_status": "online",  # Recent heartbeat (12 min ago)
+                "status_description": "System is active and responding",
+            }
+        ],
+    },
+    {
+        "id": "flaky_agent",
+        "builder": scenario_flaky_agent,
+        "expected": [
+            {
+                "hostname": "test-flaky-agent",
+                "heartbeat_status": "online",  # Most recent heartbeat 5 min ago
+                "status_description": "System is active and responding",
+            }
+        ],
+    },
+    {
         "id": "never_seen",
         "builder": scenario_never_seen,
         "expected": [
             {
-                "hostname": "test-never-seen", 
+                "hostname": "test-never-seen",
                 "heartbeat_status": "stale",  # No heartbeat, but system state is ~45min old = stale
                 "last_heartbeat": None,
-                "status_description": "System may be experiencing issues - no recent activity"
+                "status_description": "System may be experiencing issues - no recent activity",
             }
         ],
     },
@@ -37,18 +110,18 @@ HEARTBEAT_SCENARIO_CONFIGS = [
             {
                 "hostname": "test-uptodate",
                 "heartbeat_status": "online",  # Recent heartbeat = online
-                "status_description": "System is active and responding"
+                "status_description": "System is active and responding",
             }
         ],
     },
     {
-        "id": "offline", 
+        "id": "offline",
         "builder": scenario_offline,
         "expected": [
             {
                 "hostname": "test-offline",
                 "heartbeat_status": "stale",  # 45min heartbeat, might have recent state change
-                "status_description": "System may be experiencing issues - no recent activity"
+                "status_description": "System may be experiencing issues - no recent activity",
             }
         ],
     },
@@ -57,9 +130,9 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "builder": scenario_behind,
         "expected": [
             {
-                "hostname": "test-behind", 
+                "hostname": "test-behind",
                 "heartbeat_status": "online",  # Recent heartbeat = online
-                "status_description": "System is active and responding"
+                "status_description": "System is active and responding",
             }
         ],
     },
@@ -70,7 +143,7 @@ HEARTBEAT_SCENARIO_CONFIGS = [
             {
                 "hostname": "test-eval-failed",
                 "heartbeat_status": "online",  # Recent heartbeat = online
-                "status_description": "System is active and responding"
+                "status_description": "System is active and responding",
             }
         ],
     },
@@ -80,9 +153,9 @@ HEARTBEAT_SCENARIO_CONFIGS = [
         "expected": {
             "count": 4,
             "heartbeat_counts": {
-                "online": 3,   # test-mixed-1, 2, 3 have recent heartbeats
-                "stale": 1     # test-mixed-4 has 65min old heartbeat but recent state change
-            }
+                "online": 3,  # test-mixed-1, 2, 3 have recent heartbeats
+                "stale": 1,  # test-mixed-4 has 65min old heartbeat but recent state change
+            },
         },
     },
 ]
@@ -108,7 +181,7 @@ def cf_config():
     return CFTestConfig()
 
 
-@pytest.fixture(scope="session") 
+@pytest.fixture(scope="session")
 def cf_client(cf_config):
     client = CFTestClient(cf_config)
     client.execute_sql("SELECT 1")
@@ -118,7 +191,9 @@ def cf_client(cf_config):
 @pytest.mark.vm_internal
 @pytest.mark.views
 @pytest.mark.database
-@pytest.mark.parametrize("scenario_config", HEARTBEAT_SCENARIO_CONFIGS, ids=lambda x: x["id"])
+@pytest.mark.parametrize(
+    "scenario_config", HEARTBEAT_SCENARIO_CONFIGS, ids=lambda x: x["id"]
+)
 def test_heartbeat_status_scenarios(
     cf_client: CFTestClient, clean_test_data, scenario_config: Dict[str, Any]
 ):
@@ -190,7 +265,7 @@ def test_heartbeat_status_scenarios(
                 (row for row in rows if row["hostname"] == expected_hostname), None
             )
             assert matching_row is not None, f"No result found for {expected_hostname}"
-            
+
             for field, expected_value in expected_system.items():
                 if field == "hostname":
                     continue
@@ -236,12 +311,12 @@ def test_heartbeat_view_basic_functionality(cf_client: CFTestClient):
 
     expected_columns = {
         "hostname",
-        "heartbeat_status", 
+        "heartbeat_status",
         "most_recent_activity",
         "last_heartbeat",
         "last_state_change",
         "minutes_since_last_activity",
-        "status_description"
+        "status_description",
     }
     actual_columns = {row["column_name"] for row in result}
     assert expected_columns.issubset(
@@ -259,7 +334,9 @@ def test_heartbeat_view_performance(cf_client: CFTestClient):
     result = cf_client.execute_sql(f"SELECT COUNT(*) FROM {VIEW_HEARTBEAT_STATUS}")
     query_time = time.time() - start_time
 
-    assert query_time < 5.0, f"Heartbeat view query took too long: {query_time:.2f} seconds"
+    assert (
+        query_time < 5.0
+    ), f"Heartbeat view query took too long: {query_time:.2f} seconds"
     assert len(result) == 1
 
 
@@ -268,9 +345,9 @@ def test_heartbeat_view_performance(cf_client: CFTestClient):
 def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data):
     """Test specific timing boundaries for heartbeat status"""
     from cf_test.scenarios import _create_base_scenario
-    
+
     now = datetime.now(UTC)
-    
+
     # Test case 1: System with heartbeat at exactly 25 minutes ago (should be online)
     scenario_25min = _create_base_scenario(
         cf_client,
@@ -279,9 +356,9 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
         repo_url="https://example.com/timing-25.git",
         git_hash="timing25min",
         heartbeat_age_minutes=25,
-        commit_age_hours=2  # Make sure state change is old
+        commit_age_hours=2,  # Make sure state change is old
     )
-    
+
     # Force the system state to be old so only heartbeat matters
     cf_client.execute_sql(
         """
@@ -289,20 +366,20 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
         SET timestamp = %s
         WHERE hostname = %s
         """,
-        (now - timedelta(hours=2), "test-timing-25min")
+        (now - timedelta(hours=2), "test-timing-25min"),
     )
-    
+
     # Test case 2: System with heartbeat at exactly 35 minutes ago (should be stale)
     scenario_35min = _create_base_scenario(
-        cf_client, 
+        cf_client,
         hostname="test-timing-35min",
         flake_name="timing-test-35",
-        repo_url="https://example.com/timing-35.git", 
+        repo_url="https://example.com/timing-35.git",
         git_hash="timing35min",
         heartbeat_age_minutes=35,
-        commit_age_hours=2
+        commit_age_hours=2,
     )
-    
+
     # Force the system state to be old
     cf_client.execute_sql(
         """
@@ -310,20 +387,20 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
         SET timestamp = %s
         WHERE hostname = %s
         """,
-        (now - timedelta(hours=2), "test-timing-35min")
+        (now - timedelta(hours=2), "test-timing-35min"),
     )
-    
+
     # Test case 3: System with heartbeat at exactly 65 minutes ago (should be offline)
     scenario_65min = _create_base_scenario(
         cf_client,
-        hostname="test-timing-65min", 
+        hostname="test-timing-65min",
         flake_name="timing-test-65",
         repo_url="https://example.com/timing-65.git",
-        git_hash="timing65min", 
+        git_hash="timing65min",
         heartbeat_age_minutes=65,
-        commit_age_hours=2
+        commit_age_hours=2,
     )
-    
+
     # Force the system state to be old
     cf_client.execute_sql(
         """
@@ -331,9 +408,9 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
         SET timestamp = %s
         WHERE hostname = %s
         """,
-        (now - timedelta(hours=2), "test-timing-65min")
+        (now - timedelta(hours=2), "test-timing-65min"),
     )
-    
+
     # Query all timing test systems
     rows = cf_client.execute_sql(
         f"""
@@ -344,55 +421,55 @@ def test_heartbeat_status_timing_logic(cf_client: CFTestClient, clean_test_data)
         ORDER BY hostname
         """
     )
-    
+
     # Validate timing boundaries
     timing_results = {row["hostname"]: row for row in rows}
-    
+
     # 25 minutes should be online
     assert "test-timing-25min" in timing_results
     assert timing_results["test-timing-25min"]["heartbeat_status"] == "online", (
         f"25min system should be online, got {timing_results['test-timing-25min']['heartbeat_status']}. "
         f"Data: {timing_results['test-timing-25min']}"
     )
-    
-    # 35 minutes should be stale  
+
+    # 35 minutes should be stale
     assert "test-timing-35min" in timing_results
     assert timing_results["test-timing-35min"]["heartbeat_status"] == "stale", (
         f"35min system should be stale, got {timing_results['test-timing-35min']['heartbeat_status']}. "
         f"Data: {timing_results['test-timing-35min']}"
     )
-    
+
     # 65 minutes should be offline
-    assert "test-timing-65min" in timing_results  
+    assert "test-timing-65min" in timing_results
     assert timing_results["test-timing-65min"]["heartbeat_status"] == "offline", (
         f"65min system should be offline, got {timing_results['test-timing-65min']['heartbeat_status']}. "
         f"Data: {timing_results['test-timing-65min']}"
     )
-    
+
     # Clean up
     cf_client.cleanup_test_data(scenario_25min["cleanup"])
-    cf_client.cleanup_test_data(scenario_35min["cleanup"]) 
+    cf_client.cleanup_test_data(scenario_35min["cleanup"])
     cf_client.cleanup_test_data(scenario_65min["cleanup"])
 
 
-@pytest.mark.views 
+@pytest.mark.views
 @pytest.mark.database
 def test_heartbeat_state_change_priority(cf_client: CFTestClient, clean_test_data):
     """Test that recent state changes keep systems online even with old heartbeats"""
     from cf_test.scenarios import _create_base_scenario
-    
+
     # Create system with old heartbeat (35 min) but recent state change (5 min)
     # This should be online because either heartbeat OR state change being recent = online
     base_scenario = _create_base_scenario(
         cf_client,
         hostname="test-state-priority",
-        flake_name="state-priority-test", 
+        flake_name="state-priority-test",
         repo_url="https://example.com/state-priority.git",
         git_hash="statepriority",
         heartbeat_age_minutes=35,  # Old heartbeat (would be stale)
-        commit_age_hours=1
+        commit_age_hours=1,
     )
-    
+
     # Update the system state to be very recent (5 minutes ago)
     cf_client.execute_sql(
         """
@@ -400,9 +477,9 @@ def test_heartbeat_state_change_priority(cf_client: CFTestClient, clean_test_dat
         SET timestamp = %s
         WHERE hostname = %s
         """,
-        (datetime.now(UTC) - timedelta(minutes=5), "test-state-priority")
+        (datetime.now(UTC) - timedelta(minutes=5), "test-state-priority"),
     )
-    
+
     # Query the view
     rows = cf_client.execute_sql(
         f"""
@@ -412,24 +489,24 @@ def test_heartbeat_state_change_priority(cf_client: CFTestClient, clean_test_dat
         WHERE hostname = 'test-state-priority'
         """
     )
-    
+
     assert len(rows) == 1
     row = rows[0]
-    
+
     # Should be online because recent state change overrides old heartbeat
     assert row["heartbeat_status"] == "online", (
         f"Expected online status due to recent state change, got {row['heartbeat_status']}. "
         f"Row data: {row}"
     )
-    
+
     # Most recent activity should be the state change, not the heartbeat
     assert row["most_recent_activity"] == row["last_state_change"]
-    
+
     # Minutes since last activity should be around 5 (state change), not 35 (heartbeat)
-    assert 4 <= row["minutes_since_last_activity"] <= 7, (
-        f"Expected ~5 minutes since state change, got {row['minutes_since_last_activity']}"
-    )
-    
+    assert (
+        4 <= row["minutes_since_last_activity"] <= 7
+    ), f"Expected ~5 minutes since state change, got {row['minutes_since_last_activity']}"
+
     # Clean up
     cf_client.cleanup_test_data(base_scenario["cleanup"])
 
@@ -439,10 +516,10 @@ def test_heartbeat_state_change_priority(cf_client: CFTestClient, clean_test_dat
 def test_debug_scenario_timing(cf_client: CFTestClient, clean_test_data):
     """Debug test to understand what data scenarios actually create"""
     from cf_test.scenarios import scenario_never_seen, scenario_offline
-    
+
     # Test never_seen scenario
     never_seen_data = scenario_never_seen(cf_client, "debug-never-seen")
-    
+
     never_seen_rows = cf_client.execute_sql(
         f"""
         SELECT hostname, heartbeat_status, last_heartbeat, last_state_change,
@@ -451,12 +528,12 @@ def test_debug_scenario_timing(cf_client: CFTestClient, clean_test_data):
         WHERE hostname = 'debug-never-seen'
         """
     )
-    
+
     print(f"Never seen data: {never_seen_rows}")
-    
-    # Test offline scenario  
+
+    # Test offline scenario
     offline_data = scenario_offline(cf_client, "debug-offline")
-    
+
     offline_rows = cf_client.execute_sql(
         f"""
         SELECT hostname, heartbeat_status, last_heartbeat, last_state_change,
@@ -465,9 +542,9 @@ def test_debug_scenario_timing(cf_client: CFTestClient, clean_test_data):
         WHERE hostname = 'debug-offline'
         """
     )
-    
+
     print(f"Offline data: {offline_rows}")
-    
+
     # Clean up
     cf_client.cleanup_test_data(never_seen_data["cleanup"])
     cf_client.cleanup_test_data(offline_data["cleanup"])

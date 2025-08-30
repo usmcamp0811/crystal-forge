@@ -2,7 +2,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import CFTestClient
-from .scenarios import _cleanup_fn, _create_base_scenario, _one_row
 
 
 def _one_row(client: CFTestClient, sql: str, params: Tuple[Any, ...]) -> Dict[str, Any]:
