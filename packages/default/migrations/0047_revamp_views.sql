@@ -389,26 +389,6 @@ WITH commit_evaluations AS (
         c.git_commit_hash,
         c.commit_timestamp
 ),
-actual_system_deployments AS (
-    -- Find what systems are actually running based on system_states
-    SELECT DISTINCT ON (ss.hostname)
-        ss.hostname,
-        ss.derivation_path,
-        ss.timestamp AS deployment_time,
-        d.commit_id,
-        c.git_commit_hash,
-        c.commit_timestamp
-    FROM
-        system_states ss
-        LEFT JOIN derivations d ON ss.derivation_path = d.derivation_path
-            AND d.derivation_type = 'nixos'
-        LEFT JOIN commits c ON d.commit_id = c.id
-    WHERE
-        ss.timestamp >= NOW() - INTERVAL '30 days'
-    ORDER BY
-        ss.hostname,
-        ss.timestamp DESC
-),
 latest_successful_by_system AS (
     -- For each system, find the most recent successful derivation
     SELECT DISTINCT ON (d.derivation_name)
@@ -443,42 +423,39 @@ system_first_seen_with_commit AS (
         lsbs.derivation_name
 ),
 current_deployments AS (
-    SELECT DISTINCT ON (ss.hostname)
-        ss.hostname,
-        ss.timestamp AS current_timestamp
+    -- Get current deployment status
+    SELECT DISTINCT ON (hostname)
+        hostname,
+        timestamp AS current_timestamp
     FROM
-        system_states ss
-        JOIN derivations d ON ss.derivation_path = d.derivation_path
-            AND d.derivation_type = 'nixos'
-        JOIN commits c ON d.commit_id = c.id
-    WHERE
-        ss.timestamp >= NOW() - INTERVAL '30 days'
+        system_states
     ORDER BY
-        ss.hostname,
-        ss.timestamp DESC
+        hostname,
+        timestamp DESC
 ),
 commit_deployment_stats AS (
+    -- Aggregate deployment info per commit
     SELECT
         lsbs.commit_id,
         COUNT(DISTINCT lsbs.derivation_name) AS systems_with_successful_evaluation,
-    COUNT(DISTINCT sfswc.derivation_name) AS systems_seen_after_commit,
-    MIN(sfswc.first_seen_after_commit) AS first_system_seen,
-    MAX(sfswc.first_seen_after_commit) AS last_system_seen,
-    STRING_AGG(DISTINCT sfswc.derivation_name, ', ') AS systems_seen_list,
-    -- Current systems running this commit (based on latest successful derivation)
-    COUNT(DISTINCT CASE WHEN cd.hostname IS NOT NULL THEN
-            lsbs.derivation_name
-        END) AS currently_active_systems,
-    STRING_AGG(DISTINCT CASE WHEN cd.hostname IS NOT NULL THEN
-            lsbs.derivation_name
-        END, ', ') AS currently_active_systems_list
-FROM
-    latest_successful_by_system lsbs
-    LEFT JOIN system_first_seen_with_commit sfswc ON lsbs.commit_id = sfswc.commit_id
-        AND lsbs.derivation_name = sfswc.derivation_name
-    LEFT JOIN current_deployments cd ON lsbs.derivation_name = cd.hostname
-GROUP BY
-    lsbs.commit_id
+        COUNT(DISTINCT sfswc.derivation_name) AS systems_seen_after_commit,
+        MIN(sfswc.first_seen_after_commit) AS first_system_seen,
+        MAX(sfswc.first_seen_after_commit) AS last_system_seen,
+        STRING_AGG(DISTINCT sfswc.derivation_name, ', ') AS systems_seen_list,
+        -- Current systems running this commit (based on latest successful derivation)
+        COUNT(DISTINCT CASE WHEN cd.hostname IS NOT NULL THEN
+                lsbs.derivation_name
+            END) AS currently_active_systems,
+        STRING_AGG(DISTINCT CASE WHEN cd.hostname IS NOT NULL THEN
+                lsbs.derivation_name
+            END, ', ') AS currently_active_systems_list
+    FROM
+        latest_successful_by_system lsbs
+        LEFT JOIN system_first_seen_with_commit sfswc ON lsbs.commit_id = sfswc.commit_id
+            AND lsbs.derivation_name = sfswc.derivation_name
+        LEFT JOIN current_deployments cd ON lsbs.derivation_name = cd.hostname
+    GROUP BY
+        lsbs.commit_id
 )
 SELECT
     ce.flake_id,
