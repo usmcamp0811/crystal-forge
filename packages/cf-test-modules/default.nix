@@ -182,12 +182,49 @@
       cf-test-runner -m integration --maxfail=3 --tb=short
     '';
   };
+
+  python = pkgs.python3.withPackages (ps: [
+    ps.pytest
+    ps.pytest-html
+    ps.pytest-xdist
+    ps.psycopg2
+  ]);
+  scenarioRunner = pkgs.writeShellApplication {
+    name = "cf-scenarios";
+    runtimeInputs = with pkgs;
+      [
+        postgresql
+        cfTest
+      ]
+      ++ [python];
+    text = ''
+      # Ensure Python can import the packaged cf_test module
+      export PYTHONPATH="${cfTest}/${pkgs.python3.sitePackages}:$PYTHONPATH"
+
+      # Default DB/Server env (override as needed)
+      export DB_HOST="''${DB_HOST:-127.0.0.1}"
+      export DB_PORT="''${DB_PORT:-5432}"
+      export DB_USER="''${DB_USER:-crystal_forge}"
+      export DB_PASSWORD="''${DB_PASSWORD:-password}"
+      export DB_NAME="''${DB_NAME:-crystal_forge}"
+      export CF_SERVER_HOST="''${CF_SERVER_HOST:-127.0.0.1}"
+      export CF_SERVER_PORT="''${CF_SERVER_PORT:-3000}"
+
+      # Run the Python CLI: e.g. cf-scenarios -s up_to_date --param num_systems=5
+      exec python -m cf_test.scenarios "$@"
+    '';
+  };
 in
   cfTest
   // {
     # Export the test package as the main result
-    inherit testRunner runTests;
-
-    # Export convenience commands
-    inherit smokeTests databaseTests viewTests integrationTests;
+    inherit
+      testRunner
+      runTests
+      smokeTests
+      databaseTests
+      viewTests
+      integrationTests
+      scenarioRunner
+      ;
   }

@@ -1,46 +1,46 @@
-# Crystal Forge Tests (devshell & NixOS VM)
+# cf-scenarios (Crystal Forge test data)
 
-## Quick start (devshell)
+Run preset scenarios to populate your database via Nix.
 
-```sh
-# NixOS: from repo root
-nix develop -c pytest -m "smoke or (views and not slow)"  # fast set
-nix develop -c cf-test -m systems_status                  # via entrypoint
-nix develop -c python -m cf_test.tests.run_tests quick    # script runner
+## Help
+
+```bash
+nix run .#cf-test-modules.scenarioRunner -- -h
 ```
 
-## NixOS VM tests
+## Quick start
 
-Inside your VM test `machine.succeed` step, call:
-
-```sh
-cf-test -m smoke
-cf-test -m systems_status
-python -m cf_test.tests.run_tests systems-status
+```bash
+# minimal run (defaults)
+nix run .#cf-test-modules.scenarioRunner -- -s up_to_date
 ```
 
-`CFTestConfig` auto-detects VM env via `NIX_BUILD_TOP` and tries the Postgres
-unix socket `/run/postgresql` then falls back to TCP. Env vars: `DB_HOST/PORT/USER/PASSWORD/NAME`. Artifacts land in `/tmp/cf-test-outputs` and are copied to `$out/cf-test-results` when under NixOS tests.
+## Examples
 
-## Adding a new view test
+```bash
+# specify counts
+nix run .#cf-test-modules.scenarioRunner -- -s up_to_date \
+  --num-systems 10 --agent-version 1.2.3
 
-1. Import `CFTestClient` and (optionally) `scenarios`.
-2. Use a scenario builder or insert minimal rows.
-3. Query your view; assert the expected shape/status.
-4. Save evidence with `cf_client.save_artifact(...)`.
-5. Cleanup using patterns from the scenario `cleanup`.
+# DB overrides (NixOS env) + overdue hosts
+DB_HOST=127.0.0.1 DB_PORT=3042 DB_USER=crystal_forge DB_PASSWORD=pass DB_NAME=crystal_forge \
+  nix run .#cf-test-modules.scenarioRunner -- -s mixed_commit_lag --num-overdue 2
 
-## Useful markers
+# generic --param for scenario-specific kwargs
+nix run .#cf-test-modules.scenarioRunner -- -s flake_time_series \
+  --param days=7 --param repo_url=https://example.com/repo.git --param flake_name=my/flake
 
-- `@pytest.mark.smoke` quick checks
-- `@pytest.mark.views` db view tests
-- `@pytest.mark.slow` perf/large scans
-- `@pytest.mark.systems_status` (auto-applied to files with “systems_status”)
+# heartbeat lag examples
+nix run .#cf-test-modules.scenarioRunner -- -s behind \
+  --ok-heartbeat-minutes 10 --overdue-minutes 60 --num-systems 8
 
-### Why this fits what you already have
+nix run .#cf-test-modules.scenarioRunner -- -s flaky_agent \
+  --heartbeat-interval-minutes 5 --heartbeat-hours 2
 
-- You already ship a pytest entrypoint and env-driven config (see `tool.pytest.ini_options` and `CFTestConfig`), so these drop in cleanly. :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
-- `conftest.py` verifies DB at session start and registers markers; this doc/structure keeps that flow. :contentReference[oaicite:2]{index=2}
-- `run_tests.py` and `test_quick_validation.py` remain useful for quick smoke/structure checks alongside the scenario suite. :contentReference[oaicite:3]{index=3} :contentReference[oaicite:4]{index=4}
-- The scenarios mirror the states your current tests already implement (up-to-date, behind, offline, eval-failed) but DRY them up for faster additions. :contentReference[oaicite:5]{index=5}
-- Smoke tests remain unchanged. :contentReference[oaicite:6]{index=6}
+# other common scenarios
+nix run .#cf-test-modules.scenarioRunner -- -s latest_with_two_overdue --num-overdue 2
+nix run .#cf-test-modules.scenarioRunner -- -s never_seen --base-hostname testhost
+nix run .#cf-test-modules.scenarioRunner -- -s agent_restart --stagger-window-minutes 30
+nix run .#cf-test-modules.scenarioRunner -- -s rollback --hostname gray
+nix run .#cf-test-modules.scenarioRunner -- -s offline --num-systems 5
+```
