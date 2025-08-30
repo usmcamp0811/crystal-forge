@@ -471,6 +471,7 @@ def scenario_multiple_orphaned_systems(
         )
         heartbeat_ids.append(heartbeat_row["id"])
 
+
     cleanup_patterns = {
         "agent_heartbeats": [f"id IN ({','.join(map(str, heartbeat_ids))})"],
         "system_states": [f"hostname LIKE '{base_hostname}-%'"],
@@ -868,10 +869,10 @@ def scenario_progressive_system_updates(
     }
 
     return {
-    "hostnames": hostnames,
-    "flake_id": flake_id,
-    "commit_data": commit_data,
-    "commit_hashes": [c["hash"] for c in commit_data],  # Add this line
-    "cleanup": cleanup_patterns,
-    "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
+        "hostnames": hostnames,
+        "flake_id": flake_id,
+        "commit_data": commit_data,
+        "commit_hashes": [c["hash"] for c in commit_data],  # Add this line
+        "cleanup": cleanup_patterns,
+        "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
     }

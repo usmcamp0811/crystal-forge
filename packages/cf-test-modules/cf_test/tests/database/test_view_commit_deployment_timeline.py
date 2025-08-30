@@ -6,13 +6,18 @@ from typing import Any, Dict, List
 import pytest
 
 from cf_test import CFTestClient, CFTestConfig
-from cf_test.scenarios import (_create_base_scenario, scenario_agent_restart,
-                               scenario_behind, scenario_compliance_drift,
-                               scenario_eval_failed,
-                               scenario_multi_system_progression_with_failure,
-                               scenario_orphaned_deployments,
-                               scenario_progressive_system_updates,
-                               scenario_rollback, scenario_up_to_date)
+from cf_test.scenarios import (
+    _create_base_scenario,
+    scenario_agent_restart,
+    scenario_behind,
+    scenario_compliance_drift,
+    scenario_eval_failed,
+    scenario_multi_system_progression_with_failure,
+    scenario_orphaned_deployments,
+    scenario_progressive_system_updates,
+    scenario_rollback,
+    scenario_up_to_date,
+)
 
 VIEW_DEPLOYMENT_TIMELINE = "view_commit_deployment_timeline"
 
@@ -29,7 +34,7 @@ DEPLOYMENT_TIMELINE_SCENARIO_CONFIGS = [
         },
     },
     {
-        "id": "progressive_system_updates", 
+        "id": "progressive_system_updates",
         "builder": scenario_progressive_system_updates,
         "expected": {
             "commit_count": 5,  # 5 commits with staggered system updates
@@ -47,6 +52,7 @@ DEPLOYMENT_TIMELINE_SCENARIO_CONFIGS = [
             "has_successful_evaluations": True,
             "has_deployments": False,  # orphaned path ≠ derivations → no counted deployments
             "evaluation_statuses": ["complete"],
+            "currently_deployed_systems_empty": True,  # Add this line
         },
     },
     {
@@ -114,17 +120,17 @@ def _get_commit_hashes_from_timeline_scenario(
     # Check for commit hashes stored directly in scenario data
     if "commit_hashes" in scenario_data:
         return scenario_data["commit_hashes"]
-    
+
     # Check for commit_data (used by progressive_system_updates)
     if "commit_data" in scenario_data:
         return [c["hash"] for c in scenario_data["commit_data"]]
-    
+
     # Check for individual commit hashes
     hashes = []
     for attr in ["git_hash", "current_commit_hash", "latest_commit_hash"]:
         if attr in scenario_data and scenario_data[attr]:
             hashes.append(scenario_data[attr])
-    
+
     return hashes
 
 
@@ -281,6 +287,26 @@ def test_deployment_timeline_scenarios(
                 f"Expected evaluation status '{expected_status}' not found. "
                 f"Available statuses: {found_statuses}"
             )
+
+    if (
+        "currently_deployed_systems_empty" in expected
+        and expected["currently_deployed_systems_empty"]
+    ):
+        currently_deployed = [r for r in rows if r["currently_deployed_systems"] > 0]
+        assert (
+            len(currently_deployed) == 0
+        ), f"Expected no currently deployed systems for {scenario_id}, but found systems"
+
+        # Also check that the list field is empty/None
+        non_empty_lists = [
+            r
+            for r in rows
+            if r["currently_deployed_systems_list"] is not None
+            and r["currently_deployed_systems_list"].strip()
+        ]
+        assert (
+            len(non_empty_lists) == 0
+        ), f"Expected empty currently_deployed_systems_list for {scenario_id}"
 
 
 @pytest.mark.views
