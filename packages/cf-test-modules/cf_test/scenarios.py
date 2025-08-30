@@ -1172,6 +1172,278 @@ def scenario_flaky_agent(
 
 
 
+def scenario_orphaned_deployments(
+    client: "CFTestClient", hostname: str = "test-orphaned-deploy"
+) -> Dict[str, Any]:
+    """
+    Create a commit with a successful evaluation, but record a system_state whose
+    derivation_path does NOT exist in the derivations table (simulating an orphaned deployment).
+    """
+    import time
+
+    now = datetime.now(UTC)
+    timestamp = int(time.time())
+
+    # Flake
+    flake_row = _one_row(
+        client,
+        """
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
+        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        (f"orphaned-test-{timestamp}", f"https://example.com/orphaned-{timestamp}.git"),
+    )
+    flake_id = flake_row["id"]
+
+    # Commit (counted by the view)
+    commit_row = _one_row(
+        client,
+        """
+        INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
+        VALUES (%s, %s, %s, 0)
+        RETURNING id
+        """,
+        (flake_id, f"orphaned-commit-{timestamp}", now - timedelta(hours=2)),
+    )
+    commit_id = commit_row["id"]
+
+    # Successful derivation for the commit (so evaluations look complete)
+    deriv_path = f"/nix/store/tracked-derivation-{timestamp}.drv"
+    deriv_row = _one_row(
+        client,
+        """
+        INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path,
+            status_id, attempt_count, scheduled_at, completed_at
+        )
+        VALUES (
+            %s, 'nixos', %s, %s,
+            (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+            0, %s, %s
+        )
+        RETURNING id
+        """,
+        (
+            commit_id,
+            f"{hostname}-tracked",
+            deriv_path,
+            now - timedelta(hours=1, minutes=50),
+            now - timedelta(hours=1, minutes=40),
+        ),
+    )
+    derivation_id = deriv_row["id"]
+
+    # System (pointing at flake; "derivation" field here is not joined by the view)
+    system_row = _one_row(
+        client,
+        """
+        INSERT INTO systems (hostname, flake_id, is_active, derivation, public_key)
+        VALUES (%s, %s, TRUE, %s, 'orphaned-key')
+        RETURNING id
+        """,
+        (hostname, flake_id, "placeholder-derivation"),
+    )
+    system_id = system_row["id"]
+
+    # System state with an ORPHANED derivation_path (this breaks the deployment link)
+    orphaned_deriv_path = f"/nix/store/orphaned-manual-deployment-{timestamp}.drv"
+    state_row = _one_row(
+        client,
+        """
+        INSERT INTO system_states (
+            hostname, change_reason, derivation_path, os, kernel,
+            memory_gb, uptime_secs, cpu_brand, cpu_cores,
+            primary_ip_address, nixos_version, agent_compatible, timestamp
+        )
+        VALUES (
+            %s, 'config_change', %s, 'NixOS', '6.6.89',
+            32.0, 7200, 'Intel Xeon', 16,
+            '192.168.1.200', '25.05', TRUE, %s
+        )
+        RETURNING id
+        """,
+        (hostname, orphaned_deriv_path, now - timedelta(hours=1)),
+    )
+    state_id = state_row["id"]
+
+    # Heartbeat so the system looks alive
+    heartbeat_row = _one_row(
+        client,
+        """
+        INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
+        VALUES (%s, %s, '2.0.0', 'orphaned-build')
+        RETURNING id
+        """,
+        (state_id, now - timedelta(minutes=5)),
+    )
+
+    cleanup_patterns = {
+        "agent_heartbeats": [f"id = {heartbeat_row['id']}"],
+        "system_states": [f"hostname = '{hostname}'"],
+        "systems": [f"hostname = '{hostname}'"],
+        "derivations": [f"id = {derivation_id}"],
+        "commits": [f"id = {commit_id}"],
+        "flakes": [f"id = {flake_id}"],
+    }
+
+    return {
+        "hostname": hostname,
+        "flake_id": flake_id,
+        "commit_id": commit_id,
+        "derivation_id": derivation_id,
+        "system_id": system_id,
+        "state_id": state_id,
+        "heartbeat_id": heartbeat_row["id"],
+        "orphaned_derivation_path": orphaned_deriv_path,
+        "tracked_derivation_path": deriv_path,
+        "cleanup": cleanup_patterns,
+        "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
+    }
+
+# refs: :contentReference[oaicite:0]{index=0} :contentReference[oaicite:1]{index=1}
+
+
+
+def scenario_multiple_orphaned_systems(
+    client: CFTestClient, base_hostname: str = "test-multi-orphaned"
+) -> Dict[str, Any]:
+    """Creates multiple systems all with orphaned deployments pointing to the same flake"""
+    
+    import time
+    now = datetime.now(UTC)
+    timestamp = int(time.time())
+    
+    # Create single flake with commits
+    flake_row = _one_row(
+        client,
+        """
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
+        ON CONFLICT (repo_url) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        (f"multi-orphaned-{timestamp}", f"https://example.com/multi-orphaned-{timestamp}.git")
+    )
+    flake_id = flake_row["id"]
+    
+    # Create commits that the view can see
+    commit_times = [now - timedelta(hours=h) for h in [1, 3, 6]]
+    commit_ids = []
+    
+    for i, commit_time in enumerate(commit_times):
+        commit_row = _one_row(
+            client,
+            """
+            INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
+            VALUES (%s, %s, %s, 0)
+            RETURNING id
+            """,
+            (flake_id, f"multi-commit-{timestamp}-{i}", commit_time)
+        )
+        commit_ids.append(commit_row["id"])
+        
+        # Create derivation for each commit
+        _one_row(
+            client,
+            """
+            INSERT INTO derivations (
+                commit_id, derivation_type, derivation_name, derivation_path,
+                status_id, attempt_count, scheduled_at, completed_at
+            )
+            VALUES (
+                %s, 'nixos', %s, %s,
+                (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                0, %s, %s
+            )
+            """,
+            (
+                commit_row["id"],
+                f"tracked-build-{i}",
+                f"/nix/store/tracked-{timestamp}-{i}.drv",
+                commit_time + timedelta(minutes=10),
+                commit_time + timedelta(minutes=20)
+            )
+        )
+    
+    # Create 5 systems all pointing to this flake but with orphaned deployments
+    hostnames = [f"{base_hostname}-{i}" for i in range(5)]
+    system_ids = []
+    state_ids = []
+    heartbeat_ids = []
+    
+    for i, hostname in enumerate(hostnames):
+        # Create system pointing to the flake
+        system_row = _one_row(
+            client,
+            """
+            INSERT INTO systems (hostname, flake_id, is_active, derivation, public_key)
+            VALUES (%s, %s, TRUE, 'placeholder', 'multi-orphaned-key')
+            RETURNING id
+            """,
+            (hostname, flake_id)
+        )
+        system_ids.append(system_row["id"])
+        
+        # Create system_state with orphaned derivation_path
+        orphaned_path = f"/nix/store/orphaned-{hostname}-{timestamp}.drv"
+        state_row = _one_row(
+            client,
+            """
+            INSERT INTO system_states (
+                hostname, change_reason, derivation_path, os, kernel,
+                memory_gb, uptime_secs, cpu_brand, cpu_cores,
+                primary_ip_address, nixos_version, agent_compatible, timestamp
+            )
+            VALUES (
+                %s, 'startup', %s, 'NixOS', '6.6.89',
+                16.0, 3600, 'Intel Xeon', 8,
+                %s, '25.05', TRUE, %s
+            )
+            RETURNING id
+            """,
+            (
+                hostname, 
+                orphaned_path,
+                f"192.168.1.{200 + i}",
+                now - timedelta(minutes=30 + (i * 10))  # Staggered deployment times
+            )
+        )
+        state_ids.append(state_row["id"])
+        
+        # Add heartbeats to make them look active
+        heartbeat_row = _one_row(
+            client,
+            """
+            INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
+            VALUES (%s, %s, '2.0.0', 'multi-orphaned-build')
+            RETURNING id
+            """,
+            (state_row["id"], now - timedelta(minutes=5 + i))
+        )
+        heartbeat_ids.append(heartbeat_row["id"])
+    
+    cleanup_patterns = {
+        "agent_heartbeats": [f"id IN ({','.join(map(str, heartbeat_ids))})"],
+        "system_states": [f"hostname LIKE '{base_hostname}-%'"],
+        "systems": [f"hostname LIKE '{base_hostname}-%'"],
+        "derivations": [f"derivation_name LIKE 'tracked-build-%'"],
+        "commits": [f"id IN ({','.join(map(str, commit_ids))})"],
+        "flakes": [f"id = {flake_id}"],
+    }
+    
+    return {
+        "hostnames": hostnames,
+        "flake_id": flake_id,
+        "commit_ids": commit_ids,
+        "system_ids": system_ids,
+        "state_ids": state_ids,
+        "heartbeat_ids": heartbeat_ids,
+        "cleanup": cleanup_patterns,
+        "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
+    }
+
 def _discover_scenarios():
     mod = sys.modules[__name__]
     out = {}
