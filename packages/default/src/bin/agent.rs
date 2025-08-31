@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use crystal_forge::models::config::CrystalForgeConfig;
@@ -6,7 +6,8 @@ use crystal_forge::models::system_states::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
-use std::{ffi::OsStr, fs, path::PathBuf};
+use serde_json::Value;
+use std::{ffi::OsStr, fs, path::PathBuf, process::Command};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info};
 
@@ -19,6 +20,49 @@ async fn main() -> Result<()> {
 /// Reads a symlink and returns its target as a `PathBuf`.
 fn readlink_path(path: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(nix::fcntl::readlink(path)?))
+}
+
+fn deriver_drv(path: &OsStr) -> Result<String> {
+    // 1) Try nix-store (fast path)
+    let out = Command::new("nix-store")
+        .args(["--query", "--deriver"])
+        .arg(path)
+        .output()
+        .context("nix-store --query --deriver failed to start")?;
+
+    if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !s.is_empty() && s.ends_with(".drv") {
+            return Ok(s);
+        }
+    }
+
+    // 2) Fallback to nix path-info --json (some caches omit Deriver in narinfo)
+    let out = Command::new("nix")
+        .args(["path-info", "--json"])
+        .arg(path)
+        .output()
+        .context("nix path-info --json failed to start")?;
+
+    if out.status.success() {
+        let v: Value =
+            serde_json::from_slice(&out.stdout).context("decoding nix path-info JSON")?;
+        if let Some(deriver) = v
+            .as_array()
+            .and_then(|a| a.get(0))
+            .and_then(|o| o.get("deriver"))
+            .and_then(|d| d.as_str())
+        {
+            if !deriver.is_empty() && deriver.ends_with(".drv") {
+                return Ok(deriver.to_string());
+            }
+        }
+    }
+
+    bail!(
+        "deriver unknown for {} (cache may have omitted Deriver metadata)",
+        PathBuf::from(path).display()
+    );
 }
 
 /// Posts the current Nix system derivation ID to a configured server.
@@ -49,17 +93,14 @@ fn create_signed_payload(
 ) -> Result<(SystemState, String, String)> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
-
     let hostname = hostname::get()?.to_string_lossy().into_owned();
-    let system_hash = current_system.to_string_lossy().into_owned();
 
-    // Construct payload to be sent to the server
-    let payload = SystemState::gather(&hostname, context, &system_hash)?;
+    // Guarantees a .drv (or returns an error)
+    let drv_path = deriver_drv(current_system)?;
 
-    // Serialize payload
+    let payload = SystemState::gather(&hostname, context, &drv_path)?;
     let payload_json = serde_json::to_string(&payload)?;
 
-    // Load and decode private key from file
     let key_bytes = STANDARD
         .decode(fs::read_to_string(&client_cfg.private_key)?.trim())
         .context("failed to decode base64 private key")?;
@@ -70,7 +111,6 @@ fn create_signed_payload(
             .context("expected a 32-byte Ed25519 private key")?,
     );
 
-    // Sign the payload
     let signature = signing_key.sign(payload_json.as_bytes());
     let signature_b64 = STANDARD.encode(signature.to_bytes());
 
