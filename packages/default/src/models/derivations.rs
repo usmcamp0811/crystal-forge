@@ -171,12 +171,14 @@ impl Derivation {
             info!("📋 Systemd disabled in config, using direct execution");
             return Self::run_direct_dry_run(flake_target, build_config).await;
         }
-
         // Try systemd-run scoped build first
         let mut scoped = build_config.systemd_scoped_cmd_base();
-        scoped.args([flake_target, "--dry-run", "--print-out-paths", "--no-link"]);
+        scoped.args([
+            flake_target,
+            "--accept-flake-config",
+            "--no-write-lock-file",
+        ]);
         build_config.apply_to_command(&mut scoped);
-
         match scoped.output().await {
             Ok(output) => {
                 if output.status.success() {
@@ -211,15 +213,14 @@ impl Derivation {
             }
         }
     }
-
     async fn run_direct_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
         let mut direct = Command::new("nix");
         direct.args([
-            "build",
+            "derivation",
+            "show",
+            "--accept-flake-config",
+            "--no-write-lock-file",
             flake_target,
-            "--dry-run",
-            "--print-out-paths",
-            "--no-link",
         ]);
         build_config.apply_to_command(&mut direct);
         Ok(direct.output().await?)
