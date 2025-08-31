@@ -1,10 +1,12 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::queries::derivations::discover_and_insert_packages;
+
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sqlx::{FromRow, PgPool};
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::process::Output;
 use tokio::process::Command;
@@ -288,55 +290,17 @@ impl Derivation {
     ) -> Result<EvaluationResult> {
         info!("🔍 Evaluating derivation paths for: {}", flake_target);
 
-        let output = Self::run_dry_run(flake_target, build_config).await?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        // robust & deterministic: never scrape stderr, never depend on dry-run text
+        let main_drv = eval_main_drv_path(flake_target, build_config).await?;
+        let deps = list_immediate_input_drvs(&main_drv, build_config).await?;
 
-        if !output.status.success() {
-            error!("❌ nix build dry-run failed: {}", stderr.trim());
+        info!("🔍 main drv: {main_drv}");
+        info!("🔍 {} immediate input drvs", deps.len());
 
-            // Provide more context for common failures
-            if stderr.contains("out of memory") {
-                bail!(
-                    "nix build failed due to insufficient memory: {}",
-                    stderr.trim()
-                );
-            } else if stderr.contains("timeout") {
-                bail!("nix build timed out: {}", stderr.trim());
-            } else {
-                bail!("nix build dry-run failed: {}", stderr.trim());
-            }
-        }
-
-        debug!("🔍 Dry-run stdout:\n{}", stdout);
-        debug!("🔍 Dry-run stderr:\n{}", stderr);
-
-        match Self::parse_derivation_paths(&stderr, flake_target) {
-            Ok((main, deps)) => {
-                info!("🔍 Main derivation: {}", main);
-                info!("🔍 Found {} dependency derivations", deps.len());
-                Ok(EvaluationResult {
-                    main_derivation_path: main,
-                    dependency_derivation_paths: deps,
-                })
-            }
-            Err(e) if e.to_string() == "no-derivations" => {
-                info!("📦 No new derivations needed - everything already available");
-                let store_output = Self::run_print_out_paths(flake_target, build_config).await?;
-                if !store_output.status.success() {
-                    let se = String::from_utf8_lossy(&store_output.stderr);
-                    bail!("nix build for store path failed: {}", se.trim());
-                }
-                let store_stdout = String::from_utf8_lossy(&store_output.stdout);
-                let store_path = store_stdout.trim().to_string();
-
-                Ok(EvaluationResult {
-                    main_derivation_path: store_path,
-                    dependency_derivation_paths: Vec::new(),
-                })
-            }
-            Err(e) => Err(e),
-        }
+        Ok(EvaluationResult {
+            main_derivation_path: main_drv,
+            dependency_derivation_paths: deps,
+        })
     }
 
     /// Phase 2: Build a derivation from its .drv path
@@ -541,41 +505,31 @@ impl Derivation {
         flake: &crate::models::flakes::Flake,
         commit: &crate::models::commits::Commit,
     ) -> Result<String> {
-        let flake_url = &flake.repo_url;
         let system = &self.derivation_name;
-        let is_path = Path::new(flake_url).exists();
 
-        if is_path {
-            // For local paths, checkout first
-            info!(
-                "📌 Running 'git checkout {}' in {}",
-                commit.git_commit_hash, flake_url
-            );
-            let status = tokio::process::Command::new("git")
-                .args(["-C", flake_url, "checkout", &commit.git_commit_hash])
-                .status()
-                .await?;
-            if !status.success() {
-                anyhow::bail!(
-                    "❌ git checkout failed for path {} at rev {}",
-                    flake_url,
-                    commit.git_commit_hash
-                );
-            }
-            Ok(format!(
-                "{flake_url}#nixosConfigurations.{system}.config.system.build.toplevel"
-            ))
-        } else if flake_url.starts_with("git+") {
-            Ok(format!(
-                "{flake_url}?rev={}#nixosConfigurations.{system}.config.system.build.toplevel",
+        // Always use a git flake ref pinned to the commit, even for local repos.
+        let flake_ref = if Path::new(&flake.repo_url).exists() {
+            let abs = std::fs::canonicalize(&flake.repo_url)
+                .with_context(|| format!("canonicalize {}", flake.repo_url))?;
+            format!(
+                "git+file://{}?rev={}",
+                abs.display(),
                 commit.git_commit_hash
-            ))
+            )
+        } else if flake.repo_url.starts_with("git+") {
+            // ensure we pin a rev (append if not already present)
+            if flake.repo_url.contains("?rev=") {
+                flake.repo_url.clone()
+            } else {
+                format!("{}?rev={}", flake.repo_url, commit.git_commit_hash)
+            }
         } else {
-            Ok(format!(
-                "git+{0}?rev={1}#nixosConfigurations.{2}.config.system.build.toplevel",
-                flake_url, commit.git_commit_hash, self.derivation_name
-            ))
-        }
+            format!("git+{}?rev={}", flake.repo_url, commit.git_commit_hash)
+        };
+
+        Ok(format!(
+            "{flake_ref}#nixosConfigurations.{system}.config.system.build.toplevel"
+        ))
     }
     /// Pushes a built derivation to the configured cache
     pub async fn push_to_cache(
@@ -707,6 +661,54 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
         pname: Some(name_version.to_string()),
         version: None,
     })
+}
+
+async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
+    // Example: "<flake>#…config.system.build.toplevel" -> ask Nix for ".drvPath"
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--raw", &format!("{flake_target}.drvPath")]);
+    build_config.apply_to_command(&mut cmd);
+
+    let out = cmd.output().await?;
+    if !out.status.success() {
+        bail!(
+            "nix eval failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+async fn list_immediate_input_drvs(
+    drv_path: &str,
+    build_config: &BuildConfig,
+) -> Result<Vec<String>> {
+    // `nix derivation show --json <drv>` yields {"<drv>": {"inputDrvs": {"<drv2>": ["out"], …}, …}}
+    let mut cmd = Command::new("nix");
+    cmd.args(["derivation", "show", "--json", drv_path]);
+    build_config.apply_to_command(&mut cmd);
+
+    let out = cmd.output().await?;
+    if !out.status.success() {
+        bail!(
+            "nix derivation show failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    let v: Value = serde_json::from_slice(&out.stdout)?;
+    let obj = v
+        .as_object()
+        .and_then(|m| m.get(drv_path))
+        .and_then(|x| x.as_object())
+        .ok_or_else(|| anyhow!("bad JSON from nix derivation show"))?;
+
+    let deps = obj
+        .get("inputDrvs")
+        .and_then(|x| x.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_else(Vec::new);
+
+    Ok(deps)
 }
 
 #[derive(Debug)]
