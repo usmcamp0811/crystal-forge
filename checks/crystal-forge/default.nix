@@ -20,6 +20,8 @@
   #   mkdir -p $out
   #   cp -r $src/* $out/
   # '';
+  CF_TEST_DB_PORT = 5432;
+  CF_TEST_SERVER_PORT = 3000;
   systemBuildClosure = pkgs.closureInfo {
     rootPaths =
       [
@@ -46,7 +48,7 @@ in
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
         };
-        port = 3000;
+        port = CF_TEST_SERVER_PORT;
       };
 
       agent = lib.crystal-forge.makeAgentNode {
@@ -60,104 +62,37 @@ in
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
-      from vm_test_logger import TestLogger  # type: ignore[import-untyped]
-      from cf_test_modules import (  # type: ignore[import-untyped]
-          CrystalForgeTestContext,
-          GitServerTests,
-          CrystalForgeServerTests,
-          AgentTests,
-          FlakeProcessingTests,
-          SystemStateTests,
-          ServiceLogCollector,
-          DatabaseAnalyzer
-      )
-      from cf_test_modules.test_exceptions import AssertionFailedException  # type: ignore[import-untyped]
+      import os
+      import pytest
+      # --- Boot VMs first; otherwise any wait_* will hang
+      os.environ["NIXOS_TEST_DRIVER"] = "1"
+      start_all()
 
-      def run_crystal_forge_integration_test():
-          logger = TestLogger("Crystal Forge Agent Integration with Git Server", server)
-          start_all()
-          logger.setup_logging()
-          system_info = logger.gather_system_info(agent)
 
-          exit_on_failure = True
-          ctx = CrystalForgeTestContext(
-              gitserver=gitserver,
-              server=server,
-              agent=agent,
-              logger=logger,
-              system_info=system_info,
-              exit_on_failure=exit_on_failure,
-          )
-
-          def run_test_phase(phase_name: str, test_func, *args, **kwargs):
-              logger.log_section(f"🚀 STARTING: {phase_name}")
-              try:
-                  test_func(*args, **kwargs)
-                  logger.log_success(f"✅ COMPLETED: {phase_name}")
-              except AssertionFailedException as e:
-                  logger.log_error(f"❌ ASSERTION FAILED: {phase_name}")
-                  logger.log_error(f"🎯 Test: {e.test_name}")
-                  logger.log_error(f"📝 Reason: {e.reason}")
-                  if e.sql_query:
-                      logger.log_error(f"🗄️ SQL involved: {e.sql_query[:200]}...")
-                  raise
-              except Exception as e:
-                  import traceback, sys
-                  tb = traceback.extract_tb(e.__traceback__)
-                  if tb:
-                      last_frame = tb[-1]
-                      error_location = f"{last_frame.filename.split('/')[-1]}::{last_frame.name}() line {last_frame.lineno}"
-                  else:
-                      error_location = "unknown location"
-                  logger.log_error(f"❌ FAILED: {phase_name}")
-                  logger.log_error(f"📍 Error Location: {error_location}")
-                  logger.log_error(f"📝 Error Message: {str(e)}")
-                  logger.log_error(f"🔍 Error Type: {type(e).__name__}")
-                  print(f"\n" + "="*80, file=sys.stderr)
-                  print(f"❌ TEST PHASE FAILED: {phase_name}", file=sys.stderr)
-                  print(f"Location: {error_location}", file=sys.stderr)
-                  print(f"Error: {str(e)}", file=sys.stderr)
-                  print(f"Type: {type(e).__name__}", file=sys.stderr)
-                  print("="*80, file=sys.stderr)
-                  raise
-
-          try:
-              run_test_phase("Phase 1.1: Git Server Setup", GitServerTests.setup_and_verify, ctx)
-              run_test_phase("Phase 2.1: Crystal Forge Server Tests", CrystalForgeServerTests.setup_and_verify, ctx)
-              run_test_phase("Phase 2.2: Agent Tests", AgentTests.setup_and_verify, ctx)
-              run_test_phase("Phase 3.1: Flake Processing Tests", FlakeProcessingTests.verify_complete_workflow, ctx)
-              run_test_phase("Phase 3.2: System State Tests", SystemStateTests.verify_system_state_tracking, ctx)
-
-              try:
-                  original_exit_setting = ctx.exit_on_failure
-                  ctx.exit_on_failure = False
-                  run_test_phase("Phase 4.1: Service Log Collection", ServiceLogCollector.collect_all_logs, ctx)
-                  run_test_phase("Phase 4.2: Database Analysis", DatabaseAnalyzer.generate_comprehensive_report, ctx)
-                  ctx.exit_on_failure = original_exit_setting
-              except Exception as e:
-                  logger.log_warning(f"⚠️ Analysis phases failed but continuing: {e}")
-
-              logger.log_success("🎉 All Crystal Forge integration tests passed!")
-
-          except AssertionFailedException as e:
-              logger.log_error(f"💥 TEST ASSERTION FAILURE")
-              logger.log_error(f"Test: {e.test_name}")
-              logger.log_error(f"Reason: {e.reason}")
-              try:
-                  ServiceLogCollector.collect_all_logs(ctx)
-              except:
-                  pass
-              raise
-          except Exception as e:
-              logger.log_error(f"💥 CRITICAL TEST FAILURE - SEE ERROR DETAILS ABOVE")
-              try:
-                  ServiceLogCollector.collect_all_logs(ctx)
-              except:
-                  pass
-              raise
-          finally:
-              logger.finalize_test()
-
-      run_crystal_forge_integration_test()
+      os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_DB_PORT"] = "${toString CF_TEST_DB_PORT}"
+      os.environ["CF_TEST_DB_NAME"] = "crystal_forge"
+      os.environ["CF_TEST_DB_USER"] = "postgres"
+      os.environ["CF_TEST_DB_PASSWORD"] = "postgres"
+      os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
+      # Inject machines so cf_test fixtures can drive them
+      import cf_test
+      cf_test._driver_machines = {
+          "server": server,
+          "agent": agent,
+          "gitserver": gitserver,
+      }
+      # Run only VM-marked tests from cf_test package
+      exit_code = pytest.main([
+          "-vvvv",
+          "--tb=short",
+          "-x",
+          "-s",  # Add -s to see print output immediately
+          "-m", "vm_only",
+          "--pyargs", "cf_test",
+      ])
+      if exit_code != 0:
+          raise SystemExit(exit_code)
     '';
   }
