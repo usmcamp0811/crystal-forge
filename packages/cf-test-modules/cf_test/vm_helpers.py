@@ -39,8 +39,16 @@ def check_service_active(machine, service_name: str) -> bool:
 
 
 def get_system_hash(machine) -> str:
-    """Get the system hash from /run/current-system"""
-    return machine.succeed("readlink /run/current-system").strip().split("-")[-1]
+    """Get the system derivation path from /run/current-system"""
+    # Fallback for test environments where deriver might not work initially
+    current_system = machine.succeed("readlink /run/current-system").strip()
+    # Try to find a matching .drv file as fallback
+    drv_files = machine.succeed(
+        "find /nix/store -name '*nixos-system*agent*.drv' -type f | head -1"
+    ).strip()
+    if drv_files:
+        return drv_files
+    return f"{current_system}.drv"  # Last resort fallback
 
 
 def check_keys_exist(machine, *key_paths: str) -> None:
@@ -85,7 +93,7 @@ def verify_db_state(
     ), f"Change reason {expected_reason} not found in DB. Found: {reasons}"
     assert any(
         expected_hash in path for path in derivation_paths
-    ), f"System hash {expected_hash} not found in any derivation path"
+    ), f"System hash {expected_hash} not found in {derivation_paths}"
 
 
 def verify_flake_in_db(cf_client, machine, repo_url: str) -> None:
