@@ -40,7 +40,11 @@ def check_service_active(machine, service_name: str) -> bool:
 
 def get_system_hash(machine) -> str:
     """Get the system hash from /run/current-system"""
-    return machine.succeed("readlink /run/current-system").strip().split("-")[-1]
+    return (
+        machine.succeed("nix-store --query --deriver $(readlink /run/current-system)")
+        .strip()
+        .split("-")[-1]
+    )
 
 
 def check_keys_exist(machine, *key_paths: str) -> None:
