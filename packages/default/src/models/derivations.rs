@@ -174,7 +174,7 @@ impl Derivation {
 
         // Try systemd-run scoped build first
         let mut scoped = build_config.systemd_scoped_cmd_base();
-        scoped.args([flake_target, "--dry-run", "--no-link"]);
+        scoped.args([flake_target, "--dry-run", "--print-out-paths", "--no-link"]);
         build_config.apply_to_command(&mut scoped);
 
         match scoped.output().await {
@@ -214,7 +214,13 @@ impl Derivation {
 
     async fn run_direct_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
         let mut direct = Command::new("nix");
-        direct.args(["build", flake_target, "--dry-run", "--no-link"]);
+        direct.args([
+            "build",
+            flake_target,
+            "--dry-run",
+            "--print-out-paths",
+            "--no-link",
+        ]);
         build_config.apply_to_command(&mut direct);
         Ok(direct.output().await?)
     }
@@ -315,17 +321,14 @@ impl Derivation {
                 })
             }
             Err(e) if e.to_string() == "no-derivations" => {
-                info!("📦 No new derivations needed - getting output path");
-
-                // Use --print-out-paths to get the actual store path
+                info!("📦 No new derivations needed - everything already available");
                 let store_output = Self::run_print_out_paths(flake_target, build_config).await?;
                 if !store_output.status.success() {
                     let se = String::from_utf8_lossy(&store_output.stderr);
                     bail!("nix build for store path failed: {}", se.trim());
                 }
-
-                let stdout = String::from_utf8_lossy(&store_output.stdout);
-                let store_path = stdout.trim().to_string();
+                let store_stdout = String::from_utf8_lossy(&store_output.stdout);
+                let store_path = store_stdout.trim().to_string();
 
                 Ok(EvaluationResult {
                     main_derivation_path: store_path,
