@@ -58,69 +58,105 @@ in
       pkgs.crystal-forge.vm-test-logger
     ];
 
+    # testScript = ''
+    #   import os
+    #   from vm_test_logger import with_logging, TestPatterns
+    #
+    #   SERVER_PORT = ${toString CF_TEST_SERVER_PORT}
+    #   DB_PORT = ${toString CF_TEST_DB_PORT}
+    #
+    #   @with_logging("Crystal Forge Agent Integration", primary_vm_name="server")
+    #   def run(logger):
+    #       start_all()
+    #
+    #       # Basic system info + wait for core services
+    #       logger.gather_system_info(server)
+    #       TestPatterns.standard_service_startup(
+    #           logger, server,
+    #           ["postgresql.service", "crystal-forge-server.service"]
+    #       )
+    #
+    #       # Verify ports & binaries
+    #       # TestPatterns.network_test(logger, server, "127.0.0.1", SERVER_PORT)
+    #       logger.capture_command_output(
+    #           server,
+    #           "command -v run-cf-tests || which run-cf-tests",
+    #           "which-run-cf-tests.txt",
+    #           "Verify run-cf-tests is present",
+    #       )
+    #
+    #       # Extra diagnostics before tests
+    #       logger.capture_command_output(
+    #           server,
+    #           "ss -ltn",
+    #           "listening-ports.txt",
+    #           "Listening TCP ports",
+    #       )
+    #       logger.capture_command_output(
+    #           server,
+    #           "systemctl --no-pager --full status crystal-forge-server.service || true",
+    #           "crystal-forge-server-status.txt",
+    #           "crystal-forge-server status",
+    #       )
+    #
+    #       # Run your pytest suite inside the server VM and tee output into /tmp/xchg
+    #       logger.log_section("🏃 Running tests...")
+    #
+    #       # ✅ needs a separator after `pipefail`; also capture stderr
+    #       server.succeed(
+    #           "bash -lc 'set -euo pipefail; cf-test-runner -m vm_internal -vvv 2>&1 | tee /tmp/xchg/pytest-output.txt'"
+    #       )
+    #       logger.log_files.append("pytest-output.txt")
+    #
+    #       # Try to collect any pytest HTML reports if generated
+    #       server.succeed(
+    #           "bash -lc 'mkdir -p /tmp/xchg && "
+    #           "find / -maxdepth 4 -type f -name \"report*.html\" -exec cp -t /tmp/xchg {} + 2>/dev/null || true'"
+    #       )
+    #       # Best-effort add common report names
+    #       for name in ["report.html", "pytest-report.html"]:
+    #           logger.log_files.append(name)
+    #
+    #       # Capture useful service logs (safe if absent)
+    #       logger.capture_service_logs(server, "crystal-forge-server.service")
+    #       logger.capture_service_logs(server, "postgresql.service")
+    #
+    #   run()
+    # '';
+
     testScript = ''
       import os
-      from vm_test_logger import with_logging, TestPatterns
+      import pytest
+      # --- Boot VMs first; otherwise any wait_* will hang
+      os.environ["NIXOS_TEST_DRIVER"] = "1"
+      start_all()
 
-      SERVER_PORT = ${toString CF_TEST_SERVER_PORT}
-      DB_PORT = ${toString CF_TEST_DB_PORT}
+      server.wait_for_unit("postgresql.service")
+      server.wait_for_open_port(5432)
+      server.forward_port(5433, 5432)
 
-      @with_logging("Crystal Forge Agent Integration", primary_vm_name="server")
-      def run(logger):
-          start_all()
-
-          # Basic system info + wait for core services
-          logger.gather_system_info(server)
-          TestPatterns.standard_service_startup(
-              logger, server,
-              ["postgresql.service", "crystal-forge-server.service"]
-          )
-
-          # Verify ports & binaries
-          # TestPatterns.network_test(logger, server, "127.0.0.1", SERVER_PORT)
-          logger.capture_command_output(
-              server,
-              "command -v run-cf-tests || which run-cf-tests",
-              "which-run-cf-tests.txt",
-              "Verify run-cf-tests is present",
-          )
-
-          # Extra diagnostics before tests
-          logger.capture_command_output(
-              server,
-              "ss -ltn",
-              "listening-ports.txt",
-              "Listening TCP ports",
-          )
-          logger.capture_command_output(
-              server,
-              "systemctl --no-pager --full status crystal-forge-server.service || true",
-              "crystal-forge-server-status.txt",
-              "crystal-forge-server status",
-          )
-
-          # Run your pytest suite inside the server VM and tee output into /tmp/xchg
-          logger.log_section("🏃 Running tests...")
-
-          # ✅ needs a separator after `pipefail`; also capture stderr
-          server.succeed(
-              "bash -lc 'set -euo pipefail; cf-test-runner -m vm_internal -vvv 2>&1 | tee /tmp/xchg/pytest-output.txt'"
-          )
-          logger.log_files.append("pytest-output.txt")
-
-          # Try to collect any pytest HTML reports if generated
-          server.succeed(
-              "bash -lc 'mkdir -p /tmp/xchg && "
-              "find / -maxdepth 4 -type f -name \"report*.html\" -exec cp -t /tmp/xchg {} + 2>/dev/null || true'"
-          )
-          # Best-effort add common report names
-          for name in ["report.html", "pytest-report.html"]:
-              logger.log_files.append(name)
-
-          # Capture useful service logs (safe if absent)
-          logger.capture_service_logs(server, "crystal-forge-server.service")
-          logger.capture_service_logs(server, "postgresql.service")
-
-      run()
+      # Set environment variables for the test
+      os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_DB_PORT"] = "5433"  # forwarded port
+      os.environ["CF_TEST_DB_USER"] = "postgres"
+      os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
+      os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
+      # Inject machines so cf_test fixtures can drive them
+      import cf_test
+      cf_test._driver_machines = {
+          "server": server,
+      }
+      # Run only VM-marked tests from cf_test package
+      exit_code = pytest.main([
+          "-vvvv",
+          "--tb=short",
+          "-x",
+          "-s",  # Add -s to see print output immediately
+          "-m", "database",
+          "--pyargs", "cf_test",
+      ])
+      if exit_code != 0:
+          raise SystemExit(exit_code)
     '';
   }
