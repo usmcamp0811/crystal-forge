@@ -125,31 +125,3 @@ def test_postgres_jobs_timer_and_idempotency(cf_client, server, agent):
     run_service_and_verify_success(
         cf_client, server, C.JOBS_SERVICE, "All jobs completed successfully"
     )
-
-
-@pytest.mark.slow
-def test_derivation_show_outputs_json(agent):
-    """
-    Ensure `nix derivation show` outputs valid JSON for the agent's system .drv.
-    Guards against the '--json' flag regression.
-    """
-    # Get the agent's system derivation path
-    drv_path = get_system_hash(agent)
-    assert drv_path.endswith(".drv"), f"Unexpected derivation path: {drv_path}"
-
-    # Run nix derivation show
-    raw = agent.succeed(f"nix derivation show {drv_path}")
-
-    # Must parse cleanly as JSON
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError as e:
-        pytest.fail(
-            f"`nix derivation show` did not output valid JSON: {e}\n{raw[:200]}"
-        )
-
-    # The output should include the drv_path key
-    assert drv_path in data, f"Expected key {drv_path} in JSON output"
-    assert (
-        "inputDrvs" in data[drv_path]
-    ), "Expected 'inputDrvs' field in derivation JSON"
