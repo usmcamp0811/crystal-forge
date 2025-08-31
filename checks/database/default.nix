@@ -38,11 +38,6 @@ in
     skipLint = true;
     skipTypeCheck = true;
     nodes = {
-      gitserver = lib.crystal-forge.makeGitServerNode {
-        inherit pkgs systemBuildClosure;
-        port = 8080;
-      };
-
       server = lib.crystal-forge.makeServerNode {
         inherit pkgs systemBuildClosure keyPath pubPath;
         extraConfig = {
@@ -50,16 +45,18 @@ in
         };
         port = CF_TEST_SERVER_PORT;
       };
-
-      agent = lib.crystal-forge.makeAgentNode {
-        inherit pkgs systemBuildClosure inputs keyPath pubPath;
-        serverHost = "server";
-        extraConfig = {imports = [inputs.self.nixosModules.crystal-forge];};
-      };
     };
 
-    globalTimeout = 900; # Increased timeout for flake operations
-    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
+    globalTimeout = 120; # Increased timeout for flake operations
+    extraPythonPackages = p: [
+      p.pytest
+      p.pytest-xdist
+      p.pytest-metadata
+      p.pytest-html
+      p.psycopg2
+      pkgs.crystal-forge.cf-test-modules
+      pkgs.crystal-forge.vm-test-logger
+    ];
 
     testScript = ''
       import os
@@ -83,8 +80,6 @@ in
       import cf_test
       cf_test._driver_machines = {
           "server": server,
-          "agent": agent,
-          "gitserver": gitserver,
       }
       # Run only VM-marked tests from cf_test package
       exit_code = pytest.main([
@@ -92,7 +87,7 @@ in
           "--tb=short",
           "-x",
           "-s",  # Add -s to see print output immediately
-          "-m", "vm_only",
+          "-m", "database",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:

@@ -37,24 +37,32 @@ in
       export DB_NAME="''${DB_NAME:-crystal_forge}"
       export DB_USER="''${DB_USER:-crystal_forge}"
       export DB_PASSWORD="''${DB_PASSWORD:-password}"
+      export DATABASE_URL="postgres://$DB_USER:password@$DB_HOST:$DB_PORT/$DB_NAME"
+      export CF_TEST_MODE=devshell
 
       # Add test modules to Python path so you can import them
       export PYTHONPATH="${pkgs.crystal-forge.cf-test-modules}/lib/python3.12/site-packages:''${PYTHONPATH:-}"
 
-      alias process-compose='sudo echo && nix run $PROJECT_ROOT#devScripts --'
+      alias full-stack='sudo echo && nix run $PROJECT_ROOT#devScripts --'
+      alias server-stack='nix run $PROJECT_ROOT#devScripts.server-only --'
+      alias db-only='nix run $PROJECT_ROOT#devScripts.db-only --'
       alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
       alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
       alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'
-      alias dbOnly='nix run $PROJECT_ROOT#devScripts.dbOnly --'
       alias test-agent='nix run $PROJECT_ROOT#agent.test-agent --'
+      alias run-db-test='nix run .#cf-test-modules.runTests --'
 
       echo "🔮 Welcome to the Crystal Forge Dev Environment"
       echo ""
       echo "🧰 Dev Workflow:"
       echo ""
       echo "  1️⃣  Start core services:"
-      echo "      process-compose up"
-      echo "      - Launches PostgreSQL and the Crystal Forge server"
+      echo "      full-stack up"
+      echo "      - Launches PostgreSQL, the Crystal Forge server and agent in process-compose"
+      echo "      server-stack up"
+      echo "      - Launches PostgreSQL and the Crystal Forge server in process-compose"
+      echo "      db-only up"
+      echo "      - Launches PostgreSQL in process-compose"
       echo ""
       echo "  2️⃣  Run the agent:"
       echo "      run-agent"
@@ -70,6 +78,7 @@ in
       echo "  simulate-push      → Simulate a webook push event"
       echo "  sqlx-refresh       → Drop DB and re-run sqlx prepare"
       echo "  sqlx-prepare       → Just re-run sqlx prepare"
+      echo "  run-db-test        → Run database tests against dev database (must run `server-stak up`)"
       echo ""
       echo "🧪 Test Suite Available:"
       echo ""
