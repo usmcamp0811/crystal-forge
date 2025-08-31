@@ -350,7 +350,7 @@ in rec {
   in
     {
       networking.useDHCP = true;
-      networking.firewall.allowedTCPPorts = [port];
+      networking.firewall.allowedTCPPorts = [port 5432];
       virtualisation.writableStore = true;
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
@@ -365,13 +365,16 @@ in rec {
         PGHOST = "/run/postgresql";
         PGUSER = "postgres";
       };
+
       services.postgresql = {
         enable = true;
+        settings."listen_addresses" = lib.mkForce "*";
         authentication = lib.concatStringsSep "\n" [
           "local   all   postgres   trust"
           "local   all   all        peer"
           "host    all   all 127.0.0.1/32 trust"
           "host    all   all ::1/128      trust"
+          "host    all   all 10.0.2.2/32  trust"
         ];
         initialScript = pkgs.writeText "init-crystal-forge.sql" ''
           CREATE USER crystal_forge LOGIN;

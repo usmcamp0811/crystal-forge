@@ -68,12 +68,15 @@ in
       os.environ["NIXOS_TEST_DRIVER"] = "1"
       start_all()
 
+      server.wait_for_unit("postgresql.service")
+      server.wait_for_open_port(5432)
+      server.forward_port(5433, 5432)
 
+      # Set environment variables for the test
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_DB_PORT"] = "${toString CF_TEST_DB_PORT}"
-      os.environ["CF_TEST_DB_NAME"] = "crystal_forge"
+      os.environ["CF_TEST_DB_PORT"] = "5433"  # forwarded port
       os.environ["CF_TEST_DB_USER"] = "postgres"
-      os.environ["CF_TEST_DB_PASSWORD"] = "postgres"
+      os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
       os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
       # Inject machines so cf_test fixtures can drive them

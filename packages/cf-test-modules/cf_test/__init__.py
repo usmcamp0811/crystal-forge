@@ -68,19 +68,16 @@ class CFTestClient:
                 "password": self.config.db_password,
                 "cursor_factory": RealDictCursor,
             }
-            if self.config.is_nixos_test:
-                try:
-                    conn_params["host"] = "/run/postgresql"
-                    conn_params["user"] = "postgres"
-                    del conn_params["password"]
-                    self._conn = psycopg2.connect(**conn_params)
-                except:
-                    conn_params["host"] = self.config.db_host
-                    conn_params["user"] = self.config.db_user
-                    conn_params["password"] = self.config.db_password
-                    self._conn = psycopg2.connect(**conn_params)
-            else:
-                self._conn = psycopg2.connect(**conn_params)
+            
+            # In NixOS test mode, connect via forwarded port to VM
+            if os.getenv("NIXOS_TEST_DRIVER") == "1":
+                # Use forwarded connection to VM postgres
+                conn_params["host"] = "127.0.0.1"  # driver host
+                conn_params["port"] = int(os.getenv("CF_TEST_DB_PORT", "5433"))  # forwarded port
+                conn_params["user"] = "postgres"
+                conn_params["password"] = ""  # VM postgres has no password
+                
+            self._conn = psycopg2.connect(**conn_params)
         try:
             yield self._conn
         finally:

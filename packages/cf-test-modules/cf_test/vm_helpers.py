@@ -64,39 +64,45 @@ def verify_db_state(
     expected_reason: str = "startup",
 ) -> None:
     """Verify database contains expected system state"""
-    result = cf_client.db_query_on_vm_simple(
-        machine,
-        "SELECT hostname, derivation_path, change_reason FROM system_states;",
-        db_user="postgres",
+    # Use direct DB connection instead of VM shell commands
+    rows = cf_client.execute_sql(
+        "SELECT hostname, derivation_path, change_reason FROM system_states"
     )
 
-    machine.log(f"Final DB state:\n{result}")
+    machine.log(f"Final DB state: {len(rows)} rows found")
+    for row in rows:
+        machine.log(f"  {row['hostname']}: {row['change_reason']}")
 
-    assert expected_hostname in result, f"Hostname {expected_hostname} not found in DB"
-    assert expected_reason in result, f"Change reason {expected_reason} not found in DB"
-    assert expected_hash in result, f"System hash {expected_hash} not found in DB"
+    hostnames = [row["hostname"] for row in rows]
+    reasons = [row["change_reason"] for row in rows]
+    derivation_paths = [row["derivation_path"] for row in rows]
+
+    assert (
+        expected_hostname in hostnames
+    ), f"Hostname {expected_hostname} not found in DB. Found: {hostnames}"
+    assert (
+        expected_reason in reasons
+    ), f"Change reason {expected_reason} not found in DB. Found: {reasons}"
+    assert any(
+        expected_hash in path for path in derivation_paths
+    ), f"System hash {expected_hash} not found in any derivation path"
 
 
 def verify_flake_in_db(cf_client, machine, repo_url: str) -> None:
     """Verify flake was inserted into database"""
-    # Use the simple query method for basic SELECT statements
-    result = cf_client.db_query_on_vm_simple(
-        machine, "SELECT repo_url FROM flakes;", db_user="postgres"
-    )
+    rows = cf_client.execute_sql("SELECT repo_url FROM flakes")
+    repo_urls = [row["repo_url"] for row in rows]
     assert (
-        repo_url in result
-    ), f"Flake {repo_url} not found in database. Found: {result}"
+        repo_url in repo_urls
+    ), f"Flake {repo_url} not found in database. Found: {repo_urls}"
 
 
 def verify_commits_exist(cf_client, machine) -> None:
     """Verify commits table is not empty"""
-    result = cf_client.db_query_on_vm_simple(
-        machine, "SELECT COUNT(*) FROM commits;", db_user="postgres"
-    )
-    machine.log(f"commits contents:\n{result}")
-    assert (
-        "0 rows" not in result and "0" != result.strip()
-    ), "No commits found in database"
+    rows = cf_client.execute_sql("SELECT COUNT(*) as count FROM commits")
+    count = rows[0]["count"]
+    machine.log(f"commits count: {count}")
+    assert count > 0, "No commits found in database"
 
 
 def check_timer_active(machine, timer_name: str) -> None:
