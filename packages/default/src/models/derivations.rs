@@ -173,11 +173,7 @@ impl Derivation {
         }
         // Try systemd-run scoped build first
         let mut scoped = build_config.systemd_scoped_cmd_base();
-        scoped.args([
-            flake_target,
-            "--accept-flake-config",
-            "--no-write-lock-file",
-        ]);
+        scoped.args([flake_target, "--dry-run", "--no-link", "--json"]);
         build_config.apply_to_command(&mut scoped);
         match scoped.output().await {
             Ok(output) => {
@@ -215,13 +211,7 @@ impl Derivation {
     }
     async fn run_direct_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
         let mut direct = Command::new("nix");
-        direct.args([
-            "derivation",
-            "show",
-            "--accept-flake-config",
-            "--no-write-lock-file",
-            flake_target,
-        ]);
+        direct.args(["build", flake_target, "--dry-run", "--no-link", "--json"]);
         build_config.apply_to_command(&mut direct);
         Ok(direct.output().await?)
     }
