@@ -1,16 +1,20 @@
-import os
-import time
-
 import pytest
 
-pytestmark = pytest.mark.vm_only
-
-API_PORT = 3000
-DB_NAME = "crystal_forge"
-DB_USER = "crystal_forge"
-WEBHOOK_COMMIT = os.environ.get(
-    "CF_TEST_WEBHOOK_COMMIT", "2abc071042b61202f824e7f50b655d00dfd07765"
+from cf_test import CFTestClient
+from cf_test.vm_helpers import SmokeTestConstants as C
+from cf_test.vm_helpers import (
+    SmokeTestData,
+    check_keys_exist,
+    check_timer_active,
+    get_system_hash,
+    run_service_and_verify_success,
+    verify_commits_exist,
+    verify_db_state,
+    verify_flake_in_db,
+    wait_for_agent_acceptance,
 )
+
+pytestmark = pytest.mark.vm_only
 
 
 @pytest.fixture(scope="session")
@@ -27,125 +31,93 @@ def agent():
     return cf_test._driver_machines["agent"]
 
 
-def _wait_until_succeeds(machine, cmd: str, timeout: int = 120, interval: float = 1.0):
-    end = time.time() + timeout
-    last = ""
-    while time.time() < end:
-        code, out = machine.execute(cmd)
-        last = out
-        if code == 0:
-            return out
-        time.sleep(interval)
-    raise AssertionError(f"Timed out after {timeout}s: {cmd}\nLast output:\n{last}")
+@pytest.fixture(scope="session")
+def cf_client(cf_config):
+    return CFTestClient(cf_config)
 
 
-def _db(server, sql: str, timeout: int = 60) -> str:
-    sql_escaped = sql.replace("'", "''")
-    return _wait_until_succeeds(
-        server,
-        f"sudo -u {DB_USER} psql -d {DB_NAME} -At -c $'{sql_escaped}'",
-        timeout=timeout,
-    )
+@pytest.fixture(scope="session")
+def smoke_data():
+    return SmokeTestData()
 
 
-@pytest.mark.timeout(180)
+@pytest.mark.slow  # Use existing marker instead of timeout
 def test_boot_and_units(server, agent):
-    server.succeed("systemctl status crystal-forge-server.service || true")
-    server.log("=== crystal-forge-server service logs ===")
-    server.succeed("journalctl -u crystal-forge-server.service --no-pager || true")
+    """Test that all services boot and reach expected states"""
+    server.succeed(f"systemctl status {C.SERVER_SERVICE} || true")
+    server.log(f"=== {C.SERVER_SERVICE} service logs ===")
+    server.succeed(f"journalctl -u {C.SERVER_SERVICE} --no-pager || true")
 
-    server.wait_for_unit("postgresql")
-    server.wait_for_unit("crystal-forge-server.service")
-    agent.wait_for_unit("crystal-forge-agent.service")
+    server.wait_for_unit(C.POSTGRES_SERVICE)
+    server.wait_for_unit(C.SERVER_SERVICE)
+    agent.wait_for_unit(C.AGENT_SERVICE)
     server.wait_for_unit("multi-user.target")
 
 
-@pytest.mark.timeout(60)
 def test_keys_and_network(server, agent):
-    agent.succeed("test -r /etc/agent.key")
-    agent.succeed("test -r /etc/agent.pub")
-    server.succeed("test -r /etc/agent.pub")
+    """Test that SSH keys are present and network connectivity works"""
+    # Verify keys exist
+    check_keys_exist(agent, C.AGENT_KEY_PATH, C.AGENT_PUB_PATH)
+    check_keys_exist(server, C.SERVER_PUB_PATH)
 
-    # server.wait_for_open_port(API_PORT)
-    # server.succeed(f"ss -ltn | grep ':${API_PORT}\\b'")
-
+    # Verify network connectivity
     agent.succeed("ping -c1 server")
 
 
-@pytest.mark.timeout(120)
-def test_agent_accept_and_db_state(server, agent):
+@pytest.mark.slow
+def test_agent_accept_and_db_state(cf_client, server, agent):
+    """Test that agent is accepted and database state is correct"""
     agent_hostname = agent.succeed("hostname -s").strip()
-    system_hash = agent.succeed("readlink /run/current-system").strip().split("-")[-1]
+    system_hash = get_system_hash(agent)
     change_reason = "startup"
 
-    _wait_until_succeeds(
-        server,
-        "journalctl -u crystal-forge-server.service | grep '✅ accepted agent'",
-        timeout=120,
-    )
+    # Wait for agent acceptance
+    wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
+    # Log agent status for debugging
     agent.log("=== agent logs ===")
-    agent.log(agent.succeed("journalctl -u crystal-forge-agent.service || true"))
+    agent.log(agent.succeed(f"journalctl -u {C.AGENT_SERVICE} || true"))
 
-    out = server.succeed(
-        "sudo -u postgres psql -d crystal_forge -At "
-        "-c 'SELECT hostname, derivation_path, change_reason FROM system_states;'"
-    )
-    server.log("Final DB state:\n" + out)
-
-    assert agent_hostname in out
-    assert change_reason in out
-    assert system_hash in out
+    # Verify database state
+    verify_db_state(cf_client, server, agent_hostname, system_hash, change_reason)
 
 
-@pytest.mark.timeout(120)
-def test_webhook_and_commit_ingest(server):
-    curl_data = (
-        "'{"
-        '"project":{"web_url":"http://gitserver/crystal-forge"},'
-        f'"checkout_sha":"{WEBHOOK_COMMIT}"'
-        "}'"
-    )
-    server.succeed(
-        f"curl -s -X POST http://localhost:{API_PORT}/webhook "
-        f"-H 'Content-Type: application/json' -d {curl_data}"
-    )
-    _wait_until_succeeds(
-        server,
-        f"journalctl -u crystal-forge-server.service | grep {WEBHOOK_COMMIT}",
-        timeout=90,
+@pytest.mark.slow
+def test_webhook_and_commit_ingest(cf_client, server, smoke_data):
+    """Test webhook processing and commit ingestion"""
+    # Send webhook
+    cf_client.send_webhook(server, C.API_PORT, smoke_data.webhook_payload)
+
+    # Wait for webhook processing
+    cf_client.wait_for_service_log(
+        server, C.SERVER_SERVICE, smoke_data.webhook_commit, timeout=90
     )
 
-    flake_row = server.succeed(
-        "sudo -u postgres psql -d crystal_forge -At -c "
-        "\"SELECT repo_url FROM flakes WHERE repo_url = 'http://gitserver/crystal-forge';\""
-    )
-    assert "http://gitserver/crystal-forge" in flake_row
+    # Verify flake was created
+    verify_flake_in_db(cf_client, server, smoke_data.git_server_url)
 
-    commits = server.succeed(
-        "sudo -u postgres psql -d crystal_forge -At -c 'SELECT COUNT(*) FROM commits;'"
-    ).strip()
-    server.log("commits contents:\n" + commits)
-    assert "0 rows" not in commits and "0 rows" not in commits.lower()
+    # Verify commits were ingested
+    verify_commits_exist(cf_client, server)
 
 
-@pytest.mark.timeout(120)
-def test_postgres_jobs_timer_and_idempotency(server, agent):
+@pytest.mark.slow
+def test_postgres_jobs_timer_and_idempotency(cf_client, server, agent):
+    """Test postgres jobs timer and service idempotency"""
+    # Verify agent doesn't run postgres (security check)
     active_services = agent.succeed(
         "systemctl list-units --type=service --state=active"
     )
     assert "postgresql" not in active_services
 
-    server.succeed("systemctl list-timers | grep crystal-forge-postgres-jobs")
+    # Verify timer is active
+    check_timer_active(server, C.JOBS_TIMER)
 
-    server.succeed("systemctl start crystal-forge-postgres-jobs.service")
-    server.succeed(
-        "journalctl -u crystal-forge-postgres-jobs.service | "
-        "grep 'All jobs completed successfully'"
+    # Test service runs successfully
+    run_service_and_verify_success(
+        cf_client, server, C.JOBS_SERVICE, "All jobs completed successfully"
     )
 
-    server.succeed("systemctl start crystal-forge-postgres-jobs.service")
-    server.succeed(
-        "journalctl -u crystal-forge-postgres-jobs.service | tail -20 | "
-        "grep 'All jobs completed successfully'"
+    # Test idempotency - second run should also succeed
+    run_service_and_verify_success(
+        cf_client, server, C.JOBS_SERVICE, "All jobs completed successfully"
     )

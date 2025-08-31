@@ -218,6 +218,7 @@ def pytest_configure(config: pytest.Config) -> None:
         ("views", "Database view tests"),
         ("integration", "Integration tests"),
         ("agent", "Agent-related tests"),
+        ("timeout", "Tests with timeout constraints"),
     ]:
         config.addinivalue_line("markers", f"{mark}: {desc}")
 

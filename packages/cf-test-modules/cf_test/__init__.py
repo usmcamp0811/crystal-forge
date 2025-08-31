@@ -59,7 +59,6 @@ class CFTestClient:
 
     @contextmanager
     def db_connection(self):
-        # (unchanged)
         if self._conn is None:
             conn_params = {
                 "host": self.config.db_host,
@@ -97,8 +96,63 @@ class CFTestClient:
             with conn.cursor() as cur:
                 cur.execute(sql, params)
                 rows = [dict(row) for row in cur.fetchall()] if cur.description else []
-                conn.commit()  # ensure DML takes effect across calls
+                conn.commit()
                 return rows
+
+    # VM Testing Helpers
+    def wait_until_succeeds(self, machine, cmd: str, timeout: int = 120, interval: float = 1.0) -> str:
+        """Wait for a command to succeed on a VM machine"""
+        end = time.time() + timeout
+        last = ""
+        while time.time() < end:
+            code, out = machine.execute(cmd)
+            last = out
+            if code == 0:
+                return out
+            time.sleep(interval)
+        raise AssertionError(f"Timed out after {timeout}s: {cmd}\nLast output:\n{last}")
+
+    def db_query_on_vm(self, machine, sql: str, timeout: int = 60, db_name: str = "crystal_forge", db_user: str = "crystal_forge") -> str:
+        """Execute SQL query on a VM via psql command using temporary file"""
+        temp_sql_path = f"/tmp/query_{os.getpid()}_{int(time.time())}.sql"
+        
+        # Write the SQL to a file on the VM
+        machine.succeed(f"cat > {temp_sql_path} << 'EOF'\n{sql}\nEOF")
+        
+        try:
+            # Execute the SQL file
+            result = self.wait_until_succeeds(
+                machine,
+                f"sudo -u {db_user} psql -d {db_name} -At -f {temp_sql_path}",
+                timeout=timeout,
+            )
+            return result
+        finally:
+            # Clean up the temporary file
+            machine.succeed(f"rm -f {temp_sql_path}")
+
+    def db_query_on_vm_simple(self, machine, sql: str, timeout: int = 60, db_name: str = "crystal_forge", db_user: str = "crystal_forge") -> str:
+        """Execute simple SQL query on a VM via psql command (for basic queries without special characters)"""
+        sql_escaped = sql.replace("'", "''")
+        cmd = f"sudo -u {db_user} psql -d {db_name} -At -c $'{sql_escaped}'"
+        return self.wait_until_succeeds(machine, cmd, timeout=timeout)
+
+    def wait_for_service_log(self, machine, service_name: str, log_pattern: str, timeout: int = 120) -> None:
+        """Wait for a specific pattern to appear in service logs"""
+        self.wait_until_succeeds(
+            machine,
+            f"journalctl -u {service_name} | grep '{log_pattern}'",
+            timeout=timeout,
+        )
+
+    def send_webhook(self, machine, port: int, payload: dict) -> str:
+        """Send webhook payload to server"""
+        import json
+        payload_str = json.dumps(payload).replace('"', '\\"')
+        return machine.succeed(
+            f"curl -s -X POST http://localhost:{port}/webhook "
+            f"-H 'Content-Type: application/json' -d \"{payload_str}\""
+        )
 
     def execute_sql_file(self, sql_file: Union[str, Path]) -> List[Dict[str, Any]]:
         """Execute SQL from file"""
@@ -146,14 +200,13 @@ class CFTestClient:
         with self.db_connection() as conn:
             with conn.cursor() as cur:
                 # Define the correct deletion order based on foreign key dependencies
-                # Must delete in reverse dependency order: children first, then parents
                 deletion_order = [
-                    "agent_heartbeats",  # references system_states
-                    "system_states",  # references systems (via hostname)
-                    "derivations",  # references commits
-                    "systems",  # references flakes
-                    "commits",  # references flakes
-                    "flakes",  # no dependencies
+                    "agent_heartbeats",
+                    "system_states",
+                    "derivations",
+                    "systems",
+                    "commits",
+                    "flakes",
                 ]
 
                 for table in deletion_order:
@@ -169,7 +222,6 @@ class CFTestClient:
                                 print(
                                     f"Warning: Failed to delete from {table} with pattern '{pattern}': {e}"
                                 )
-                                # Continue with other deletions
                 conn.commit()
 
     def run_agent_command(self, hostname: str, **kwargs) -> subprocess.CompletedProcess:
@@ -188,7 +240,6 @@ class CFTestClient:
             str(self.config.server_port),
         ]
 
-        # Add optional parameters
         for key, value in kwargs.items():
             cmd.extend([f"--{key.replace('_', '-')}", str(value)])
 
@@ -239,14 +290,12 @@ def db_transaction(cf_client):
     """Database transaction fixture - rolls back after test"""
     with cf_client.db_connection() as conn:
         with conn.cursor() as cur:
-            # Start transaction
             cur.execute("BEGIN")
             yield cf_client
-            # Rollback transaction
             cur.execute("ROLLBACK")
 
 
-# Test markers for grouping
+# Test markers
 pytest.mark.database = pytest.mark.database
 pytest.mark.integration = pytest.mark.integration
 pytest.mark.agent = pytest.mark.agent
@@ -311,7 +360,6 @@ def pytest_sessionfinish(session, exitstatus):
     config = CFTestConfig()
 
     if config.is_nixos_test and config.output_dir.exists():
-        # Copy to $out/test-results for NixOS test framework
         nix_out = os.getenv("out", "/tmp/test-results")
         nix_out_path = Path(nix_out)
         nix_out_path.mkdir(parents=True, exist_ok=True)
@@ -330,7 +378,7 @@ def main(argv=None):
 
     import pytest
 
-    cfg = CFTestConfig()  # ensures output dir exists
+    cfg = CFTestConfig()
     args = [
         "--tb=short",
         "--maxfail=5",
