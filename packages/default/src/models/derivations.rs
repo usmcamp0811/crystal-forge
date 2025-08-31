@@ -683,9 +683,9 @@ async fn list_immediate_input_drvs(
     drv_path: &str,
     build_config: &BuildConfig,
 ) -> Result<Vec<String>> {
-    // `nix derivation show --json <drv>` yields {"<drv>": {"inputDrvs": {"<drv2>": ["out"], …}, …}}
+    // `nix derivation show <drv>` yields {"<drv>": {"inputDrvs": {"<drv2>": ["out"], …}, …}}
     let mut cmd = Command::new("nix");
-    cmd.args(["derivation", "show", "--json", drv_path]);
+    cmd.args(["derivation", "show", drv_path]);
     build_config.apply_to_command(&mut cmd);
 
     let out = cmd.output().await?;
