@@ -26,7 +26,7 @@ pub struct Derivation {
     pub attempt_count: i32,
     pub evaluation_duration_ms: Option<i32>,
     pub error_message: Option<String>,
-    // pub parent_derivation_id: Option<i32>, // for hierarchical relationships (packages → systems)
+    // pub parent_derivation_id: Option<i32>, // for hierarchical relationships (packages → systems)   ▐
     pub pname: Option<String>,   // Nix package name (for packages)
     pub version: Option<String>, // package version (for packages)
     pub status_id: i32,          // foreign key to derivation_statuses table
@@ -173,7 +173,7 @@ impl Derivation {
         }
         // Try systemd-run scoped build first
         let mut scoped = build_config.systemd_scoped_cmd_base();
-        scoped.args([flake_target, "--dry-run", "--no-link", "--json"]);
+        scoped.args([flake_target, "--dry-run", "--no-link"]);
         build_config.apply_to_command(&mut scoped);
         match scoped.output().await {
             Ok(output) => {
@@ -209,9 +209,10 @@ impl Derivation {
             }
         }
     }
+
     async fn run_direct_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
         let mut direct = Command::new("nix");
-        direct.args(["build", flake_target, "--dry-run", "--no-link", "--json"]);
+        direct.args(["build", flake_target, "--dry-run", "--no-link"]);
         build_config.apply_to_command(&mut direct);
         Ok(direct.output().await?)
     }
@@ -312,28 +313,25 @@ impl Derivation {
                 })
             }
             Err(e) if e.to_string() == "no-derivations" => {
-                info!("📦 No new derivations needed - getting derivation path from evaluation");
+                info!("📦 No new derivations needed - getting output path from evaluation");
 
-                // Get the derivation path using nix eval
+                // Get the output path using nix eval
                 let mut eval_cmd = Command::new("nix");
-                eval_cmd.args(["eval", "--raw", &format!("{}^drvPath", flake_target)]);
+                eval_cmd.args(["eval", "--raw", &format!("{}^out", flake_target)]);
                 build_config.apply_to_command(&mut eval_cmd);
 
                 let eval_output = eval_cmd.output().await?;
                 if !eval_output.status.success() {
                     let eval_stderr = String::from_utf8_lossy(&eval_output.stderr);
-                    bail!(
-                        "nix eval for derivation path failed: {}",
-                        eval_stderr.trim()
-                    );
+                    bail!("nix eval for output path failed: {}", eval_stderr.trim());
                 }
 
-                let drv_path = String::from_utf8_lossy(&eval_output.stdout)
+                let out_path = String::from_utf8_lossy(&eval_output.stdout)
                     .trim()
                     .to_string();
 
                 Ok(EvaluationResult {
-                    main_derivation_path: drv_path, // Now this is actually a .drv path!
+                    main_derivation_path: out_path, // This is now an output path, not .drv
                     dependency_derivation_paths: Vec::new(),
                 })
             }
