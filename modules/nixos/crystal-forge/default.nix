@@ -858,6 +858,7 @@ in {
         gnugrep
         findutils
         vulnix
+        nix
       ];
       environment = {
         RUST_LOG = cfg.log_level;

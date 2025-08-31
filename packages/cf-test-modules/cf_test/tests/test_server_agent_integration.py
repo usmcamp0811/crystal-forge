@@ -68,11 +68,13 @@ def test_keys_and_network(server, agent):
 def test_agent_accept_and_db_state(cf_client, server, agent):
     """Test that agent is accepted and database state is correct"""
     agent_hostname = agent.succeed("hostname -s").strip()
+
+    # Wait for agent acceptance first
+    wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
+
+    # Now get the system hash after the database fix has run
     system_hash = get_system_hash(agent)
     change_reason = "startup"
-
-    # Wait for agent acceptance
-    wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
     # Log agent status for debugging
     agent.log("=== agent logs ===")
