@@ -12,16 +12,22 @@
   "__elements": {},
   "__requires": [
     {
+      "type": "panel",
+      "id": "bargauge",
+      "name": "Bar gauge",
+      "version": ""
+    },
+    {
       "type": "grafana",
       "id": "grafana",
       "name": "Grafana",
-      "version": "12.0.2"
+      "version": "12.0.3"
     },
     {
       "type": "datasource",
       "id": "grafana-postgresql-datasource",
       "name": "PostgreSQL",
-      "version": "12.0.2"
+      "version": "12.0.3"
     },
     {
       "type": "panel",
@@ -79,7 +85,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "crystal-forge-ds"
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -121,12 +127,12 @@
         "textMode": "auto",
         "wideLayout": true
       },
-      "pluginVersion": "12.0.2",
+      "pluginVersion": "12.0.3",
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "crystal-forge-ds"
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
           },
           "editorMode": "code",
           "format": "table",
@@ -171,7 +177,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "crystal-forge-ds"
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
       },
       "description": "",
       "fieldConfig": {
@@ -219,6 +225,36 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "🔴 Offline"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "🟠 Critical"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
@@ -249,17 +285,17 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.2",
+      "pluginVersion": "12.0.3",
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "crystal-forge-ds"
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
           },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "-- Fleet Health Status based on heartbeat/activity\nSELECT \n    CASE \n        WHEN last_seen > NOW() - INTERVAL '15 minutes' THEN 'Healthy'\n        WHEN last_seen > NOW() - INTERVAL '1 hour' THEN 'Warning'\n        WHEN last_seen > NOW() - INTERVAL '4 hours' THEN 'Critical'\n        ELSE 'Offline'\n    END as health_status,\n    COUNT(*) as count\nFROM view_systems_current_state\nGROUP BY \n    (CASE \n        WHEN last_seen > NOW() - INTERVAL '15 minutes' THEN 'Healthy'\n        WHEN last_seen > NOW() - INTERVAL '1 hour' THEN 'Warning'\n        WHEN last_seen > NOW() - INTERVAL '4 hours' THEN 'Critical'\n        ELSE 'Offline'\n    END)\nORDER BY \n    CASE \n        WHEN (CASE \n            WHEN last_seen > NOW() - INTERVAL '15 minutes' THEN 'Healthy'\n            WHEN last_seen > NOW() - INTERVAL '1 hour' THEN 'Warning'\n            WHEN last_seen > NOW() - INTERVAL '4 hours' THEN 'Critical'\n            ELSE 'Offline'\n        END) = 'Healthy' THEN 1\n        WHEN (CASE \n            WHEN last_seen > NOW() - INTERVAL '15 minutes' THEN 'Healthy'\n            WHEN last_seen > NOW() - INTERVAL '1 hour' THEN 'Warning'\n            WHEN last_seen > NOW() - INTERVAL '4 hours' THEN 'Critical'\n            ELSE 'Offline'\n        END) = 'Warning' THEN 2\n        WHEN (CASE \n            WHEN last_seen > NOW() - INTERVAL '15 minutes' THEN 'Healthy'\n            WHEN last_seen > NOW() - INTERVAL '1 hour' THEN 'Warning'\n            WHEN last_seen > NOW() - INTERVAL '4 hours' THEN 'Critical'\n            ELSE 'Offline'\n        END) = 'Critical' THEN 3\n        ELSE 4\n    END;",
+          "rawSql": "select Count(*) as count, heartbeat_status as health_status from view_system_heartbeat_status group by heartbeat_status;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -286,7 +322,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "crystal-forge-ds"
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -300,6 +336,7 @@
               "viz": false
             }
           },
+          "fieldMinMax": false,
           "mappings": []
         },
         "overrides": [
@@ -407,6 +444,141 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "starting"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "offline"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "online"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "stale"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "🔴 Behind"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "⚪ No Evaluation"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#424242",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#465145",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "behind"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "up_to_date"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
@@ -437,17 +609,17 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.2",
+      "pluginVersion": "12.0.3",
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "crystal-forge-ds"
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
           },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT \n    status_text, \n    COUNT(*) as count\nFROM view_systems_status_table \nGROUP BY status, status_text\nORDER BY \n    CASE status\n        WHEN '🟢' THEN 1  -- Up to Date\n        WHEN '🟡' THEN 2  -- Updating\n        WHEN '🔴' THEN 3  -- Outdated\n        WHEN '🟤' THEN 4  -- Unknown/Stuck\n        WHEN '⚪' THEN 5  -- No Data\n        WHEN '⚫' THEN 6  -- Offline\n        ELSE 7\n    END;",
+          "rawSql": "select count(*) as count, deployment_status from view_system_deployment_status group by deployment_status;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -474,7 +646,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "crystal-forge-ds"
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -482,7 +654,7 @@
             "mode": "continuous-YlBl"
           },
           "custom": {
-            "axisPlacement": "hidden",
+            "axisPlacement": "auto",
             "fillOpacity": 80,
             "hideFrom": {
               "legend": false,
@@ -575,17 +747,17 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.2",
+      "pluginVersion": "12.0.3",
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "crystal-forge-ds"
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
           },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT                                        \n  commit_timestamp as time,\n  CONCAT(\n    currently_deployed_systems, \n    ' deployed (', \n    short_hash, \n    ')§', \n    ROW_NUMBER() OVER (PARTITION BY flake_name ORDER BY commit_timestamp DESC) - 1\n  ) as \"Config\",\n  flake_name\nFROM view_commit_deployment_timeline \nORDER BY commit_timestamp DESC",
+          "rawSql": "select * from view_config_timeline;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -629,12 +801,284 @@
       "type": "state-timeline"
     },
     {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 17
+      },
+      "id": 11,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.0.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    status_name as \"Status\",\n    total_count as \"Total\",\n    nixos_count as \"NixOS\",\n    package_count as \"Packages\",\n    avg_attempts as \"Avg Attempts\",\n    avg_duration_seconds as \"Avg Duration (s)\",\n    count_last_24h as \"Last 24h\"\nFROM view_derivation_status_breakdown\nWHERE is_terminal = false\nORDER BY total_count DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Current Build Queue Status - ${building:text}",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Attempts"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 94
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Error"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 693
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 23
+      },
+      "id": 12,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
+        },
+        "showHeader": true,
+        "sortBy": []
+      },
+      "pluginVersion": "12.0.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    derivation_name as \"Derivation\",\n    derivation_type as \"Type\",\n    ds.name as \"Status\",\n    attempt_count as \"Attempts\",\n    error_message as \"Error\",\n    scheduled_at as \"Scheduled\",\n    started_at as \"Started\"\nFROM derivations d\nJOIN derivation_statuses ds ON d.status_id = ds.id\nWHERE ds.name IN ('build-failed', 'dry-run-failed', 'failed')\n  AND scheduled_at >= $__timeFrom()\n  AND scheduled_at <= $__timeTo()\nORDER BY scheduled_at DESC\nLIMIT 20;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Recent Failures (for troubleshooting)",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 24,
+        "x": 0,
+        "y": 31
+      },
+      "id": 13,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.0.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    derivation_name as \"Derivation\",\n    derivation_type as \"Type\",\n    evaluation_duration_ms/1000 as \"Duration (s)\",\n    attempt_count as \"Attempts\",\n    completed_at as \"Completed\"\nFROM derivations d  \nJOIN derivation_statuses ds ON d.status_id = ds.id\nWHERE ds.name IN ('build-complete', 'complete')\n  AND evaluation_duration_ms IS NOT NULL\n  AND completed_at >= NOW() - INTERVAL '24 hours'\nORDER BY evaluation_duration_ms DESC\nLIMIT 15;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Performance Leaders and Laggards",
+      "type": "table"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 17
+        "y": 37
       },
       "id": 3,
       "panels": [],
@@ -644,7 +1088,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "crystal-forge-ds"
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
       },
       "fieldConfig": {
         "defaults": {
@@ -678,7 +1122,7 @@
         "h": 11,
         "w": 24,
         "x": 0,
-        "y": 18
+        "y": 38
       },
       "id": 7,
       "options": {
@@ -691,12 +1135,12 @@
         },
         "showHeader": true
       },
-      "pluginVersion": "12.0.2",
+      "pluginVersion": "12.0.3",
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "crystal-forge-ds"
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
           },
           "editorMode": "code",
           "format": "table",
@@ -777,122 +1221,204 @@
       "type": "table"
     },
     {
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 29
+        "y": 49
       },
       "id": 9,
-      "panels": [],
+      "panels": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "continuous-RdYlGr",
+                "seriesBy": "last"
+              },
+              "custom": {
+                "axisBorderShow": false,
+                "axisCenteredZero": false,
+                "axisColorMode": "text",
+                "axisLabel": "",
+                "axisPlacement": "auto",
+                "axisSoftMax": 100,
+                "axisSoftMin": 0,
+                "barAlignment": 0,
+                "barWidthFactor": 0.6,
+                "drawStyle": "line",
+                "fillOpacity": 20,
+                "gradientMode": "scheme",
+                "hideFrom": {
+                  "legend": false,
+                  "tooltip": false,
+                  "viz": false
+                },
+                "insertNulls": false,
+                "lineInterpolation": "smooth",
+                "lineWidth": 3,
+                "pointSize": 5,
+                "scaleDistribution": {
+                  "type": "linear"
+                },
+                "showPoints": "auto",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                },
+                "thresholdsStyle": {
+                  "mode": "off"
+                }
+              },
+              "mappings": [],
+              "max": 100,
+              "min": 0,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red"
+                  },
+                  {
+                    "color": "orange",
+                    "value": 70
+                  },
+                  {
+                    "color": "#EAB839",
+                    "value": 90
+                  },
+                  {
+                    "color": "green",
+                    "value": 100
+                  }
+                ]
+              },
+              "unit": "percent"
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 7,
+            "w": 24,
+            "x": 0,
+            "y": 70
+          },
+          "id": 8,
+          "options": {
+            "legend": {
+              "calcs": [],
+              "displayMode": "hidden",
+              "placement": "right",
+              "showLegend": false
+            },
+            "tooltip": {
+              "hideZeros": false,
+              "mode": "single",
+              "sort": "none"
+            }
+          },
+          "pluginVersion": "12.0.2",
+          "targets": [
+            {
+              "datasource": {
+                "type": "grafana-postgresql-datasource",
+                "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+              },
+              "editorMode": "code",
+              "format": "table",
+              "rawQuery": true,
+              "rawSql": "SELECT\n    snapshot_date,\n    compliance_percentage\nFROM view_compliance_trend_7d\nORDER BY snapshot_date;",
+              "refId": "A",
+              "sql": {
+                "columns": [
+                  {
+                    "parameters": [],
+                    "type": "function"
+                  }
+                ],
+                "groupBy": [
+                  {
+                    "property": {
+                      "type": "string"
+                    },
+                    "type": "groupBy"
+                  }
+                ],
+                "limit": 50
+              }
+            }
+          ],
+          "title": "7-Day Trend",
+          "type": "timeseries"
+        }
+      ],
       "title": "Compliance",
       "type": "row"
     },
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "crystal-forge-ds"
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
       },
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "continuous-RdYlGr",
-            "seriesBy": "last"
-          },
           "custom": {
-            "axisBorderShow": false,
-            "axisCenteredZero": false,
-            "axisColorMode": "text",
-            "axisLabel": "",
-            "axisPlacement": "auto",
-            "axisSoftMax": 100,
-            "axisSoftMin": 0,
-            "barAlignment": 0,
-            "barWidthFactor": 0.6,
-            "drawStyle": "line",
-            "fillOpacity": 20,
-            "gradientMode": "scheme",
-            "hideFrom": {
-              "legend": false,
-              "tooltip": false,
-              "viz": false
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
             },
-            "insertNulls": false,
-            "lineInterpolation": "smooth",
-            "lineWidth": 3,
-            "pointSize": 5,
-            "scaleDistribution": {
-              "type": "linear"
-            },
-            "showPoints": "auto",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            },
-            "thresholdsStyle": {
-              "mode": "off"
-            }
+            "inspect": false
           },
           "mappings": [],
-          "max": 100,
-          "min": 0,
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "red"
+                "color": "green"
               },
               {
-                "color": "orange",
-                "value": 70
-              },
-              {
-                "color": "#EAB839",
-                "value": 90
-              },
-              {
-                "color": "green",
-                "value": 100
+                "color": "red",
+                "value": 80
               }
             ]
-          },
-          "unit": "percent"
+          }
         },
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
-        "w": 24,
+        "h": 8,
+        "w": 12,
         "x": 0,
-        "y": 30
+        "y": 50
       },
-      "id": 8,
+      "id": 15,
       "options": {
-        "legend": {
-          "calcs": [],
-          "displayMode": "hidden",
-          "placement": "right",
-          "showLegend": false
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
         },
-        "tooltip": {
-          "hideZeros": false,
-          "mode": "single",
-          "sort": "none"
-        }
+        "showHeader": true
       },
-      "pluginVersion": "12.0.2",
+      "pluginVersion": "12.0.3",
       "targets": [
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "crystal-forge-ds"
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
           },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n    snapshot_date,\n    compliance_percentage\nFROM view_compliance_trend_7d\nORDER BY snapshot_date;",
+          "rawSql": "SELECT \n    hostname as \"System\",\n    deployment_status as \"Status\", \n    commits_behind as \"Behind\",\n    CASE \n        WHEN deployment_status = 'no_deployment' THEN 'Never deployed'\n        WHEN deployment_status = 'unknown' THEN 'Cant track - investigate' \n        WHEN deployment_status = 'behind' AND commits_behind > 10 THEN 'Critically outdated'\n        WHEN deployment_status = 'behind' THEN 'Update available'\n        WHEN deployment_status = 'ahead' THEN 'Unreleased code'\n        ELSE 'Investigate'\n    END as \"Issue\"\nFROM view_system_deployment_status \nWHERE deployment_status NOT IN ('up_to_date')\nORDER BY \n    CASE deployment_status \n        WHEN 'no_deployment' THEN 1\n        WHEN 'unknown' THEN 2  \n        WHEN 'behind' THEN 3\n        ELSE 4 \n    END,\n    commits_behind DESC NULLS LAST;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -913,8 +1439,178 @@
           }
         }
       ],
-      "title": "7-Day Trend",
-      "type": "timeseries"
+      "title": "Deployment Problems",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 50
+      },
+      "id": 14,
+      "options": {
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
+          "fields": "",
+          "reducer": ["sum"],
+          "show": false
+        },
+        "showHeader": true
+      },
+      "pluginVersion": "12.0.3",
+      "targets": [
+        {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+          },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT \n    hostname as \"System\",\n    heartbeat_status as \"Status\",\n    ROUND(minutes_since_last_activity/60, 1) as \"Hours Offline\",\n    most_recent_activity as \"Last Seen\",\n    CASE \n        WHEN heartbeat_status = 'Offline' AND minutes_since_last_activity > 1440 THEN 'URGENT'\n        WHEN heartbeat_status = 'Critical' THEN 'HIGH'\n        ELSE 'MEDIUM'\n    END as \"Priority\"\nFROM view_system_heartbeat_status \nWHERE heartbeat_status IN ('Offline', 'Critical', 'Warning')\nORDER BY \n    CASE heartbeat_status WHEN 'Offline' THEN 1 ELSE 2 END,\n    minutes_since_last_activity DESC;",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          }
+        }
+      ],
+      "title": "Critical & Offline Systems",
+      "type": "table"
+    },
+    {
+      "datasource": {
+        "type": "grafana-postgresql-datasource",
+        "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "continuous-GrYlRd"
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              },
+              {
+                "color": "red",
+                "value": 80
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 58
+      },
+      "id": 16,
+      "options": {
+        "displayMode": "basic",
+        "legend": {
+          "calcs": [],
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "maxVizHeight": 300,
+        "minVizHeight": 16,
+        "minVizWidth": 8,
+        "namePlacement": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [],
+          "fields": "",
+          "values": true
+        },
+        "showUnfilled": true,
+        "sizing": "auto",
+        "valueMode": "color"
+      },
+      "pluginVersion": "12.0.3",
+      "targets": [
+        {
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "-- Bar gauge: derivations by status (use “Bar gauge” panel)\n-- Title: Build status – ${commit:text}\nSELECT\n  ds.name  AS status,\n  ds.display_order,\n  COUNT(*) AS count\nFROM view_commit_nixos_table v\nJOIN derivation_statuses ds ON ds.name = v.derivation_status\nWHERE $__timeFilter(v.commit_timestamp)\n  AND v.commit_id::text IN (${commit:sqlstring})\nGROUP BY ds.name, ds.display_order\nORDER BY ds.display_order;\n",
+          "refId": "A",
+          "sql": {
+            "columns": [
+              {
+                "parameters": [],
+                "type": "function"
+              }
+            ],
+            "groupBy": [
+              {
+                "property": {
+                  "type": "string"
+                },
+                "type": "groupBy"
+              }
+            ],
+            "limit": 50
+          },
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+          }
+        }
+      ],
+      "title": "New panel",
+      "type": "bargauge"
     }
   ],
   "schemaVersion": 41,
@@ -922,10 +1618,37 @@
   "templating": {
     "list": [
       {
+        "allowCustomValue": false,
         "current": {},
-        "name": "query0",
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+        },
+        "definition": "SELECT t.__text, t.__value\nFROM (\n  SELECT DISTINCT ON (commit_id)\n         (flake_name || ' ' || short_hash) AS __text,\n         commit_id AS __value,\n         commit_timestamp\n  FROM view_commit_nixos_table\n  ORDER BY commit_id, commit_timestamp DESC\n) AS t\nORDER BY t.commit_timestamp DESC;",
+        "description": "Query to get the available commits",
+        "label": "Commit",
+        "multi": true,
+        "name": "commit",
         "options": [],
-        "query": "",
+        "query": "SELECT t.__text, t.__value\nFROM (\n  SELECT DISTINCT ON (commit_id)\n         (flake_name || ' ' || short_hash) AS __text,\n         commit_id AS __value,\n         commit_timestamp\n  FROM view_commit_nixos_table\n  ORDER BY commit_id, commit_timestamp DESC\n) AS t\nORDER BY t.commit_timestamp DESC;",
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      },
+      {
+        "allowCustomValue": false,
+        "current": {},
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+        },
+        "definition": "-- Grafana variable: text/value\nSELECT\n  f.name || '/' || d.derivation_name || ' @ ' || LEFT(c.git_commit_hash, 8) AS text,\n  d.id AS value\nFROM public.derivations d\nJOIN public.derivation_statuses s ON s.id = d.status_id\nJOIN public.commits c ON c.id = d.commit_id\nJOIN public.flakes f ON f.id = c.flake_id\nWHERE s.name = 'build-inprogress'\nORDER BY d.started_at DESC NULLS LAST;\n",
+        "description": "",
+        "hide": 2,
+        "label": "Build In-Progress Derivations",
+        "name": "building",
+        "options": [],
+        "query": "-- Grafana variable: text/value\nSELECT\n  f.name || '/' || d.derivation_name || ' @ ' || LEFT(c.git_commit_hash, 8) AS text,\n  d.id AS value\nFROM public.derivations d\nJOIN public.derivation_statuses s ON s.id = d.status_id\nJOIN public.commits c ON c.id = d.commit_id\nJOIN public.flakes f ON f.id = c.flake_id\nWHERE s.name = 'build-inprogress'\nORDER BY d.started_at DESC NULLS LAST;\n",
         "refresh": 1,
         "regex": "",
         "type": "query"
@@ -940,6 +1663,6 @@
   "timezone": "browser",
   "title": "Crystal Forge Dashboard",
   "uid": "3d70baf5-db41-4dfa-bbee-af52dbfbe736",
-  "version": 39,
+  "version": 52,
   "weekStart": ""
 }

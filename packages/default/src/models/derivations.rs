@@ -321,17 +321,28 @@ impl Derivation {
                 })
             }
             Err(e) if e.to_string() == "no-derivations" => {
-                info!("📦 No new derivations needed - everything already available");
-                let store_output = Self::run_print_out_paths(flake_target, build_config).await?;
-                if !store_output.status.success() {
-                    let se = String::from_utf8_lossy(&store_output.stderr);
-                    bail!("nix build for store path failed: {}", se.trim());
+                info!("📦 No new derivations needed - getting derivation path from evaluation");
+
+                // Get the derivation path using nix eval
+                let mut eval_cmd = Command::new("nix");
+                eval_cmd.args(["eval", "--raw", &format!("{}^drvPath", flake_target)]);
+                build_config.apply_to_command(&mut eval_cmd);
+
+                let eval_output = eval_cmd.output().await?;
+                if !eval_output.status.success() {
+                    let eval_stderr = String::from_utf8_lossy(&eval_output.stderr);
+                    bail!(
+                        "nix eval for derivation path failed: {}",
+                        eval_stderr.trim()
+                    );
                 }
-                let store_stdout = String::from_utf8_lossy(&store_output.stdout);
-                let store_path = store_stdout.trim().to_string();
+
+                let drv_path = String::from_utf8_lossy(&eval_output.stdout)
+                    .trim()
+                    .to_string();
 
                 Ok(EvaluationResult {
-                    main_derivation_path: store_path,
+                    main_derivation_path: drv_path, // Now this is actually a .drv path!
                     dependency_derivation_paths: Vec::new(),
                 })
             }

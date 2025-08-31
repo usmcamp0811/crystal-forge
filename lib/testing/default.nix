@@ -178,7 +178,7 @@ in rec {
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
 
-      environment.systemPackages = [pkgs.git pkgs.jq];
+      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.cf-test-modules.runTests pkgs.crystal-forge.cf-test-modules.testRunner];
 
       nix = {
         package = pkgs.nixVersions.stable;
@@ -350,25 +350,31 @@ in rec {
   in
     {
       networking.useDHCP = true;
-      networking.firewall.allowedTCPPorts = [port];
+      networking.firewall.allowedTCPPorts = [port 5432];
       virtualisation.writableStore = true;
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
 
-      environment.systemPackages = [pkgs.git pkgs.jq];
+      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.default pkgs.crystal-forge.cf-test-modules.runTests pkgs.crystal-forge.cf-test-modules.testRunner];
       environment.etc = lib.mkMerge [
         (lib.mkIf (keyPath != null) {"agent.key".source = "${keyPath}/agent.key";})
         (lib.mkIf (pubPath != null) {"agent.pub".source = "${pubPath}/agent.pub";})
         (lib.mkIf (cfFlakePath != null) {"cf_flake".source = cfFlakePath;})
       ];
+      environment.variables = {
+        PGHOST = "/run/postgresql";
+        PGUSER = "postgres";
+      };
 
       services.postgresql = {
         enable = true;
+        settings."listen_addresses" = lib.mkForce "*";
         authentication = lib.concatStringsSep "\n" [
-          "local all root trust"
-          "local all postgres peer"
-          "host all all 127.0.0.1/32 trust"
-          "host all all ::1/128 trust"
+          "local   all   postgres   trust"
+          "local   all   all        peer"
+          "host    all   all 127.0.0.1/32 trust"
+          "host    all   all ::1/128      trust"
+          "host    all   all 10.0.2.2/32  trust"
         ];
         initialScript = pkgs.writeText "init-crystal-forge.sql" ''
           CREATE USER crystal_forge LOGIN;
@@ -445,6 +451,7 @@ in rec {
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
 
+      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.cf-test-modules.runTests pkgs.crystal-forge.cf-test-modules.testRunner];
       networking.useDHCP = true;
       networking.firewall.enable = false;
 
