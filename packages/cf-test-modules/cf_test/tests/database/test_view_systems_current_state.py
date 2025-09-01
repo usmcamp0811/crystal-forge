@@ -83,8 +83,8 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
                 "hostname": "test-compliance-drift",
                 "has_last_heartbeat": True,
                 "has_deployment": True,
-                "has_evaluation": True,
-                "is_running_latest_derivation": False,  # Running ancient commit
+                "has_evaluation": False,  # No evaluation for latest commit with matching hostname
+                "is_running_latest_derivation": None,  # No evaluation = null
             }
         ],
     },
@@ -148,8 +148,8 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
                 "hostname": "test-behind",
                 "has_last_heartbeat": True,
                 "has_deployment": True,
-                "has_evaluation": True,
-                "is_running_latest_derivation": False,  # Behind by design
+                "has_evaluation": False,  # Latest commit has no derivation with matching hostname
+                "is_running_latest_derivation": None,  # No evaluation = null
             }
         ],
     },
@@ -161,8 +161,8 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
                 "hostname": "test-eval-failed",
                 "has_last_heartbeat": True,
                 "has_deployment": True,
-                "has_evaluation": True,  # Running older working commit
-                "is_running_latest_derivation": False,  # Latest commit failed, running older one
+                "has_evaluation": False,  # Latest commit failed evaluation, no successful derivation
+                "is_running_latest_derivation": None,  # No successful evaluation = null
             }
         ],
     },
@@ -172,7 +172,7 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
         "expected": {
             "count": 3,  # fast, medium, slow systems
             "has_deployments": 3,
-            "has_evaluations": 3,
+            "has_evaluations": 1,
             "has_heartbeats": 3,
             "running_latest_count": 1,  # Only fast system runs latest
             "running_older_count": 2,  # medium and slow run older commits
@@ -218,10 +218,10 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
         "expected": {
             "count": 5,
             "has_deployments": 5,
-            "has_evaluations": 5,  # Systems run successful derivations from commit 9
+            "has_evaluations": 0,  # Latest commit (10) failed, no successful derivation
             "has_heartbeats": 5,
             "running_latest_count": 0,  # Latest commit failed, so no systems run "latest"
-            "running_older_count": 5,   # All systems stuck on commit 9
+            "running_older_count": 0,   # Can't determine without evaluations (all will be None)
         },
     },
     {
