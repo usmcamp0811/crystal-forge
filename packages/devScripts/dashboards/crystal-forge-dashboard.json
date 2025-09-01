@@ -137,7 +137,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT\n  (SELECT COUNT(*) FROM view_systems_current_state) AS \"Total Systems\",\n  (SELECT COUNT(*) FROM view_systems_current_state WHERE is_running_latest_derivation = true) AS \"Up to Date\",\n  (SELECT COUNT(*) FROM view_systems_current_state WHERE is_running_latest_derivation = false) AS \"Behind Latest\",\n  (SELECT COUNT(*) FROM view_systems_current_state WHERE last_seen < NOW() - INTERVAL '15 minutes') AS \"No Recent Heartbeat\";\n",
+          "rawSql": "-- Replace view_systems_current_state counts using the new views\nSELECT\n  (SELECT COUNT(*) FROM view_system_deployment_status) AS \"Total Systems\",\n  (SELECT COUNT(*) FROM view_system_deployment_status WHERE deployment_status = 'up_to_date') AS \"Up to Date\",\n  (SELECT COUNT(*) FROM view_system_deployment_status WHERE deployment_status = 'behind') AS \"Behind Latest\",\n  (SELECT COUNT(*)\n     FROM view_system_heartbeat_status h\n    WHERE (h.most_recent_activity  IS NULL OR h.most_recent_activity  < NOW() - INTERVAL '15 minutes')\n      AND h.hostname IN (SELECT hostname FROM view_system_deployment_status)\n  ) AS \"No Recent Heartbeat\";\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1307,7 +1307,7 @@
             "h": 7,
             "w": 24,
             "x": 0,
-            "y": 70
+            "y": 103
           },
           "id": 8,
           "options": {
@@ -1649,20 +1649,20 @@
         "name": "building",
         "options": [],
         "query": "-- Grafana variable: text/value\nSELECT\n  f.name || '/' || d.derivation_name || ' @ ' || LEFT(c.git_commit_hash, 8) AS text,\n  d.id AS value\nFROM public.derivations d\nJOIN public.derivation_statuses s ON s.id = d.status_id\nJOIN public.commits c ON c.id = d.commit_id\nJOIN public.flakes f ON f.id = c.flake_id\nWHERE s.name = 'build-inprogress'\nORDER BY d.started_at DESC NULLS LAST;\n",
-        "refresh": 1,
+        "refresh": 2,
         "regex": "",
         "type": "query"
       }
     ]
   },
   "time": {
-    "from": "now-7d",
-    "to": "now"
+    "from": "2025-08-22T02:15:46.120Z",
+    "to": "2025-08-28T16:26:45.747Z"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Crystal Forge Dashboard",
   "uid": "3d70baf5-db41-4dfa-bbee-af52dbfbe736",
-  "version": 52,
+  "version": 54,
   "weekStart": ""
 }
