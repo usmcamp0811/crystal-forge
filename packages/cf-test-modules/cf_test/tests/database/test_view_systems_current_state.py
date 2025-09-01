@@ -45,7 +45,7 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
                 "has_last_heartbeat": True,
                 "has_deployment": True,
                 "latest_commit_evaluation_status": None,  # Pending builds don't count as evaluated
-                "is_running_latest_derivation": None,  # No evaluation = null
+                "is_running_latest_derivation": False,  # Has deployment but no successful evaluation = behind
             }
         ],
     },
@@ -84,7 +84,7 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
                 "has_last_heartbeat": True,
                 "has_deployment": True,
                 "has_evaluation": False,  # No evaluation for latest commit with matching hostname
-                "is_running_latest_derivation": None,  # No evaluation = null
+                "is_running_latest_derivation": False,  # Has deployment but behind latest = behind
             }
         ],
     },
@@ -149,7 +149,7 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
                 "has_last_heartbeat": True,
                 "has_deployment": True,
                 "has_evaluation": False,  # Latest commit has no derivation with matching hostname
-                "is_running_latest_derivation": None,  # No evaluation = null
+                "is_running_latest_derivation": False,  # Has deployment but behind latest = behind
             }
         ],
     },
@@ -162,7 +162,7 @@ SYSTEMS_CURRENT_STATE_SCENARIO_CONFIGS = [
                 "has_last_heartbeat": True,
                 "has_deployment": True,
                 "has_evaluation": False,  # Latest commit failed evaluation, no successful derivation
-                "is_running_latest_derivation": None,  # No successful evaluation = null
+                "is_running_latest_derivation": False,  # Has deployment but latest failed = behind
             }
         ],
     },

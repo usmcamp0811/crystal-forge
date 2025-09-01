@@ -78,14 +78,16 @@ SELECT
         AND lss.derivation_path = le.derivation_path THEN
         TRUE
     WHEN lss.derivation_path IS NOT NULL
-        AND slfc.git_commit_hash IS NOT NULL
+        AND le.derivation_path IS NULL THEN
+        FALSE -- Has deployment but no evaluation for latest commit = behind
+    WHEN lss.derivation_path IS NOT NULL
+        AND le.derivation_path IS NOT NULL
         AND lss.derivation_path != le.derivation_path THEN
-        FALSE
-    WHEN lss.derivation_path IS NULL THEN
-        NULL::boolean -- No deployment at all
+        FALSE -- Has deployment and evaluation, but different = behind
     ELSE
-        NULL::boolean -- Can't determine
-    END AS is_running_latest_derivation lhb.last_heartbeat,
+        NULL::boolean -- No deployment or can't determine
+    END AS is_running_latest_derivation,
+    lhb.last_heartbeat,
     GREATEST (COALESCE(lss."timestamp", '1970-01-01 00:00:00'::timestamp with time zone), COALESCE(lhb.last_heartbeat, '1970-01-01 00:00:00'::timestamp with time zone)) AS last_seen
 FROM
     public.systems s
