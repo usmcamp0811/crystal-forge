@@ -11,8 +11,6 @@ from cf_test.scenarios import (
     scenario_up_to_date,
 )
 
-VIEW_STATUS = "public.view_systems_status_table"
-
 
 @pytest.mark.harness
 def test_validate_scenario_eval_failed(cf_client, clean_test_data):
@@ -114,8 +112,8 @@ def test_scenario_creates_data(cf_client):
     # Touch the view to ensure it resolves without error
     _ = cf_client.execute_sql(
         """
-        SELECT hostname, connectivity_status, update_status, overall_status
-        FROM view_systems_status_table
+        SELECT hostname, heartbeat_status, last_state_change, status_description
+        FROM view_system_heartbeat_status
         WHERE hostname = %s
         """,
         (hostname,),
