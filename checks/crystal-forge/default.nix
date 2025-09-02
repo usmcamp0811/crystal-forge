@@ -17,7 +17,7 @@
     cp ${keyPair}/agent.pub $out/
   '';
   testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
-    cat ${testFlake}/HEAD_COMMIT > $out
+    cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
   '';
   # cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
   #   mkdir -p $out
@@ -75,35 +75,35 @@ in
       server.wait_for_open_port(5432)
       server.forward_port(5433, 5432)
 
-          # Set environment variables for the test
-          os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
-          os.environ["CF_TEST_DB_PORT"] = "5433"  # forwarded port
-          os.environ["CF_TEST_DB_USER"] = "postgres"
-          os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
-          os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
-          os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
+      # Set environment variables for the test
+      os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_DB_PORT"] = "5433"  # forwarded port
+      os.environ["CF_TEST_DB_USER"] = "postgres"
+      os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
+      os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
 
-          # Make real git info available to tests
-          os.environ["CF_TEST_REAL_COMMIT_HASH"] = ${testFlakeCommitHash}
-          os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
+      # Make real git info available to tests
+      os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
+      os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
 
-          # Inject machines so cf_test fixtures can drive them
-          import cf_test
-          cf_test._driver_machines = {
-              "server": server,
-              "agent": agent,
-              "gitserver": gitserver,
-          }
-          # Run only VM-marked tests from cf_test package
-          exit_code = pytest.main([
-              "-vvvv",
-              "--tb=short",
-              "-x",
-              "-s",  # Add -s to see print output immediately
-              "-m", "vm_only",
-              "--pyargs", "cf_test",
-          ])
-          if exit_code != 0:
-              raise SystemExit(exit_code)
+      # Inject machines so cf_test fixtures can drive them
+      import cf_test
+      cf_test._driver_machines = {
+          "server": server,
+          "agent": agent,
+          "gitserver": gitserver,
+      }
+      # Run only VM-marked tests from cf_test package
+      exit_code = pytest.main([
+          "-vvvv",
+          "--tb=short",
+          "-x",
+          "-s",  # Add -s to see print output immediately
+          "-m", "vm_only",
+          "--pyargs", "cf_test",
+      ])
+      if exit_code != 0:
+          raise SystemExit(exit_code)
     '';
   }

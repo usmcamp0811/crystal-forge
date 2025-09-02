@@ -63,8 +63,8 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         cf_client,
         hostname="test-reset-failed-terminal",
         flake_name="reset-test-2",
-        repo_url="https://example.com/reset-test-2.git",
-        git_hash="terminal5678",
+        repo_url=real_repo_url,  # Use real repo
+        git_hash=real_commit_hash,  # Use real hash
         derivation_status="dry-run-failed",
         derivation_error="Terminal failure",
         commit_age_hours=1,
@@ -86,8 +86,8 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         cf_client,
         hostname="test-reset-failed-low",
         flake_name="reset-test-3",
-        repo_url="https://example.com/reset-test-3.git",
-        git_hash="reset5678",
+        repo_url=real_repo_url,  # Use real repo
+        git_hash=real_commit_hash,  # Use real hash
         derivation_status="dry-run-failed",
         derivation_error="Temporary failure",
         commit_age_hours=1,
@@ -109,8 +109,8 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         cf_client,
         hostname="test-reset-build-failed",
         flake_name="reset-test-4",
-        repo_url="http://gitserver/crystal-forge",
-        git_hash="main",
+        repo_url=real_repo_url,  # Use real repo
+        git_hash=real_commit_hash,  # Use real hash
         derivation_status="build-failed",
         derivation_error="Build failed",
         commit_age_hours=1,
