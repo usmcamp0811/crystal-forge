@@ -812,50 +812,82 @@ pub async fn increment_derivation_attempt_count(
 }
 
 pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
-    // Reset derivations without paths to dry-run-pending
-    // Include failed derivations that haven't exceeded attempt limit
+    // Reset derivations without paths to dry-run-pending (only if attempts < 5)
     let result1 = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NULL 
+        AND attempt_count < 5
         AND (
-            status_id NOT IN ($2, $3) -- Only exclude always-terminal states
-            OR (status_id IN ($4, $5) AND attempt_count < 5) -- Include retryable failed states
+            status_id NOT IN ($2, $3) -- Exclude always-terminal states
+            OR status_id IN ($4, $5) -- Include retryable failed states
         )
         "#,
         EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
         EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
         EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
-        EvaluationStatus::BuildFailed.as_id(),    // $4 = 12 (always terminal)
-        EvaluationStatus::DryRunFailed.as_id()    // $5 = 6 (only terminal if attempts >= 5)
+        EvaluationStatus::DryRunFailed.as_id(),   // $4 = 6
+        EvaluationStatus::BuildFailed.as_id()     // $5 = 12
     )
     .execute(pool)
     .await?;
 
-    // Reset derivations with paths to build-pending
-    // Include failed derivations that haven't exceeded attempt limit
+    // Reset derivations with paths to build-pending (only if attempts < 5)
     let result2 = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NOT NULL 
+        AND attempt_count < 5
         AND (
-            status_id NOT IN ($2, $3, $4)
-            OR (status_id = $4 AND attempt_count < 5)  -- Include build-failed with < 5 attempts
+            status_id NOT IN ($2, $3, $4) -- Exclude always-terminal states
+            OR status_id = $4 -- Include build-failed for retry
         )
         "#,
         EvaluationStatus::BuildPending.as_id(),   // $1 = 7
         EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
         EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
-        EvaluationStatus::BuildFailed.as_id()     // $4 = 12 (check this for retry condition)
+        EvaluationStatus::BuildFailed.as_id()     // $4 = 12
     )
     .execute(pool)
     .await?;
 
-    let total_rows_affected = result1.rows_affected() + result2.rows_affected();
-    info!("💡 Reset {} non-terminal derivations.", total_rows_affected);
+    // Set derivations without paths to terminal dry-run-failed (if attempts >= 5)
+    let result3 = sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1
+        WHERE derivation_path IS NULL 
+        AND attempt_count >= 5
+        AND status_id NOT IN ($2, $3) -- Don't touch already-terminal states
+        "#,
+        EvaluationStatus::DryRunFailed.as_id(),   // $1 = 6
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
+        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (always terminal)
+    )
+    .execute(pool)
+    .await?;
 
+    // Set derivations with paths to terminal build-failed (if attempts >= 5)
+    let result4 = sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1
+        WHERE derivation_path IS NOT NULL 
+        AND attempt_count >= 5
+        AND status_id NOT IN ($2, $3, $4) -- Don't touch already-terminal states
+        "#,
+        EvaluationStatus::BuildFailed.as_id(),    // $1 = 12
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
+        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
+        EvaluationStatus::BuildFailed.as_id()     // $4 = 12 (already terminal)
+    )
+    .execute(pool)
+    .await?;
+
+    let total_rows_affected = result1.rows_affected() + result2.rows_affected() + result3.rows_affected() + result4.rows_affected();
+    info!("💡 Reset {} non-terminal derivations.", total_rows_affected);
     Ok(())
 }
 

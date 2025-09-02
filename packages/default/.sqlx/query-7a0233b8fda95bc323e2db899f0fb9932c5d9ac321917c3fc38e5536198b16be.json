@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations \n        SET status_id = $1\n        WHERE derivation_path IS NOT NULL \n        AND attempt_count >= 5\n        AND status_id NOT IN ($2, $3, $4) -- Don't touch already-terminal states\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7a0233b8fda95bc323e2db899f0fb9932c5d9ac321917c3fc38e5536198b16be"
+}
