@@ -41,7 +41,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         heartbeat_age_minutes=None,
     )
     cf_client.execute_sql(
-        "UPDATE derivations SET attempt_count = 2 WHERE id = %s",
+        "UPDATE derivations SET attempt_count = 4 WHERE id = %s",
         (scenario1["derivation_id"],),
     )
     test_scenarios.append(scenario1)
@@ -151,7 +151,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     # 2. dry-run-failed with 5+ attempts should stay dry-run-failed (terminal)
     failed_terminal = states_by_name["test-reset-failed-terminal"]
     assert (
-        failed_terminal["status_name"] == "build-pending"
+        failed_terminal["status_name"] == "dry-run-failed"
     ), f"Expected dry-run-failed, got {failed_terminal['status_name']}"
     assert (
         failed_terminal["attempt_count"] == 5
@@ -160,7 +160,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     # 3. dry-run-failed with <5 attempts should reset to dry-run-pending
     failed_low = states_by_name["test-reset-failed-low"]
     assert (
-        failed_low["status_name"] == "build-pending"
+        failed_low["status_name"] == "dry-run-pending"
     ), f"Expected reset to dry-run-pending, got {failed_low['status_name']}"
 
     # 4. build-failed with path and <5 attempts should reset to build-pending
