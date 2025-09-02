@@ -1,3 +1,4 @@
+import os
 import time
 from datetime import UTC, datetime, timedelta
 
@@ -26,31 +27,61 @@ def cf_client(cf_config):
 def test_derivation_reset_on_server_startup(cf_client, server):
     """Test that server resets derivations properly on startup"""
 
+    # Get real git info from environment
+    real_commit_hash = os.getenv(
+        "CF_TEST_REAL_COMMIT_HASH", "ebcc48fbf1030fc2065fc266da158af1d0b3943c"
+    )
+    real_repo_url = os.getenv("CF_TEST_REAL_REPO_URL", "http://gitserver/crystal-forge")
+
     # Create various derivation states to test reset logic
     test_scenarios = []
 
-    # 1. dry-run-pending with low attempts (should reset to dry-run-pending)
+    # 1. dry-run-pending with low attempts (should advance to build-pending if it has a path)
     scenario1 = _create_base_scenario(
         cf_client,
         hostname="test-reset-pending-low",
         flake_name="reset-test-1",
-        repo_url="https://example.com/reset-test-1.git",
-        git_hash="reset1234",
+        repo_url=real_repo_url,  # Use real repo
+        git_hash=real_commit_hash,  # Use real hash
         derivation_status="dry-run-pending",
         commit_age_hours=1,
         heartbeat_age_minutes=None,
     )
     cf_client.execute_sql(
-        "UPDATE derivations SET attempt_count = 4 WHERE id = %s",
+        """
+        UPDATE derivations 
+        SET attempt_count = 4,
+            derivation_path = '/nix/store/test-pending-low.drv'
+        WHERE id = %s
+        """,
         (scenario1["derivation_id"],),
     )
     test_scenarios.append(scenario1)
 
-    # 2. dry-run-failed with high attempts (should stay dry-run-failed - terminal)
-    scenario2 = scenario_dry_run_failed(cf_client, "test-reset-failed-terminal")
+    # 2. dry-run-failed with high attempts and NO path (should stay dry-run-failed - terminal)
+    scenario2 = _create_base_scenario(
+        cf_client,
+        hostname="test-reset-failed-terminal",
+        flake_name="reset-test-2",
+        repo_url="https://example.com/reset-test-2.git",
+        git_hash="terminal5678",
+        derivation_status="dry-run-failed",
+        derivation_error="Terminal failure",
+        commit_age_hours=1,
+        heartbeat_age_minutes=None,
+    )
+    cf_client.execute_sql(
+        """
+        UPDATE derivations 
+        SET derivation_path = NULL, 
+            attempt_count = 5 
+        WHERE id = %s
+        """,
+        (scenario2["derivation_id"],),
+    )
     test_scenarios.append(scenario2)
 
-    # 3. dry-run-failed with low attempts (should reset to dry-run-pending)
+    # 3. dry-run-failed with low attempts and NO path (should reset to dry-run-pending)
     scenario3 = _create_base_scenario(
         cf_client,
         hostname="test-reset-failed-low",
@@ -63,7 +94,12 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         heartbeat_age_minutes=None,
     )
     cf_client.execute_sql(
-        "UPDATE derivations SET attempt_count = 2 WHERE id = %s",
+        """
+        UPDATE derivations 
+        SET attempt_count = 2, 
+            derivation_path = NULL 
+        WHERE id = %s
+        """,
         (scenario3["derivation_id"],),
     )
     test_scenarios.append(scenario3)
@@ -73,8 +109,8 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         cf_client,
         hostname="test-reset-build-failed",
         flake_name="reset-test-4",
-        repo_url="https://example.com/reset-test-4.git",
-        git_hash="reset9012",
+        repo_url="http://gitserver/crystal-forge",
+        git_hash="main",
         derivation_status="build-failed",
         derivation_error="Build failed",
         commit_age_hours=1,
@@ -130,7 +166,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     final_states = cf_client.execute_sql(
         """
         SELECT d.id, d.derivation_name, d.status_id, ds.name as status_name, 
-               d.attempt_count, d.derivation_path IS NOT NULL as has_path
+               d.attempt_count as attempt_count, d.derivation_path IS NOT NULL as has_path
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id  
         WHERE d.derivation_name LIKE 'test-reset-%'
@@ -142,13 +178,13 @@ def test_derivation_reset_on_server_startup(cf_client, server):
 
     # Assertions based on reset logic
 
-    # 1. dry-run-pending with low attempts should advance to build-pending if it has a path
+    # 1. dry-run-pending with path and low attempts should advance to build-pending
     pending_low = states_by_name["test-reset-pending-low"]
     assert (
         pending_low["status_name"] == "build-pending"
     ), f"Expected build-pending (advanced from dry-run-pending), got {pending_low['status_name']}"
 
-    # 2. dry-run-failed with 5+ attempts should stay dry-run-failed (terminal)
+    # 2. dry-run-failed with no path and 5+ attempts should stay dry-run-failed (terminal)
     failed_terminal = states_by_name["test-reset-failed-terminal"]
     assert (
         failed_terminal["status_name"] == "dry-run-failed"
@@ -157,11 +193,11 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         failed_terminal["attempt_count"] == 5
     ), f"Expected 5 attempts, got {failed_terminal['attempt_count']}"
 
-    # 3. dry-run-failed with <5 attempts should reset to dry-run-pending
+    # 3. dry-run-failed with no path and <5 attempts should reset to dry-run-pending
     failed_low = states_by_name["test-reset-failed-low"]
     assert (
         failed_low["status_name"] == "dry-run-pending"
-    ), f"Expected reset to dry-run-pending, got {failed_low['status_name']}"
+    ), f"Expected reset to dry-run-pending, got {failed_low['status_name']} -- attempt_count => {failed_low['attempt_count']}"
 
     # 4. build-failed with path and <5 attempts should reset to build-pending
     build_failed = states_by_name["test-reset-build-failed"]
