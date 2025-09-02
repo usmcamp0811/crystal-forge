@@ -820,8 +820,8 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NULL 
         AND (
-            status_id NOT IN ($2, $3, $4) 
-            OR (status_id = $5 AND attempt_count < 5)  -- Include dry-run-failed with < 5 attempts
+            status_id NOT IN ($2, $3) -- Only exclude always-terminal states
+            OR (status_id IN ($4, $5) AND attempt_count < 5) -- Include retryable failed states
         )
         "#,
         EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
