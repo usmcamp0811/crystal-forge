@@ -25,7 +25,7 @@ def _create_base_scenario(
     repo_url: str,
     git_hash: str,
     commit_age_hours: int = 1,
-    derivation_status: str = "complete",
+    derivation_status: str = "dry-run-pending",
     derivation_error: Optional[str] = None,
     heartbeat_age_minutes: Optional[int] = 5,
     system_ip: str = "192.168.1.100",

@@ -115,6 +115,7 @@ def scenario_eval_failed(
         flake_name="eval-app",
         repo_url="https://example.com/eval.git",
         git_hash=old_hash,
+        derivation_status="dry-run-failed",
         commit_age_hours=4,
         heartbeat_age_minutes=3,
     )
@@ -145,7 +146,40 @@ def scenario_eval_failed(
                 (SELECT id FROM public.derivation_statuses WHERE name='failed'),
                 0, %s, 'Evaluation failed')
         """,
-        (new_commit_id, f"{hostname}-build-failed", failed_completed),
+        (new_commit_id, f"{hostname}-dry-run-failed", failed_completed),
+    )
+
+    return result
+
+def scenario_dry_run_failed(
+    client: CFTestClient, hostname: str = "test-dry-run-failed"
+) -> Dict[str, Any]:
+    """System with a failed evaluation for the latest commit"""
+    import time
+
+    timestamp = int(time.time())
+
+    old_hash = f"working123-{timestamp}"
+
+    # Create base scenario with working commit
+    result = _create_base_scenario(
+        client,
+        hostname=hostname,
+        flake_name="dry-run-app",
+        repo_url="https://example.com/dry-run.git",
+        git_hash=old_hash,
+        commit_age_hours=4,
+        heartbeat_age_minutes=3,
+    )
+
+    now = datetime.now(UTC)
+
+    client.execute_sql(
+        """
+        UPDATE public.derivations 
+        SET attempt_count = 5
+        WHERE derivation_status = 51
+        """ # 51 == dry-run-failed
     )
 
     return result
