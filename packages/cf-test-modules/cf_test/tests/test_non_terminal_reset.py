@@ -222,6 +222,7 @@ def test_derivation_reset_background_loop(cf_client, server):
             """,
             (scenario["derivation_id"],),
         )
+        server.log(f"Query Returned: {result}")
 
         if result:
             status = result[0]
