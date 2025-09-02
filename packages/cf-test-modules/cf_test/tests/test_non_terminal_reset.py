@@ -95,11 +95,11 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     server.log("=== Pre-restart derivation states ===")
     initial_states = cf_client.execute_sql(
         """
-        SELECT id, derivation_name, status_id, attempt_count, derivation_path
+        SELECT d.id, d.derivation_name, d.status_id, d.attempt_count, d.derivation_path
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
-        WHERE derivation_name LIKE 'test-reset-%'
-        ORDER BY derivation_name
+        WHERE d.derivation_name LIKE 'test-reset-%'
+        ORDER BY d.derivation_name
         """
     )
     for state in initial_states:
@@ -108,12 +108,23 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         )
 
     # Restart the server to trigger reset_non_terminal_derivations
+    server.log("=== Restarting server to trigger reset ===")
     server.succeed(f"systemctl restart {C.SERVER_SERVICE}")
+
+    # Wait for service to be active and check logs for startup
     server.wait_for_unit(C.SERVER_SERVICE)
 
-    # Wait for server to be ready
-    cf_client.wait_for_service(C.API_PORT, timeout=30)
-    time.sleep(5)  # Allow reset function to complete
+    # Check service status
+    status_output = server.succeed(f"systemctl status {C.SERVER_SERVICE}")
+    server.log(f"Service status after restart: {status_output}")
+
+    # Wait for reset to complete by looking for the reset log message
+    cf_client.wait_for_service_log(server, C.SERVER_SERVICE, "Reset", timeout=60)
+
+    # Give additional time for API to be ready
+    time.sleep(10)
+
+    server.succeed(f"journalctl -u {C.SERVER_SERVICE} --no-pager -n 50 || true")
 
     server.log("=== Post-restart derivation states ===")
     final_states = cf_client.execute_sql(
