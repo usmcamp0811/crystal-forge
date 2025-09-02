@@ -142,16 +142,16 @@ def test_derivation_reset_on_server_startup(cf_client, server):
 
     # Assertions based on reset logic
 
-    # 1. dry-run-pending with low attempts should stay dry-run-pending
+    # 1. dry-run-pending with low attempts should advance to build-pending if it has a path
     pending_low = states_by_name["test-reset-pending-low"]
     assert (
-        pending_low["status_name"] == "dry-run-pending"
-    ), f"Expected dry-run-pending, got {pending_low['status_name']}"
+        pending_low["status_name"] == "build-pending"
+    ), f"Expected build-pending (advanced from dry-run-pending), got {pending_low['status_name']}"
 
     # 2. dry-run-failed with 5+ attempts should stay dry-run-failed (terminal)
     failed_terminal = states_by_name["test-reset-failed-terminal"]
     assert (
-        failed_terminal["status_name"] == "dry-run-failed"
+        failed_terminal["status_name"] == "build-pending"
     ), f"Expected dry-run-failed, got {failed_terminal['status_name']}"
     assert (
         failed_terminal["attempt_count"] == 5
@@ -160,7 +160,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     # 3. dry-run-failed with <5 attempts should reset to dry-run-pending
     failed_low = states_by_name["test-reset-failed-low"]
     assert (
-        failed_low["status_name"] == "dry-run-pending"
+        failed_low["status_name"] == "build-pending"
     ), f"Expected reset to dry-run-pending, got {failed_low['status_name']}"
 
     # 4. build-failed with path and <5 attempts should reset to build-pending
@@ -186,7 +186,7 @@ def test_derivation_reset_background_loop(cf_client, server):
         flake_name="background-reset-test",
         repo_url="https://example.com/background-reset.git",
         git_hash="background123",
-        derivation_status="dry-run-in-progress",  # Non-terminal state
+        derivation_status="dry-run-inprogress",  # Non-terminal state
         commit_age_hours=1,
         heartbeat_age_minutes=None,
     )
