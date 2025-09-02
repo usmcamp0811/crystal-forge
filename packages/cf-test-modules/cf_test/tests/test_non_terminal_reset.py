@@ -186,7 +186,7 @@ def test_derivation_reset_background_loop(cf_client, server):
         flake_name="background-reset-test",
         repo_url="https://example.com/background-reset.git",
         git_hash="background123",
-        derivation_status="dry-run-inprogress",  # Non-terminal state
+        derivation_status="dry-run-pending",  # Non-terminal state
         commit_age_hours=1,
         heartbeat_age_minutes=None,
     )
@@ -196,7 +196,7 @@ def test_derivation_reset_background_loop(cf_client, server):
         """
         UPDATE derivations 
         SET started_at = NOW() - INTERVAL '2 hours',
-            attempt_count = 1
+            attempt_count = 5
         WHERE id = %s
         """,
         (scenario["derivation_id"],),
