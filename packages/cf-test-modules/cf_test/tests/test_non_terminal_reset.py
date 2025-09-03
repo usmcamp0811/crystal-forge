@@ -81,7 +81,30 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     )
     test_scenarios.append(scenario2)
 
-    # 3. derivation with path but failed build (should reset to build-pending)
+    # 3. dry-run-failed with low attempts and NO path (should reset to dry-run-pending)
+    scenario3 = _create_base_scenario(
+        cf_client,
+        hostname="test-reset-failed-low",
+        flake_name="reset-test-3",
+        repo_url=real_repo_url,  # Use real repo
+        git_hash=real_commit_hash,  # Use real hash
+        derivation_status="dry-run-failed",
+        derivation_error="Temporary failure",
+        commit_age_hours=1,
+        heartbeat_age_minutes=None,
+    )
+    cf_client.execute_sql(
+        """
+        UPDATE derivations 
+        SET attempt_count = 2, 
+            derivation_path = NULL 
+        WHERE id = %s
+        """,
+        (scenario3["derivation_id"],),
+    )
+    test_scenarios.append(scenario3)
+
+    # 4. derivation with path but failed build (should reset to build-pending)
     scenario4 = _create_base_scenario(
         cf_client,
         hostname="test-reset-build-failed",
