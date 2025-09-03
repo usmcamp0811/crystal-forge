@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
 use anyhow::Result;
 use sqlx::PgPool;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // Status IDs from the derivation_statuses table
 // These should match the IDs you inserted in your migration
