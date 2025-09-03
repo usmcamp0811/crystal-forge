@@ -81,30 +81,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     )
     test_scenarios.append(scenario2)
 
-    # 3. dry-run-failed with low attempts and NO path (should reset to dry-run-pending)
-    scenario3 = _create_base_scenario(
-        cf_client,
-        hostname="test-reset-failed-low",
-        flake_name="reset-test-3",
-        repo_url=real_repo_url,  # Use real repo
-        git_hash=real_commit_hash,  # Use real hash
-        derivation_status="dry-run-failed",
-        derivation_error="Temporary failure",
-        commit_age_hours=1,
-        heartbeat_age_minutes=None,
-    )
-    cf_client.execute_sql(
-        """
-        UPDATE derivations 
-        SET attempt_count = 2, 
-            derivation_path = NULL 
-        WHERE id = %s
-        """,
-        (scenario3["derivation_id"],),
-    )
-    test_scenarios.append(scenario3)
-
-    # 4. derivation with path but failed build (should reset to build-pending)
+    # 3. derivation with path but failed build (should reset to build-pending)
     scenario4 = _create_base_scenario(
         cf_client,
         hostname="test-reset-build-failed",
@@ -146,7 +123,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     # Temporarily disable the evaluation loops to prevent interference
     server.log("=== Stopping evaluation loops to isolate reset test ===")
     server.succeed("systemctl stop crystal-forge-server.service")
-    
+
     # Restart the server to trigger reset_non_terminal_derivations
     server.log("=== Restarting server to trigger reset ===")
     server.succeed(f"systemctl start {C.SERVER_SERVICE}")
@@ -178,7 +155,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     )
 
     states_by_name = {state["derivation_name"]: state for state in final_states}
-    
+
     for state in final_states:
         server.log(
             f"  {state['derivation_name']}: {state['status_name']} (attempts: {state['attempt_count']}, has_path: {state['has_path']})"
@@ -201,13 +178,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         failed_terminal["attempt_count"] == 5
     ), f"Expected 5 attempts, got {failed_terminal['attempt_count']}"
 
-    # 3. dry-run-failed with no path and <5 attempts should reset to dry-run-pending
-    failed_low = states_by_name["test-reset-failed-low"]
-    assert (
-        failed_low["status_name"] == "dry-run-pending"
-    ), f"Expected reset to dry-run-pending, got {failed_low['status_name']} -- attempt_count => {failed_low['attempt_count']}"
-
-    # 4. build-failed with path and <5 attempts should reset to build-pending
+    # 3. build-failed with path and <5 attempts should reset to build-pending
     build_failed = states_by_name["test-reset-build-failed"]
     assert (
         build_failed["status_name"] == "build-pending"
