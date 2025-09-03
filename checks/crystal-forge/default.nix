@@ -72,6 +72,7 @@ in
       start_all()
 
       server.wait_for_unit("postgresql.service")
+      server.wait_for_unit("crystal-forge-server.service")
       server.wait_for_open_port(5432)
       server.forward_port(5433, 5432)
 
