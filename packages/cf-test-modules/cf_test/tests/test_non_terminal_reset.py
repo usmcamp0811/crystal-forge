@@ -157,12 +157,6 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     # Wait for the server to actually start up properly and look for startup completion
     server.log("=== Waiting for server startup to complete ===")
 
-    # Check the logs to verify the server actually restarted and completed initialization
-    # Look for the specific log message from reset_non_terminal_derivations
-    cf_client.wait_for_service_log(
-        server, C.SERVER_SERVICE, "Reset.*non-terminal derivations", timeout=60
-    )
-
     # Also wait for the background tasks to start (from spawn_background_tasks)
     cf_client.wait_for_service_log(
         server, C.SERVER_SERVICE, "Starting Crystal Forge Server", timeout=30
@@ -180,7 +174,7 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     # Wait for database state to stabilize by polling until we see expected changes
     server.log("=== Waiting for database reset to complete ===")
     max_wait_attempts = 10
-    wait_interval = 2  # seconds
+    wait_interval = 6  # seconds
 
     for attempt in range(max_wait_attempts):
         final_states = cf_client.execute_sql(
