@@ -932,12 +932,9 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         SET status_id = $1
         WHERE derivation_path IS NULL 
         AND attempt_count >= 5
-        AND status_id NOT IN ($2, $3, $4) -- Don't touch already-terminal states
+        AND status_id != $1  -- Only update if not already in terminal failed state
         "#,
-        EvaluationStatus::DryRunFailed.as_id(),   // $1 = 6
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
-        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
-        EvaluationStatus::DryRunFailed.as_id()    // $4 = 6 (already terminal)
+        EvaluationStatus::DryRunFailed.as_id()   // $1 = 6
     )
     .execute(pool)
     .await?;
@@ -948,28 +945,26 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         SET status_id = $1
         WHERE derivation_path IS NOT NULL 
         AND attempt_count >= 5
-        AND status_id NOT IN ($2, $3, $4) -- Don't touch already-terminal states
+        AND status_id != $1  -- Only update if not already in terminal failed state
         "#,
-        EvaluationStatus::BuildFailed.as_id(),    // $1 = 12
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
-        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
-        EvaluationStatus::BuildFailed.as_id()     // $4 = 12 (already terminal)
+        EvaluationStatus::BuildFailed.as_id()    // $1 = 12
     )
     .execute(pool)
     .await?;
 
     // Then, reset derivations that should be retried (attempts < 5)
+    // Reset ALL non-terminal derivations with < 5 attempts to pending states
     let reset_dry_run_result = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NULL 
         AND attempt_count < 5
-        AND status_id NOT IN ($2, $3) -- Only exclude permanently terminal states
+        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
         "#,
         EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (permanently terminal)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (permanently terminal)
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
+        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
     )
     .execute(pool)
     .await?;
@@ -980,11 +975,11 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NOT NULL 
         AND attempt_count < 5
-        AND status_id NOT IN ($2, $3) -- Only exclude permanently terminal states
+        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
         "#,
         EvaluationStatus::BuildPending.as_id(),   // $1 = 7
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (permanently terminal)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (permanently terminal)
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
+        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
     )
     .execute(pool)
     .await?;
