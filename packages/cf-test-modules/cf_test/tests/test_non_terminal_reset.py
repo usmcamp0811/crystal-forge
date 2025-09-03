@@ -143,71 +143,42 @@ def test_derivation_reset_on_server_startup(cf_client, server):
             f"  {state['derivation_name']}: status_id={state['status_id']}, attempts={state['attempt_count']}, path={state['derivation_path'] is not None}"
         )
 
+    # Temporarily disable the evaluation loops to prevent interference
+    server.log("=== Stopping evaluation loops to isolate reset test ===")
+    server.succeed("systemctl stop crystal-forge-server.service")
+    
     # Restart the server to trigger reset_non_terminal_derivations
     server.log("=== Restarting server to trigger reset ===")
-    server.succeed(f"systemctl restart {C.SERVER_SERVICE}")
+    server.succeed(f"systemctl start {C.SERVER_SERVICE}")
 
     # Wait for service to be active and check logs for startup
     server.wait_for_unit(C.SERVER_SERVICE)
 
-    # Check service status
-    status_output = server.succeed(f"systemctl status {C.SERVER_SERVICE}")
-    server.log(f"Service status after restart: {status_output}")
-
-    # Wait for the server to actually start up properly and look for startup completion
-    server.log("=== Waiting for server startup to complete ===")
-
-    # Also wait for the background tasks to start (from spawn_background_tasks)
+    # Wait specifically for the reset to complete
     cf_client.wait_for_service_log(
-        server, C.SERVER_SERVICE, "Starting Crystal Forge Server", timeout=30
+        server, C.SERVER_SERVICE, "💡 Total derivations processed:", timeout=30
     )
 
-    # Show recent server logs for debugging
-    recent_logs = server.succeed(
-        f"journalctl -u {C.SERVER_SERVICE} --no-pager -n 20 --since '1 minute ago'"
-    )
-    server.log(f"Recent server logs:\n{recent_logs}")
+    # Give a moment for database commits to complete
+    time.sleep(2)
 
-    # Give a moment for any final database commits to complete
-    time.sleep(5)
-
-    # Wait for database state to stabilize by polling until we see expected changes
-    server.log("=== Waiting for database reset to complete ===")
-    max_wait_attempts = 10
-    wait_interval = 6  # seconds
-
-    for attempt in range(max_wait_attempts):
-        final_states = cf_client.execute_sql(
-            """
-            SELECT d.id, d.derivation_name, d.status_id, ds.name as status_name, 
-                   d.attempt_count as attempt_count, d.derivation_path IS NOT NULL as has_path
-            FROM derivations d
-            JOIN derivation_statuses ds ON d.status_id = ds.id  
-            WHERE d.derivation_name LIKE 'test-reset-%'
-            ORDER BY d.derivation_name
-            """
-        )
-
-        states_by_name = {state["derivation_name"]: state for state in final_states}
-
-        # Check if the key test case (scenario 3) has been reset properly
-        if "test-reset-failed-low" in states_by_name:
-            failed_low = states_by_name["test-reset-failed-low"]
-            if failed_low["status_name"] == "dry-run-pending":
-                server.log(
-                    f"=== Database reset completed after {attempt + 1} attempts ==="
-                )
-                break
-
-        if attempt < max_wait_attempts - 1:
-            server.log(
-                f"Database not yet reset, waiting {wait_interval}s (attempt {attempt + 1}/{max_wait_attempts})"
-            )
-            time.sleep(wait_interval)
-    else:
-        server.log("=== Database reset did not complete within expected time ===")
+    # Stop the server again to prevent evaluation loops from running
+    server.succeed("systemctl stop crystal-forge-server.service")
 
     server.log("=== Post-restart derivation states ===")
+    final_states = cf_client.execute_sql(
+        """
+        SELECT d.id, d.derivation_name, d.status_id, ds.name as status_name, 
+               d.attempt_count as attempt_count, d.derivation_path IS NOT NULL as has_path
+        FROM derivations d
+        JOIN derivation_statuses ds ON d.status_id = ds.id  
+        WHERE d.derivation_name LIKE 'test-reset-%'
+        ORDER BY d.derivation_name
+        """
+    )
+
+    states_by_name = {state["derivation_name"]: state for state in final_states}
+    
     for state in final_states:
         server.log(
             f"  {state['derivation_name']}: {state['status_name']} (attempts: {state['attempt_count']}, has_path: {state['has_path']})"
@@ -242,6 +213,10 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         build_failed["status_name"] == "build-pending"
     ), f"Expected reset to build-pending, got {build_failed['status_name']}"
     assert build_failed["has_path"] == True, f"Expected to keep derivation path"
+
+    # Restart server normally for cleanup
+    server.succeed(f"systemctl start {C.SERVER_SERVICE}")
+    server.wait_for_unit(C.SERVER_SERVICE)
 
     # Cleanup
     for scenario in test_scenarios:
