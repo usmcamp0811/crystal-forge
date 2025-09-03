@@ -924,75 +924,89 @@ pub async fn handle_derivation_failure(
     Ok(updated)
 }
 
+
 pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
-    // First, set derivations to terminal failed states if attempts >= 5
-    let terminal_dry_run_result = sqlx::query!(
+    // 1) Anything that exhausted attempts -> terminal failed
+    let term_fail_missing_path = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1
-        WHERE derivation_path IS NULL 
-        AND attempt_count >= 5
-        AND status_id != $1  -- Only update if not already in terminal failed state
+        WHERE derivation_path IS NULL
+          AND attempt_count >= 5
+          AND status_id != $1
         "#,
-        EvaluationStatus::DryRunFailed.as_id()   // $1 = 6
+        EvaluationStatus::TerminalFailed.as_id()
     )
     .execute(pool)
     .await?;
 
-    let terminal_build_result = sqlx::query!(
+    let term_fail_has_path = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1
-        WHERE derivation_path IS NOT NULL 
-        AND attempt_count >= 5
-        AND status_id != $1  -- Only update if not already in terminal failed state
+        WHERE derivation_path IS NOT NULL
+          AND attempt_count >= 5
+          AND status_id != $1
         "#,
-        EvaluationStatus::BuildFailed.as_id()    // $1 = 12
+        EvaluationStatus::TerminalFailed.as_id()
     )
     .execute(pool)
     .await?;
 
-    // Then, reset derivations that should be retried (attempts < 5)
-    // Reset ALL non-terminal derivations with < 5 attempts to pending states
+    // 2) Reset interrupted/failed dry-run rows back to pending (keep already-pending untouched)
     let reset_dry_run_result = sqlx::query!(
         r#"
-        UPDATE derivations 
-        SET status_id = $1, scheduled_at = NOW()
-        WHERE derivation_path IS NULL 
-        AND attempt_count < 5
-        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
+        UPDATE derivations
+        SET 
+            status_id     = $1,
+            scheduled_at  = COALESCE(scheduled_at, NOW() + interval '30 seconds'),
+            started_at    = NULL,
+            completed_at  = NULL,
+            error_message = NULL
+        WHERE derivation_path IS NULL
+          AND attempt_count < 5
+          AND status_id IN ($2, $3)
         "#,
-        EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
+        EvaluationStatus::DryRunPending.as_id(),  // $1
+        EvaluationStatus::DryRunStarted.as_id(),  // $2
+        EvaluationStatus::DryRunFailed.as_id()    // $3
     )
     .execute(pool)
     .await?;
 
+    // 3) Reset interrupted/failed build rows back to pending (keep already-pending untouched)
     let reset_build_result = sqlx::query!(
         r#"
-        UPDATE derivations 
-        SET status_id = $1, scheduled_at = NOW()
-        WHERE derivation_path IS NOT NULL 
-        AND attempt_count < 5
-        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
+        UPDATE derivations
+        SET 
+            status_id     = $1,
+            scheduled_at  = COALESCE(scheduled_at, NOW() + interval '30 seconds'),
+            started_at    = NULL,
+            completed_at  = NULL,
+            error_message = NULL
+        WHERE derivation_path IS NOT NULL
+          AND attempt_count < 5
+          AND status_id IN ($2, $3)
         "#,
-        EvaluationStatus::BuildPending.as_id(),   // $1 = 7
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
+        EvaluationStatus::BuildPending.as_id(),   // $1
+        EvaluationStatus::BuildStarted.as_id(),   // $2
+        EvaluationStatus::BuildFailed.as_id()     // $3
     )
     .execute(pool)
     .await?;
 
-    let total_terminal = terminal_dry_run_result.rows_affected() + terminal_build_result.rows_affected();
-    let total_reset = reset_dry_run_result.rows_affected() + reset_build_result.rows_affected();
-    
-    info!("💡 Set {} derivations to terminal failed state (attempts >= 5)", total_terminal);
-    info!("💡 Reset {} derivations for retry (attempts < 5)", total_reset);
-    info!("💡 Total derivations processed: {}", total_terminal + total_reset);
-    
+    tracing::info!(
+        "💡 Set {} derivations to terminal failed state (attempts >= 5)",
+        term_fail_missing_path.rows_affected() + term_fail_has_path.rows_affected()
+    );
+    tracing::info!(
+        "💡 Reset {} derivations for retry (attempts < 5)",
+        reset_dry_run_result.rows_affected() + reset_build_result.rows_affected()
+    );
+
     Ok(())
 }
+
 
 // Keeping the original function names for backward compatibility
 pub async fn mark_target_dry_run_in_progress(pool: &PgPool, target_id: i32) -> Result<Derivation> {
