@@ -925,65 +925,24 @@ pub async fn handle_derivation_failure(
 }
 
 pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
-    // Reset derivations without paths to dry-run-pending (only if attempts < 5)
-    let result1 = sqlx::query!(
-        r#"
-        UPDATE derivations 
-        SET status_id = $1, scheduled_at = NOW()
-        WHERE derivation_path IS NULL 
-        AND attempt_count < 5
-        AND (
-            status_id NOT IN ($2, $3) -- Exclude always-terminal states
-            OR status_id IN ($4, $5) -- Include retryable failed states
-        )
-        "#,
-        EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
-        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
-        EvaluationStatus::DryRunFailed.as_id(),   // $4 = 6
-        EvaluationStatus::BuildFailed.as_id()     // $5 = 12
-    )
-    .execute(pool)
-    .await?;
-
-    // Reset derivations with paths to build-pending (only if attempts < 5)
-    let result2 = sqlx::query!(
-        r#"
-        UPDATE derivations 
-        SET status_id = $1, scheduled_at = NOW()
-        WHERE derivation_path IS NOT NULL 
-        AND attempt_count < 5
-        AND (
-            status_id NOT IN ($2, $3, $4) -- Exclude always-terminal states
-            OR status_id = $4 -- Include build-failed for retry
-        )
-        "#,
-        EvaluationStatus::BuildPending.as_id(),   // $1 = 7
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
-        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
-        EvaluationStatus::BuildFailed.as_id()     // $4 = 12
-    )
-    .execute(pool)
-    .await?;
-
-    // Set derivations without paths to terminal dry-run-failed (if attempts >= 5)
-    let result3 = sqlx::query!(
+    // First, set derivations to terminal failed states if attempts >= 5
+    let terminal_dry_run_result = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1
         WHERE derivation_path IS NULL 
         AND attempt_count >= 5
-        AND status_id NOT IN ($2, $3) -- Don't touch already-terminal states
+        AND status_id NOT IN ($2, $3, $4) -- Don't touch already-terminal states
         "#,
         EvaluationStatus::DryRunFailed.as_id(),   // $1 = 6
         EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (always terminal)
+        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
+        EvaluationStatus::DryRunFailed.as_id()    // $4 = 6 (already terminal)
     )
     .execute(pool)
     .await?;
 
-    // Set derivations with paths to terminal build-failed (if attempts >= 5)
-    let result4 = sqlx::query!(
+    let terminal_build_result = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1
@@ -999,8 +958,44 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
     .execute(pool)
     .await?;
 
-    let total_rows_affected = result1.rows_affected() + result2.rows_affected() + result3.rows_affected() + result4.rows_affected();
-    info!("💡 Reset {} non-terminal derivations.", total_rows_affected);
+    // Then, reset derivations that should be retried (attempts < 5)
+    let reset_dry_run_result = sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1, scheduled_at = NOW()
+        WHERE derivation_path IS NULL 
+        AND attempt_count < 5
+        AND status_id NOT IN ($2, $3) -- Only exclude permanently terminal states
+        "#,
+        EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (permanently terminal)
+        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (permanently terminal)
+    )
+    .execute(pool)
+    .await?;
+
+    let reset_build_result = sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1, scheduled_at = NOW()
+        WHERE derivation_path IS NOT NULL 
+        AND attempt_count < 5
+        AND status_id NOT IN ($2, $3) -- Only exclude permanently terminal states
+        "#,
+        EvaluationStatus::BuildPending.as_id(),   // $1 = 7
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (permanently terminal)
+        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (permanently terminal)
+    )
+    .execute(pool)
+    .await?;
+
+    let total_terminal = terminal_dry_run_result.rows_affected() + terminal_build_result.rows_affected();
+    let total_reset = reset_dry_run_result.rows_affected() + reset_build_result.rows_affected();
+    
+    info!("💡 Set {} derivations to terminal failed state (attempts >= 5)", total_terminal);
+    info!("💡 Reset {} derivations for retry (attempts < 5)", total_reset);
+    info!("💡 Total derivations processed: {}", total_terminal + total_reset);
+    
     Ok(())
 }
 
