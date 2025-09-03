@@ -3,7 +3,7 @@ use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::derivations::{
-    get_pending_dry_run_derivations, increment_derivation_attempt_count,
+    get_pending_dry_run_derivations, handle_derivation_failure, increment_derivation_attempt_count,
     insert_derivation_with_target, mark_derivation_dry_run_in_progress,
     mark_target_dry_run_complete, mark_target_failed, reset_non_terminal_derivations,
     update_derivation_path, update_scheduled_at,
@@ -75,9 +75,6 @@ async fn run_derivation_evaluation_loop(pool: PgPool, interval: Duration) {
         interval
     );
     loop {
-        if let Err(e) = reset_non_terminal_derivations(&pool).await {
-            error!("❌ Error reseting non-terminal derivations: {e}")
-        }
         if let Err(e) = process_pending_derivations(&pool).await {
             error!("❌ Error in target evaluation cycle: {e}");
         }
@@ -199,20 +196,10 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
                             }
                         }
                         Err(e) => {
-                            if let Err(inc_err) =
-                                increment_derivation_attempt_count(&pool, &target, &e).await
+                            if let Err(handle_err) =
+                                handle_derivation_failure(&pool, &target, "dry-run", &e).await
                             {
-                                error!("❌ Failed to increment attempt count: {inc_err}");
-                            }
-
-                            // Mark as failed instead of just incrementing attempts
-                            if let Err(mark_err) =
-                                mark_target_failed(&pool, target.id, "dry-run", &e.to_string())
-                                    .await
-                            {
-                                error!("❌ Failed to mark target as failed: {mark_err}");
-                            } else {
-                                info!("💥 Marked target {} as failed", target.derivation_name);
+                                error!("❌ Failed to handle derivation failure: {handle_err}");
                             }
                         }
                     }

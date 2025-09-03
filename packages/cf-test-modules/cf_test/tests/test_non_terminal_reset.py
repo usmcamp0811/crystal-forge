@@ -154,27 +154,70 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     status_output = server.succeed(f"systemctl status {C.SERVER_SERVICE}")
     server.log(f"Service status after restart: {status_output}")
 
-    # Wait for reset to complete by looking for the reset log message
-    cf_client.wait_for_service_log(server, C.SERVER_SERVICE, "Reset", timeout=60)
+    # Wait for the server to actually start up properly and look for startup completion
+    server.log("=== Waiting for server startup to complete ===")
 
-    # Give additional time for API to be ready
-    time.sleep(10)
-
-    server.succeed(f"journalctl -u {C.SERVER_SERVICE} --no-pager -n 50 || true")
-
-    server.log("=== Post-restart derivation states ===")
-    final_states = cf_client.execute_sql(
-        """
-        SELECT d.id, d.derivation_name, d.status_id, ds.name as status_name, 
-               d.attempt_count as attempt_count, d.derivation_path IS NOT NULL as has_path
-        FROM derivations d
-        JOIN derivation_statuses ds ON d.status_id = ds.id  
-        WHERE d.derivation_name LIKE 'test-reset-%'
-        ORDER BY d.derivation_name
-        """
+    # Check the logs to verify the server actually restarted and completed initialization
+    # Look for the specific log message from reset_non_terminal_derivations
+    cf_client.wait_for_service_log(
+        server, C.SERVER_SERVICE, "Reset.*non-terminal derivations", timeout=60
     )
 
-    states_by_name = {state["derivation_name"]: state for state in final_states}
+    # Also wait for the background tasks to start (from spawn_background_tasks)
+    cf_client.wait_for_service_log(
+        server, C.SERVER_SERVICE, "Starting Crystal Forge Server", timeout=30
+    )
+
+    # Show recent server logs for debugging
+    recent_logs = server.succeed(
+        f"journalctl -u {C.SERVER_SERVICE} --no-pager -n 20 --since '1 minute ago'"
+    )
+    server.log(f"Recent server logs:\n{recent_logs}")
+
+    # Give a moment for any final database commits to complete
+    time.sleep(5)
+
+    # Wait for database state to stabilize by polling until we see expected changes
+    server.log("=== Waiting for database reset to complete ===")
+    max_wait_attempts = 10
+    wait_interval = 2  # seconds
+
+    for attempt in range(max_wait_attempts):
+        final_states = cf_client.execute_sql(
+            """
+            SELECT d.id, d.derivation_name, d.status_id, ds.name as status_name, 
+                   d.attempt_count as attempt_count, d.derivation_path IS NOT NULL as has_path
+            FROM derivations d
+            JOIN derivation_statuses ds ON d.status_id = ds.id  
+            WHERE d.derivation_name LIKE 'test-reset-%'
+            ORDER BY d.derivation_name
+            """
+        )
+
+        states_by_name = {state["derivation_name"]: state for state in final_states}
+
+        # Check if the key test case (scenario 3) has been reset properly
+        if "test-reset-failed-low" in states_by_name:
+            failed_low = states_by_name["test-reset-failed-low"]
+            if failed_low["status_name"] == "dry-run-pending":
+                server.log(
+                    f"=== Database reset completed after {attempt + 1} attempts ==="
+                )
+                break
+
+        if attempt < max_wait_attempts - 1:
+            server.log(
+                f"Database not yet reset, waiting {wait_interval}s (attempt {attempt + 1}/{max_wait_attempts})"
+            )
+            time.sleep(wait_interval)
+    else:
+        server.log("=== Database reset did not complete within expected time ===")
+
+    server.log("=== Post-restart derivation states ===")
+    for state in final_states:
+        server.log(
+            f"  {state['derivation_name']}: {state['status_name']} (attempts: {state['attempt_count']}, has_path: {state['has_path']})"
+        )
 
     # Assertions based on reset logic
 
@@ -194,10 +237,10 @@ def test_derivation_reset_on_server_startup(cf_client, server):
     ), f"Expected 5 attempts, got {failed_terminal['attempt_count']}"
 
     # 3. dry-run-failed with no path and <5 attempts should reset to dry-run-pending
-    # failed_low = states_by_name["test-reset-failed-low"]
-    # assert (
-    #     failed_low["status_name"] == "dry-run-pending"
-    # ), f"Expected reset to dry-run-pending, got {failed_low['status_name']} -- attempt_count => {failed_low['attempt_count']}"
+    failed_low = states_by_name["test-reset-failed-low"]
+    assert (
+        failed_low["status_name"] == "dry-run-pending"
+    ), f"Expected reset to dry-run-pending, got {failed_low['status_name']} -- attempt_count => {failed_low['attempt_count']}"
 
     # 4. build-failed with path and <5 attempts should reset to build-pending
     build_failed = states_by_name["test-reset-build-failed"]
@@ -232,7 +275,7 @@ def test_derivation_reset_background_loop(cf_client, server):
         """
         UPDATE derivations 
         SET started_at = NOW() - INTERVAL '2 hours',
-            attempt_count = 5
+            attempt_count = 5, derivation_path = NULL
         WHERE id = %s
         """,
         (scenario["derivation_id"],),
@@ -299,7 +342,7 @@ def test_attempt_count_terminal_logic(cf_client, server):
 
     # Set attempt count to exactly 5 (terminal threshold)
     cf_client.execute_sql(
-        "UPDATE derivations SET attempt_count = 5 WHERE id = %s",
+        "UPDATE derivations SET attempt_count = 5, derivation_path = NULL WHERE id = %s",
         (scenario["derivation_id"],),
     )
 

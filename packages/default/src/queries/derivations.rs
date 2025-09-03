@@ -811,6 +811,119 @@ pub async fn increment_derivation_attempt_count(
     Ok(())
 }
 
+/// Handle derivation failure with proper attempt count logic
+pub async fn handle_derivation_failure(
+    pool: &PgPool,
+    derivation: &Derivation,
+    phase: &str, // "dry-run" or "build"
+    error: &anyhow::Error,
+) -> Result<Derivation> {
+    // First increment the attempt count
+    let new_attempt_count = derivation.attempt_count + 1;
+    
+    // Determine if this should be terminal based on attempt count
+    let (status, is_terminal_failure) = match phase {
+        "dry-run" => {
+            if new_attempt_count >= 5 {
+                (EvaluationStatus::DryRunFailed, true)
+            } else {
+                // For <5 attempts, we could use a different status like "DryRunFailed" 
+                // but the reset logic will pick it up and retry it
+                (EvaluationStatus::DryRunFailed, false)
+            }
+        }
+        "build" => {
+            if new_attempt_count >= 5 {
+                (EvaluationStatus::BuildFailed, true)
+            } else {
+                (EvaluationStatus::BuildFailed, false)
+            }
+        }
+        _ => return Err(anyhow::anyhow!("Invalid phase: {}", phase)),
+    };
+
+    // Update with both attempt count and status in a single transaction
+    let updated = if is_terminal_failure {
+        sqlx::query_as!(
+            Derivation,
+            r#"
+            UPDATE derivations SET 
+                status_id = $1,
+                attempt_count = $2,
+                completed_at = NOW(),
+                evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+                error_message = $3
+            WHERE id = $4
+            RETURNING
+                id,
+                commit_id,
+                derivation_type as "derivation_type: DerivationType",
+                derivation_name,
+                derivation_path,
+                derivation_target,
+                scheduled_at,
+                completed_at,
+                started_at,
+                attempt_count,
+                evaluation_duration_ms,
+                error_message,
+                pname,
+                version,
+                status_id
+            "#,
+            status.as_id(),
+            new_attempt_count,
+            error.to_string(),
+            derivation.id
+        )
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_as!(
+            Derivation,
+            r#"
+            UPDATE derivations SET 
+                status_id = $1,
+                attempt_count = $2,
+                error_message = $3
+            WHERE id = $4
+            RETURNING
+                id,
+                commit_id,
+                derivation_type as "derivation_type: DerivationType",
+                derivation_name,
+                derivation_path,
+                derivation_target,
+                scheduled_at,
+                completed_at,
+                started_at,
+                attempt_count,
+                evaluation_duration_ms,
+                error_message,
+                pname,
+                version,
+                status_id
+            "#,
+            status.as_id(),
+            new_attempt_count,
+            error.to_string(),
+            derivation.id
+        )
+        .fetch_one(pool)
+        .await?
+    };
+
+    if is_terminal_failure {
+        error!("❌ Derivation {} terminally failed after {} attempts: {}", 
+               updated.derivation_name, new_attempt_count, error);
+    } else {
+        warn!("⚠️ Derivation {} failed (attempt {}): {}", 
+              updated.derivation_name, new_attempt_count, error);
+    }
+
+    Ok(updated)
+}
+
 pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
     // Reset derivations without paths to dry-run-pending (only if attempts < 5)
     let result1 = sqlx::query!(
