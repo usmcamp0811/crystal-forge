@@ -597,12 +597,12 @@ def scenario_partial_rebuild(
                 last_attempt_time,
                 (
                     last_attempt_time + timedelta(minutes=15)
-                    if final_status in ["complete", "failed"]
+                    if final_status in ["build-complete", "build-failed"]
                     else None
                 ),
                 (
                     f"Build failed after {attempts} attempts"
-                    if final_status == "failed"
+                    if final_status == "build-failed"
                     else None
                 ),
             ),

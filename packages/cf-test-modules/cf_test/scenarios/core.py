@@ -41,7 +41,7 @@ def _create_base_scenario(
         repo_url: Git repository URL (unique)
         git_hash: Git commit hash
         commit_age_hours: How many hours ago the commit was made
-        derivation_status: Status name ('complete', 'failed', etc.)
+        derivation_status: Status name ('build-complete', 'build-failed', etc.)
         derivation_error: Error message if status is 'failed'
         heartbeat_age_minutes: How many minutes ago last heartbeat (None = no heartbeat)
         system_ip: IP address for the system
@@ -111,7 +111,7 @@ def _create_base_scenario(
     scheduled_at = commit_ts + timedelta(minutes=1)
     completed_at = (
         commit_ts + timedelta(minutes=2)
-        if derivation_status == "complete"
+        if derivation_status == "build-complete"
         else commit_ts + timedelta(minutes=3)
     )
     deriv_row = _one_row(

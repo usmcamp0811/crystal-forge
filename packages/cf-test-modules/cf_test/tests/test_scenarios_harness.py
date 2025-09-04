@@ -63,8 +63,8 @@ def test_validate_scenario_eval_failed(cf_client, clean_test_data):
     ), f"Expected at least 1 derivation, got {len(derivations)}"
 
     # Find the complete and failed derivations
-    complete_derivs = [d for d in derivations if d["status"] == "complete"]
-    failed_derivs = [d for d in derivations if d["status"] == "failed"]
+    complete_derivs = [d for d in derivations if d["status"] == "build-complete"]
+    failed_derivs = [d for d in derivations if d["status"] == "build-failed"]
 
     assert len(complete_derivs) >= 1, "Expected at least 1 complete derivation"
     assert len(failed_derivs) >= 1, "Expected at least 1 failed derivation"

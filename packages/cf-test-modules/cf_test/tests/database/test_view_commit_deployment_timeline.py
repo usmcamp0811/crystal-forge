@@ -51,7 +51,7 @@ DEPLOYMENT_TIMELINE_SCENARIO_CONFIGS = [
             "has_commits": True,
             "has_successful_evaluations": True,
             "has_deployments": False,  # orphaned path ≠ derivations → no counted deployments
-            "evaluation_statuses": ["complete"],
+            "evaluation_statuses": ["build-complete"],
             "currently_deployed_systems_empty": True,  # Add this line
         },
     },

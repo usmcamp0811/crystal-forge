@@ -233,7 +233,7 @@ def scenario_latest_with_two_overdue(
 
     # Insert two commits, second is latest
     [complete_status] = client.execute_sql(
-        "SELECT id FROM public.derivation_statuses WHERE name='complete'"
+        "SELECT id FROM public.derivation_statuses WHERE name='build-complete'"
     )
     complete_status_id = complete_status["id"]
 
@@ -405,7 +405,7 @@ def scenario_multiple_orphaned_systems(
             )
             VALUES (
                 %s, 'nixos', %s, %s,
-                (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                (SELECT id FROM derivation_statuses WHERE name = 'dry-run-complete'),
                 0, %s, %s
             )
             """,
@@ -566,7 +566,7 @@ def scenario_multi_system_progression_with_failure(
                     )
                     VALUES (
                         %s, 'nixos', %s, %s,
-                        (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                        (SELECT id FROM derivation_statuses WHERE name = 'dry-run-complete'),
                         0, %s, %s
                     )
                     RETURNING id
@@ -793,7 +793,7 @@ def scenario_progressive_system_updates(
                 )
                 VALUES (
                     %s, 'nixos', %s, %s,
-                    (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                    (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
                     0, %s, %s
                 )
                 RETURNING id

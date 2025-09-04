@@ -282,23 +282,27 @@ def test_derivation_status_breakdown_scenarios(
 
     if expected.get("has_complete_status"):
         assert (
-            "build-complete" in status_lookup
+            "dry-run-complete" in status_lookup or "build-complete" in status_lookup
         ), f"Expected complete status for {scenario_id}"
-        complete_row = status_lookup["build-complete"]
+        if "build-complete" in status_lookup:
+            complete_row = status_lookup["build-complete"]
+            assert (
+                complete_row["is_terminal"] is True
+            ), "Complete status is `build-complete` and should be terminal=True"
+        if "dry-run-complete" in status_lookup:
+            complete_row = status_lookup["dry-run-complete"]
+            assert (
+                complete_row["is_terminal"] is False
+            ), "Complete status is `dry-run-complete` and should be terminal=False"
         assert (
             complete_row["total_count"] > 0
         ), f"Expected complete derivations for {scenario_id}"
         assert (
             complete_row["is_success"] is True
         ), "Complete status should be success=True"
-        assert (
-            complete_row["is_terminal"] is True
-        ), "Complete status should be terminal=True"
 
     if expected.get("has_failed_status"):
-        failed_statuses = [
-            name for name in status_lookup if "build-failed" in name.lower()
-        ]
+        failed_statuses = [name for name in status_lookup if "failed" in name.lower()]
         assert len(failed_statuses) > 0, f"Expected failed status for {scenario_id}"
         for status_name in failed_statuses:
             failed_row = status_lookup[status_name]
@@ -506,6 +510,7 @@ def test_derivation_status_breakdown_time_filters(
         git_hash="timeold123",
         commit_age_hours=48,  # This affects commit timestamp, not scheduled_at
         heartbeat_age_minutes=None,
+        derivation_status="build-complete",
     )
 
     scenario2 = _create_base_scenario(
@@ -516,6 +521,7 @@ def test_derivation_status_breakdown_time_filters(
         git_hash="timerecent456",
         commit_age_hours=12,
         heartbeat_age_minutes=None,
+        derivation_status="build-complete",
     )
 
     # Update the scheduled_at times directly (since _create_base_scenario doesn't control this)
