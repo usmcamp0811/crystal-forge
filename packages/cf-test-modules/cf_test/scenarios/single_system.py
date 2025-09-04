@@ -328,7 +328,7 @@ def scenario_build_timeout(
         repo_url="https://example.com/build-timeout.git",
         git_hash="timeout-789",
         commit_age_hours=8,
-        derivation_status="pending",  # Initial state
+        derivation_status="build-pending",  # Initial state
         heartbeat_age_minutes=10,
     )
 
@@ -338,7 +338,7 @@ def scenario_build_timeout(
     client.execute_sql(
         """
         UPDATE derivations 
-        SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'pending'),
+        SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'build-pending'),
             started_at = %s,
             completed_at = NULL
         WHERE id = %s
@@ -348,9 +348,9 @@ def scenario_build_timeout(
 
     # Add additional derivations in various stuck states
     stuck_derivations = [
-        ("package-1", "pending", now - timedelta(hours=4)),
-        ("package-2", "pending", now - timedelta(hours=7)),
-        ("package-3", "pending", now - timedelta(hours=3)),
+        ("package-1", "build-pending", now - timedelta(hours=4)),
+        ("package-2", "build-pending", now - timedelta(hours=7)),
+        ("package-3", "build-pending", now - timedelta(hours=3)),
     ]
 
     additional_deriv_ids = []
@@ -555,7 +555,7 @@ def scenario_partial_rebuild(
         repo_url="https://example.com/partial-rebuild.git",
         git_hash="partial-456",
         commit_age_hours=12,
-        derivation_status="complete",  # Main derivation succeeds
+        derivation_status="build-complete",  # Main derivation succeeds
         heartbeat_age_minutes=8,
     )
 
@@ -563,11 +563,11 @@ def scenario_partial_rebuild(
 
     # Add packages with mixed success/failure/retry pattern
     package_scenarios = [
-        ("pkg-success", "complete", 1, now - timedelta(hours=11)),
-        ("pkg-failed-once", "failed", 2, now - timedelta(hours=10)),
-        ("pkg-retry-success", "complete", 3, now - timedelta(hours=9)),
-        ("pkg-still-failing", "failed", 4, now - timedelta(hours=8)),
-        ("pkg-building", "pending", 2, now - timedelta(minutes=30)),
+        ("pkg-success", "build-complete", 1, now - timedelta(hours=11)),
+        ("pkg-failed-once", "build-failed", 2, now - timedelta(hours=10)),
+        ("pkg-retry-success", "build-complete", 3, now - timedelta(hours=9)),
+        ("pkg-still-failing", "build-failed", 4, now - timedelta(hours=8)),
+        ("pkg-building", "build-pending", 2, now - timedelta(minutes=30)),
     ]
 
     package_deriv_ids = []
@@ -666,7 +666,7 @@ def scenario_compliance_drift(
             )
             VALUES (
                 %s, 'nixos', %s, %s,
-                (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
                 0, %s, %s
             )
             """,
@@ -815,7 +815,7 @@ def scenario_orphaned_deployments(
         )
         VALUES (
             %s, 'nixos', %s, %s,
-            (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+            (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
             0, %s, %s
         )
         RETURNING id

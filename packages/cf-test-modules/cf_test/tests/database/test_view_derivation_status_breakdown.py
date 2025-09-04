@@ -296,7 +296,9 @@ def test_derivation_status_breakdown_scenarios(
         ), "Complete status should be terminal=True"
 
     if expected.get("has_failed_status"):
-        failed_statuses = [name for name in status_lookup if "failed" in name.lower()]
+        failed_statuses = [
+            name for name in status_lookup if "build-failed" in name.lower()
+        ]
         assert len(failed_statuses) > 0, f"Expected failed status for {scenario_id}"
         for status_name in failed_statuses:
             failed_row = status_lookup[status_name]
@@ -309,7 +311,7 @@ def test_derivation_status_breakdown_scenarios(
         pending_statuses = [
             name
             for name in status_lookup
-            if name in ["pending", "scheduled", "building"]
+            if name in ["build-pending", "build-scheduled", "build-building"]
         ]
         assert (
             len(pending_statuses) > 0
@@ -545,7 +547,7 @@ def test_derivation_status_breakdown_time_filters(
     )
 
     # Find the complete status row (our derivations should be complete)
-    complete_rows = [r for r in rows if r["status_name"] == "complete"]
+    complete_rows = [r for r in rows if r["status_name"] == "build-complete"]
     assert len(complete_rows) > 0, "Expected at least one complete status row"
 
     complete_row = complete_rows[0]
