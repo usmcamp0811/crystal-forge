@@ -12,13 +12,7 @@ if TYPE_CHECKING:
 def scenario_never_seen(
     client: CFTestClient, hostname: str = "test-never-seen"
 ) -> Dict[str, Any]:
-    """Pre-registered/tracked system that has **never sent a heartbeat**.
-
-    We still create `systems` and `system_states` to represent a known, tracked
-    machine (the app tracks systems before first contact), but we set
-    `heartbeat_age_minutes=None` so **no agent_heartbeats are inserted**.
-    Views should therefore resolve connectivity/update/overall to "never_seen".
-    """
+    """Pre-registered/tracked system that has **never sent a heartbeat**."""
     import time
 
     timestamp = int(time.time())
@@ -31,6 +25,7 @@ def scenario_never_seen(
         git_hash=f"never123seen-{timestamp}",
         commit_age_hours=1,
         heartbeat_age_minutes=None,  # No heartbeat = never seen
+        derivation_status="build-complete",  # Add this line
     )
 
 
@@ -68,6 +63,7 @@ def scenario_behind(
         commit_age_hours=48,  # Old commit from 2 days ago
         heartbeat_age_minutes=1,
         system_ip="192.168.1.101",
+        derivation_status="build-complete",  # Add this line
         additional_commits=[
             {"hash": "new789commit", "age_hours": 1}  # Newer commit available
         ],
@@ -82,20 +78,77 @@ def scenario_behind(
     return result
 
 
-def scenario_offline(
-    client: CFTestClient, hostname: str = "test-offline"
+def scenario_flaky_agent(
+    client: CFTestClient, hostname: str = "test-flaky-agent"
 ) -> Dict[str, Any]:
-    """System that is offline (no recent heartbeats)"""
-    return _create_base_scenario(
+    """System with intermittent heartbeat gaps (unreliable network)"""
+
+    now = datetime.now(UTC)
+
+    # Create base system
+    base = _create_base_scenario(
         client,
         hostname=hostname,
-        flake_name="offline-app",
-        repo_url="https://example.com/offline.git",
-        git_hash="offline123",
+        flake_name="flaky-agent-test",
+        repo_url="https://example.com/flaky-agent.git",
+        git_hash="flaky-789",
         commit_age_hours=2,
-        heartbeat_age_minutes=45,  # cutoff is 30m, so this is offline
-        system_ip="192.168.1.102",
+        heartbeat_age_minutes=None,  # Custom heartbeat pattern
+        system_ip="192.168.1.170",
     )
+
+    system_state_id = base["state_id"]
+
+    # Create intermittent heartbeat pattern over 24 hours
+    # Pattern: normal, gap, recovery, gap, normal, gap, current
+    heartbeat_pattern = [
+        # Normal operation (24-12 hours ago)
+        now - timedelta(hours=24),
+        now - timedelta(hours=23),
+        now - timedelta(hours=22),
+        now - timedelta(hours=21),
+        now - timedelta(hours=20),
+        now - timedelta(hours=19),
+        # 6-hour gap (18-12 hours ago)
+        # Brief recovery (12-10 hours ago)
+        now - timedelta(hours=12),
+        now - timedelta(hours=11, minutes=30),
+        # 2-hour gap (10-8 hours ago)
+        # Normal operation (8-4 hours ago)
+        now - timedelta(hours=8),
+        now - timedelta(hours=7),
+        now - timedelta(hours=6),
+        now - timedelta(hours=5),
+        # 1-hour gap (4-3 hours ago)
+        # Recent recovery (last 3 hours)
+        now - timedelta(hours=3),
+        now - timedelta(hours=2, minutes=30),
+        now - timedelta(hours=2),
+        now - timedelta(hours=1, minutes=30),
+        now - timedelta(hours=1),
+        now - timedelta(minutes=30),
+        now - timedelta(minutes=5),
+    ]
+
+    heartbeat_ids = []
+    for i, hb_time in enumerate(heartbeat_pattern):
+        hb_row = _one_row(
+            client,
+            """
+            INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
+            VALUES (%s, %s, '2.0.1', 'flaky-build')
+            RETURNING id
+            """,
+            (system_state_id, hb_time),
+        )
+        heartbeat_ids.append(hb_row["id"])
+
+    cleanup_patterns = base["cleanup"].copy()
+    cleanup_patterns["agent_heartbeats"] = [
+        f"id IN ({','.join(map(str, heartbeat_ids))})"
+    ]
+
+    return {**base, "heartbeat_ids": heartbeat_ids}
 
 
 def scenario_eval_failed(
@@ -116,7 +169,7 @@ def scenario_eval_failed(
         flake_name="eval-app",
         repo_url="https://example.com/eval.git",
         git_hash=old_hash,
-        derivation_status="dry-run-failed",
+        derivation_status="build-complete",
         commit_age_hours=4,
         heartbeat_age_minutes=3,
     )
@@ -188,6 +241,23 @@ def scenario_dry_run_failed(
     return result
 
 
+def scenario_offline(
+    client: CFTestClient, hostname: str = "test-offline"
+) -> Dict[str, Any]:
+    """System that is offline (no recent heartbeats)"""
+    return _create_base_scenario(
+        client,
+        hostname=hostname,
+        flake_name="offline-app",
+        repo_url="https://example.com/offline.git",
+        git_hash="offline123",
+        commit_age_hours=2,
+        heartbeat_age_minutes=45,  # cutoff is 30m, so this is offline
+        system_ip="192.168.1.102",
+        derivation_status="build-complete",  # Add this line
+    )
+
+
 def scenario_agent_restart(
     client: CFTestClient, hostname: str = "test-agent-restart"
 ) -> Dict[str, Any]:
@@ -205,6 +275,7 @@ def scenario_agent_restart(
         commit_age_hours=6,
         heartbeat_age_minutes=None,  # We'll create custom heartbeats
         system_ip="192.168.1.150",
+        derivation_status="build-complete",  # Use build-complete for successful evaluations
     )
 
     system_state_id = base["state_id"]
@@ -342,8 +413,8 @@ def scenario_rollback(
 
     # Create timeline: old commit (stable) -> new commit (problematic) -> rollback to old
     commits_data = [
-        (f"old-stable-{timestamp}", now - timedelta(days=7), "complete"),
-        (f"new-problem-{timestamp}", now - timedelta(hours=6), "complete"),
+        (f"old-stable-{timestamp}", now - timedelta(days=7), "build-complete"),
+        (f"new-problem-{timestamp}", now - timedelta(hours=6), "build-complete"),
     ]
 
     commit_ids = []
@@ -639,6 +710,7 @@ def scenario_flaky_agent(
         commit_age_hours=2,
         heartbeat_age_minutes=None,  # Custom heartbeat pattern
         system_ip="192.168.1.170",
+        derivation_status="build-complete",  # Use build-complete for successful builds
     )
 
     system_state_id = base["state_id"]

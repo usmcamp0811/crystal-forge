@@ -181,7 +181,7 @@ DERIVATION_STATUS_BREAKDOWN_SCENARIO_CONFIGS = [
             "has_complete_status": True,
             "has_failed_status": True,
             "min_nixos_count": 50,  # 10 successful commits × 5 systems
-            "min_failed_count": 5,   # 1 failed commit × 5 systems
+            "min_failed_count": 5,  # 1 failed commit × 5 systems
         },
     },
     {
@@ -212,7 +212,9 @@ def cf_client(cf_config):
 @pytest.mark.views
 @pytest.mark.database
 @pytest.mark.parametrize(
-    "scenario_config", DERIVATION_STATUS_BREAKDOWN_SCENARIO_CONFIGS, ids=lambda x: x["id"]
+    "scenario_config",
+    DERIVATION_STATUS_BREAKDOWN_SCENARIO_CONFIGS,
+    ids=lambda x: x["id"],
 )
 def test_derivation_status_breakdown_scenarios(
     cf_client: CFTestClient, clean_test_data, scenario_config: Dict[str, Any]
@@ -279,11 +281,19 @@ def test_derivation_status_breakdown_scenarios(
         assert total_derivations > 0, f"Expected derivations for {scenario_id}"
 
     if expected.get("has_complete_status"):
-        assert "complete" in status_lookup, f"Expected complete status for {scenario_id}"
-        complete_row = status_lookup["complete"]
-        assert complete_row["total_count"] > 0, f"Expected complete derivations for {scenario_id}"
-        assert complete_row["is_success"] is True, "Complete status should be success=True"
-        assert complete_row["is_terminal"] is True, "Complete status should be terminal=True"
+        assert (
+            "build-complete" in status_lookup
+        ), f"Expected complete status for {scenario_id}"
+        complete_row = status_lookup["build-complete"]
+        assert (
+            complete_row["total_count"] > 0
+        ), f"Expected complete derivations for {scenario_id}"
+        assert (
+            complete_row["is_success"] is True
+        ), "Complete status should be success=True"
+        assert (
+            complete_row["is_terminal"] is True
+        ), "Complete status should be terminal=True"
 
     if expected.get("has_failed_status"):
         failed_statuses = [name for name in status_lookup if "failed" in name.lower()]
@@ -291,13 +301,27 @@ def test_derivation_status_breakdown_scenarios(
         for status_name in failed_statuses:
             failed_row = status_lookup[status_name]
             if failed_row["total_count"] > 0:
-                assert failed_row["is_success"] is False, f"Failed status should be success=False for {status_name}"
+                assert (
+                    failed_row["is_success"] is False
+                ), f"Failed status should be success=False for {status_name}"
 
     if expected.get("has_pending_status"):
-        pending_statuses = [name for name in status_lookup if name in ["pending", "scheduled", "building"]]
-        assert len(pending_statuses) > 0, f"Expected pending-type status for {scenario_id}"
-        has_pending_count = any(status_lookup[name]["total_count"] > 0 for name in pending_statuses if name in status_lookup)
-        assert has_pending_count, f"Expected non-zero pending derivations for {scenario_id}"
+        pending_statuses = [
+            name
+            for name in status_lookup
+            if name in ["pending", "scheduled", "building"]
+        ]
+        assert (
+            len(pending_statuses) > 0
+        ), f"Expected pending-type status for {scenario_id}"
+        has_pending_count = any(
+            status_lookup[name]["total_count"] > 0
+            for name in pending_statuses
+            if name in status_lookup
+        )
+        assert (
+            has_pending_count
+        ), f"Expected non-zero pending derivations for {scenario_id}"
 
     # Count validations
     if expected.get("min_nixos_count"):
@@ -316,7 +340,8 @@ def test_derivation_status_breakdown_scenarios(
 
     if expected.get("min_pending_count"):
         pending_count = sum(
-            row["total_count"] for row in rows 
+            row["total_count"]
+            for row in rows
             if not row["is_terminal"] and row["total_count"] > 0
         )
         assert pending_count >= expected["min_pending_count"], (
@@ -326,8 +351,11 @@ def test_derivation_status_breakdown_scenarios(
 
     if expected.get("min_failed_count"):
         failed_count = sum(
-            row["total_count"] for row in rows 
-            if row["is_terminal"] and row["is_success"] is False and row["total_count"] > 0
+            row["total_count"]
+            for row in rows
+            if row["is_terminal"]
+            and row["is_success"] is False
+            and row["total_count"] > 0
         )
         assert failed_count >= expected["min_failed_count"], (
             f"Expected at least {expected['min_failed_count']} failed derivations, "
@@ -335,27 +363,31 @@ def test_derivation_status_breakdown_scenarios(
         )
 
     if expected.get("has_multiple_attempts"):
-        high_attempt_rows = [row for row in rows if row["avg_attempts"] and row["avg_attempts"] > 1.5]
-        assert len(high_attempt_rows) > 0, (
-            f"Expected some derivations with >1 attempts for {scenario_id}"
-        )
+        high_attempt_rows = [
+            row for row in rows if row["avg_attempts"] and row["avg_attempts"] > 1.5
+        ]
+        assert (
+            len(high_attempt_rows) > 0
+        ), f"Expected some derivations with >1 attempts for {scenario_id}"
 
     # Data quality checks
     for row in rows:
         # Percentage should be reasonable
-        assert 0 <= row["percentage_of_total"] <= 100, (
-            f"Invalid percentage {row['percentage_of_total']} for {row['status_name']}"
-        )
-        
+        assert (
+            0 <= row["percentage_of_total"] <= 100
+        ), f"Invalid percentage {row['percentage_of_total']} for {row['status_name']}"
+
         # Counts should be consistent
         assert row["nixos_count"] + row["package_count"] == row["total_count"], (
             f"Count mismatch for {row['status_name']}: "
             f"nixos({row['nixos_count']}) + package({row['package_count']}) != total({row['total_count']})"
         )
-        
+
         # avg_attempts should be >= 0
         if row["avg_attempts"] is not None:
-            assert row["avg_attempts"] >= 0, f"Invalid avg_attempts for {row['status_name']}"
+            assert (
+                row["avg_attempts"] >= 0
+            ), f"Invalid avg_attempts for {row['status_name']}"
 
 
 @pytest.mark.views
@@ -373,7 +405,7 @@ def test_derivation_status_breakdown_view_basic_functionality(cf_client: CFTestC
 
     expected_columns = {
         "status_name",
-        "status_description", 
+        "status_description",
         "is_terminal",
         "is_success",
         "total_count",
@@ -399,7 +431,9 @@ def test_derivation_status_breakdown_view_performance(cf_client: CFTestClient):
     import time
 
     start_time = time.time()
-    result = cf_client.execute_sql(f"SELECT COUNT(*) FROM {VIEW_DERIVATION_STATUS_BREAKDOWN}")
+    result = cf_client.execute_sql(
+        f"SELECT COUNT(*) FROM {VIEW_DERIVATION_STATUS_BREAKDOWN}"
+    )
     query_time = time.time() - start_time
 
     assert (
@@ -410,15 +444,17 @@ def test_derivation_status_breakdown_view_performance(cf_client: CFTestClient):
 
 @pytest.mark.views
 @pytest.mark.database
-def test_derivation_status_breakdown_percentage_totals(cf_client: CFTestClient, clean_test_data):
+def test_derivation_status_breakdown_percentage_totals(
+    cf_client: CFTestClient, clean_test_data
+):
     """Test that percentages add up to 100% (within rounding)"""
-    
+
     # Create a few test derivations to ensure we have data
     scenario = _create_base_scenario(
         cf_client,
         hostname="test-percentage-calc",
         flake_name="percentage-test",
-        repo_url="https://example.com/percentage-test.git", 
+        repo_url="https://example.com/percentage-test.git",
         git_hash="percentage123",
         commit_age_hours=1,
         heartbeat_age_minutes=5,
@@ -437,11 +473,11 @@ def test_derivation_status_breakdown_percentage_totals(cf_client: CFTestClient, 
 
     # Sum percentages
     total_percentage = sum(row["percentage_of_total"] for row in rows)
-    
+
     # Should be close to 100% (allowing for rounding)
-    assert 99.9 <= total_percentage <= 100.1, (
-        f"Percentages should sum to ~100%, got {total_percentage}"
-    )
+    assert (
+        99.9 <= total_percentage <= 100.1
+    ), f"Percentages should sum to ~100%, got {total_percentage}"
 
     # Clean up
     cf_client.cleanup_test_data(scenario["cleanup"])
@@ -449,9 +485,11 @@ def test_derivation_status_breakdown_percentage_totals(cf_client: CFTestClient, 
 
 @pytest.mark.views
 @pytest.mark.database
-def test_derivation_status_breakdown_time_filters(cf_client: CFTestClient, clean_test_data):
+def test_derivation_status_breakdown_time_filters(
+    cf_client: CFTestClient, clean_test_data
+):
     """Test that 24-hour count filtering works"""
-    
+
     # Create derivation with specific timing
     now = datetime.now(UTC)
     old_time = now - timedelta(days=2)  # Older than 24 hours
@@ -470,7 +508,7 @@ def test_derivation_status_breakdown_time_filters(cf_client: CFTestClient, clean
 
     scenario2 = _create_base_scenario(
         cf_client,
-        hostname="test-time-filter-recent", 
+        hostname="test-time-filter-recent",
         flake_name="time-filter-recent",
         repo_url="https://example.com/time-filter-recent.git",
         git_hash="timerecent456",
@@ -485,7 +523,7 @@ def test_derivation_status_breakdown_time_filters(cf_client: CFTestClient, clean
         SET scheduled_at = %s
         WHERE derivation_name = 'test-time-filter-old'
         """,
-        (old_time,)
+        (old_time,),
     )
 
     cf_client.execute_sql(
@@ -494,7 +532,7 @@ def test_derivation_status_breakdown_time_filters(cf_client: CFTestClient, clean
         SET scheduled_at = %s  
         WHERE derivation_name = 'test-time-filter-recent'
         """,
-        (recent_time,)
+        (recent_time,),
     )
 
     # Query the view
@@ -509,9 +547,9 @@ def test_derivation_status_breakdown_time_filters(cf_client: CFTestClient, clean
     # Find the complete status row (our derivations should be complete)
     complete_rows = [r for r in rows if r["status_name"] == "complete"]
     assert len(complete_rows) > 0, "Expected at least one complete status row"
-    
+
     complete_row = complete_rows[0]
-    
+
     # The 24h count should be less than or equal to total count
     assert complete_row["count_last_24h"] <= complete_row["total_count"], (
         f"24h count ({complete_row['count_last_24h']}) should not exceed total "
@@ -527,7 +565,7 @@ def test_derivation_status_breakdown_time_filters(cf_client: CFTestClient, clean
 @pytest.mark.database
 def test_derivation_status_breakdown_ordering(cf_client: CFTestClient, clean_test_data):
     """Test that statuses are ordered by display_order"""
-    
+
     # Create some test data first since this is a standalone test
     scenario = _create_base_scenario(
         cf_client,
@@ -538,7 +576,7 @@ def test_derivation_status_breakdown_ordering(cf_client: CFTestClient, clean_tes
         commit_age_hours=1,
         heartbeat_age_minutes=5,
     )
-    
+
     rows = cf_client.execute_sql(
         f"""
         SELECT status_name
@@ -563,17 +601,17 @@ def test_derivation_status_breakdown_ordering(cf_client: CFTestClient, clean_tes
     # Verify the view results are in display_order
     ordered_statuses = [row["status_name"] for row in view_with_order]
     actual_statuses = [row["status_name"] for row in rows]
-    
+
     # Since both queries should return the same data, just differently ordered
-    assert set(ordered_statuses) == set(actual_statuses), (
-        "View should contain same statuses regardless of ordering"
-    )
-    
+    assert set(ordered_statuses) == set(
+        actual_statuses
+    ), "View should contain same statuses regardless of ordering"
+
     # Verify display_order is ascending (assuming that's the intended order)
     display_orders = [row["display_order"] for row in view_with_order]
-    assert display_orders == sorted(display_orders), (
-        "Statuses should be ordered by display_order ascending"
-    )
-    
+    assert display_orders == sorted(
+        display_orders
+    ), "Statuses should be ordered by display_order ascending"
+
     # Clean up
     cf_client.cleanup_test_data(scenario["cleanup"])
