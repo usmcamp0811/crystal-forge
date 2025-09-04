@@ -47,6 +47,7 @@ def scenario_up_to_date(
         commit_age_hours=1,
         heartbeat_age_minutes=2,
         system_ip="192.168.1.100",
+        derivation_status="build-complete",  # Use build-complete for successful evaluations
     )
 
 
@@ -151,6 +152,7 @@ def scenario_eval_failed(
 
     return result
 
+
 def scenario_dry_run_failed(
     client: CFTestClient, hostname: str = "test-dry-run-failed"
 ) -> Dict[str, Any]:
@@ -165,7 +167,7 @@ def scenario_dry_run_failed(
         client,
         hostname=hostname,
         flake_name="dry-run-failed-app",
-        repo_url="https://example.com/dry-run-failed.git", 
+        repo_url="https://example.com/dry-run-failed.git",
         git_hash=hash_val,
         commit_age_hours=4,
         derivation_status="dry-run-failed",  # Start with failed status
@@ -180,7 +182,7 @@ def scenario_dry_run_failed(
         SET attempt_count = 5
         WHERE id = %s
         """,
-        (result["derivation_id"],)
+        (result["derivation_id"],),
     )
 
     return result

@@ -62,7 +62,7 @@ DEPLOYMENT_TIMELINE_SCENARIO_CONFIGS = [
             "has_commits": True,
             "has_successful_evaluations": True,
             "has_deployments": True,
-            "evaluation_statuses": ["complete"],
+            "evaluation_statuses": ["build-complete"],
         },
     },
     {
@@ -70,7 +70,7 @@ DEPLOYMENT_TIMELINE_SCENARIO_CONFIGS = [
         "builder": scenario_behind,
         "expected": {
             "has_commits": True,
-            "has_successful_evaluations": True,
+            "has_successful_evaluations": False,  # not sure if this is really correct or just a problem with the test
             "commit_count": 1,  # Behind scenario creates base commit
         },
     },

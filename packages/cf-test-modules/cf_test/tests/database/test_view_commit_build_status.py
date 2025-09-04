@@ -82,10 +82,8 @@ BUILD_STATUS_SCENARIO_CONFIGS = [
         "id": "up_to_date",
         "builder": scenario_up_to_date,
         "expected": {
-            # Remove the strict commit_build_status check since the scenario
-            # creates non-terminal derivations (showing as "building")
             "total_derivations": 1,
-            "derivation_status": "complete",
+            "derivation_status": "build-complete",
         },
     },
     {
@@ -341,7 +339,7 @@ def test_commit_build_status_categories(cf_client: CFTestClient, clean_test_data
         flake_name="build-status-test",
         repo_url="https://example.com/build-status.git",
         git_hash="complete-build-123",
-        derivation_status="complete",
+        derivation_status="build-complete",
         commit_age_hours=1,
         heartbeat_age_minutes=5,
     )
@@ -428,11 +426,12 @@ def test_commit_filter_by_specific_commit(cf_client: CFTestClient, clean_test_da
         git_hash="multi-deriv-abc123",
         commit_age_hours=1,
         heartbeat_age_minutes=5,
+        derivation_status="build-complete",  # Use build-complete status for NixOS derivations
     )
 
     commit_id = base_scenario["commit_id"]
 
-    # Add additional derivations for the same commit
+    # Add additional derivations for the same commit with proper terminal statuses
     cf_client.execute_sql(
         """
         INSERT INTO derivations (
@@ -441,11 +440,11 @@ def test_commit_filter_by_specific_commit(cf_client: CFTestClient, clean_test_da
         )
         VALUES (
             %s, 'package', 'test-package-1', '/nix/store/pkg1.drv',
-            (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+            (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
             1, NOW() - INTERVAL '30 minutes', NOW() - INTERVAL '20 minutes'
         ), (
             %s, 'package', 'test-package-2', '/nix/store/pkg2.drv',
-            (SELECT id FROM derivation_statuses WHERE name = 'failed'),
+            (SELECT id FROM derivation_statuses WHERE name = 'build-failed'),
             2, NOW() - INTERVAL '30 minutes', NOW() - INTERVAL '15 minutes'
         )
         """,
@@ -457,7 +456,7 @@ def test_commit_filter_by_specific_commit(cf_client: CFTestClient, clean_test_da
         f"""
         SELECT git_commit_hash, derivation_name, derivation_type, derivation_status,
                total_derivations, successful_derivations, failed_derivations,
-               commit_build_status
+               commit_build_status, in_progress_derivations
         FROM {VIEW_COMMIT_BUILD_STATUS}
         WHERE git_commit_hash = 'multi-deriv-abc123'
         ORDER BY derivation_type, derivation_name
@@ -469,8 +468,11 @@ def test_commit_filter_by_specific_commit(cf_client: CFTestClient, clean_test_da
     # All rows should have the same commit-level aggregations
     first_row = rows[0]
     assert first_row["total_derivations"] == 3
-    assert first_row["successful_derivations"] == 1
-    assert first_row["failed_derivations"] == 1  # package-2
+    assert (
+        first_row["successful_derivations"] == 2
+    )  # nixos + package-1 (both build-complete)
+    assert first_row["failed_derivations"] == 1  # package-2 (build-failed)
+    assert first_row["in_progress_derivations"] == 0  # all should be terminal
     assert first_row["commit_build_status"] == "partial"  # mixed success/failure
 
     # Check individual derivations
