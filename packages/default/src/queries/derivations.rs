@@ -3,7 +3,7 @@ use anyhow::anyhow;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
 use anyhow::Result;
 use sqlx::PgPool;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 // Status IDs from the derivation_statuses table
 // These should match the IDs you inserted in your migration
@@ -811,51 +811,186 @@ pub async fn increment_derivation_attempt_count(
     Ok(())
 }
 
+/// Handle derivation failure with proper attempt count logic
+pub async fn handle_derivation_failure(
+    pool: &PgPool,
+    derivation: &Derivation,
+    phase: &str, // "dry-run" or "build"
+    error: &anyhow::Error,
+) -> Result<Derivation> {
+    // First increment the attempt count
+    let new_attempt_count = derivation.attempt_count + 1;
+    
+    // Determine if this should be terminal based on attempt count
+    let (status, is_terminal_failure) = match phase {
+        "dry-run" => {
+            if new_attempt_count >= 5 {
+                (EvaluationStatus::DryRunFailed, true)
+            } else {
+                // For <5 attempts, we could use a different status like "DryRunFailed" 
+                // but the reset logic will pick it up and retry it
+                (EvaluationStatus::DryRunFailed, false)
+            }
+        }
+        "build" => {
+            if new_attempt_count >= 5 {
+                (EvaluationStatus::BuildFailed, true)
+            } else {
+                (EvaluationStatus::BuildFailed, false)
+            }
+        }
+        _ => return Err(anyhow::anyhow!("Invalid phase: {}", phase)),
+    };
+
+    // Update with both attempt count and status in a single transaction
+    let updated = if is_terminal_failure {
+        sqlx::query_as!(
+            Derivation,
+            r#"
+            UPDATE derivations SET 
+                status_id = $1,
+                attempt_count = $2,
+                completed_at = NOW(),
+                evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+                error_message = $3
+            WHERE id = $4
+            RETURNING
+                id,
+                commit_id,
+                derivation_type as "derivation_type: DerivationType",
+                derivation_name,
+                derivation_path,
+                derivation_target,
+                scheduled_at,
+                completed_at,
+                started_at,
+                attempt_count,
+                evaluation_duration_ms,
+                error_message,
+                pname,
+                version,
+                status_id
+            "#,
+            status.as_id(),
+            new_attempt_count,
+            error.to_string(),
+            derivation.id
+        )
+        .fetch_one(pool)
+        .await?
+    } else {
+        sqlx::query_as!(
+            Derivation,
+            r#"
+            UPDATE derivations SET 
+                status_id = $1,
+                attempt_count = $2,
+                error_message = $3
+            WHERE id = $4
+            RETURNING
+                id,
+                commit_id,
+                derivation_type as "derivation_type: DerivationType",
+                derivation_name,
+                derivation_path,
+                derivation_target,
+                scheduled_at,
+                completed_at,
+                started_at,
+                attempt_count,
+                evaluation_duration_ms,
+                error_message,
+                pname,
+                version,
+                status_id
+            "#,
+            status.as_id(),
+            new_attempt_count,
+            error.to_string(),
+            derivation.id
+        )
+        .fetch_one(pool)
+        .await?
+    };
+
+    if is_terminal_failure {
+        error!("❌ Derivation {} terminally failed after {} attempts: {}", 
+               updated.derivation_name, new_attempt_count, error);
+    } else {
+        warn!("⚠️ Derivation {} failed (attempt {}): {}", 
+              updated.derivation_name, new_attempt_count, error);
+    }
+
+    Ok(updated)
+}
+
 pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
-    // Reset derivations without paths to dry-run-pending
-    // Include failed derivations that haven't exceeded attempt limit
-    let result1 = sqlx::query!(
+    // First, set derivations to terminal failed states if attempts >= 5
+    let terminal_dry_run_result = sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1
+        WHERE derivation_path IS NULL 
+        AND attempt_count >= 5
+        AND status_id != $1  -- Only update if not already in terminal failed state
+        "#,
+        EvaluationStatus::DryRunFailed.as_id()   // $1 = 6
+    )
+    .execute(pool)
+    .await?;
+
+    let terminal_build_result = sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1
+        WHERE derivation_path IS NOT NULL 
+        AND attempt_count >= 5
+        AND status_id != $1  -- Only update if not already in terminal failed state
+        "#,
+        EvaluationStatus::BuildFailed.as_id()    // $1 = 12
+    )
+    .execute(pool)
+    .await?;
+
+    // Then, reset derivations that should be retried (attempts < 5)
+    // Reset ALL non-terminal derivations with < 5 attempts to pending states
+    let reset_dry_run_result = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NULL 
-        AND (
-            status_id NOT IN ($2, $3, $4) 
-            OR (status_id = $5 AND attempt_count < 5)  -- Include dry-run-failed with < 5 attempts
-        )
+        AND attempt_count < 5
+        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
         "#,
         EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
-        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
-        EvaluationStatus::BuildFailed.as_id(),    // $4 = 12 (always terminal)
-        EvaluationStatus::DryRunFailed.as_id()    // $5 = 6 (only terminal if attempts >= 5)
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
+        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
     )
     .execute(pool)
     .await?;
 
-    // Reset derivations with paths to build-pending
-    // Include failed derivations that haven't exceeded attempt limit
-    let result2 = sqlx::query!(
+    let reset_build_result = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NOT NULL 
-        AND (
-            status_id NOT IN ($2, $3, $4)
-            OR (status_id = $4 AND attempt_count < 5)  -- Include build-failed with < 5 attempts
-        )
+        AND attempt_count < 5
+        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
         "#,
         EvaluationStatus::BuildPending.as_id(),   // $1 = 7
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (always terminal)
-        EvaluationStatus::BuildComplete.as_id(),  // $3 = 10 (always terminal)
-        EvaluationStatus::BuildFailed.as_id()     // $4 = 12 (check this for retry condition)
+        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
+        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
     )
     .execute(pool)
     .await?;
 
-    let total_rows_affected = result1.rows_affected() + result2.rows_affected();
-    info!("💡 Reset {} non-terminal derivations.", total_rows_affected);
-
+    let total_terminal = terminal_dry_run_result.rows_affected() + terminal_build_result.rows_affected();
+    let total_reset = reset_dry_run_result.rows_affected() + reset_build_result.rows_affected();
+    
+    info!("💡 Set {} derivations to terminal failed state (attempts >= 5)", total_terminal);
+    info!("💡 Reset {} derivations for retry (attempts < 5)", total_reset);
+    info!("💡 Total derivations processed: {}", total_terminal + total_reset);
+    
     Ok(())
 }
 

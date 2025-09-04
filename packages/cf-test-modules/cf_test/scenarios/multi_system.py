@@ -138,6 +138,7 @@ def scenario_mixed_commit_lag(client: CFTestClient) -> Dict[str, Any]:
         git_hash="mix123current",
         commit_age_hours=1,
         heartbeat_age_minutes=5,
+        derivation_status="build-complete",  # Add this line
     )
     # second up_to_date
     _create_base_scenario(
@@ -148,6 +149,7 @@ def scenario_mixed_commit_lag(client: CFTestClient) -> Dict[str, Any]:
         git_hash="mix123current",
         commit_age_hours=1,
         heartbeat_age_minutes=7,
+        derivation_status="build-complete",  # Add this line
     )
     # one behind (online)
     _create_base_scenario(
@@ -158,6 +160,7 @@ def scenario_mixed_commit_lag(client: CFTestClient) -> Dict[str, Any]:
         git_hash="old000behind",
         commit_age_hours=24,
         heartbeat_age_minutes=4,
+        derivation_status="build-complete",  # Add this line
     )
     # one offline
     _create_base_scenario(
@@ -168,6 +171,7 @@ def scenario_mixed_commit_lag(client: CFTestClient) -> Dict[str, Any]:
         git_hash="mix123current",
         commit_age_hours=1,
         heartbeat_age_minutes=65,
+        derivation_status="build-complete",  # Add this line
     )
 
     return {
@@ -229,7 +233,7 @@ def scenario_latest_with_two_overdue(
 
     # Insert two commits, second is latest
     [complete_status] = client.execute_sql(
-        "SELECT id FROM public.derivation_statuses WHERE name='complete'"
+        "SELECT id FROM public.derivation_statuses WHERE name='build-complete'"
     )
     complete_status_id = complete_status["id"]
 
@@ -401,7 +405,7 @@ def scenario_multiple_orphaned_systems(
             )
             VALUES (
                 %s, 'nixos', %s, %s,
-                (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                (SELECT id FROM derivation_statuses WHERE name = 'dry-run-complete'),
                 0, %s, %s
             )
             """,
@@ -470,7 +474,6 @@ def scenario_multiple_orphaned_systems(
             (state_row["id"], now - timedelta(minutes=5 + i)),
         )
         heartbeat_ids.append(heartbeat_row["id"])
-
 
     cleanup_patterns = {
         "agent_heartbeats": [f"id IN ({','.join(map(str, heartbeat_ids))})"],
@@ -563,7 +566,7 @@ def scenario_multi_system_progression_with_failure(
                     )
                     VALUES (
                         %s, 'nixos', %s, %s,
-                        (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                        (SELECT id FROM derivation_statuses WHERE name = 'dry-run-complete'),
                         0, %s, %s
                     )
                     RETURNING id
@@ -790,7 +793,7 @@ def scenario_progressive_system_updates(
                 )
                 VALUES (
                     %s, 'nixos', %s, %s,
-                    (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                    (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
                     0, %s, %s
                 )
                 RETURNING id
