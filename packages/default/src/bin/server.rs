@@ -47,8 +47,8 @@ async fn main() -> anyhow::Result<()> {
     let background_pool = pool.clone();
     let flake_init_pool = pool.clone();
     // TODO: Update this to get the first N commits on the first time
-    initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
     reset_non_terminal_derivations(&pool).await?;
+    initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
     spawn_background_tasks(cfg.clone(), background_pool);
 
     // Start HTTP server
