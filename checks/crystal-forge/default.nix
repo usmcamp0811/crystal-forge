@@ -16,6 +16,9 @@
     mkdir -p $out
     cp ${keyPair}/agent.pub $out/
   '';
+  testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
+    cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
+  '';
   # cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
   #   mkdir -p $out
   #   cp -r $src/* $out/
@@ -69,6 +72,7 @@ in
       start_all()
 
       server.wait_for_unit("postgresql.service")
+      server.wait_for_unit("crystal-forge-server.service")
       server.wait_for_open_port(5432)
       server.forward_port(5433, 5432)
 
@@ -79,6 +83,11 @@ in
       os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
       os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
+
+      # Make real git info available to tests
+      os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
+      os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
+
       # Inject machines so cf_test fixtures can drive them
       import cf_test
       cf_test._driver_machines = {

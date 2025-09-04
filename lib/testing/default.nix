@@ -151,6 +151,9 @@ in rec {
       git add -f flake.nix
       git commit -q -m "Update timestamp"
 
+      # Get the final commit hash BEFORE creating bare repo
+      FINAL_COMMIT=$(git rev-parse HEAD)
+
       # Create bare repository for serving
       git init --bare "$out"
       git -C "$out" config receive.denyCurrentBranch ignore
@@ -161,6 +164,9 @@ in rec {
       git -C "$out" config http.receivepack true
       git -C "$out" config http.uploadpack true
       git -C "$out" update-server-info
+
+      # Output the commit hash to a file in the bare repo
+      echo "$FINAL_COMMIT" > "$out/HEAD_COMMIT"
     '';
 
   # Create a reusable git server node for tests with cgit web interface

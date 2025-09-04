@@ -12,13 +12,7 @@ if TYPE_CHECKING:
 def scenario_never_seen(
     client: CFTestClient, hostname: str = "test-never-seen"
 ) -> Dict[str, Any]:
-    """Pre-registered/tracked system that has **never sent a heartbeat**.
-
-    We still create `systems` and `system_states` to represent a known, tracked
-    machine (the app tracks systems before first contact), but we set
-    `heartbeat_age_minutes=None` so **no agent_heartbeats are inserted**.
-    Views should therefore resolve connectivity/update/overall to "never_seen".
-    """
+    """Pre-registered/tracked system that has **never sent a heartbeat**."""
     import time
 
     timestamp = int(time.time())
@@ -31,6 +25,7 @@ def scenario_never_seen(
         git_hash=f"never123seen-{timestamp}",
         commit_age_hours=1,
         heartbeat_age_minutes=None,  # No heartbeat = never seen
+        derivation_status="build-complete",  # Add this line
     )
 
 
@@ -47,6 +42,7 @@ def scenario_up_to_date(
         commit_age_hours=1,
         heartbeat_age_minutes=2,
         system_ip="192.168.1.100",
+        derivation_status="build-complete",  # Use build-complete for successful evaluations
     )
 
 
@@ -67,6 +63,7 @@ def scenario_behind(
         commit_age_hours=48,  # Old commit from 2 days ago
         heartbeat_age_minutes=1,
         system_ip="192.168.1.101",
+        derivation_status="build-complete",  # Add this line
         additional_commits=[
             {"hash": "new789commit", "age_hours": 1}  # Newer commit available
         ],
@@ -81,20 +78,77 @@ def scenario_behind(
     return result
 
 
-def scenario_offline(
-    client: CFTestClient, hostname: str = "test-offline"
+def scenario_flaky_agent(
+    client: CFTestClient, hostname: str = "test-flaky-agent"
 ) -> Dict[str, Any]:
-    """System that is offline (no recent heartbeats)"""
-    return _create_base_scenario(
+    """System with intermittent heartbeat gaps (unreliable network)"""
+
+    now = datetime.now(UTC)
+
+    # Create base system
+    base = _create_base_scenario(
         client,
         hostname=hostname,
-        flake_name="offline-app",
-        repo_url="https://example.com/offline.git",
-        git_hash="offline123",
+        flake_name="flaky-agent-test",
+        repo_url="https://example.com/flaky-agent.git",
+        git_hash="flaky-789",
         commit_age_hours=2,
-        heartbeat_age_minutes=45,  # cutoff is 30m, so this is offline
-        system_ip="192.168.1.102",
+        heartbeat_age_minutes=None,  # Custom heartbeat pattern
+        system_ip="192.168.1.170",
     )
+
+    system_state_id = base["state_id"]
+
+    # Create intermittent heartbeat pattern over 24 hours
+    # Pattern: normal, gap, recovery, gap, normal, gap, current
+    heartbeat_pattern = [
+        # Normal operation (24-12 hours ago)
+        now - timedelta(hours=24),
+        now - timedelta(hours=23),
+        now - timedelta(hours=22),
+        now - timedelta(hours=21),
+        now - timedelta(hours=20),
+        now - timedelta(hours=19),
+        # 6-hour gap (18-12 hours ago)
+        # Brief recovery (12-10 hours ago)
+        now - timedelta(hours=12),
+        now - timedelta(hours=11, minutes=30),
+        # 2-hour gap (10-8 hours ago)
+        # Normal operation (8-4 hours ago)
+        now - timedelta(hours=8),
+        now - timedelta(hours=7),
+        now - timedelta(hours=6),
+        now - timedelta(hours=5),
+        # 1-hour gap (4-3 hours ago)
+        # Recent recovery (last 3 hours)
+        now - timedelta(hours=3),
+        now - timedelta(hours=2, minutes=30),
+        now - timedelta(hours=2),
+        now - timedelta(hours=1, minutes=30),
+        now - timedelta(hours=1),
+        now - timedelta(minutes=30),
+        now - timedelta(minutes=5),
+    ]
+
+    heartbeat_ids = []
+    for i, hb_time in enumerate(heartbeat_pattern):
+        hb_row = _one_row(
+            client,
+            """
+            INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
+            VALUES (%s, %s, '2.0.1', 'flaky-build')
+            RETURNING id
+            """,
+            (system_state_id, hb_time),
+        )
+        heartbeat_ids.append(hb_row["id"])
+
+    cleanup_patterns = base["cleanup"].copy()
+    cleanup_patterns["agent_heartbeats"] = [
+        f"id IN ({','.join(map(str, heartbeat_ids))})"
+    ]
+
+    return {**base, "heartbeat_ids": heartbeat_ids}
 
 
 def scenario_eval_failed(
@@ -115,6 +169,7 @@ def scenario_eval_failed(
         flake_name="eval-app",
         repo_url="https://example.com/eval.git",
         git_hash=old_hash,
+        derivation_status="build-complete",
         commit_age_hours=4,
         heartbeat_age_minutes=3,
     )
@@ -145,10 +200,62 @@ def scenario_eval_failed(
                 (SELECT id FROM public.derivation_statuses WHERE name='failed'),
                 0, %s, 'Evaluation failed')
         """,
-        (new_commit_id, f"{hostname}-build-failed", failed_completed),
+        (new_commit_id, f"{hostname}-dry-run-failed", failed_completed),
     )
 
     return result
+
+
+def scenario_dry_run_failed(
+    client: CFTestClient, hostname: str = "test-dry-run-failed"
+) -> Dict[str, Any]:
+    """System with a failed dry-run evaluation (5+ attempts)"""
+    import time
+
+    timestamp = int(time.time())
+    hash_val = f"dryrunfailed123-{timestamp}"
+
+    # Create base scenario with dry-run-failed status and high attempt count
+    result = _create_base_scenario(
+        client,
+        hostname=hostname,
+        flake_name="dry-run-failed-app",
+        repo_url="https://example.com/dry-run-failed.git",
+        git_hash=hash_val,
+        commit_age_hours=4,
+        derivation_status="dry-run-failed",  # Start with failed status
+        derivation_error="Dry run failed after multiple attempts",
+        heartbeat_age_minutes=3,
+    )
+
+    # Update the derivation to have 5+ attempts to make it terminal
+    client.execute_sql(
+        """
+        UPDATE public.derivations 
+        SET attempt_count = 5
+        WHERE id = %s
+        """,
+        (result["derivation_id"],),
+    )
+
+    return result
+
+
+def scenario_offline(
+    client: CFTestClient, hostname: str = "test-offline"
+) -> Dict[str, Any]:
+    """System that is offline (no recent heartbeats)"""
+    return _create_base_scenario(
+        client,
+        hostname=hostname,
+        flake_name="offline-app",
+        repo_url="https://example.com/offline.git",
+        git_hash="offline123",
+        commit_age_hours=2,
+        heartbeat_age_minutes=45,  # cutoff is 30m, so this is offline
+        system_ip="192.168.1.102",
+        derivation_status="build-complete",  # Add this line
+    )
 
 
 def scenario_agent_restart(
@@ -168,6 +275,7 @@ def scenario_agent_restart(
         commit_age_hours=6,
         heartbeat_age_minutes=None,  # We'll create custom heartbeats
         system_ip="192.168.1.150",
+        derivation_status="build-complete",  # Use build-complete for successful evaluations
     )
 
     system_state_id = base["state_id"]
@@ -220,7 +328,7 @@ def scenario_build_timeout(
         repo_url="https://example.com/build-timeout.git",
         git_hash="timeout-789",
         commit_age_hours=8,
-        derivation_status="pending",  # Initial state
+        derivation_status="build-pending",  # Initial state
         heartbeat_age_minutes=10,
     )
 
@@ -230,7 +338,7 @@ def scenario_build_timeout(
     client.execute_sql(
         """
         UPDATE derivations 
-        SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'pending'),
+        SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'build-pending'),
             started_at = %s,
             completed_at = NULL
         WHERE id = %s
@@ -240,9 +348,9 @@ def scenario_build_timeout(
 
     # Add additional derivations in various stuck states
     stuck_derivations = [
-        ("package-1", "pending", now - timedelta(hours=4)),
-        ("package-2", "pending", now - timedelta(hours=7)),
-        ("package-3", "pending", now - timedelta(hours=3)),
+        ("package-1", "build-pending", now - timedelta(hours=4)),
+        ("package-2", "build-pending", now - timedelta(hours=7)),
+        ("package-3", "build-pending", now - timedelta(hours=3)),
     ]
 
     additional_deriv_ids = []
@@ -305,8 +413,8 @@ def scenario_rollback(
 
     # Create timeline: old commit (stable) -> new commit (problematic) -> rollback to old
     commits_data = [
-        (f"old-stable-{timestamp}", now - timedelta(days=7), "complete"),
-        (f"new-problem-{timestamp}", now - timedelta(hours=6), "complete"),
+        (f"old-stable-{timestamp}", now - timedelta(days=7), "build-complete"),
+        (f"new-problem-{timestamp}", now - timedelta(hours=6), "build-complete"),
     ]
 
     commit_ids = []
@@ -447,7 +555,7 @@ def scenario_partial_rebuild(
         repo_url="https://example.com/partial-rebuild.git",
         git_hash="partial-456",
         commit_age_hours=12,
-        derivation_status="complete",  # Main derivation succeeds
+        derivation_status="build-complete",  # Main derivation succeeds
         heartbeat_age_minutes=8,
     )
 
@@ -455,11 +563,11 @@ def scenario_partial_rebuild(
 
     # Add packages with mixed success/failure/retry pattern
     package_scenarios = [
-        ("pkg-success", "complete", 1, now - timedelta(hours=11)),
-        ("pkg-failed-once", "failed", 2, now - timedelta(hours=10)),
-        ("pkg-retry-success", "complete", 3, now - timedelta(hours=9)),
-        ("pkg-still-failing", "failed", 4, now - timedelta(hours=8)),
-        ("pkg-building", "pending", 2, now - timedelta(minutes=30)),
+        ("pkg-success", "build-complete", 1, now - timedelta(hours=11)),
+        ("pkg-failed-once", "build-failed", 2, now - timedelta(hours=10)),
+        ("pkg-retry-success", "build-complete", 3, now - timedelta(hours=9)),
+        ("pkg-still-failing", "build-failed", 4, now - timedelta(hours=8)),
+        ("pkg-building", "build-pending", 2, now - timedelta(minutes=30)),
     ]
 
     package_deriv_ids = []
@@ -489,12 +597,12 @@ def scenario_partial_rebuild(
                 last_attempt_time,
                 (
                     last_attempt_time + timedelta(minutes=15)
-                    if final_status in ["complete", "failed"]
+                    if final_status in ["build-complete", "build-failed"]
                     else None
                 ),
                 (
                     f"Build failed after {attempts} attempts"
-                    if final_status == "failed"
+                    if final_status == "build-failed"
                     else None
                 ),
             ),
@@ -558,7 +666,7 @@ def scenario_compliance_drift(
             )
             VALUES (
                 %s, 'nixos', %s, %s,
-                (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+                (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
                 0, %s, %s
             )
             """,
@@ -602,6 +710,7 @@ def scenario_flaky_agent(
         commit_age_hours=2,
         heartbeat_age_minutes=None,  # Custom heartbeat pattern
         system_ip="192.168.1.170",
+        derivation_status="build-complete",  # Use build-complete for successful builds
     )
 
     system_state_id = base["state_id"]
@@ -706,7 +815,7 @@ def scenario_orphaned_deployments(
         )
         VALUES (
             %s, 'nixos', %s, %s,
-            (SELECT id FROM derivation_statuses WHERE name = 'complete'),
+            (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
             0, %s, %s
         )
         RETURNING id
