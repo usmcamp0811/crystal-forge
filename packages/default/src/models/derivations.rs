@@ -491,13 +491,7 @@ impl Derivation {
             scoped.args(["--property", property]);
         }
 
-        scoped.args([
-            "--",
-            "nix-store",
-            "--realise",
-            "--print-build-logs",
-            drv_path,
-        ]);
+        scoped.args(["--", "nix-store", "--realise", drv_path]);
         scoped.stdout(Stdio::piped()).stderr(Stdio::piped());
         build_config.apply_to_command(&mut scoped);
 
@@ -540,7 +534,7 @@ impl Derivation {
         pool: &PgPool,
     ) -> Result<String> {
         let mut cmd = Command::new("nix-store");
-        cmd.args(["--realise", "--print-build-logs", drv_path]);
+        cmd.args(["--realise", drv_path]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         build_config.apply_to_command(&mut cmd);
 
