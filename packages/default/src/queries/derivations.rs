@@ -755,6 +755,7 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
 
 // New function to get targets ready for building
 pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Derivation>> {
+
     let rows = sqlx::query_as!(
         Derivation,
         r#"
@@ -776,6 +777,10 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
                 d.pname,
                 d.version,
                 d.status_id,
+                d.build_elapsed_seconds,
+                d.build_current_target,
+                d.build_last_activity_seconds,
+                d.build_last_heartbeat,
                 -- Find the related NixOS system for packages, or use self for NixOS systems
                 CASE 
                     WHEN d.derivation_type = 'package' THEN 
