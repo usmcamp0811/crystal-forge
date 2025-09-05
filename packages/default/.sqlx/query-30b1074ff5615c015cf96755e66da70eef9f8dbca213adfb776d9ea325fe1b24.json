@@ -1,0 +1,131 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH nixos_system_groups AS (\n            -- Get NixOS systems and their associated packages\n            SELECT \n                d.id,\n                d.commit_id,\n                d.derivation_type,\n                d.derivation_name,\n                d.derivation_path,\n                d.derivation_target,\n                d.scheduled_at,\n                d.completed_at,\n                d.started_at,\n                d.attempt_count,\n                d.evaluation_duration_ms,\n                d.error_message,\n                d.pname,\n                d.version,\n                d.status_id,\n                d.build_elapsed_seconds,\n                d.build_current_target,\n                d.build_last_activity_seconds,\n                d.build_last_heartbeat,\n                -- Find the related NixOS system for packages, or use self for NixOS systems\n                CASE \n                    WHEN d.derivation_type = 'package' THEN \n                        COALESCE(\n                            (SELECT MIN(nixos_dep.id) \n                             FROM derivation_dependencies dd \n                             JOIN derivations nixos_dep ON dd.derivation_id = nixos_dep.id \n                             WHERE dd.depends_on_id = d.id \n                               AND nixos_dep.derivation_type = 'nixos'\n                             LIMIT 1),\n                            999999 -- Orphaned packages get highest group number\n                        )\n                    ELSE d.id -- NixOS systems group by themselves\n                END as nixos_group_id,\n                -- Priority: packages first (0), then NixOS systems (1)\n                CASE \n                    WHEN d.derivation_type = 'package' THEN 0\n                    WHEN d.derivation_type = 'nixos' THEN 1\n                    ELSE 2\n                END as type_priority\n            FROM derivations d\n            WHERE d.status_id in ( $1, $2 )\n        )\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat\n        FROM nixos_system_groups\n        ORDER BY \n            nixos_group_id,          -- Group related packages and systems together\n            type_priority,           -- Within each group: packages first, then NixOS\n            completed_at ASC         -- Within same type: oldest first\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "derivation_type: DerivationType",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "derivation_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "derivation_path",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "derivation_target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "scheduled_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "completed_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "attempt_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "evaluation_duration_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "pname",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 13,
+        "name": "version",
+        "type_info": "Varchar"
+      },
+      {
+        "ordinal": 14,
+        "name": "status_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 15,
+        "name": "build_elapsed_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 16,
+        "name": "build_current_target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "build_last_activity_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 18,
+        "name": "build_last_heartbeat",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "30b1074ff5615c015cf96755e66da70eef9f8dbca213adfb776d9ea325fe1b24"
+}
