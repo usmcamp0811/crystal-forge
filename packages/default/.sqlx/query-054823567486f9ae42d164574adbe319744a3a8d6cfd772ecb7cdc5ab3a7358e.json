@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id\n        FROM derivations\n        WHERE status_id = $1\n        AND attempt_count < 5\n        ORDER BY scheduled_at DESC\n        ",
+  "query": "\n        INSERT INTO derivations (\n            commit_id, \n            derivation_type, \n            derivation_name, \n            status_id,\n            attempt_count\n        )\n        VALUES ($1, $2, $3, $4, 0)\n        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) \n        DO UPDATE SET\n            status_id = CASE \n                WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.status_id  -- Keep terminal states\n                ELSE EXCLUDED.status_id  -- Reset non-terminal states to pending\n            END\n        RETURNING \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat\n        ",
   "describe": {
     "columns": [
       {
@@ -77,10 +77,33 @@
         "ordinal": 14,
         "name": "status_id",
         "type_info": "Int4"
+      },
+      {
+        "ordinal": 15,
+        "name": "build_elapsed_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 16,
+        "name": "build_current_target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "build_last_activity_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 18,
+        "name": "build_last_heartbeat",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
+        "Int4",
+        "Text",
+        "Text",
         "Int4"
       ]
     },
@@ -99,8 +122,12 @@
       true,
       true,
       true,
-      false
+      false,
+      true,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "6ab039ce4e89a6087d9226d07f661a99e65b6a0593092688b81cf5a77a506b59"
+  "hash": "054823567486f9ae42d164574adbe319744a3a8d6cfd772ecb7cdc5ab3a7358e"
 }
