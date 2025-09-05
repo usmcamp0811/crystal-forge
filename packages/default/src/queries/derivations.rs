@@ -97,7 +97,11 @@ pub async fn insert_derivation(
             error_message,
             pname,
             version,
-            status_id
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat
         "#,
         commit_id,
         derivation_type,
@@ -147,7 +151,11 @@ pub async fn insert_derivation_with_target(
             error_message,
             pname,
             version,
-            status_id
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat
         "#,
         commit_id,
         derivation_type,
@@ -211,7 +219,11 @@ pub async fn insert_package_derivation(
             error_message,
             pname,
             version,
-            status_id
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat
         "#,
         None::<i32>, // commit_id is NULL for standalone packages
         "package",
@@ -265,7 +277,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     path,
@@ -299,7 +315,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     path,
@@ -336,7 +356,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     path,
@@ -368,7 +392,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     path,
@@ -404,7 +432,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     err,
@@ -436,7 +468,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     err,
@@ -470,7 +506,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     target_id
@@ -501,7 +541,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     target_id
@@ -529,7 +573,11 @@ pub async fn update_derivation_status(
                         error_message,
                         pname,
                         version,
-                        status_id
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat
                     "#,
                     status_id,
                     target_id
@@ -651,7 +699,11 @@ pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Deriv
             error_message,
             pname,
             version,
-            status_id
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat
         FROM derivations
         WHERE id = $1
         "#,
@@ -683,7 +735,11 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
             error_message,
             pname,
             version,
-            status_id
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat
         FROM derivations
         WHERE status_id = $1
         AND attempt_count < 5
@@ -758,7 +814,11 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             error_message,
             pname,
             version,
-            status_id
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat
         FROM nixos_system_groups
         ORDER BY 
             nixos_group_id,          -- Group related packages and systems together
@@ -869,7 +929,11 @@ pub async fn handle_derivation_failure(
                 error_message,
                 pname,
                 version,
-                status_id
+                status_id,
+                build_elapsed_seconds,
+                build_current_target,
+                build_last_activity_seconds,
+                build_last_heartbeat
             "#,
             status.as_id(),
             new_attempt_count,
@@ -902,7 +966,11 @@ pub async fn handle_derivation_failure(
                 error_message,
                 pname,
                 version,
-                status_id
+                status_id,
+                build_elapsed_seconds,
+                build_current_target,
+                build_last_activity_seconds,
+                build_last_heartbeat
             "#,
             status.as_id(),
             new_attempt_count,
@@ -1110,7 +1178,11 @@ pub async fn discover_and_insert_packages(
                     error_message,
                     pname,
                     version,
-                    status_id
+                    status_id,
+                    build_elapsed_seconds,
+                    build_current_target,
+                    build_last_activity_seconds,
+                    build_last_heartbeat
                 "#,
                 None::<i32>,                           // commit_id is NULL for discovered packages
                 "package",                             // derivation_type = "package"

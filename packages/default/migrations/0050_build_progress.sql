@@ -1,3 +1,4 @@
+-- Add build progress tracking columns to derivations table
 ALTER TABLE derivations
     ADD COLUMN build_elapsed_seconds integer;
 

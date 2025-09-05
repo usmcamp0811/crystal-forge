@@ -2,7 +2,6 @@ use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::queries::derivations::{
     clear_derivation_build_status, discover_and_insert_packages, update_derivation_build_status,
 };
-
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,9 +10,12 @@ use sqlx::{FromRow, PgPool};
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::process::Output;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
+use tokio::time::{Instant, interval};
 use tracing::{debug, error, info, warn};
 
 // Updated derivation model to match the new database schema
@@ -35,9 +37,13 @@ pub struct Derivation {
     pub version: Option<String>, // package version (for packages)
     pub status_id: i32,          // foreign key to derivation_statuses table
     pub derivation_target: Option<String>,
+    #[serde(default)]
     pub build_elapsed_seconds: Option<i32>,
+    #[serde(default)]
     pub build_current_target: Option<String>,
+    #[serde(default)]
     pub build_last_activity_seconds: Option<i32>,
+    #[serde(default)]
     pub build_last_heartbeat: Option<DateTime<Utc>>,
 }
 
@@ -299,7 +305,8 @@ impl Derivation {
         );
 
         // Clear build progress on completion
-        let _ = crate::queries::derivations::clear_derivation_build_status(&pool, derivation_id);
+        let _ =
+            crate::queries::derivations::clear_derivation_build_status(pool, derivation_id).await;
 
         Ok(output_path)
     }
@@ -442,6 +449,8 @@ impl Derivation {
     /// Phase 2: Build a derivation from its .drv path
     /// This can run on any machine that has access to the required inputs
     pub async fn build_derivation_from_path(
+        &self,
+        pool: &PgPool,
         drv_path: &str,
         build_config: &BuildConfig,
     ) -> Result<String> {
@@ -454,8 +463,14 @@ impl Derivation {
         // Check if systemd should be used
         if !build_config.should_use_systemd() {
             info!("📋 Systemd disabled in config, using direct execution for nix-store");
-            return Self::run_direct_nix_store_streaming(drv_path, build_config, self.id, pool)
-                .await;
+            return Self::run_direct_nix_store_streaming(
+                &self,
+                drv_path,
+                build_config,
+                self.id,
+                pool,
+            )
+            .await;
         }
 
         // Try systemd-run scoped build first
@@ -502,13 +517,34 @@ impl Derivation {
                         "⚠️ Systemd scope creation failed, falling back to direct execution: {}",
                         error_msg
                     );
-                    Self::run_direct_nix_store_streaming(drv_path, build_config, self.id, pool)
-                        .await
+
+                    Self::run_direct_nix_store_streaming(
+                        &self,
+                        drv_path,
+                        build_config,
+                        self.id,
+                        pool,
+                    )
+                    .await
                 } else {
                     Err(e)
                 }
             }
         }
+    }
+    async fn run_direct_nix_store_streaming(
+        &self,
+        drv_path: &str,
+        build_config: &BuildConfig,
+        derivation_id: i32,
+        pool: &PgPool,
+    ) -> Result<String> {
+        let mut cmd = Command::new("nix-store");
+        cmd.args(["--realise", "--print-build-logs", drv_path]);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        build_config.apply_to_command(&mut cmd);
+
+        Self::run_streaming_build(cmd, drv_path, derivation_id, pool).await
     }
 
     async fn run_direct_nix_store(drv_path: &str, build_config: &BuildConfig) -> Result<String> {
@@ -576,6 +612,8 @@ impl Derivation {
                     // Phase 2: Build the main derivation
                     if eval_result.main_derivation_path.ends_with(".drv") {
                         Self::build_derivation_from_path(
+                            &self,
+                            &pool,
                             &eval_result.main_derivation_path,
                             build_config,
                         )
@@ -612,7 +650,7 @@ impl Derivation {
                     .ok_or_else(|| anyhow::anyhow!("Package derivation missing derivation_path"))?;
                 if full_build {
                     // Build the package from its .drv path
-                    Self::build_derivation_from_path(drv_path, build_config).await
+                    Self::build_derivation_from_path(&self, &pool, drv_path, build_config).await
                 } else {
                     // For dry-run, just return the existing .drv path
                     Ok(drv_path.clone())

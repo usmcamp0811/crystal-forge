@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET status_id = $1\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id\n                    ",
+  "query": "\n                    UPDATE derivations SET status_id = $1\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat\n                    ",
   "describe": {
     "columns": [
       {
@@ -77,6 +77,26 @@
         "ordinal": 14,
         "name": "status_id",
         "type_info": "Int4"
+      },
+      {
+        "ordinal": 15,
+        "name": "build_elapsed_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 16,
+        "name": "build_current_target",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 17,
+        "name": "build_last_activity_seconds",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 18,
+        "name": "build_last_heartbeat",
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
@@ -100,8 +120,12 @@
       true,
       true,
       true,
-      false
+      false,
+      true,
+      true,
+      true,
+      true
     ]
   },
-  "hash": "c8e90fa4bafe7339862080ace274d09a947671be9f45f3670db32430563d6c8a"
+  "hash": "ba5ffc09b7bd7e21cd58763f195d4d52d87238391725f7a2d4a1fb63e1cb8391"
 }
