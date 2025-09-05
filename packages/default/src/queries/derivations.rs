@@ -1187,3 +1187,52 @@ pub async fn update_derivation_path_and_metadata(
 
     Ok(())
 }
+
+
+pub async fn update_derivation_build_status(
+    pool: &PgPool,
+    derivation_id: i32,
+    elapsed_seconds: i32,
+    current_build_target: Option<&str>,
+    last_activity_seconds: i32,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations SET
+            build_elapsed_seconds = $1,
+            build_current_target = $2,
+            build_last_activity_seconds = $3,
+            build_last_heartbeat = NOW()
+        WHERE id = $4
+        "#,
+        elapsed_seconds,
+        current_build_target,
+        last_activity_seconds,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+    
+    Ok(())
+}
+
+pub async fn clear_derivation_build_status(
+    pool: &PgPool,
+    derivation_id: i32,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations SET
+            build_elapsed_seconds = NULL,
+            build_current_target = NULL,
+            build_last_activity_seconds = NULL,
+            build_last_heartbeat = NULL
+        WHERE id = $1
+        "#,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+    
+    Ok(())
+}
