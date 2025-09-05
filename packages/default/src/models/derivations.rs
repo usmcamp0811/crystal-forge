@@ -1,6 +1,7 @@
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
-use crate::queries::derivations::discover_and_insert_packages;
-
+use crate::queries::derivations::{
+    clear_derivation_build_status, discover_and_insert_packages, update_derivation_build_status,
+};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -9,9 +10,12 @@ use sqlx::{FromRow, PgPool};
 use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::process::Output;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
+use tokio::time::{Instant, interval};
 use tracing::{debug, error, info, warn};
 
 // Updated derivation model to match the new database schema
@@ -33,6 +37,14 @@ pub struct Derivation {
     pub version: Option<String>, // package version (for packages)
     pub status_id: i32,          // foreign key to derivation_statuses table
     pub derivation_target: Option<String>,
+    #[serde(default)]
+    pub build_elapsed_seconds: Option<i32>,
+    #[serde(default)]
+    pub build_current_target: Option<String>,
+    #[serde(default)]
+    pub build_last_activity_seconds: Option<i32>,
+    #[serde(default)]
+    pub build_last_heartbeat: Option<DateTime<Utc>>,
 }
 
 // Enum for derivation types (updated from TargetType)
@@ -167,6 +179,137 @@ impl Derivation {
         }
     }
 
+    async fn run_streaming_build(
+        mut cmd: Command,
+        drv_path: &str,
+        derivation_id: i32,
+        pool: &PgPool,
+    ) -> Result<String> {
+        let start_time = Instant::now();
+        let mut heartbeat = interval(Duration::from_secs(30));
+        heartbeat.tick().await; // Skip first immediate tick
+
+        let mut child = cmd.spawn()?;
+
+        // Take stdout and stderr for streaming
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
+
+        let mut output_lines = Vec::new();
+        let mut last_activity = Instant::now();
+        let mut current_build_target = None::<String>;
+
+        loop {
+            tokio::select! {
+                            // Read stdout
+                            line_result = stdout_reader.next_line() => {
+                                match line_result? {
+                                    Some(line) => {
+                                        last_activity = Instant::now();
+                                        debug!("nix stdout: {}", line);
+
+                                        // Check if this looks like an output path
+                                        if line.starts_with("/nix/store/") && !line.contains(".drv") {
+                                            output_lines.push(line);
+                                        }
+                                    }
+                                    None => break,
+                                }
+                            }
+
+                            // Read stderr (where build logs go)
+                            line_result = stderr_reader.next_line() => {
+                                match line_result? {
+                                    Some(line) => {
+                                        last_activity = Instant::now();
+
+                                        // Parse build status from nix output
+                                        if line.contains("building '") {
+                                            if let Some(start) = line.find("building '") {
+                                                if let Some(end) = line[start + 10..].find("'") {
+                                                    current_build_target = Some(line[start + 10..start + 10 + end].to_string());
+                                                    info!("🔨 Started building: {}", current_build_target.as_ref().unwrap());
+                                                }
+                                            }
+                                        } else if line.contains("built '") {
+                                            if let Some(start) = line.find("built '") {
+                                                if let Some(end) = line[start + 7..].find("'") {
+                                                    let built_target = &line[start + 7..start + 7 + end];
+                                                    info!("✅ Completed building: {}", built_target);
+                                                    current_build_target = None;
+                                                }
+                                            }
+                                        } else if line.contains("downloading '") || line.contains("fetching ") {
+                                            debug!("📥 {}", line);
+                                        } else if line.contains("error:") || line.contains("failed") {
+                                            error!("❌ Build error: {}", line);
+                                        }
+                                    }
+                                    None => break,
+                                }
+                            }
+
+                            // Periodic heartbeat
+            _ = heartbeat.tick() => {
+                let elapsed = start_time.elapsed();
+                let mins = elapsed.as_secs() / 60;
+                let secs = elapsed.as_secs() % 60;
+                let last_activity_secs = last_activity.elapsed().as_secs();
+
+                if let Some(ref target) = current_build_target {
+                    info!("⏳ Still building {}: {}m {}s elapsed, last activity {}s ago",
+                          target, mins, secs, last_activity_secs);
+                } else {
+                    info!("⏳ Build in progress: {}m {}s elapsed, last activity {}s ago",
+                          mins, secs, last_activity_secs);
+                }
+
+                // Database heartbeat update
+                let _ = crate::queries::derivations::update_derivation_build_status(
+                    pool,
+                    derivation_id,
+                    elapsed.as_secs() as i32,
+                    current_build_target.as_deref(),
+                    last_activity_secs as i32
+                ).await;
+            }
+                        }
+        }
+
+        // Wait for process to complete
+        let status = child.wait().await?;
+
+        if !status.success() {
+            anyhow::bail!(
+                "nix-store --realise failed with exit code: {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+
+        // Find the output path
+        let output_path = output_lines
+            .into_iter()
+            .find(|line| !line.contains(".drv"))
+            .ok_or_else(|| anyhow::anyhow!("No output path found in nix-store output"))?;
+
+        let elapsed = start_time.elapsed();
+        info!(
+            "✅ Built derivation {} -> {} (took {}m {}s)",
+            drv_path,
+            output_path,
+            elapsed.as_secs() / 60,
+            elapsed.as_secs() % 60
+        );
+
+        // Clear build progress on completion
+        let _ =
+            crate::queries::derivations::clear_derivation_build_status(pool, derivation_id).await;
+
+        Ok(output_path)
+    }
     async fn run_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
         // Check if systemd should be used
         if !build_config.should_use_systemd() {
@@ -284,7 +427,7 @@ impl Derivation {
 
     /// Phase 1: Evaluate and discover all derivation paths (dry-run only)
     /// This can run on any machine and doesn't require commit_id
-    pub async fn evaluate_derivation_path(
+    pub async fn dry_run_derivation_path(
         flake_target: &str,
         build_config: &BuildConfig,
     ) -> Result<EvaluationResult> {
@@ -306,6 +449,8 @@ impl Derivation {
     /// Phase 2: Build a derivation from its .drv path
     /// This can run on any machine that has access to the required inputs
     pub async fn build_derivation_from_path(
+        &self,
+        pool: &PgPool,
         drv_path: &str,
         build_config: &BuildConfig,
     ) -> Result<String> {
@@ -318,7 +463,14 @@ impl Derivation {
         // Check if systemd should be used
         if !build_config.should_use_systemd() {
             info!("📋 Systemd disabled in config, using direct execution for nix-store");
-            return Self::run_direct_nix_store(drv_path, build_config).await;
+            return Self::run_direct_nix_store_streaming(
+                &self,
+                drv_path,
+                build_config,
+                self.id,
+                pool,
+            )
+            .await;
         }
 
         // Try systemd-run scoped build first
@@ -339,54 +491,60 @@ impl Derivation {
             scoped.args(["--property", property]);
         }
 
-        scoped.args(["--", "nix-store", "--realise", drv_path]);
+        scoped.args([
+            "--",
+            "nix-store",
+            "--realise",
+            "--print-build-logs",
+            drv_path,
+        ]);
+        scoped.stdout(Stdio::piped()).stderr(Stdio::piped());
+        build_config.apply_to_command(&mut scoped);
 
-        match scoped.output().await {
-            Ok(output) => {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let output_path = stdout.trim();
+        match Self::run_streaming_build(scoped, drv_path, self.id, pool).await {
+            Ok(output_path) => Ok(output_path),
+            Err(e) => {
+                let error_msg = e.to_string();
+                // Check for systemd-specific issues that indicate fallback needed
+                if error_msg.contains("Failed to connect to user scope bus")
+                    || error_msg.contains("DBUS_SESSION_BUS_ADDRESS")
+                    || error_msg.contains("XDG_RUNTIME_DIR")
+                    || error_msg.contains("Failed to create scope")
+                    || error_msg.contains("Interactive authentication required")
+                    || error_msg.contains("systemd")
+                {
+                    warn!(
+                        "⚠️ Systemd scope creation failed, falling back to direct execution: {}",
+                        error_msg
+                    );
 
-                    if output_path.is_empty() {
-                        anyhow::bail!("No output path returned from nix-store --realise");
-                    }
-
-                    info!("✅ Built derivation {} -> {}", drv_path, output_path);
-                    Ok(output_path.to_string())
+                    Self::run_direct_nix_store_streaming(
+                        &self,
+                        drv_path,
+                        build_config,
+                        self.id,
+                        pool,
+                    )
+                    .await
                 } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    // Check for systemd-specific issues that indicate fallback needed
-                    if stderr.contains("Failed to connect to user scope bus")
-                        || stderr.contains("DBUS_SESSION_BUS_ADDRESS")
-                        || stderr.contains("XDG_RUNTIME_DIR")
-                        || stderr.contains("Failed to create scope")
-                        || stderr.contains("Interactive authentication required")
-                        || stderr.contains("systemd")
-                    {
-                        warn!(
-                            "⚠️ Systemd scope creation failed, falling back to direct execution: {}",
-                            stderr.trim()
-                        );
-                        Self::run_direct_nix_store(drv_path, build_config).await
-                    } else {
-                        // Other failure - return the systemd error
-                        error!("❌ nix-store --realise failed: {}", stderr.trim());
-                        anyhow::bail!("nix-store --realise failed: {}", stderr.trim());
-                    }
+                    Err(e)
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!("📋 systemd-run not available for nix-store, using direct execution");
-                Self::run_direct_nix_store(drv_path, build_config).await
-            }
-            Err(e) => {
-                warn!(
-                    "⚠️ systemd-run failed for nix-store: {}, trying direct execution",
-                    e
-                );
-                Self::run_direct_nix_store(drv_path, build_config).await
-            }
         }
+    }
+    async fn run_direct_nix_store_streaming(
+        &self,
+        drv_path: &str,
+        build_config: &BuildConfig,
+        derivation_id: i32,
+        pool: &PgPool,
+    ) -> Result<String> {
+        let mut cmd = Command::new("nix-store");
+        cmd.args(["--realise", "--print-build-logs", drv_path]);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        build_config.apply_to_command(&mut cmd);
+
+        Self::run_streaming_build(cmd, drv_path, derivation_id, pool).await
     }
 
     async fn run_direct_nix_store(drv_path: &str, build_config: &BuildConfig) -> Result<String> {
@@ -432,12 +590,12 @@ impl Derivation {
                 // Use the provided pool instead of creating a new one
                 let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
                 let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
-                let flake_target = self.build_flake_target(&flake, &commit).await?;
+                let flake_target = self.build_flake_target_string(&flake, &commit).await?;
 
                 if full_build {
                     // Phase 1: Evaluate
                     let eval_result =
-                        Self::evaluate_derivation_path(&flake_target, build_config).await?;
+                        Self::dry_run_derivation_path(&flake_target, build_config).await?;
                     // Insert dependencies into database
                     if !eval_result.dependency_derivation_paths.is_empty() {
                         crate::queries::derivations::discover_and_insert_packages(
@@ -454,6 +612,8 @@ impl Derivation {
                     // Phase 2: Build the main derivation
                     if eval_result.main_derivation_path.ends_with(".drv") {
                         Self::build_derivation_from_path(
+                            &self,
+                            &pool,
                             &eval_result.main_derivation_path,
                             build_config,
                         )
@@ -465,7 +625,7 @@ impl Derivation {
                 } else {
                     // Dry-run only
                     let eval_result =
-                        Self::evaluate_derivation_path(&flake_target, build_config).await?;
+                        Self::dry_run_derivation_path(&flake_target, build_config).await?;
                     // Insert dependencies into database
                     if !eval_result.dependency_derivation_paths.is_empty() {
                         crate::queries::derivations::discover_and_insert_packages(
@@ -490,7 +650,7 @@ impl Derivation {
                     .ok_or_else(|| anyhow::anyhow!("Package derivation missing derivation_path"))?;
                 if full_build {
                     // Build the package from its .drv path
-                    Self::build_derivation_from_path(drv_path, build_config).await
+                    Self::build_derivation_from_path(&self, &pool, drv_path, build_config).await
                 } else {
                     // For dry-run, just return the existing .drv path
                     Ok(drv_path.clone())
@@ -500,7 +660,7 @@ impl Derivation {
     }
 
     /// Helper to build the flake target string
-    async fn build_flake_target(
+    async fn build_flake_target_string(
         &self,
         flake: &crate::models::flakes::Flake,
         commit: &crate::models::commits::Commit,
