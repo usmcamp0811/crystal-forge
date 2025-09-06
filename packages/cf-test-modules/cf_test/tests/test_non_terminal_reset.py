@@ -27,7 +27,28 @@ def cf_client(cf_config):
 def test_derivation_reset_on_server_startup(cf_client, server):
     """Test that server resets derivations properly on startup"""
 
-    server.succeed(f"systemctl status {C.SERVER_SERVICE} || true")
+    server.wait_for_unit("crystal-forge-server.service")
+    # Additionally wait for the database to be fully migrated
+    for attempt in range(12):  # 2 minutes
+        try:
+            # Check if the derivation_statuses table exists (created by migrations)
+            result = server.succeed(
+                """
+                sudo -u postgres psql -d crystal_forge -t -c "
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_name = 'derivation_statuses' LIMIT 1;" 2>/dev/null || echo "0"
+            """
+            ).strip()
+
+            if result == "1":
+                print("✓ Database migrations completed")
+                break
+        except:
+            pass
+        time.sleep(10)
+    else:
+        pytest.fail("Database migrations did not complete in time")
+
     # Get real git info from environment
     real_commit_hash = os.getenv(
         "CF_TEST_REAL_COMMIT_HASH", "ebcc48fbf1030fc2065fc266da158af1d0b3943c"
