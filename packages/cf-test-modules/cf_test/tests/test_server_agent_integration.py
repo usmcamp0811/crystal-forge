@@ -14,6 +14,7 @@ from cf_test.vm_helpers import (
     verify_db_state,
     verify_flake_in_db,
     wait_for_agent_acceptance,
+    wait_for_crystal_forge_ready,
 )
 
 pytestmark = pytest.mark.vm_only
@@ -69,6 +70,9 @@ def test_keys_and_network(server, agent):
 @pytest.mark.slow
 def test_agent_accept_and_db_state(cf_client, server, agent):
     """Test that agent is accepted and database state is correct"""
+
+    wait_for_crystal_forge_ready(server)
+
     agent_hostname = agent.succeed("hostname -s").strip()
 
     # Wait for agent acceptance first
