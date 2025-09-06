@@ -27,6 +27,7 @@ def cf_client(cf_config):
 def test_derivation_reset_on_server_startup(cf_client, server):
     """Test that server resets derivations properly on startup"""
 
+    server.succeed(f"systemctl status {C.SERVER_SERVICE} || true")
     # Get real git info from environment
     real_commit_hash = os.getenv(
         "CF_TEST_REAL_COMMIT_HASH", "ebcc48fbf1030fc2065fc266da158af1d0b3943c"
