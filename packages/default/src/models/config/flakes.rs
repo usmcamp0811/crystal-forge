@@ -17,8 +17,14 @@ pub struct WatchedFlake {
     pub name: String,
     pub repo_url: String,
     pub auto_poll: bool, // true = server polls git directly, false = webhook-only
+    #[serde(default = "default_initial_commit_depth")]
+    pub initial_commit_depth: usize,
     #[serde(default = "default_branch")]
     pub branch: String,
+}
+
+fn default_initial_commit_depth() -> usize {
+    5
 }
 
 fn default_branch() -> String {

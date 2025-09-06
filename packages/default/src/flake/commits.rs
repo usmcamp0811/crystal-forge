@@ -20,76 +20,58 @@ pub async fn fetch_and_insert_latest_commit(
     Ok(Some(commit_hash))
 }
 
-/// Get the latest commit hash from a specific branch in a git repository
-async fn get_latest_commit_hash(repo_url: &str, branch: &str) -> Result<String> {
-    let stdout = run_ls_remote(repo_url).await?;
+/// Get the past N commit hashes from a specific branch in a git repository
+async fn get_recent_commit_hashes(
+    repo_url: &str,
+    branch: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    let git_url = normalize_repo_url_for_git(repo_url);
 
-    // Try specified branch first
-    let target_ref = format!("refs/heads/{}", branch);
-    if let Some(line) = stdout.lines().find(|l| l.ends_with(&target_ref)) {
-        if let Some(hash) = line.split_whitespace().next() {
-            return Ok(hash.to_string());
-        }
+    // First, get the branch reference to ensure it exists
+    let branch_ref = get_branch_ref(&git_url, branch).await?;
+
+    // Now get the commit history using git log
+    let output = tokio::process::Command::new("git")
+        .args(&[
+            "log", 
+            "--format=%H",  // Only output commit hashes
+            &format!("--max-count={}", limit),
+            &branch_ref
+        ])
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to spawn git process for 'git log --format=%H --max-count={} {}' (normalized from '{}')",
+                limit, branch_ref, repo_url
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        return Err(anyhow::anyhow!(
+            "git log failed for repository '{}' branch '{}' (exit code: {})\nError output: {}",
+            repo_url,
+            branch,
+            exit_code,
+            stderr.trim()
+        ));
     }
 
-    // Fallback to HEAD
-    if let Some(line) = stdout.lines().find(|l| l.ends_with("HEAD")) {
-        if let Some(hash) = line.split_whitespace().next() {
-            return Ok(hash.to_string());
-        }
-    }
-
-    // Fallback to common branches
-    for fallback in ["refs/heads/main", "refs/heads/master"] {
-        if let Some(line) = stdout.lines().find(|l| l.ends_with(fallback)) {
-            if let Some(hash) = line.split_whitespace().next() {
-                return Ok(hash.to_string());
-            }
-        }
-    }
-
-    Err(anyhow::anyhow!(
-        "No suitable commit found in ls-remote output for branch '{}'",
-        branch
-    ))
-}
-
-async fn get_recent_commit_hashes(repo_url: &str, branch: &str) -> Result<Vec<String>> {
-    let stdout = run_ls_remote(repo_url).await?;
-    let mut commits = Vec::new();
-
-    // Try specified branch first
-    let target_ref = format!("refs/heads/{}", branch);
-    if let Some(line) = stdout.lines().find(|line| line.ends_with(&target_ref)) {
-        if let Some(commit_hash) = line.split_whitespace().next() {
-            commits.push(commit_hash.to_string());
-        }
-    }
-
-    // Fallback to HEAD
-    if commits.is_empty() {
-        if let Some(head_line) = stdout.lines().find(|line| line.ends_with("HEAD")) {
-            if let Some(commit_hash) = head_line.split_whitespace().next() {
-                commits.push(commit_hash.to_string());
-            }
-        }
-    }
-
-    // Fallback to common defaults
-    if commits.is_empty() {
-        for fallback in ["refs/heads/main", "refs/heads/master"] {
-            if let Some(line) = stdout.lines().find(|l| l.ends_with(fallback)) {
-                if let Some(commit_hash) = line.split_whitespace().next() {
-                    commits.push(commit_hash.to_string());
-                    break;
-                }
-            }
-        }
-    }
+    let stdout = String::from_utf8(output.stdout)?;
+    let commits: Vec<String> = stdout
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
 
     if commits.is_empty() {
         return Err(anyhow::anyhow!(
-            "No commits found in repository for branch '{}'",
+            "No commits found in repository '{}' for branch '{}'",
+            repo_url,
             branch
         ));
     }
@@ -97,13 +79,46 @@ async fn get_recent_commit_hashes(repo_url: &str, branch: &str) -> Result<Vec<St
     Ok(commits)
 }
 
-/// Fetch up to 10 recent commits from a git repository and insert them into the database
+/// Get the branch reference (tries specified branch, then falls back to HEAD, main, master)
+async fn get_branch_ref(git_url: &str, branch: &str) -> Result<String> {
+    let stdout = run_ls_remote(git_url).await?;
+
+    // Try specified branch first
+    let target_ref = format!("refs/heads/{}", branch);
+    if stdout.lines().any(|l| l.ends_with(&target_ref)) {
+        return Ok(target_ref);
+    }
+
+    // Fallback to HEAD
+    if stdout.lines().any(|l| l.ends_with("HEAD")) {
+        return Ok("HEAD".to_string());
+    }
+
+    // Fallback to common branches
+    for fallback in ["refs/heads/main", "refs/heads/master"] {
+        if stdout.lines().any(|l| l.ends_with(fallback)) {
+            return Ok(fallback.to_string());
+        }
+    }
+
+    Err(anyhow::anyhow!("No suitable branch found for '{}'", branch))
+}
+
+/// Get the latest commit hash from a specific branch in a git repository
+async fn get_latest_commit_hash(repo_url: &str, branch: &str) -> Result<String> {
+    let commits = get_recent_commit_hashes(repo_url, branch, 1).await?;
+    Ok(commits.into_iter().next().unwrap()) // Safe because we know there's at least 1
+}
+
+/// Fetch up to N recent commits from a git repository and insert them into the database
 pub async fn fetch_and_insert_recent_commits(
     pool: &PgPool,
     repo_url: &str,
     branch: &str,
+    limit: Option<usize>,
 ) -> Result<Vec<String>> {
-    let commit_hashes = get_recent_commit_hashes(repo_url, branch).await?;
+    let limit = limit.unwrap_or(10); // Default to 10 if not specified
+    let commit_hashes = get_recent_commit_hashes(repo_url, branch, limit).await?;
 
     let mut inserted_commits = Vec::new();
 
@@ -164,7 +179,14 @@ pub async fn initialize_flake_commits(
             }
         }
 
-        match fetch_and_insert_recent_commits(pool, &flake.repo_url, &flake.branch).await {
+        match fetch_and_insert_recent_commits(
+            pool,
+            &flake.repo_url,
+            &flake.branch,
+            Some(flake.initial_commit_depth),
+        )
+        .await
+        {
             Ok(commits) => {
                 info!(
                     "✅ Successfully initialized {} commits for {} on branch {}",
@@ -269,4 +291,107 @@ async fn run_ls_remote(repo_url: &str) -> Result<String> {
     }
 
     Ok(String::from_utf8(output.stdout)?)
+}
+
+/// Get all new commit hashes since a given commit on a specific branch
+async fn get_commits_since(
+    repo_url: &str,
+    branch: &str,
+    since_commit: &str,
+) -> Result<Vec<String>> {
+    let git_url = normalize_repo_url_for_git(repo_url);
+
+    // Get the branch reference to ensure it exists
+    let branch_ref = get_branch_ref(&git_url, branch).await?;
+
+    // Use git log to get commits since the given commit (exclusive)
+    let output = tokio::process::Command::new("git")
+        .args(&[
+            "log", 
+            "--format=%H",  // Only output commit hashes
+            &format!("{}..{}", since_commit, branch_ref)  // Commits between since_commit and branch_ref
+        ])
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to spawn git process for 'git log --format=%H {}..{}' (normalized from '{}')",
+                since_commit, branch_ref, repo_url
+            )
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let exit_code = output.status.code().unwrap_or(-1);
+
+        return Err(anyhow::anyhow!(
+            "git log failed for repository '{}' branch '{}' since commit '{}' (exit code: {})\nError output: {}",
+            repo_url,
+            branch,
+            since_commit,
+            exit_code,
+            stderr.trim()
+        ));
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let commits: Vec<String> = stdout
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect();
+
+    debug!(
+        "Found {} new commits since {} for repo {} on branch {}",
+        commits.len(),
+        since_commit,
+        repo_url,
+        branch
+    );
+
+    Ok(commits)
+}
+
+/// Fetch and insert all new commits since a given commit hash
+pub async fn fetch_and_insert_commits_since(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+    since_commit: &str,
+) -> Result<Vec<String>> {
+    let commit_hashes = get_commits_since(repo_url, branch, since_commit).await?;
+
+    if commit_hashes.is_empty() {
+        debug!(
+            "No new commits found since {} for repo {}",
+            since_commit, repo_url
+        );
+        return Ok(Vec::new());
+    }
+
+    let mut inserted_commits = Vec::new();
+
+    // Insert commits in reverse order (oldest first) so they're in chronological order
+    for commit_hash in commit_hashes.into_iter().rev() {
+        match insert_commit(pool, &commit_hash, repo_url).await {
+            Ok(_) => {
+                debug!("✅ Inserted commit {} for repo {}", commit_hash, repo_url);
+                inserted_commits.push(commit_hash);
+            }
+            Err(e) => {
+                warn!(
+                    "❌ Failed to insert commit {} for repo {}: {}",
+                    commit_hash, repo_url, e
+                );
+            }
+        }
+    }
+
+    info!(
+        "✅ Inserted {} new commits since {} for repo {}",
+        inserted_commits.len(),
+        since_commit,
+        repo_url
+    );
+    Ok(inserted_commits)
 }
