@@ -33,20 +33,10 @@ async fn get_recent_commit_hashes(
 
     // Now get the commit history using git log
     let output = tokio::process::Command::new("git")
-        .args(&[
-            "log", 
-            "--format=%H",  // Only output commit hashes
-            &format!("--max-count={}", limit),
-            &branch_ref
-        ])
+        .args(&["ls-remote", &git_url, &format!("refs/heads/{}", branch)])
         .output()
         .await
-        .with_context(|| {
-            format!(
-                "Failed to spawn git process for 'git log --format=%H --max-count={} {}' (normalized from '{}')",
-                limit, branch_ref, repo_url
-            )
-        })?;
+        .with_context(|| format!("Failed to get branch ref for {}", repo_url))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
