@@ -73,8 +73,12 @@ in
 
       server.wait_for_unit("postgresql.service")
       server.wait_for_unit("crystal-forge-server.service")
+      gitserver.wait_for_unit("cgit.service")
+
       server.wait_for_open_port(5432)
       server.forward_port(5433, 5432)
+
+      server.succeed("git ls-remote http://gitserver/crystal-forge")
 
       # Set environment variables for the test
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
