@@ -344,6 +344,19 @@ in rec {
           Environment = "HOME=/srv/git";
         };
       };
+
+      systemd.services.fix-git-ownership = {
+        enable = true;
+        description = "Fix Git Repository Ownership";
+        after = ["systemd-tmpfiles-setup.service"];
+        before = ["git-daemon.service" "cgit-gitserver.service"];
+        wantedBy = ["multi-user.target"];
+
+        serviceConfig = {
+          Type = "oneshot";
+          ExecStart = "${pkgs.bash}/bin/bash -c 'chown -R git:git /srv/git/crystal-forge.git && chmod -R g+r /srv/git/crystal-forge.git'";
+        };
+      };
     }
     // extraConfig;
 

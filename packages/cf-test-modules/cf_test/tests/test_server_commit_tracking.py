@@ -35,16 +35,17 @@ def cf_client(cf_config):
 def test_flake_initialization_commits(cf_client, server):
     """Test that server initializes flake with 5 commits"""
 
-    # Wait for the initialization log message
-    cf_client.wait_for_service_log(
-        server,
-        C.SERVER_SERVICE,
-        "✅ Successfully initialized 5 commits for",
-        timeout=120,
-    )
+    # Wait for each commit to be inserted (5 times)
+    for i in range(5):
+        cf_client.wait_for_service_log(
+            server,
+            C.SERVER_SERVICE,
+            "✅ Inserted commit",
+            timeout=120,
+        )
+        print(f"Found commit {i + 1}/5")
 
     # Check database has exactly 5 commits
     rows = cf_client.execute_sql("SELECT COUNT(*) as count FROM commits")
     commit_count = rows[0]["count"]
-
     assert commit_count == 5, f"Expected 5 commits in database, found {commit_count}"
