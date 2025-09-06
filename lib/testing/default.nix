@@ -123,18 +123,16 @@ in rec {
       set -eu
       export HOME=$PWD
       work="$TMPDIR/work"
-
       # Prepare working directory
       mkdir -p "$work"
       cp -r ${srcPath}/. "$work/"
       cd "$work"
       chmod -R u+w .
-
       git init -q
       git config user.name "Crystal Forge Test"
       git config user.email "test@crystal-forge.dev"
 
-      # Create development history with multiple commits
+      # Create development history with 15 commits
       git add -f flake.nix
       [ -f flake.lock ] && git add -f flake.lock
       git commit -q -m "Initial flake configuration"
@@ -150,6 +148,50 @@ in rec {
       echo "# Last updated: $(date)" >> flake.nix
       git add -f flake.nix
       git commit -q -m "Update timestamp"
+
+      echo "# Version: 1.0.0" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add version information"
+
+      echo "# Maintainer: Crystal Forge Team" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add maintainer information"
+
+      echo "# License: MIT" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add license information"
+
+      echo "# Dependencies updated" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Update dependencies"
+
+      echo "# Performance improvements" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Performance optimizations"
+
+      echo "# Security fixes applied" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Apply security patches"
+
+      echo "# Documentation updates" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Update documentation"
+
+      echo "# Build system improvements" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Improve build system"
+
+      echo "# Testing framework added" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add testing framework"
+
+      echo "# CI/CD pipeline configured" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Configure CI/CD pipeline"
+
+      echo "# Final release preparation" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Prepare for release"
 
       # Get the final commit hash BEFORE creating bare repo
       FINAL_COMMIT=$(git rev-parse HEAD)
