@@ -7,6 +7,7 @@ import pytest
 from cf_test import CFTestClient
 from cf_test.scenarios import _create_base_scenario, scenario_dry_run_failed
 from cf_test.vm_helpers import SmokeTestConstants as C
+from cf_test.vm_helpers import wait_for_crystal_forge_ready
 
 pytestmark = pytest.mark.vm_only
 
@@ -27,27 +28,7 @@ def cf_client(cf_config):
 def test_derivation_reset_on_server_startup(cf_client, server):
     """Test that server resets derivations properly on startup"""
 
-    server.wait_for_unit("crystal-forge-server.service")
-    # Additionally wait for the database to be fully migrated
-    for attempt in range(12):  # 2 minutes
-        try:
-            # Check if the derivation_statuses table exists (created by migrations)
-            result = server.succeed(
-                """
-                sudo -u postgres psql -d crystal_forge -t -c "
-                SELECT 1 FROM information_schema.tables 
-                WHERE table_name = 'derivation_statuses' LIMIT 1;" 2>/dev/null || echo "0"
-            """
-            ).strip()
-
-            if result == "1":
-                print("✓ Database migrations completed")
-                break
-        except:
-            pass
-        time.sleep(10)
-    else:
-        pytest.fail("Database migrations did not complete in time")
+    wait_for_crystal_forge_ready(server)
 
     # Get real git info from environment
     real_commit_hash = os.getenv(

@@ -64,6 +64,33 @@ def wait_for_agent_acceptance(cf_client, machine, timeout: int = 120) -> None:
     )
 
 
+def wait_for_crystal_forge_ready(server, timeout=120):
+    """Wait for Crystal Forge server to be fully ready including database migrations"""
+
+    # First wait for the systemd service
+    server.wait_for_unit("crystal-forge-server.service")
+
+    # Then wait for database migrations to complete
+    for attempt in range(timeout // 10):
+        try:
+            # Check if critical tables exist (created by migrations)
+            result = server.succeed(
+                """
+                sudo -u postgres psql -d crystal_forge -t -c "
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_name = 'derivation_statuses' LIMIT 1;" 2>/dev/null || echo "0"
+            """
+            ).strip()
+
+            if result == "1":
+                return
+        except Exception:
+            pass
+        time.sleep(10)
+
+    raise TimeoutError(f"Crystal Forge not ready after {timeout} seconds")
+
+
 def verify_db_state(
     cf_client,
     machine,
