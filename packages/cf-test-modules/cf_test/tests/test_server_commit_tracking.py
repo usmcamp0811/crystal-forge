@@ -47,7 +47,8 @@ def cf_client(cf_config):
 @pytest.mark.commits
 def test_flake_initialization_commits(cf_client, server):
     """Test that server initializes flake with 5 commits (default initial_commit_depth)"""
-
+    start_rows = cf_client.execute_sql("SELECT COUNT(*) as count FROM commits")
+    start_commit_count = start_rows[0]["count"]
     # Wait for the initialization log message
     cf_client.wait_for_service_log(
         server,
@@ -60,7 +61,9 @@ def test_flake_initialization_commits(cf_client, server):
     rows = cf_client.execute_sql("SELECT COUNT(*) as count FROM commits")
     commit_count = rows[0]["count"]
 
-    assert commit_count == 5, f"Expected 5 commits in database, found {commit_count}"
+    assert commit_count == (
+        5 + start_commit_count
+    ), f"Expected 5 commits in database, found {commit_count}"
 
 
 @pytest.mark.slow
