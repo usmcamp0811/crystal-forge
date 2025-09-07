@@ -7,6 +7,7 @@ import pytest
 from cf_test import CFTestClient
 from cf_test.scenarios import _create_base_scenario, scenario_dry_run_failed
 from cf_test.vm_helpers import SmokeTestConstants as C
+from cf_test.vm_helpers import wait_for_crystal_forge_ready
 
 pytestmark = pytest.mark.vm_only
 
@@ -26,6 +27,8 @@ def cf_client(cf_config):
 @pytest.mark.integration
 def test_derivation_reset_on_server_startup(cf_client, server):
     """Test that server resets derivations properly on startup"""
+
+    wait_for_crystal_forge_ready(server)
 
     # Get real git info from environment
     real_commit_hash = os.getenv(

@@ -78,3 +78,17 @@ pub async fn flake_has_commits(pool: &PgPool, repo_url: &str) -> Result<bool> {
     .await?;
     Ok(count.0 > 0)
 }
+
+pub async fn flake_last_commit(pool: &PgPool, repo_url: &str) -> Result<Commit> {
+    let commit = sqlx::query_as::<_, Commit>(
+        "SELECT * FROM COMMITS c 
+         JOIN flakes f ON c.flake_id = f.id 
+         WHERE repo_url = $1 
+         ORDER BY commit_timestamp DESC 
+         LIMIT 1;",
+    )
+    .bind(repo_url)
+    .fetch_one(pool)
+    .await?;
+    Ok(commit)
+}
