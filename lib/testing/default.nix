@@ -123,33 +123,93 @@ in rec {
       set -eu
       export HOME=$PWD
       work="$TMPDIR/work"
-
       # Prepare working directory
       mkdir -p "$work"
       cp -r ${srcPath}/. "$work/"
       cd "$work"
       chmod -R u+w .
-
       git init -q
       git config user.name "Crystal Forge Test"
       git config user.email "test@crystal-forge.dev"
 
-      # Create development history with multiple commits
+      # Array to store commit hashes
+      COMMIT_HASHES=()
+
+      # Create development history with 15 commits
       git add -f flake.nix
       [ -f flake.lock ] && git add -f flake.lock
       git commit -q -m "Initial flake configuration"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
 
       echo "# Crystal Forge Test Environment" >> flake.nix
       git add -f flake.nix
       git commit -q -m "Add documentation comment"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
 
       git add -A
       git commit -q -m "Add remaining project files"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
 
       echo "" >> flake.nix
       echo "# Last updated: $(date)" >> flake.nix
       git add -f flake.nix
       git commit -q -m "Update timestamp"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Version: 1.0.0" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add version information"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Maintainer: Crystal Forge Team" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add maintainer information"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# License: MIT" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add license information"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Dependencies updated" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Update dependencies"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Performance improvements" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Performance optimizations"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Security fixes applied" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Apply security patches"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Documentation updates" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Update documentation"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Build system improvements" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Improve build system"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Testing framework added" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Add testing framework"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# CI/CD pipeline configured" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Configure CI/CD pipeline"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
+
+      echo "# Final release preparation" >> flake.nix
+      git add -f flake.nix
+      git commit -q -m "Prepare for release"
+      COMMIT_HASHES+=($(git rev-parse HEAD))
 
       # Get the final commit hash BEFORE creating bare repo
       FINAL_COMMIT=$(git rev-parse HEAD)
@@ -167,6 +227,12 @@ in rec {
 
       # Output the commit hash to a file in the bare repo
       echo "$FINAL_COMMIT" > "$out/HEAD_COMMIT"
+
+      # Output all commit hashes (one per line)
+      printf "%s\n" "''${COMMIT_HASHES[@]}" > "$out/ALL_COMMITS"
+
+      # Output count of commits
+      echo "''${#COMMIT_HASHES[@]}" > "$out/COMMIT_COUNT"
     '';
 
   # Create a reusable git server node for tests with cgit web interface
@@ -234,9 +300,24 @@ in rec {
 
       systemd.tmpfiles.rules = [
         "d /srv/git 0755 git git -"
-        "L+ /srv/git/crystal-forge.git - - - - ${testFlake}"
         "d /var/lib/cgit 0755 cgit cgit -"
       ];
+
+      # Service to create writable git repository
+      systemd.services.setup-git-repo = {
+        enable = true;
+        description = "Setup writable git repository";
+        after = ["systemd-tmpfiles-setup.service"];
+        before = ["git-daemon.service" "cgit-gitserver.service"];
+        wantedBy = ["multi-user.target"];
+
+        serviceConfig = {
+          Type = "oneshot";
+          User = "git";
+          Group = "git";
+          ExecStart = "${pkgs.bash}/bin/bash -c 'cp -r ${testFlake} /srv/git/crystal-forge.git && chown -R git:git /srv/git/crystal-forge.git && chmod -R u+w /srv/git/crystal-forge.git'";
+        };
+      };
 
       environment.etc."gitconfig".text = ''
         [safe]
@@ -302,19 +383,6 @@ in rec {
           Environment = "HOME=/srv/git";
         };
       };
-
-      systemd.services.fix-git-ownership = {
-        enable = true;
-        description = "Fix Git Repository Ownership";
-        after = ["systemd-tmpfiles-setup.service"];
-        before = ["git-daemon.service" "cgit-gitserver.service"];
-        wantedBy = ["multi-user.target"];
-
-        serviceConfig = {
-          Type = "oneshot";
-          ExecStart = "${pkgs.bash}/bin/bash -c 'chown -R git:git /srv/git/crystal-forge.git && chmod -R g+r /srv/git/crystal-forge.git'";
-        };
-      };
     }
     // extraConfig;
 
@@ -358,7 +426,7 @@ in rec {
       networking.useDHCP = true;
       networking.firewall.allowedTCPPorts = [port 5432];
       virtualisation.writableStore = true;
-      virtualisation.memorySize = 2048;
+      virtualisation.memorySize = 8096;
       virtualisation.additionalPaths = [systemBuildClosure];
 
       environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.default pkgs.crystal-forge.cf-test-modules.runTests pkgs.crystal-forge.cf-test-modules.testRunner];
@@ -400,6 +468,7 @@ in rec {
             host = "localhost";
             name = "crystal_forge";
           };
+          flakes.flake_polling_interval = "1m";
           flakes.watched = [
             {
               name = "crystal-forge";
