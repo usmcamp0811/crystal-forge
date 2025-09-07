@@ -10,10 +10,9 @@ from cf_test.vm_helpers import (
     check_timer_active,
     get_system_hash,
     run_service_and_verify_success,
-    verify_commits_exist,
     verify_db_state,
-    verify_flake_in_db,
     wait_for_agent_acceptance,
+    wait_for_crystal_forge_ready,
 )
 
 pytestmark = pytest.mark.vm_only
@@ -69,6 +68,9 @@ def test_keys_and_network(server, agent):
 @pytest.mark.slow
 def test_agent_accept_and_db_state(cf_client, server, agent):
     """Test that agent is accepted and database state is correct"""
+
+    wait_for_crystal_forge_ready(server)
+
     agent_hostname = agent.succeed("hostname -s").strip()
 
     # Wait for agent acceptance first
@@ -84,24 +86,6 @@ def test_agent_accept_and_db_state(cf_client, server, agent):
 
     # Verify database state
     verify_db_state(cf_client, server, agent_hostname, system_hash, change_reason)
-
-
-@pytest.mark.slow
-def test_webhook_and_commit_ingest(cf_client, server, smoke_data):
-    """Test webhook processing and commit ingestion"""
-    # Send webhook
-    cf_client.send_webhook(server, C.API_PORT, smoke_data.webhook_payload)
-
-    # Wait for webhook processing
-    cf_client.wait_for_service_log(
-        server, C.SERVER_SERVICE, smoke_data.webhook_commit, timeout=90
-    )
-
-    # Verify flake was created
-    verify_flake_in_db(cf_client, server, smoke_data.git_server_url)
-
-    # Verify commits were ingested
-    verify_commits_exist(cf_client, server)
 
 
 @pytest.mark.slow

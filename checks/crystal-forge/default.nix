@@ -19,6 +19,16 @@
   testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
     cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
   '';
+
+  # Helper to get all commit hashes
+  testFlakeCommitHashes = pkgs.runCommand "test-flake-commits" {} ''
+    cat ${lib.crystal-forge.testFlake}/ALL_COMMITS > $out
+  '';
+
+  # Helper to get commit count
+  testFlakeCommitCount = pkgs.runCommand "test-flake-commit-count" {} ''
+    cat ${lib.crystal-forge.testFlake}/COMMIT_COUNT > $out
+  '';
   # cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
   #   mkdir -p $out
   #   cp -r $src/* $out/
@@ -73,8 +83,12 @@ in
 
       server.wait_for_unit("postgresql.service")
       server.wait_for_unit("crystal-forge-server.service")
+      gitserver.wait_for_unit("fcgiwrap-cgit-gitserver.service")
+
       server.wait_for_open_port(5432)
       server.forward_port(5433, 5432)
+
+      server.succeed("git ls-remote http://gitserver/crystal-forge")
 
       # Set environment variables for the test
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
@@ -87,6 +101,15 @@ in
       # Make real git info available to tests
       os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
       os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
+
+      # Read all commit hashes and pass them as environment variables
+      with open("${testFlakeCommitHashes}", "r") as f:
+          commit_hashes = f.read().strip().split('\n')
+      os.environ["CF_TEST_ALL_COMMIT_HASHES"] = ",".join(commit_hashes)
+
+      with open("${testFlakeCommitCount}", "r") as f:
+          commit_count = f.read().strip()
+      os.environ["CF_TEST_EXPECTED_COMMIT_COUNT"] = commit_count
 
       # Inject machines so cf_test fixtures can drive them
       import cf_test
