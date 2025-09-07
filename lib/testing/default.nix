@@ -426,7 +426,7 @@ in rec {
       networking.useDHCP = true;
       networking.firewall.allowedTCPPorts = [port 5432];
       virtualisation.writableStore = true;
-      virtualisation.memorySize = 2048;
+      virtualisation.memorySize = 4096;
       virtualisation.additionalPaths = [systemBuildClosure];
 
       environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.default pkgs.crystal-forge.cf-test-modules.runTests pkgs.crystal-forge.cf-test-modules.testRunner];
