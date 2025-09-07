@@ -19,15 +19,42 @@ pub struct WatchedFlake {
     pub auto_poll: bool, // true = server polls git directly, false = webhook-only
     #[serde(default = "default_initial_commit_depth")]
     pub initial_commit_depth: usize,
-    #[serde(default = "default_branch")]
-    pub branch: String,
 }
 
 fn default_initial_commit_depth() -> usize {
     5
 }
 
-fn default_branch() -> String {
+fn parse_branch_from_url(url: &str) -> String {
+    // Handle nix flake URL formats like:
+    // - github:owner/repo/branch
+    // - gitlab:owner/repo/branch
+    // - git+https://github.com/owner/repo?ref=branch
+    // - https://github.com/owner/repo/tree/branch
+
+    // GitHub/GitLab shorthand: github:owner/repo/branch
+    if let Some(colon_pos) = url.find(':') {
+        let after_colon = &url[colon_pos + 1..];
+        let parts: Vec<&str> = after_colon.split('/').collect();
+        if parts.len() >= 3 {
+            return parts[2].to_string();
+        }
+    }
+
+    // Git URL with ref parameter: ?ref=branch
+    if url.contains("?ref=") {
+        if let Some(ref_part) = url.split("?ref=").nth(1) {
+            return ref_part.split('&').next().unwrap_or("main").to_string();
+        }
+    }
+
+    // GitHub web URL: /tree/branch
+    if url.contains("/tree/") {
+        if let Some(branch_part) = url.split("/tree/").nth(1) {
+            return branch_part.split('/').next().unwrap_or("main").to_string();
+        }
+    }
+
     "main".to_string()
 }
 
@@ -39,5 +66,13 @@ impl FlakeConfig {
             commit_evaluation_interval: Duration::from_secs(60),
             build_processing_interval: Duration::from_secs(60),
         }
+    }
+}
+
+impl WatchedFlake {
+    pub fn branch(&self) -> String {
+        self.branch
+            .clone()
+            .unwrap_or_else(|| parse_branch_from_url(&self.repo_url))
     }
 }
