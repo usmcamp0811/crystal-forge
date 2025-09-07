@@ -116,9 +116,16 @@ impl CrystalForgeConfig {
             .build()
             .context("loading configuration")?;
 
-        settings
-            .try_deserialize::<Self>()
-            .context("parsing configuration")
+        let mut config: Self = settings
+            .try_deserialize()
+            .context("parsing configuration")?;
+
+        // Post-process to set branch fields
+        for watched_flake in &mut config.flakes.watched {
+            watched_flake.set_branch_from_url();
+        }
+
+        Ok(config)
     }
 
     pub async fn db_pool() -> Result<PgPool> {
