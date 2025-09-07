@@ -1,3 +1,4 @@
+use crate::models::commits::Commit;
 use crate::models::config;
 use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
 use anyhow::{Context, Result};
@@ -236,16 +237,23 @@ pub async fn sync_all_watched_flakes_commits(
         }
 
         info!("🔗 Syncing commits for flake: {}", flake.name);
-
-        match fetch_and_insert_commits_since(pool, &flake.repo_url, &flake.branch).await {
-            Ok(Some(commit_hash)) => {
-                info!(
-                    "✅ Successfully synced commit {} for {}",
-                    commit_hash, flake.name
-                );
-            }
-            Ok(None) => {
-                warn!("⚠️ No commits found for {}", flake.name);
+        let last_commit = flake_last_commit(pool, &flake.repo_url).await?;
+        match fetch_and_insert_commits_since(pool, &flake.repo_url, &flake.branch, &last_commit)
+            .await
+        {
+            Ok(commit_hashes) => {
+                if commit_hashes.is_empty() {
+                    info!("No new commits found for {}", flake.name)
+                } else {
+                    info!(
+                        "✅ Successfully synced {} new commits for {}",
+                        commit_hashes.len(),
+                        flake.name
+                    );
+                    for commit_hash in commit_hashes {
+                        debug!("📝 New commit for {}: {}", flake.name, commit_hash);
+                    }
+                }
             }
             Err(e) => {
                 warn!("❌ Failed to sync commits for {}: {}", flake.name, e);
