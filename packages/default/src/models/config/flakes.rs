@@ -13,12 +13,40 @@ pub struct FlakeConfig {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[serde(from = "WatchedFlakeRaw")]
 pub struct WatchedFlake {
     pub name: String,
     pub repo_url: String,
-    pub auto_poll: bool, // true = server polls git directly, false = webhook-only
+    pub auto_poll: bool,
+    pub initial_commit_depth: usize,
+    pub branch: String, // This gets set automatically
+}
+
+#[derive(Debug, Deserialize)]
+struct WatchedFlakeRaw {
+    pub name: String,
+    pub repo_url: String,
+    pub auto_poll: bool,
     #[serde(default = "default_initial_commit_depth")]
     pub initial_commit_depth: usize,
+    #[serde(default)]
+    pub branch: Option<String>,
+}
+
+impl From<WatchedFlakeRaw> for WatchedFlake {
+    fn from(raw: WatchedFlakeRaw) -> Self {
+        let branch = raw
+            .branch
+            .unwrap_or_else(|| parse_branch_from_url(&raw.repo_url));
+
+        Self {
+            name: raw.name,
+            repo_url: raw.repo_url,
+            auto_poll: raw.auto_poll,
+            initial_commit_depth: raw.initial_commit_depth,
+            branch,
+        }
+    }
 }
 
 fn default_initial_commit_depth() -> usize {
@@ -66,13 +94,5 @@ impl FlakeConfig {
             commit_evaluation_interval: Duration::from_secs(60),
             build_processing_interval: Duration::from_secs(60),
         }
-    }
-}
-
-impl WatchedFlake {
-    pub fn branch(&self) -> String {
-        self.branch
-            .clone()
-            .unwrap_or_else(|| parse_branch_from_url(&self.repo_url))
     }
 }
