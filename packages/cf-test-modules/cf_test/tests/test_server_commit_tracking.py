@@ -8,8 +8,14 @@ import pytest
 
 from cf_test import CFTestClient, CFTestConfig
 from cf_test.vm_helpers import SmokeTestConstants as C
+from cf_test.vm_helpers import SmokeTestData, verify_commits_exist, verify_flake_in_db
 
 pytestmark = pytest.mark.vm_only
+
+
+@pytest.fixture(scope="session")
+def smoke_data():
+    return SmokeTestData()
 
 
 @pytest.fixture(scope="session")
@@ -38,6 +44,7 @@ def cf_client(cf_config):
     return CFTestClient(cf_config)
 
 
+@pytest.mark.commits
 def test_flake_initialization_commits(cf_client, server):
     """Test that server initializes flake with 5 commits (default initial_commit_depth)"""
 
@@ -57,6 +64,7 @@ def test_flake_initialization_commits(cf_client, server):
 
 
 @pytest.mark.slow
+@pytest.mark.commits
 def test_flake_polling_picks_up_new_commit(cf_client, server, gitserver):
     """Test that polling picks up a new commit pushed to the git repository"""
 
@@ -121,3 +129,35 @@ def test_flake_polling_picks_up_new_commit(cf_client, server, gitserver):
     assert len(commit_rows) == 1, f"New commit {new_commit_hash} not found in database"
 
     print("✅ Polling test passed: new commit was detected and processed")
+
+
+@pytest.mark.slow
+@pytest.mark.commits
+def test_webhook_and_commit_ingest(cf_client, server, smoke_data):
+    """Test webhook processing and commit ingestion"""
+    # Send webhook
+    cf_client.send_webhook(server, C.API_PORT, smoke_data.webhook_payload)
+
+    # Wait for webhook processing
+    cf_client.wait_for_service_log(
+        server, C.SERVER_SERVICE, smoke_data.webhook_commit, timeout=90
+    )
+
+    # Verify flake was created
+    verify_flake_in_db(cf_client, server, smoke_data.git_server_url)
+
+    # Verify commits were ingested
+    verify_commits_exist(cf_client, server)
+
+    # Cleanup webhook test - delete in correct order to respect foreign keys
+    cf_client.execute_sql(
+        "DELETE FROM commits WHERE flake_id IN (SELECT id FROM flakes WHERE repo_url = %s)",
+        (smoke_data.git_server_url,),
+    )
+    cf_client.execute_sql(
+        "DELETE FROM systems WHERE flake_id IN (SELECT id FROM flakes WHERE repo_url = %s)",
+        (smoke_data.git_server_url,),
+    )
+    cf_client.execute_sql(
+        "DELETE FROM flakes WHERE repo_url = %s", (smoke_data.git_server_url,)
+    )
