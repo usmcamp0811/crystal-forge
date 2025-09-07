@@ -46,7 +46,7 @@ async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
     info!("🔄 Starting periodic flake polling loop...");
     loop {
         // Get all flakes from database instead of just config ones
-        match get_all_flakes_from_db(&pool).await {
+        match get_all_flakes_from_db(&pool, &flake_config).await {
             Ok(db_flakes) => {
                 if let Err(e) = sync_all_watched_flakes_commits(&pool, &db_flakes).await {
                     error!("❌ Error in flake polling cycle: {e}");

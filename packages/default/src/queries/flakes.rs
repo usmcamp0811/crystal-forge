@@ -1,4 +1,4 @@
-use crate::models::config::WatchedFlake;
+use crate::models::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
 use anyhow::Result;
 use sqlx::PgPool;
@@ -47,18 +47,26 @@ pub async fn get_flake_id_by_repo_url(pool: &PgPool, repo_url: &str) -> Result<O
     Ok(flake_id)
 }
 
-pub async fn get_all_flakes_from_db(pool: &PgPool) -> Result<Vec<WatchedFlake>> {
+pub async fn get_all_flakes_from_db(
+    pool: &PgPool,
+    config: &FlakeConfig,
+) -> Result<Vec<WatchedFlake>> {
     let rows = sqlx::query!("SELECT name, repo_url FROM flakes")
         .fetch_all(pool)
         .await?;
 
     Ok(rows
         .into_iter()
-        .map(|row| WatchedFlake {
-            name: row.name,
-            repo_url: row.repo_url,
-            auto_poll: true,
-            initial_commit_depth: 5,
+        .map(|row| {
+            // Look for matching config flake to get the proper initial_commit_depth
+            let config_flake = config.watched.iter().find(|f| f.repo_url == row.repo_url);
+
+            WatchedFlake {
+                name: row.name,
+                repo_url: row.repo_url,
+                auto_poll: true,
+                initial_commit_depth: config_flake.map(|f| f.initial_commit_depth).unwrap_or(5), // fallback to 5 for database-only flakes
+            }
         })
         .collect())
 }

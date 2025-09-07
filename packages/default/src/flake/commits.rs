@@ -237,31 +237,41 @@ pub async fn sync_all_watched_flakes_commits(
             debug!("⏭️ Skipping {} (auto_poll = false)", flake.name);
             continue;
         }
-        info!("🔗 Syncing commits for flake: {}", flake.name);
-        let last_commit = flake_last_commit(pool, &flake.repo_url).await?;
-        let branch = flake.branch();
-        debug!(
-            "Extracted branch '{}' from URL '{}'",
-            branch, flake.repo_url
-        );
 
-        match fetch_and_insert_commits_since(pool, &flake.repo_url, &branch, &last_commit).await {
-            Ok(commit_hashes) => {
-                if commit_hashes.is_empty() {
-                    info!("No new commits found for {}", flake.name)
-                } else {
-                    info!(
-                        "✅ Successfully synced {} new commits for {}",
-                        commit_hashes.len(),
-                        flake.name
-                    );
-                    for commit_hash in commit_hashes {
-                        debug!("📝 New commit for {}: {}", flake.name, commit_hash);
+        info!("🔗 Syncing commits for flake: {}", flake.name);
+
+        // Check if flake has commits first
+        match flake_has_commits(pool, &flake.repo_url).await {
+            Ok(true) => {
+                // Has commits, do incremental sync
+                let last_commit = flake_last_commit(pool, &flake.repo_url).await?;
+                // ... rest of sync logic
+            }
+            Ok(false) => {
+                // No commits, initialize
+                info!("🔄 Initializing commits for flake: {}", flake.name);
+                match fetch_and_insert_recent_commits(
+                    pool,
+                    &flake.repo_url,
+                    &flake.branch(),
+                    Some(flake.initial_commit_depth),
+                )
+                .await
+                {
+                    Ok(commits) => {
+                        info!(
+                            "✅ Successfully initialized {} commits for {}",
+                            commits.len(),
+                            flake.name
+                        );
+                    }
+                    Err(e) => {
+                        warn!("❌ Failed to initialize commits for {}: {}", flake.name, e);
                     }
                 }
             }
             Err(e) => {
-                warn!("❌ Failed to sync commits for {}: {}", flake.name, e);
+                warn!("❌ Failed to check commits for {}: {}", flake.name, e);
             }
         }
     }

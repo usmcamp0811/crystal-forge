@@ -513,18 +513,18 @@ in rec {
               auto_poll = true;
               initial_commit_depth = 5;
             }
-            # {
-            #   name = "crystal-forge-development";
-            #   repo_url = "http://gitserver/crystal-forge?ref=development";
-            #   auto_poll = true;
-            #   initial_commit_depth = 7;
-            # }
-            # {
-            #   name = "crystal-forge-feature";
-            #   repo_url = "http://gitserver/crystal-forge?ref=feature/experimental";
-            #   auto_poll = true;
-            #   initial_commit_depth = 3;
-            # }
+            {
+              name = "crystal-forge-development";
+              repo_url = "http://gitserver/crystal-forge?ref=development";
+              auto_poll = true;
+              initial_commit_depth = 7;
+            }
+            {
+              name = "crystal-forge-feature";
+              repo_url = "http://gitserver/crystal-forge?ref=feature/experimental";
+              auto_poll = true;
+              initial_commit_depth = 3;
+            }
           ];
           environments = [
             {
