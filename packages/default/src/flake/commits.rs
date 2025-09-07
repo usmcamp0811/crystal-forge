@@ -240,6 +240,11 @@ pub async fn sync_all_watched_flakes_commits(
         info!("🔗 Syncing commits for flake: {}", flake.name);
         let last_commit = flake_last_commit(pool, &flake.repo_url).await?;
         let branch = flake.branch();
+        debug!(
+            "Extracted branch '{}' from URL '{}'",
+            branch, flake.repo_url
+        );
+
         match fetch_and_insert_commits_since(pool, &flake.repo_url, &branch, &last_commit).await {
             Ok(commit_hashes) => {
                 if commit_hashes.is_empty() {
@@ -265,21 +270,23 @@ pub async fn sync_all_watched_flakes_commits(
 }
 
 fn normalize_repo_url_for_git(repo_url: &str) -> String {
-    // Handle different Nix flake URL formats
-    if let Some(stripped) = repo_url.strip_prefix("git+") {
-        // Remove git+ prefix
-        stripped.to_string()
+    let base_url = if let Some(stripped) = repo_url.strip_prefix("git+") {
+        stripped
     } else if repo_url.starts_with("github:") {
-        // Convert github: to https://
         let repo_path = repo_url.strip_prefix("github:").unwrap();
-        format!("https://github.com/{}", repo_path)
+        return format!("https://github.com/{}", repo_path);
     } else if repo_url.starts_with("gitlab:") {
-        // Convert gitlab: to https://
         let repo_path = repo_url.strip_prefix("gitlab:").unwrap();
-        format!("https://gitlab.com/{}", repo_path)
+        return format!("https://gitlab.com/{}", repo_path);
     } else {
-        // Already a regular git URL
-        repo_url.to_string()
+        repo_url
+    };
+
+    // Strip query parameters for git operations
+    if let Some(question_mark_pos) = base_url.find('?') {
+        base_url[..question_mark_pos].to_string()
+    } else {
+        base_url.to_string()
     }
 }
 

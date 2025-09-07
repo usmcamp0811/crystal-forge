@@ -1,3 +1,4 @@
+use crate::models::config::WatchedFlake;
 use crate::models::flakes::Flake;
 use anyhow::Result;
 use sqlx::PgPool;
@@ -44,4 +45,20 @@ pub async fn get_flake_id_by_repo_url(pool: &PgPool, repo_url: &str) -> Result<O
         .await?;
 
     Ok(flake_id)
+}
+
+pub async fn get_all_flakes_from_db(pool: &PgPool) -> Result<Vec<WatchedFlake>> {
+    let rows = sqlx::query!("SELECT name, repo_url FROM flakes")
+        .fetch_all(pool)
+        .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| WatchedFlake {
+            name: row.name,
+            repo_url: row.repo_url,
+            auto_poll: true,
+            initial_commit_depth: 5,
+        })
+        .collect())
 }

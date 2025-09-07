@@ -8,6 +8,7 @@ use crate::queries::derivations::{
     mark_target_dry_run_complete, mark_target_failed, reset_non_terminal_derivations,
     update_derivation_path, update_scheduled_at,
 };
+use crate::queries::flakes::get_all_flakes_from_db;
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use futures::stream;
@@ -42,13 +43,16 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
 
 /// Runs the periodic flake polling loop to check for new commits
 async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
-    info!(
-        "🔁 Starting periodic flake polling loop (every {:?})...",
-        flake_config.flake_polling_interval
-    );
+    info!("🔄 Starting periodic flake polling loop...");
     loop {
-        if let Err(e) = sync_all_watched_flakes_commits(&pool, &flake_config.watched).await {
-            error!("❌ Error in flake polling cycle: {e}");
+        // Get all flakes from database instead of just config ones
+        match get_all_flakes_from_db(&pool).await {
+            Ok(db_flakes) => {
+                if let Err(e) = sync_all_watched_flakes_commits(&pool, &db_flakes).await {
+                    error!("❌ Error in flake polling cycle: {e}");
+                }
+            }
+            Err(e) => error!("❌ Failed to get flakes from database: {e}"),
         }
         tokio::time::sleep(flake_config.flake_polling_interval).await;
     }
