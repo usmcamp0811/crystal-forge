@@ -120,11 +120,6 @@ impl CrystalForgeConfig {
             .try_deserialize()
             .context("parsing configuration")?;
 
-        // Post-process to set branch fields
-        for watched_flake in &mut config.flakes.watched {
-            watched_flake.set_branch_from_url();
-        }
-
         Ok(config)
     }
 

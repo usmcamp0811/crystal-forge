@@ -195,7 +195,7 @@ pub async fn initialize_flake_commits(
         match fetch_and_insert_recent_commits(
             pool,
             &flake.repo_url,
-            &flake.branch,
+            &flake.branch(),
             Some(flake.initial_commit_depth),
         )
         .await
@@ -205,13 +205,15 @@ pub async fn initialize_flake_commits(
                     "✅ Successfully initialized {} commits for {} on branch {}",
                     commits.len(),
                     flake.name,
-                    flake.branch
+                    flake.branch()
                 );
             }
             Err(e) => {
                 warn!(
                     "❌ Failed to initialize commits for {}: {} on branch {}",
-                    flake.name, e, flake.branch
+                    flake.name,
+                    e,
+                    flake.branch()
                 );
             }
         }
@@ -235,12 +237,10 @@ pub async fn sync_all_watched_flakes_commits(
             debug!("⏭️ Skipping {} (auto_poll = false)", flake.name);
             continue;
         }
-
         info!("🔗 Syncing commits for flake: {}", flake.name);
         let last_commit = flake_last_commit(pool, &flake.repo_url).await?;
-        match fetch_and_insert_commits_since(pool, &flake.repo_url, &flake.branch, &last_commit)
-            .await
-        {
+        let branch = flake.branch();
+        match fetch_and_insert_commits_since(pool, &flake.repo_url, &branch, &last_commit).await {
             Ok(commit_hashes) => {
                 if commit_hashes.is_empty() {
                     info!("No new commits found for {}", flake.name)
