@@ -29,6 +29,19 @@
   testFlakeCommitCount = pkgs.runCommand "test-flake-commit-count" {} ''
     cat ${lib.crystal-forge.testFlake}/COMMIT_COUNT > $out
   '';
+
+  # Helper files for branch testing
+  mainCommitHashes = pkgs.runCommand "main-commits" {} ''
+    cat ${lib.crystal-forge.testFlake}/MAIN_COMMITS > $out
+  '';
+
+  developmentCommitHashes = pkgs.runCommand "development-commits" {} ''
+    cat ${lib.crystal-forge.testFlake}/DEVELOPMENT_COMMITS > $out
+  '';
+
+  featureCommitHashes = pkgs.runCommand "feature-commits" {} ''
+    cat ${lib.crystal-forge.testFlake}/FEATURE_COMMITS > $out
+  '';
   # cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
   #   mkdir -p $out
   #   cp -r $src/* $out/
@@ -98,11 +111,10 @@ in
       os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
 
-      # Make real git info available to tests
+      # Legacy single-branch data (main branch)
       os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
       os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
 
-      # Read all commit hashes and pass them as environment variables
       with open("${testFlakeCommitHashes}", "r") as f:
           commit_hashes = f.read().strip().split('\n')
       os.environ["CF_TEST_ALL_COMMIT_HASHES"] = ",".join(commit_hashes)
@@ -110,6 +122,22 @@ in
       with open("${testFlakeCommitCount}", "r") as f:
           commit_count = f.read().strip()
       os.environ["CF_TEST_EXPECTED_COMMIT_COUNT"] = commit_count
+
+      # Multi-branch data
+      with open("${mainCommitHashes}", "r") as f:
+          main_commits = f.read().strip().split('\n')
+      os.environ["CF_TEST_MAIN_COMMITS"] = ",".join(main_commits)
+      os.environ["CF_TEST_MAIN_COMMIT_COUNT"] = "5"
+
+      with open("${developmentCommitHashes}", "r") as f:
+          dev_commits = f.read().strip().split('\n')
+      os.environ["CF_TEST_DEVELOPMENT_COMMITS"] = ",".join(dev_commits)
+      os.environ["CF_TEST_DEVELOPMENT_COMMIT_COUNT"] = "7"
+
+      with open("${featureCommitHashes}", "r") as f:
+          feature_commits = f.read().strip().split('\n')
+      os.environ["CF_TEST_FEATURE_COMMITS"] = ",".join(feature_commits)
+      os.environ["CF_TEST_FEATURE_COMMIT_COUNT"] = "3"
 
       # Inject machines so cf_test fixtures can drive them
       import cf_test
@@ -124,7 +152,7 @@ in
           "--tb=short",
           "-x",
           "-s",  # Add -s to see print output immediately
-          "-m", "vm_only",
+          "-m", "commits",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:
