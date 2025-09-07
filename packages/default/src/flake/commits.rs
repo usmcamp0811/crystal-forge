@@ -329,7 +329,7 @@ async fn get_commits_since(
         .args(&[
             "clone",
             "--depth",
-            "20",
+            "5",
             "--branch",
             branch,
             "--single-branch",
