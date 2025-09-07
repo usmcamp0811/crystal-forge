@@ -153,6 +153,63 @@ def run_service_and_verify_success(
     cf_client.wait_for_service_log(machine, service_name, success_pattern)
 
 
+def wait_for_git_server_ready(machine, timeout=120):
+    """Wait for git server to be fully ready with proper error handling"""
+    import time
+
+    start_time = time.time()
+    last_error = None
+
+    while time.time() - start_time < timeout:
+        try:
+            # Check if setup completed
+            machine.succeed("systemctl is-active setup-git-repo.service", timeout=10)
+
+            # Check if git repo exists and is accessible
+            machine.succeed("test -d /srv/git/crystal-forge.git", timeout=5)
+            machine.succeed("test -r /srv/git/crystal-forge.git/HEAD", timeout=5)
+
+            # Check if fcgiwrap service is running
+            machine.succeed(
+                "systemctl is-active fcgiwrap-cgit-gitserver.service", timeout=10
+            )
+
+            # Test actual git access
+            machine.succeed("git ls-remote http://localhost/crystal-forge", timeout=15)
+
+            return True
+
+        except Exception as e:
+            last_error = e
+            time.sleep(5)
+
+            # Try to restart the service if it failed
+            try:
+                machine.succeed("systemctl restart fcgiwrap-cgit-gitserver.service")
+            except:
+                pass
+
+    # Final attempt to get debug info
+    try:
+        machine.log("=== Git server debug information ===")
+        machine.log(machine.succeed("systemctl status setup-git-repo.service || true"))
+        machine.log(
+            machine.succeed("systemctl status fcgiwrap-cgit-gitserver.service || true")
+        )
+        machine.log(machine.succeed("ls -la /srv/git/ || true"))
+        machine.log(
+            machine.succeed(
+                "journalctl -u fcgiwrap-cgit-gitserver.service --lines=20 || true"
+            )
+        )
+    except:
+        pass
+
+    raise TimeoutError(
+        f"Git server not ready after {timeout}s. Last error: {last_error}"
+    )
+
+
 class SmokeTestConstants:
     """Common constants for smoke tests"""
 
@@ -178,6 +235,7 @@ class SmokeTestConstants:
     AGENT_ACCEPTANCE_TIMEOUT = 120
     WEBHOOK_TIMEOUT = 120
     JOBS_TIMEOUT = 120
+    GIT_SERVER_TIMEOUT = 120
 
 
 class SmokeTestData:
