@@ -300,9 +300,24 @@ in rec {
 
       systemd.tmpfiles.rules = [
         "d /srv/git 0755 git git -"
-        "L+ /srv/git/crystal-forge.git - - - - ${testFlake}"
         "d /var/lib/cgit 0755 cgit cgit -"
       ];
+
+      # Service to create writable git repository
+      systemd.services.setup-git-repo = {
+        enable = true;
+        description = "Setup writable git repository";
+        after = ["systemd-tmpfiles-setup.service"];
+        before = ["git-daemon.service" "cgit-gitserver.service"];
+        wantedBy = ["multi-user.target"];
+
+        serviceConfig = {
+          Type = "oneshot";
+          User = "git";
+          Group = "git";
+          ExecStart = "${pkgs.bash}/bin/bash -c 'cp -r ${testFlake} /srv/git/crystal-forge.git && chown -R git:git /srv/git/crystal-forge.git && chmod -R u+w /srv/git/crystal-forge.git'";
+        };
+      };
 
       environment.etc."gitconfig".text = ''
         [safe]
@@ -366,19 +381,6 @@ in rec {
           WorkingDirectory = "/srv/git";
           ExecStart = "${pkgs.git}/bin/git daemon --verbose --export-all --base-path=/srv/git --reuseaddr --port=${toString port}";
           Environment = "HOME=/srv/git";
-        };
-      };
-
-      systemd.services.fix-git-ownership = {
-        enable = true;
-        description = "Fix Git Repository Ownership";
-        after = ["systemd-tmpfiles-setup.service"];
-        before = ["git-daemon.service" "cgit-gitserver.service"];
-        wantedBy = ["multi-user.target"];
-
-        serviceConfig = {
-          Type = "oneshot";
-          ExecStart = "${pkgs.bash}/bin/bash -c 'chown -R git:git /srv/git/crystal-forge.git && chmod -R g+r /srv/git/crystal-forge.git'";
         };
       };
     }
@@ -466,6 +468,7 @@ in rec {
             host = "localhost";
             name = "crystal_forge";
           };
+          flakes.flake_polling_interval = "1m";
           flakes.watched = [
             {
               name = "crystal-forge";
