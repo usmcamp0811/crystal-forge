@@ -130,8 +130,8 @@ def test_branch_specific_flake_initialization(
 
     # Insert the branch-specific flake into the database
     cf_client.execute_sql(
-        "INSERT INTO flakes (name, repo_url, auto_poll) VALUES (%s, %s, %s) ON CONFLICT (repo_url) DO NOTHING",
-        (flake_name, branch_repo_url, True),
+        "INSERT INTO flakes (name, repo_url) VALUES (%s, %s) ON CONFLICT (repo_url) DO NOTHING",
+        (flake_name, branch_repo_url),
     )
 
     # Get the flake ID
@@ -251,8 +251,8 @@ def test_branch_polling_picks_up_new_commit(cf_client, server, gitserver):
 
     # Ensure the branch flake exists
     cf_client.execute_sql(
-        "INSERT INTO flakes (name, repo_url, auto_poll) VALUES (%s, %s, %s) ON CONFLICT (repo_url) DO NOTHING",
-        (f"crystal-forge-{branch_name}", repo_url, True),
+        "INSERT INTO flakes (name, repo_url) VALUES (%s, %s) ON CONFLICT (repo_url) DO NOTHING",
+        (f"crystal-forge-{branch_name}", repo_url),
     )
 
     # Get initial commit count for this branch
