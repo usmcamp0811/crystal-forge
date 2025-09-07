@@ -87,7 +87,8 @@ in
       server.wait_for_open_port(5432)
       server.forward_port(5433, 5432)
 
-      wait_for_git_server_with_retry(gitserver)
+      from cf_test.vm_helpers import wait_for_git_server_ready
+      wait_for_git_server_ready(gitserver, timeout=120)
 
       # Set environment variables for the test
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
