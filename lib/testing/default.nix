@@ -308,7 +308,7 @@ in rec {
         enable = true;
         description = "Setup writable git repository";
         after = ["systemd-tmpfiles-setup.service"];
-        before = ["git-daemon.service" "cgit-gitserver.service"];
+        before = ["git-daemon.service"];
         wantedBy = ["multi-user.target"];
 
         serviceConfig = {
@@ -316,6 +316,7 @@ in rec {
           User = "git";
           Group = "git";
           ExecStart = "${pkgs.bash}/bin/bash -c 'cp -r ${testFlake} /srv/git/crystal-forge.git && chown -R git:git /srv/git/crystal-forge.git && chmod -R u+w /srv/git/crystal-forge.git'";
+          RemainAfterExit = true; # Important: keeps the service "active" after completion
         };
       };
 
@@ -324,33 +325,22 @@ in rec {
             directory = /srv/git/crystal-forge.git
       '';
 
-      # Configure cgit web interface
+      # Configure cgit web interface with better service dependencies
       services.cgit = {
         gitserver = {
           enable = true;
-
-          # Use scanPath to automatically discover repositories
           scanPath = "/srv/git";
 
           settings = {
-            # Basic appearance
             root-title = "Crystal Forge Git Server";
             root-desc = "Test Git repositories for Crystal Forge";
-
-            # Enable features
             enable-follow-links = true;
             enable-index-links = true;
             enable-log-filecount = true;
             enable-log-linecount = true;
-
-            # Syntax highlighting
             source-filter = "${pkgs.cgit}/lib/cgit/filters/syntax-highlighting.py";
             about-filter = "${pkgs.cgit}/lib/cgit/filters/about-formatting.sh";
-
-            # Cache for performance
             cache-size = 1000;
-
-            # Allow cloning
             enable-git-config = true;
           };
 
@@ -364,6 +354,20 @@ in rec {
         };
       };
 
+      # Override the fcgiwrap service to wait for git repo setup
+      systemd.services.fcgiwrap-cgit-gitserver = {
+        after = ["setup-git-repo.service"];
+        wants = ["setup-git-repo.service"];
+
+        # Add restart on failure with delay
+        serviceConfig = {
+          Restart = "on-failure";
+          RestartSec = "5s";
+          StartLimitBurst = 3;
+          StartLimitIntervalSec = "30s";
+        };
+      };
+
       # Enable nginx for cgit
       services.nginx.enable = true;
 
@@ -371,7 +375,8 @@ in rec {
       systemd.services.git-daemon = {
         enable = true;
         description = "Git Daemon for git:// protocol";
-        after = ["network.target"];
+        after = ["network.target" "setup-git-repo.service"];
+        wants = ["setup-git-repo.service"];
         wantedBy = ["multi-user.target"];
 
         serviceConfig = {
@@ -381,6 +386,8 @@ in rec {
           WorkingDirectory = "/srv/git";
           ExecStart = "${pkgs.git}/bin/git daemon --verbose --export-all --base-path=/srv/git --reuseaddr --port=${toString port}";
           Environment = "HOME=/srv/git";
+          Restart = "on-failure";
+          RestartSec = "5s";
         };
       };
     }
