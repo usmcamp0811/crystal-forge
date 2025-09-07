@@ -38,7 +38,6 @@ def cf_client(cf_config):
     return CFTestClient(cf_config)
 
 
-@pytest.mark.commits
 def test_flake_initialization_commits(cf_client, server):
     """Test that server initializes flake with 5 commits (default initial_commit_depth)"""
 
@@ -58,7 +57,6 @@ def test_flake_initialization_commits(cf_client, server):
 
 
 @pytest.mark.slow
-@pytest.mark.commits
 def test_flake_polling_picks_up_new_commit(cf_client, server, gitserver):
     """Test that polling picks up a new commit pushed to the git repository"""
 
