@@ -1,5 +1,5 @@
 use crate::models::config;
-use crate::queries::commits::{flake_has_commits, insert_commit};
+use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use tracing::{debug, info, warn};
@@ -20,7 +20,6 @@ pub async fn fetch_and_insert_latest_commit(
     Ok(Some(commit_hash))
 }
 
-/// Get the past N commit hashes from a specific branch in a git repository
 /// Get the past N commit hashes from a specific branch in a git repository
 async fn get_recent_commit_hashes(
     repo_url: &str,
@@ -115,31 +114,6 @@ async fn get_recent_commit_hashes(
 
     // Temporary directory is automatically cleaned up when temp_dir goes out of scope
     Ok(commits)
-}
-
-/// Get the branch reference (tries specified branch, then falls back to HEAD, main, master)
-async fn get_branch_ref(git_url: &str, branch: &str) -> Result<String> {
-    let stdout = run_ls_remote(git_url).await?;
-
-    // Try specified branch first
-    let target_ref = format!("refs/heads/{}", branch);
-    if stdout.lines().any(|l| l.ends_with(&target_ref)) {
-        return Ok(target_ref);
-    }
-
-    // Fallback to HEAD
-    if stdout.lines().any(|l| l.ends_with("HEAD")) {
-        return Ok("HEAD".to_string());
-    }
-
-    // Fallback to common branches
-    for fallback in ["refs/heads/main", "refs/heads/master"] {
-        if stdout.lines().any(|l| l.ends_with(fallback)) {
-            return Ok(fallback.to_string());
-        }
-    }
-
-    Err(anyhow::anyhow!("No suitable branch found for '{}'", branch))
 }
 
 /// Get the latest commit hash from a specific branch in a git repository
@@ -263,7 +237,7 @@ pub async fn sync_all_watched_flakes_commits(
 
         info!("🔗 Syncing commits for flake: {}", flake.name);
 
-        match fetch_and_insert_latest_commit(pool, &flake.repo_url, &flake.branch).await {
+        match fetch_and_insert_commits_since(pool, &flake.repo_url, &flake.branch).await {
             Ok(Some(commit_hash)) => {
                 info!(
                     "✅ Successfully synced commit {} for {}",
@@ -335,7 +309,7 @@ async fn run_ls_remote(repo_url: &str) -> Result<String> {
 async fn get_commits_since(
     repo_url: &str,
     branch: &str,
-    since_commit: &str,
+    since_commit: &Commit,
 ) -> Result<Vec<String>> {
     let git_url = normalize_repo_url_for_git(repo_url);
 
@@ -359,7 +333,11 @@ async fn get_commits_since(
         .await?;
 
     let output = tokio::process::Command::new("git")
-        .args(&["log", "--format=%H", &format!("{}..HEAD", since_commit)])
+        .args(&[
+            "log",
+            "--format=%H",
+            &format!("{}..HEAD", since_commit.git_commit_hash),
+        ])
         .current_dir(clone_path)
         .output()
         .await?;
@@ -378,7 +356,7 @@ pub async fn fetch_and_insert_commits_since(
     pool: &PgPool,
     repo_url: &str,
     branch: &str,
-    since_commit: &str,
+    since_commit: &Commit,
 ) -> Result<Vec<String>> {
     let commit_hashes = get_commits_since(repo_url, branch, since_commit).await?;
 

@@ -24,7 +24,7 @@ pub struct WatchedFlake {
 }
 
 fn default_initial_commit_depth() -> usize {
-    15
+    5
 }
 
 fn default_branch() -> String {
