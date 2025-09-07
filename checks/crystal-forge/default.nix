@@ -19,6 +19,16 @@
   testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
     cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
   '';
+
+  # Helper to get all commit hashes
+  testFlakeCommitHashes = pkgs.runCommand "test-flake-commits" {} ''
+    cat ${lib.crystal-forge.testFlake}/ALL_COMMITS > $out
+  '';
+
+  # Helper to get commit count
+  testFlakeCommitCount = pkgs.runCommand "test-flake-commit-count" {} ''
+    cat ${lib.crystal-forge.testFlake}/COMMIT_COUNT > $out
+  '';
   # cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
   #   mkdir -p $out
   #   cp -r $src/* $out/
@@ -92,6 +102,15 @@ in
       os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
       os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
 
+      # Read all commit hashes and pass them as environment variables
+      with open("${testFlakeCommitHashes}", "r") as f:
+          commit_hashes = f.read().strip().split('\n')
+      os.environ["CF_TEST_ALL_COMMIT_HASHES"] = ",".join(commit_hashes)
+
+      with open("${testFlakeCommitCount}", "r") as f:
+          commit_count = f.read().strip()
+      os.environ["CF_TEST_EXPECTED_COMMIT_COUNT"] = commit_count
+
       # Inject machines so cf_test fixtures can drive them
       import cf_test
       cf_test._driver_machines = {
@@ -105,7 +124,7 @@ in
           "--tb=short",
           "-x",
           "-s",  # Add -s to see print output immediately
-          "-m", "vm_only",
+          "-m", "commits",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:

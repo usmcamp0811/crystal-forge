@@ -21,6 +21,7 @@ pub async fn fetch_and_insert_latest_commit(
 }
 
 /// Get the past N commit hashes from a specific branch in a git repository
+/// Get the past N commit hashes from a specific branch in a git repository
 async fn get_recent_commit_hashes(
     repo_url: &str,
     branch: &str,
@@ -28,22 +29,38 @@ async fn get_recent_commit_hashes(
 ) -> Result<Vec<String>> {
     let git_url = normalize_repo_url_for_git(repo_url);
 
-    // First, get the branch reference to ensure it exists
-    let branch_ref = get_branch_ref(&git_url, branch).await?;
+    // Create a temporary directory for the shallow clone
+    let temp_dir = tempfile::tempdir().with_context(|| "Failed to create temporary directory")?;
+    let clone_path = temp_dir.path();
 
-    // Now get the commit history using git log
-    let output = tokio::process::Command::new("git")
-        .args(&["ls-remote", &git_url, &format!("refs/heads/{}", branch)])
+    // Perform shallow clone with the specified depth
+    let clone_output = tokio::process::Command::new("git")
+        .args(&[
+            "clone",
+            "--depth",
+            &limit.to_string(),
+            "--branch",
+            branch,
+            "--single-branch",
+            &git_url,
+            ".",
+        ])
+        .current_dir(clone_path)
         .output()
         .await
-        .with_context(|| format!("Failed to get branch ref for {}", repo_url))?;
+        .with_context(|| {
+            format!(
+                "Failed to spawn git clone for '{}' with depth {}",
+                repo_url, limit
+            )
+        })?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
+    if !clone_output.status.success() {
+        let stderr = String::from_utf8_lossy(&clone_output.stderr);
+        let exit_code = clone_output.status.code().unwrap_or(-1);
 
         return Err(anyhow::anyhow!(
-            "git log failed for repository '{}' branch '{}' (exit code: {})\nError output: {}",
+            "git clone failed for repository '{}' branch '{}' (exit code: {})\nError output: {}",
             repo_url,
             branch,
             exit_code,
@@ -51,7 +68,37 @@ async fn get_recent_commit_hashes(
         ));
     }
 
-    let stdout = String::from_utf8(output.stdout)?;
+    // Now get the commit history using git log
+    let log_output = tokio::process::Command::new("git")
+        .args(&[
+            "log",
+            "--format=%H", // Only output commit hashes
+            &format!("--max-count={}", limit),
+        ])
+        .current_dir(clone_path)
+        .output()
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to spawn git log in cloned repository for '{}'",
+                repo_url
+            )
+        })?;
+
+    if !log_output.status.success() {
+        let stderr = String::from_utf8_lossy(&log_output.stderr);
+        let exit_code = log_output.status.code().unwrap_or(-1);
+
+        return Err(anyhow::anyhow!(
+            "git log failed in cloned repository for '{}' branch '{}' (exit code: {})\nError output: {}",
+            repo_url,
+            branch,
+            exit_code,
+            stderr.trim()
+        ));
+    }
+
+    let stdout = String::from_utf8(log_output.stdout)?;
     let commits: Vec<String> = stdout
         .lines()
         .map(|line| line.trim().to_string())
@@ -66,6 +113,7 @@ async fn get_recent_commit_hashes(
         ));
     }
 
+    // Temporary directory is automatically cleaned up when temp_dir goes out of scope
     Ok(commits)
 }
 
@@ -291,53 +339,36 @@ async fn get_commits_since(
 ) -> Result<Vec<String>> {
     let git_url = normalize_repo_url_for_git(repo_url);
 
-    // Get the branch reference to ensure it exists
-    let branch_ref = get_branch_ref(&git_url, branch).await?;
+    let temp_dir = tempfile::tempdir()?;
+    let clone_path = temp_dir.path();
 
-    // Use git log to get commits since the given commit (exclusive)
-    let output = tokio::process::Command::new("git")
+    // Clone with shallow depth - should be enough for frequent polling
+    tokio::process::Command::new("git")
         .args(&[
-            "log", 
-            "--format=%H",  // Only output commit hashes
-            &format!("{}..{}", since_commit, branch_ref)  // Commits between since_commit and branch_ref
-        ])
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to spawn git process for 'git log --format=%H {}..{}' (normalized from '{}')",
-                since_commit, branch_ref, repo_url
-            )
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        return Err(anyhow::anyhow!(
-            "git log failed for repository '{}' branch '{}' since commit '{}' (exit code: {})\nError output: {}",
-            repo_url,
+            "clone",
+            "--depth",
+            "20",
+            "--branch",
             branch,
-            since_commit,
-            exit_code,
-            stderr.trim()
-        ));
-    }
+            "--single-branch",
+            &git_url,
+            ".",
+        ])
+        .current_dir(clone_path)
+        .output()
+        .await?;
 
-    let stdout = String::from_utf8(output.stdout)?;
-    let commits: Vec<String> = stdout
+    let output = tokio::process::Command::new("git")
+        .args(&["log", "--format=%H", &format!("{}..HEAD", since_commit)])
+        .current_dir(clone_path)
+        .output()
+        .await?;
+
+    let commits: Vec<String> = String::from_utf8(output.stdout)?
         .lines()
         .map(|line| line.trim().to_string())
         .filter(|line| !line.is_empty())
         .collect();
-
-    debug!(
-        "Found {} new commits since {} for repo {} on branch {}",
-        commits.len(),
-        since_commit,
-        repo_url,
-        branch
-    );
 
     Ok(commits)
 }

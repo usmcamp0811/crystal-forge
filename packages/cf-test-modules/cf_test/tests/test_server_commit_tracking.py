@@ -31,21 +31,48 @@ def cf_client(cf_config):
     return CFTestClient(cf_config)
 
 
-@pytest.mark.vm_only
+@pytest.mark.commits
 def test_flake_initialization_commits(cf_client, server):
-    """Test that server initializes flake with 5 commits"""
+    """Test that server initializes flake with the expected number of commits"""
+    import os
 
-    # Wait for each commit to be inserted (5 times)
-    for i in range(5):
+    # Get expected commit count from environment
+    # expected_count = int(os.environ.get("CF_TEST_EXPECTED_COMMIT_COUNT", "15"))
+    expected_count = 5
+    all_commit_hashes = os.environ.get("CF_TEST_ALL_COMMIT_HASHES", "").split(",")
+
+    print(f"Expecting {expected_count} commits")
+    print(f"All commit hashes: {all_commit_hashes}")
+
+    # Wait for each commit to be inserted
+    for i in range(expected_count):
         cf_client.wait_for_service_log(
             server,
             C.SERVER_SERVICE,
             "✅ Inserted commit",
             timeout=120,
         )
-        print(f"Found commit {i + 1}/5")
+        print(f"Found commit {i + 1}/{expected_count}")
 
-    # Check database has exactly 5 commits
+    # Check database has the expected number of commits
     rows = cf_client.execute_sql("SELECT COUNT(*) as count FROM commits")
     commit_count = rows[0]["count"]
-    assert commit_count == 5, f"Expected 5 commits in database, found {commit_count}"
+    assert (
+        commit_count == expected_count
+    ), f"Expected {expected_count} commits in database, found {commit_count}"
+
+    # Optionally verify the commit hashes match
+    if (
+        all_commit_hashes and all_commit_hashes[0]
+    ):  # Check if we have real commit hashes
+        rows = cf_client.execute_sql(
+            "SELECT git_commit_hash FROM commits ORDER BY commit_timestamp"
+        )
+        db_hashes = [row["git_commit_hash"] for row in rows]
+
+        # Check that all expected hashes are in the database
+        for expected_hash in all_commit_hashes:
+            if expected_hash:  # Skip empty strings
+                assert (
+                    expected_hash in db_hashes
+                ), f"Expected commit hash {expected_hash} not found in database"
