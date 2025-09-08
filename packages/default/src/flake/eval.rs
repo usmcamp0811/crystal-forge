@@ -43,12 +43,9 @@ pub async fn list_nixos_configurations_from_commit(
     } else if repo_url.starts_with("git+") {
         format!("{}?rev={}", repo_url, commit_hash)
     } else {
-        format!(
-            "git+{}{}.git?rev={}",
-            repo_url,
-            if repo_url.ends_with('/') { "" } else { "" },
-            commit_hash
-        )
+        let separator = if repo_url.contains('?') { "&" } else { "?" };
+        let git_suffix = if repo_url.contains('?') { "" } else { ".git" };
+        format!("git+{}{git_suffix}{separator}rev={}", repo_url, commit_hash)
     };
 
     if is_path {

@@ -660,7 +660,6 @@ impl Derivation {
         commit: &crate::models::commits::Commit,
     ) -> Result<String> {
         let system = &self.derivation_name;
-
         // Always use a git flake ref pinned to the commit, even for local repos.
         let flake_ref = if Path::new(&flake.repo_url).exists() {
             let abs = std::fs::canonicalize(&flake.repo_url)
@@ -678,9 +677,17 @@ impl Derivation {
                 format!("{}?rev={}", flake.repo_url, commit.git_commit_hash)
             }
         } else {
-            format!("git+{}?rev={}", flake.repo_url, commit.git_commit_hash)
+            // Check if URL already has query parameters to avoid malformed URLs
+            let separator = if flake.repo_url.contains('?') {
+                "&"
+            } else {
+                "?"
+            };
+            format!(
+                "git+{}{separator}rev={}",
+                flake.repo_url, commit.git_commit_hash
+            )
         };
-
         Ok(format!(
             "{flake_ref}#nixosConfigurations.{system}.config.system.build.toplevel"
         ))
