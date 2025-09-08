@@ -12,22 +12,16 @@
   "__elements": {},
   "__requires": [
     {
-      "type": "panel",
-      "id": "bargauge",
-      "name": "Bar gauge",
-      "version": ""
-    },
-    {
       "type": "grafana",
       "id": "grafana",
       "name": "Grafana",
-      "version": "12.0.3"
+      "version": "12.0.4"
     },
     {
       "type": "datasource",
       "id": "grafana-postgresql-datasource",
       "name": "PostgreSQL",
-      "version": "12.0.3"
+      "version": "12.0.4"
     },
     {
       "type": "panel",
@@ -127,7 +121,7 @@
         "textMode": "auto",
         "wideLayout": true
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -137,7 +131,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "-- Replace view_systems_current_state counts using the new views\nSELECT\n  (SELECT COUNT(*) FROM view_system_deployment_status) AS \"Total Systems\",\n  (SELECT COUNT(*) FROM view_system_deployment_status WHERE deployment_status = 'up_to_date') AS \"Up to Date\",\n  (SELECT COUNT(*) FROM view_system_deployment_status WHERE deployment_status = 'behind') AS \"Behind Latest\",\n  (SELECT COUNT(*)\n     FROM view_system_heartbeat_status h\n    WHERE (h.most_recent_activity  IS NULL OR h.most_recent_activity  < NOW() - INTERVAL '15 minutes')\n      AND h.hostname IN (SELECT hostname FROM view_system_deployment_status)\n  ) AS \"No Recent Heartbeat\";\n",
+          "rawSql": "SELECT\n  (SELECT COUNT(*) FROM view_system_deployment_status) AS \"Total Systems\",\n  (SELECT COUNT(*) FROM view_system_deployment_status WHERE deployment_status = 'up_to_date') AS \"Up to Date\",\n  (SELECT COUNT(*) FROM view_system_deployment_status WHERE deployment_status = 'behind') AS \"Behind Latest\",\n  (SELECT COUNT(*)\n     FROM view_system_heartbeat_status h\n    WHERE (h.most_recent_activity IS NULL OR h.most_recent_activity < NOW() - INTERVAL '15 minutes')\n      AND h.hostname IN (SELECT hostname FROM view_system_deployment_status)\n  ) AS \"No Recent Heartbeat\";\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -255,6 +249,21 @@
                 }
               }
             ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dotfiles Healthy"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "semi-dark-green",
+                  "mode": "fixed"
+                }
+              }
+            ]
           }
         ]
       },
@@ -285,7 +294,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -295,7 +304,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "select Count(*) as count, heartbeat_status as health_status from view_system_heartbeat_status group by heartbeat_status;",
+          "rawSql": "-- Per-flake heartbeat breakdown (stacked bar friendly) — hostnames via subquery (no join)\nSELECT\n  (\n    SELECT name\n    FROM flakes\n    WHERE id = (\n      SELECT s.flake_id\n      FROM systems AS s\n      WHERE s.hostname = h.hostname\n      LIMIT 1\n    )\n  ) AS flake_name,\n  h.heartbeat_status AS health_status,\n  COUNT(*) AS count\nFROM view_system_heartbeat_status AS h\nWHERE h.hostname IN (\n  SELECT s.hostname\n  FROM systems AS s\n  WHERE s.flake_id IN (${flake:csv})\n)\nGROUP BY flake_name, h.heartbeat_status\nORDER BY flake_name, h.heartbeat_status;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -609,7 +618,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -619,7 +628,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "select count(*) as count, deployment_status from view_system_deployment_status group by deployment_status;",
+          "rawSql": "SELECT\n  COUNT(*) AS count,\n  v.deployment_status\nFROM view_system_deployment_status AS v\nWHERE v.hostname IN (\n  SELECT s.hostname\n  FROM systems AS s\n  WHERE s.flake_id IN (${flake:csv})\n)\nGROUP BY v.deployment_status\nORDER BY v.deployment_status;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -747,7 +756,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -757,7 +766,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "select * from view_config_timeline;",
+          "rawSql": "-- Config timeline × multi-flake\nSELECT v.*\nFROM public.view_config_timeline AS v\nJOIN flakes AS f ON f.name = v.flake_name\nWHERE f.id IN (${flake:csv})\nORDER BY v.time DESC;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -847,7 +856,7 @@
         },
         "showHeader": true
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -954,7 +963,7 @@
         "showHeader": true,
         "sortBy": []
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -1038,7 +1047,7 @@
         },
         "showHeader": true
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -1135,7 +1144,7 @@
         },
         "showHeader": true
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -1145,7 +1154,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "SELECT hostname as \"Hostname\", status as \"Deployment Status\", last_seen as \"Last Seen\", version as \"Agent Version\", uptime as \"Uptime\", ip_address as \"IP Address\" FROM view_systems_status_table LIMIT 50 ",
+          "rawSql": "SELECT \n    vsd.hostname AS \"Hostname\",\n    vsd.deployment_status AS \"Deployment Status\", \n    vsh.most_recent_activity AS \"Last Seen\",\n    lss.agent_version AS \"Agent Version\",\n    ROUND(lss.uptime_secs / 86400.0, 1) AS \"Uptime\",\n    lss.primary_ip_address AS \"IP Address\"\nFROM view_system_deployment_status vsd\nLEFT JOIN view_system_heartbeat_status vsh ON vsd.hostname = vsh.hostname\nLEFT JOIN (\n    SELECT DISTINCT ON (hostname)\n        hostname,\n        agent_version, \n        uptime_secs,\n        primary_ip_address\n    FROM system_states\n    ORDER BY hostname, timestamp DESC\n) lss ON vsd.hostname = lss.hostname\nLEFT JOIN systems s ON vsd.hostname = s.hostname\nWHERE s.flake_id IN ($flake)\nLIMIT 50;",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1307,7 +1316,7 @@
             "h": 7,
             "w": 24,
             "x": 0,
-            "y": 103
+            "y": 136
           },
           "id": 8,
           "options": {
@@ -1408,7 +1417,7 @@
         },
         "showHeader": true
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -1489,7 +1498,7 @@
         },
         "showHeader": true
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -1528,10 +1537,15 @@
         "type": "grafana-postgresql-datasource",
         "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
       },
+      "description": "Check this if all your systems are `unknown`. ",
       "fieldConfig": {
         "defaults": {
-          "color": {
-            "mode": "continuous-GrYlRd"
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            },
+            "inspect": false
           },
           "mappings": [],
           "thresholds": {
@@ -1550,41 +1564,33 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 8,
+        "h": 7,
         "w": 12,
         "x": 0,
         "y": 58
       },
       "id": 16,
       "options": {
-        "displayMode": "basic",
-        "legend": {
-          "calcs": [],
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": false
-        },
-        "maxVizHeight": 300,
-        "minVizHeight": 16,
-        "minVizWidth": 8,
-        "namePlacement": "auto",
-        "orientation": "horizontal",
-        "reduceOptions": {
-          "calcs": [],
+        "cellHeight": "sm",
+        "footer": {
+          "countRows": false,
           "fields": "",
-          "values": true
+          "reducer": ["sum"],
+          "show": false
         },
-        "showUnfilled": true,
-        "sizing": "auto",
-        "valueMode": "color"
+        "showHeader": true
       },
-      "pluginVersion": "12.0.3",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
+          "datasource": {
+            "type": "grafana-postgresql-datasource",
+            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+          },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "-- Bar gauge: derivations by status (use “Bar gauge” panel)\n-- Title: Build status – ${commit:text}\nSELECT\n  ds.name  AS status,\n  ds.display_order,\n  COUNT(*) AS count\nFROM view_commit_nixos_table v\nJOIN derivation_statuses ds ON ds.name = v.derivation_status\nWHERE $__timeFilter(v.commit_timestamp)\n  AND v.commit_id::text IN (${commit:sqlstring})\nGROUP BY ds.name, ds.display_order\nORDER BY ds.display_order;\n",
+          "rawSql": "-- your variable returns IDs, but the view has flake *names*\n-- filter by mapping IDs -> names\nSELECT flake as \"Flake\", commit as \"Commit\", age_interval as \"Age\", attempt_status as \"Status\"\nFROM view_flake_recent_commits\nWHERE flake IN (\n  SELECT name FROM flakes WHERE id IN (${flake:csv})\n)\nORDER BY flake, commit_timestamp DESC;\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -1602,21 +1608,36 @@
               }
             ],
             "limit": 50
-          },
-          "datasource": {
-            "type": "grafana-postgresql-datasource",
-            "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
           }
         }
       ],
-      "title": "New panel",
-      "type": "bargauge"
+      "title": "Latest Commit Status",
+      "type": "table"
     }
   ],
   "schemaVersion": 41,
   "tags": [],
   "templating": {
     "list": [
+      {
+        "allowCustomValue": false,
+        "current": {},
+        "datasource": {
+          "type": "grafana-postgresql-datasource",
+          "uid": "${DS_RECKLESS-POSTGRES-CRYSTAL-FORGE}"
+        },
+        "definition": "SELECT id AS \"__value\", name AS \"__text\"\nFROM flakes\nORDER BY name;",
+        "description": "The Flake or Flakes to Display",
+        "includeAll": true,
+        "label": "Flake",
+        "multi": true,
+        "name": "flake",
+        "options": [],
+        "query": "SELECT id AS \"__value\", name AS \"__text\"\nFROM flakes\nORDER BY name;",
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      },
       {
         "allowCustomValue": false,
         "current": {},
@@ -1656,13 +1677,13 @@
     ]
   },
   "time": {
-    "from": "2025-08-22T02:15:46.120Z",
-    "to": "2025-08-28T16:26:45.747Z"
+    "from": "now-6h",
+    "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Crystal Forge Dashboard",
   "uid": "3d70baf5-db41-4dfa-bbee-af52dbfbe736",
-  "version": 54,
+  "version": 63,
   "weekStart": ""
 }
