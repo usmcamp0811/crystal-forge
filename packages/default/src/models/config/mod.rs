@@ -116,9 +116,11 @@ impl CrystalForgeConfig {
             .build()
             .context("loading configuration")?;
 
-        settings
-            .try_deserialize::<Self>()
-            .context("parsing configuration")
+        let mut config: Self = settings
+            .try_deserialize()
+            .context("parsing configuration")?;
+
+        Ok(config)
     }
 
     pub async fn db_pool() -> Result<PgPool> {

@@ -259,6 +259,11 @@ in {
               type = lib.types.bool;
               description = "Automatically poll for new commits";
             };
+            initial_commit_depth = lib.mkOption {
+              type = lib.types.int;
+              default = 5;
+              description = "How many commits in the past to monitor when initializing the flake monitor";
+            };
           };
         });
         default = [];

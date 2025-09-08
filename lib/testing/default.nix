@@ -132,92 +132,111 @@ in rec {
       git config user.name "Crystal Forge Test"
       git config user.email "test@crystal-forge.dev"
 
-      # Array to store commit hashes
-      COMMIT_HASHES=()
+      # Array to store commit hashes for each branch
+      declare -A BRANCH_COMMITS
+      BRANCH_COMMITS[main]=""
+      BRANCH_COMMITS[development]=""
+      BRANCH_COMMITS[feature/experimental]=""
 
-      # Create development history with 15 commits
+      # === MAIN BRANCH (5 commits) ===
+      git checkout -b main
+
       git add -f flake.nix
       [ -f flake.lock ] && git add -f flake.lock
       git commit -q -m "Initial flake configuration"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
-      echo "# Crystal Forge Test Environment" >> flake.nix
+      echo "# Crystal Forge Production Environment" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Add documentation comment"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Add production documentation"
+      BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
       git add -A
-      git commit -q -m "Add remaining project files"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Add project files for production"
+      BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
-      echo "" >> flake.nix
-      echo "# Last updated: $(date)" >> flake.nix
+      echo "# Version: 1.0.0-stable" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Update timestamp"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Release version 1.0.0"
+      BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
-      echo "# Version: 1.0.0" >> flake.nix
+      echo "# Production ready" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Add version information"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Mark as production ready"
+      BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
-      echo "# Maintainer: Crystal Forge Team" >> flake.nix
+      MAIN_HEAD=$(git rev-parse HEAD)
+
+      # === DEVELOPMENT BRANCH (7 commits) ===
+      git checkout -b development main
+
+      echo "# Development Environment" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Add maintainer information"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Setup development environment"
+      BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
-      echo "# License: MIT" >> flake.nix
+      echo "# Debug flags enabled" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Add license information"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Enable debug flags for development"
+      BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
-      echo "# Dependencies updated" >> flake.nix
+      echo "# Development dependencies" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Update dependencies"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Add development dependencies"
+      BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
-      echo "# Performance improvements" >> flake.nix
+      echo "# Testing framework integration" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Performance optimizations"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Integrate testing framework"
+      BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
-      echo "# Security fixes applied" >> flake.nix
+      echo "# Hot reload support" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Apply security patches"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Add hot reload for development"
+      BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
-      echo "# Documentation updates" >> flake.nix
+      echo "# Development tools configured" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Update documentation"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Configure development tools"
+      BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
-      echo "# Build system improvements" >> flake.nix
+      echo "# Latest development snapshot" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Improve build system"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Development snapshot v1.1.0-dev"
+      BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
-      echo "# Testing framework added" >> flake.nix
+      DEV_HEAD=$(git rev-parse HEAD)
+
+      # === FEATURE BRANCH (3 commits) ===
+      git checkout -b feature/experimental development
+
+      echo "# Experimental features enabled" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Add testing framework"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Enable experimental features"
+      BRANCH_COMMITS[feature/experimental]+="$(git rev-parse HEAD) "
 
-      echo "# CI/CD pipeline configured" >> flake.nix
+      echo "# New algorithm implementation" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Configure CI/CD pipeline"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Implement new experimental algorithm"
+      BRANCH_COMMITS[feature/experimental]+="$(git rev-parse HEAD) "
 
-      echo "# Final release preparation" >> flake.nix
+      echo "# Performance benchmarks" >> flake.nix
       git add -f flake.nix
-      git commit -q -m "Prepare for release"
-      COMMIT_HASHES+=($(git rev-parse HEAD))
+      git commit -q -m "Add performance benchmarks"
+      BRANCH_COMMITS[feature/experimental]+="$(git rev-parse HEAD) "
 
-      # Get the final commit hash BEFORE creating bare repo
-      FINAL_COMMIT=$(git rev-parse HEAD)
+      FEATURE_HEAD=$(git rev-parse HEAD)
 
       # Create bare repository for serving
       git init --bare "$out"
       git -C "$out" config receive.denyCurrentBranch ignore
-      git push "$out" HEAD:refs/heads/main
+
+      # Push all branches to bare repo
+      git push "$out" main:refs/heads/main
+      git push "$out" development:refs/heads/development
+      git push "$out" feature/experimental:refs/heads/feature/experimental
+
+      # Set main as default branch
       git -C "$out" symbolic-ref HEAD refs/heads/main
 
       # Enable Git HTTP backend
@@ -225,14 +244,25 @@ in rec {
       git -C "$out" config http.uploadpack true
       git -C "$out" update-server-info
 
-      # Output the commit hash to a file in the bare repo
-      echo "$FINAL_COMMIT" > "$out/HEAD_COMMIT"
+      # Output branch information
+      echo "$MAIN_HEAD" > "$out/MAIN_HEAD"
+      echo "$DEV_HEAD" > "$out/DEVELOPMENT_HEAD"
+      echo "$FEATURE_HEAD" > "$out/FEATURE_HEAD"
 
-      # Output all commit hashes (one per line)
-      printf "%s\n" "''${COMMIT_HASHES[@]}" > "$out/ALL_COMMITS"
+      # Output all commits for each branch (space-separated)
+      echo "''${BRANCH_COMMITS[main]}" | tr ' ' '\n' | grep -v '^$' > "$out/MAIN_COMMITS"
+      echo "''${BRANCH_COMMITS[development]}" | tr ' ' '\n' | grep -v '^$' > "$out/DEVELOPMENT_COMMITS"
+      echo "''${BRANCH_COMMITS[feature/experimental]}" | tr ' ' '\n' | grep -v '^$' > "$out/FEATURE_COMMITS"
 
-      # Output count of commits
-      echo "''${#COMMIT_HASHES[@]}" > "$out/COMMIT_COUNT"
+      # Output commit counts for each branch
+      echo "5" > "$out/MAIN_COMMIT_COUNT"
+      echo "7" > "$out/DEVELOPMENT_COMMIT_COUNT"
+      echo "3" > "$out/FEATURE_COMMIT_COUNT"
+
+      # Legacy compatibility - use main branch data
+      echo "$MAIN_HEAD" > "$out/HEAD_COMMIT"
+      echo "''${BRANCH_COMMITS[main]}" | tr ' ' '\n' | grep -v '^$' > "$out/ALL_COMMITS"
+      echo "5" > "$out/COMMIT_COUNT"
     '';
 
   # Create a reusable git server node for tests with cgit web interface
@@ -481,6 +511,19 @@ in rec {
               name = "crystal-forge";
               repo_url = "http://gitserver/crystal-forge";
               auto_poll = true;
+              initial_commit_depth = 5;
+            }
+            {
+              name = "crystal-forge-development";
+              repo_url = "http://gitserver/crystal-forge?ref=development";
+              auto_poll = true;
+              initial_commit_depth = 7;
+            }
+            {
+              name = "crystal-forge-feature";
+              repo_url = "http://gitserver/crystal-forge?ref=feature/experimental";
+              auto_poll = true;
+              initial_commit_depth = 3;
             }
           ];
           environments = [

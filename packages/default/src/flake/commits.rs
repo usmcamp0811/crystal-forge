@@ -34,11 +34,12 @@ async fn get_recent_commit_hashes(
     let clone_path = temp_dir.path();
 
     // Perform shallow clone with the specified depth
+    // In get_commits_since function, add proper error handling
     let clone_output = tokio::process::Command::new("git")
         .args(&[
             "clone",
             "--depth",
-            &limit.to_string(),
+            "10", // Increase depth for better history
             "--branch",
             branch,
             "--single-branch",
@@ -47,24 +48,14 @@ async fn get_recent_commit_hashes(
         ])
         .current_dir(clone_path)
         .output()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to spawn git clone for '{}' with depth {}",
-                repo_url, limit
-            )
-        })?;
+        .await?;
 
     if !clone_output.status.success() {
         let stderr = String::from_utf8_lossy(&clone_output.stderr);
-        let exit_code = clone_output.status.code().unwrap_or(-1);
-
         return Err(anyhow::anyhow!(
-            "git clone failed for repository '{}' branch '{}' (exit code: {})\nError output: {}",
+            "Git clone failed for {}: {}",
             repo_url,
-            branch,
-            exit_code,
-            stderr.trim()
+            stderr
         ));
     }
 
@@ -195,7 +186,7 @@ pub async fn initialize_flake_commits(
         match fetch_and_insert_recent_commits(
             pool,
             &flake.repo_url,
-            &flake.branch,
+            &flake.branch(),
             Some(flake.initial_commit_depth),
         )
         .await
@@ -205,13 +196,15 @@ pub async fn initialize_flake_commits(
                     "✅ Successfully initialized {} commits for {} on branch {}",
                     commits.len(),
                     flake.name,
-                    flake.branch
+                    flake.branch()
                 );
             }
             Err(e) => {
                 warn!(
                     "❌ Failed to initialize commits for {}: {} on branch {}",
-                    flake.name, e, flake.branch
+                    flake.name,
+                    e,
+                    flake.branch()
                 );
             }
         }
@@ -232,31 +225,72 @@ pub async fn sync_all_watched_flakes_commits(
 
     for flake in watched_flakes {
         if !flake.auto_poll {
-            debug!("⏭️ Skipping {} (auto_poll = false)", flake.name);
+            debug!("⭐️ Skipping {} (auto_poll = false)", flake.name);
             continue;
         }
 
         info!("🔗 Syncing commits for flake: {}", flake.name);
-        let last_commit = flake_last_commit(pool, &flake.repo_url).await?;
-        match fetch_and_insert_commits_since(pool, &flake.repo_url, &flake.branch, &last_commit)
-            .await
-        {
-            Ok(commit_hashes) => {
-                if commit_hashes.is_empty() {
-                    info!("No new commits found for {}", flake.name)
-                } else {
-                    info!(
-                        "✅ Successfully synced {} new commits for {}",
-                        commit_hashes.len(),
-                        flake.name
-                    );
-                    for commit_hash in commit_hashes {
-                        debug!("📝 New commit for {}: {}", flake.name, commit_hash);
+
+        // Check if flake has commits first
+        match flake_has_commits(pool, &flake.repo_url).await {
+            Ok(true) => {
+                // Has commits, do incremental sync
+                match flake_last_commit(pool, &flake.repo_url).await {
+                    Ok(last_commit) => {
+                        match fetch_and_insert_commits_since(
+                            pool,
+                            &flake.repo_url,
+                            &flake.branch(),
+                            &last_commit,
+                        )
+                        .await
+                        {
+                            Ok(new_commits) => {
+                                if !new_commits.is_empty() {
+                                    info!(
+                                        "✅ Found {} new commits for {}",
+                                        new_commits.len(),
+                                        flake.name
+                                    );
+                                } else {
+                                    debug!("📍 No new commits for {}", flake.name);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("⚠️ Failed to sync new commits for {}: {}", flake.name, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Failed to get last commit for {}: {}", flake.name, e);
+                    }
+                }
+            }
+            Ok(false) => {
+                // No commits, initialize
+                info!("🔄 Initializing commits for flake: {}", flake.name);
+                match fetch_and_insert_recent_commits(
+                    pool,
+                    &flake.repo_url,
+                    &flake.branch(),
+                    Some(flake.initial_commit_depth),
+                )
+                .await
+                {
+                    Ok(commits) => {
+                        info!(
+                            "✅ Successfully initialized {} commits for {}",
+                            commits.len(),
+                            flake.name
+                        );
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Failed to initialize commits for {}: {}", flake.name, e);
                     }
                 }
             }
             Err(e) => {
-                warn!("❌ Failed to sync commits for {}: {}", flake.name, e);
+                warn!("⚠️ Failed to check commits for {}: {}", flake.name, e);
             }
         }
     }
@@ -265,21 +299,23 @@ pub async fn sync_all_watched_flakes_commits(
 }
 
 fn normalize_repo_url_for_git(repo_url: &str) -> String {
-    // Handle different Nix flake URL formats
-    if let Some(stripped) = repo_url.strip_prefix("git+") {
-        // Remove git+ prefix
-        stripped.to_string()
+    let base_url = if let Some(stripped) = repo_url.strip_prefix("git+") {
+        stripped
     } else if repo_url.starts_with("github:") {
-        // Convert github: to https://
         let repo_path = repo_url.strip_prefix("github:").unwrap();
-        format!("https://github.com/{}", repo_path)
+        return format!("https://github.com/{}", repo_path);
     } else if repo_url.starts_with("gitlab:") {
-        // Convert gitlab: to https://
         let repo_path = repo_url.strip_prefix("gitlab:").unwrap();
-        format!("https://gitlab.com/{}", repo_path)
+        return format!("https://gitlab.com/{}", repo_path);
     } else {
-        // Already a regular git URL
-        repo_url.to_string()
+        repo_url
+    };
+
+    // Strip query parameters for git operations
+    if let Some(question_mark_pos) = base_url.find('?') {
+        base_url[..question_mark_pos].to_string()
+    } else {
+        base_url.to_string()
     }
 }
 
