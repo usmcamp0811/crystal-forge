@@ -152,7 +152,7 @@ in
           "--tb=short",
           "-x",
           "-s",  # Add -s to see print output immediately
-          "-m", "commits",
+          "-m", "vm_only",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:
