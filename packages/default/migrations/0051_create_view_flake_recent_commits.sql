@@ -1,4 +1,4 @@
-CREATE VIEW view_flake_recent_commits AS
+CREATE OR REPLACE VIEW view_flake_recent_commits AS
 -- Last 3 commits per flake; don't show "retries" if commit has any derivations
 WITH ranked AS (
     SELECT
