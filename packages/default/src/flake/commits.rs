@@ -34,11 +34,12 @@ async fn get_recent_commit_hashes(
     let clone_path = temp_dir.path();
 
     // Perform shallow clone with the specified depth
+    // In get_commits_since function, add proper error handling
     let clone_output = tokio::process::Command::new("git")
         .args(&[
             "clone",
             "--depth",
-            &limit.to_string(),
+            "10", // Increase depth for better history
             "--branch",
             branch,
             "--single-branch",
@@ -47,24 +48,14 @@ async fn get_recent_commit_hashes(
         ])
         .current_dir(clone_path)
         .output()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to spawn git clone for '{}' with depth {}",
-                repo_url, limit
-            )
-        })?;
+        .await?;
 
     if !clone_output.status.success() {
         let stderr = String::from_utf8_lossy(&clone_output.stderr);
-        let exit_code = clone_output.status.code().unwrap_or(-1);
-
         return Err(anyhow::anyhow!(
-            "git clone failed for repository '{}' branch '{}' (exit code: {})\nError output: {}",
+            "Git clone failed for {}: {}",
             repo_url,
-            branch,
-            exit_code,
-            stderr.trim()
+            stderr
         ));
     }
 
@@ -234,7 +225,7 @@ pub async fn sync_all_watched_flakes_commits(
 
     for flake in watched_flakes {
         if !flake.auto_poll {
-            debug!("⏭️ Skipping {} (auto_poll = false)", flake.name);
+            debug!("⭐️ Skipping {} (auto_poll = false)", flake.name);
             continue;
         }
 
@@ -244,8 +235,36 @@ pub async fn sync_all_watched_flakes_commits(
         match flake_has_commits(pool, &flake.repo_url).await {
             Ok(true) => {
                 // Has commits, do incremental sync
-                let last_commit = flake_last_commit(pool, &flake.repo_url).await?;
-                // ... rest of sync logic
+                match flake_last_commit(pool, &flake.repo_url).await {
+                    Ok(last_commit) => {
+                        match fetch_and_insert_commits_since(
+                            pool,
+                            &flake.repo_url,
+                            &flake.branch(),
+                            &last_commit,
+                        )
+                        .await
+                        {
+                            Ok(new_commits) => {
+                                if !new_commits.is_empty() {
+                                    info!(
+                                        "✅ Found {} new commits for {}",
+                                        new_commits.len(),
+                                        flake.name
+                                    );
+                                } else {
+                                    debug!("📍 No new commits for {}", flake.name);
+                                }
+                            }
+                            Err(e) => {
+                                warn!("⚠️ Failed to sync new commits for {}: {}", flake.name, e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("⚠️ Failed to get last commit for {}: {}", flake.name, e);
+                    }
+                }
             }
             Ok(false) => {
                 // No commits, initialize
@@ -266,12 +285,12 @@ pub async fn sync_all_watched_flakes_commits(
                         );
                     }
                     Err(e) => {
-                        warn!("❌ Failed to initialize commits for {}: {}", flake.name, e);
+                        warn!("⚠️ Failed to initialize commits for {}: {}", flake.name, e);
                     }
                 }
             }
             Err(e) => {
-                warn!("❌ Failed to check commits for {}: {}", flake.name, e);
+                warn!("⚠️ Failed to check commits for {}: {}", flake.name, e);
             }
         }
     }
