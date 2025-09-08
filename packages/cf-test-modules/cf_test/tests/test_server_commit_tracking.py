@@ -287,6 +287,8 @@ def test_branch_polling_picks_up_new_commit(cf_client, server, gitserver):
         "cd /tmp/test-clone-dev && git commit -m 'Test development polling commit'"
     )
 
+    gitserver.succeed(f"cd /tmp/test-clone-dev && git push origin {branch_name}")
+
     # Get the new commit hash
     new_commit_hash = gitserver.succeed(
         "cd /tmp/test-clone-dev && git rev-parse HEAD"
