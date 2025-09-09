@@ -103,17 +103,38 @@
           whitelist_path = toString cfg.vulnix.whitelist_path;
         };
     }
-    // lib.optionalAttrs (cfg.cache.push_to != null) {
+    // lib.optionalAttrs (cfg.cache.push_to != null || cfg.cache.cache_type != "Nix") {
       cache =
         {
-          push_to = cfg.cache.push_to;
+          cache_type = cfg.cache.cache_type;
           push_after_build = cfg.cache.push_after_build;
-          compression = cfg.cache.compression;
-          push_filter = cfg.cache.push_filter;
           parallel_uploads = cfg.cache.parallel_uploads;
+          max_retries = cfg.cache.max_retries;
+          retry_delay_seconds = cfg.cache.retry_delay_seconds;
+        }
+        // lib.optionalAttrs (cfg.cache.push_to != null) {
+          push_to = cfg.cache.push_to;
         }
         // lib.optionalAttrs (cfg.cache.signing_key != null) {
           signing_key = toString cfg.cache.signing_key;
+        }
+        // lib.optionalAttrs (cfg.cache.compression != null) {
+          compression = cfg.cache.compression;
+        }
+        // lib.optionalAttrs (cfg.cache.push_filter != null) {
+          push_filter = cfg.cache.push_filter;
+        }
+        // lib.optionalAttrs (cfg.cache.s3_region != null) {
+          s3_region = cfg.cache.s3_region;
+        }
+        // lib.optionalAttrs (cfg.cache.s3_profile != null) {
+          s3_profile = cfg.cache.s3_profile;
+        }
+        // lib.optionalAttrs (cfg.cache.attic_token != null) {
+          attic_token = cfg.cache.attic_token;
+        }
+        // lib.optionalAttrs (cfg.cache.attic_cache_name != null) {
+          attic_cache_name = cfg.cache.attic_cache_name;
         };
     };
 
@@ -438,6 +459,11 @@ in {
     };
 
     cache = {
+      cache_type = lib.mkOption {
+        type = lib.types.enum ["S3" "Attic" "Http" "Nix"];
+        default = "Nix";
+        description = "Type of cache to use";
+      };
       push_to = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -467,6 +493,39 @@ in {
         type = lib.types.ints.positive;
         default = 4;
         description = "Parallel uploads";
+      };
+      # S3-specific options
+      s3_region = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "S3 region for cache";
+      };
+      s3_profile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "AWS profile to use for S3 cache";
+      };
+      # Attic-specific options
+      attic_token = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Attic authentication token";
+      };
+      attic_cache_name = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Attic cache name";
+      };
+      # Retry configuration
+      max_retries = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 3;
+        description = "Maximum retry attempts for cache operations";
+      };
+      retry_delay_seconds = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 5;
+        description = "Delay between retry attempts in seconds";
       };
     };
 
