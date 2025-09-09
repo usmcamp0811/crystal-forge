@@ -1,5 +1,7 @@
 use crate::flake::eval::list_nixos_configurations_from_commit;
-use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
+use crate::models::config::{
+    BuildConfig, CacheConfig, CachePushJob, CrystalForgeConfig, VulnixConfig,
+};
 use crate::queries::commits::get_commits_pending_evaluation;
 use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
@@ -13,6 +15,7 @@ use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use sqlx::PgPool;
 use tokio::fs;
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
@@ -21,6 +24,12 @@ pub async fn run_build_loop(pool: PgPool) {
     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
         CrystalForgeConfig::default()
+    });
+    let (cache_tx, cache_rx) = mpsc::channel::<CachePushJob>(100);
+    // Spawn the cache push worker
+    let cache_pool = pool.clone();
+    tokio::spawn(async move {
+        run_cache_push_worker(cache_pool, cache_rx).await;
     });
     let build_config = cfg.get_build_config();
     let cache_config = cfg.get_cache_config();
@@ -43,7 +52,7 @@ pub async fn run_build_loop(pool: PgPool) {
     );
 
     loop {
-        if let Err(e) = build_derivations(&pool, &build_config, &cache_config).await {
+        if let Err(e) = build_derivations(&pool, &build_config, &cache_config, &cache_tx).await {
             error!("❌ Error in build cycle: {e}");
         }
 
@@ -95,6 +104,7 @@ async fn build_derivations(
     pool: &PgPool,
     build_config: &BuildConfig,
     cache_config: &CacheConfig,
+    cache_tx: &mpsc::Sender<CachePushJob>,
 ) -> Result<()> {
     // Get derivations ready for building (those with dry-run-complete status)
     match get_derivations_ready_for_build(pool).await {
@@ -134,26 +144,18 @@ async fn build_derivations(
                 // Push to cache if configured
                 if cache_config.push_after_build {
                     info!(
-                        "📤 Starting cache push for derivation: {}",
+                        "📤 Queuing cache push for derivation: {}",
                         derivation.derivation_name
                     );
-                    match derivation
-                        .push_to_cache(&store_path, cache_config, build_config)
-                        .await
-                    {
-                        Ok(_) => {
-                            info!("✅ Cache push completed for {}", derivation.derivation_name);
-                        }
-                        Err(e) => {
-                            warn!(
-                                "⚠️ Cache push failed for {}: {}",
-                                derivation.derivation_name, e
-                            );
-                            // Cache push failures are non-fatal, just log and continue
-                        }
+
+                    if let Err(e) = cache_tx.try_send(CachePushJob {
+                        derivation_id: derivation.id,
+                        derivation_name: derivation.derivation_name.clone(),
+                        store_path: store_path.clone(),
+                    }) {
+                        warn!("⚠️ Failed to queue cache push: {}", e);
+                        // Don't fail the build, just log the warning
                     }
-                } else {
-                    info!("⏭️ Skipping cache push (push_after_build = false)");
                 }
                 // Mark as build complete (this will make it available for CVE scanning)
                 use crate::queries::derivations::mark_target_build_complete;
@@ -256,5 +258,34 @@ async fn scan_derivations(
         }
         Err(e) => error!("❌ Failed to get derivations needing CVE scan: {e}"),
     }
+    Ok(())
+}
+
+async fn run_cache_push_worker(pool: PgPool, mut cache_rx: mpsc::Receiver<CachePushJob>) {
+    info!("🚀 Starting cache push worker");
+
+    while let Some(job) = cache_rx.recv().await {
+        if let Err(e) = process_cache_push_job(&pool, job).await {
+            error!("❌ Cache push job failed: {}", e);
+        }
+    }
+}
+
+async fn process_cache_push_job(pool: &PgPool, job: CachePushJob) -> Result<()> {
+    let cfg = CrystalForgeConfig::load()?;
+    let cache_config = cfg.get_cache_config();
+    let build_config = cfg.get_build_config();
+
+    info!("📤 Processing cache push for {}", job.derivation_name);
+
+    // Get derivation from database to use push_to_cache method
+    let derivation =
+        crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id).await?;
+
+    derivation
+        .push_to_cache(&job.store_path, cache_config, build_config)
+        .await?;
+
+    info!("✅ Cache push completed for {}", job.derivation_name);
     Ok(())
 }

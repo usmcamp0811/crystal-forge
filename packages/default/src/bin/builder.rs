@@ -1,5 +1,5 @@
 use crystal_forge::builder::{run_build_loop, run_cve_scan_loop};
-use crystal_forge::models::config::CrystalForgeConfig;
+use crystal_forge::models::config::{CachePushJob, CrystalForgeConfig};
 use crystal_forge::server::memory_monitor_task;
 use tokio::signal;
 use tracing::info;

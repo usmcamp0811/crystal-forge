@@ -103,6 +103,37 @@ pub struct DerivationStatus {
 }
 
 impl Derivation {
+
+    pub async fn push_to_cache_with_retry(
+        &self,
+        store_path: &str,
+        cache_config: &CacheConfig,
+        build_config: &BuildConfig,
+    ) -> Result<()> {
+        let mut attempts = 0;
+        let max_attempts = cache_config.max_retries + 1;
+
+        while attempts < max_attempts {
+            match self
+                .push_to_cache(store_path, cache_config, build_config)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) if attempts < max_attempts - 1 => {
+                    warn!(
+                        "Cache push attempt {} failed: {}, retrying...",
+                        attempts + 1,
+                        e
+                    );
+                    sleep(Duration::from_secs(cache_config.retry_delay_seconds)).await;
+                    attempts += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        unreachable!()
+    }
     pub async fn summary(&self) -> Result<String> {
         let pool = CrystalForgeConfig::db_pool().await?;
 

@@ -1,27 +1,44 @@
 use serde::Deserialize;
 
-/// Configuration for nix cache pushing and distribution
 #[derive(Clone, Debug, Deserialize)]
 pub struct CacheConfig {
-    /// Cache URI to push to (e.g., "s3://bucket", "https://cache.example.com")
+    #[serde(default)]
+    pub cache_type: CacheType,
     pub push_to: Option<String>,
-
-    /// Automatically push builds to cache after successful completion
     #[serde(default)]
     pub push_after_build: bool,
-
-    /// Path to private signing key for cache signatures
     pub signing_key: Option<String>,
-
-    /// Compression method for cache uploads
     pub compression: Option<String>,
-
-    /// Only push builds for these systems/targets
     pub push_filter: Option<Vec<String>>,
-
-    /// Maximum parallel uploads to cache
     #[serde(default = "CacheConfig::default_parallel_uploads")]
     pub parallel_uploads: u32,
+    // S3-specific
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    // Attic-specific
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    // Retry configuration
+    #[serde(default)]
+    pub max_retries: u32,
+    #[serde(default)]
+    pub retry_delay_seconds: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub enum CacheType {
+    S3,
+    Attic,
+    Http,
+    #[default]
+    Nix,
+}
+
+#[derive(Debug, Clone)]
+pub struct CachePushJob {
+    pub derivation_id: i32,
+    pub derivation_name: String,
+    pub store_path: String,
 }
 
 impl CacheConfig {
@@ -29,22 +46,43 @@ impl CacheConfig {
         4
     }
 
-    /// Check if a target should be pushed to cache based on filters
-    pub fn should_push(&self, target_name: &str) -> bool {
-        if !self.push_after_build {
-            return false;
-        }
-
-        match &self.push_filter {
-            Some(filters) => filters.iter().any(|filter| target_name.contains(filter)),
-            None => true, // No filter means push everything
+    pub fn copy_command_args(&self, store_path: &str) -> Option<Vec<String>> {
+        match self.cache_type {
+            CacheType::S3 => self.s3_copy_args(store_path),
+            CacheType::Attic => self.attic_copy_args(store_path),
+            CacheType::Http | CacheType::Nix => self.nix_copy_args(store_path),
         }
     }
 
-    /// Get nix copy command args for pushing to cache
-    pub fn copy_command_args(&self, store_path: &str) -> Option<Vec<String>> {
-        let push_to = self.push_to.as_ref()?;
+    fn attic_copy_args(&self, store_path: &str) -> Option<Vec<String>> {
+        let cache_name = self.attic_cache_name.as_ref()?;
+        Some(vec![
+            "attic".to_string(),
+            "push".to_string(),
+            cache_name.clone(),
+            store_path.to_string(),
+        ])
+    }
 
+    fn s3_copy_args(&self, store_path: &str) -> Option<Vec<String>> {
+        let push_to = self.push_to.as_ref()?;
+        let mut args = vec![
+            "copy".to_string(),
+            "--to".to_string(),
+            push_to.clone(),
+            store_path.to_string(),
+        ];
+
+        if let Some(key_path) = &self.signing_key {
+            args.extend(["--sign-key".to_string(), key_path.clone()]);
+        }
+
+        args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
+        Some(args)
+    }
+
+    fn nix_copy_args(&self, store_path: &str) -> Option<Vec<String>> {
+        let push_to = self.push_to.as_ref()?;
         let mut args = vec![
             "copy".to_string(),
             "--to".to_string(),
@@ -61,20 +99,36 @@ impl CacheConfig {
         }
 
         args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
-
         Some(args)
+    }
+
+    pub fn should_push(&self, target_name: &str) -> bool {
+        if !self.push_after_build {
+            return false;
+        }
+        match &self.push_filter {
+            Some(filters) => filters.iter().any(|filter| target_name.contains(filter)),
+            None => true,
+        }
     }
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
+            cache_type: CacheType::default(),
             push_to: None,
             push_after_build: false,
             signing_key: None,
             compression: None,
             push_filter: None,
-            parallel_uploads: 4,
+            parallel_uploads: Self::default_parallel_uploads(),
+            s3_region: None,
+            s3_profile: None,
+            attic_token: None,
+            attic_cache_name: None,
+            max_retries: 3,
+            retry_delay_seconds: 5,
         }
     }
 }
