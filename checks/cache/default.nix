@@ -54,9 +54,14 @@ in
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
           services.crystal-forge = {
+            enable = true;
             local-database = true;
             server.enable = true;
             build.enable = true;
+            database = {
+              host = "localhost";
+              port = 5432;
+            };
             cache = {
               cache_type = "S3";
               push_to = "s3://crystal-forge-cache";
@@ -86,9 +91,14 @@ in
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
           services.crystal-forge = {
+            enable = true;
             local-database = true;
             server.enable = true;
             build.enable = true;
+            database = {
+              host = "localhost";
+              port = 5432;
+            };
             cache = {
               cache_type = "Attic";
               push_after_build = true;
