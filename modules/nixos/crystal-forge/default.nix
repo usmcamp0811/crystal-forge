@@ -768,7 +768,14 @@ in {
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
-      path = with pkgs; [nix git vulnix systemd];
+      path = with pkgs;
+        [
+          nix
+          git
+          vulnix
+          systemd
+        ]
+        ++ lib.optional (cfg.cache.cache_type == "Attic") attic-client;
       environment = {
         RUST_LOG = cfg.log_level;
         NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
