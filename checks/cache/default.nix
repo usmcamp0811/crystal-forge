@@ -42,7 +42,6 @@ in
         port = 8080;
       };
 
-      # S3 cache setup
       s3Cache = lib.crystal-forge.makeS3CacheNode {
         inherit pkgs;
         bucketName = "crystal-forge-cache";
@@ -55,6 +54,7 @@ in
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
           services.crystal-forge = {
+            build.enable = true;
             cache = {
               cache_type = "S3";
               push_to = "s3://crystal-forge-cache";
@@ -64,7 +64,6 @@ in
               max_retries = 2;
               retry_delay_seconds = 1;
             };
-            # Override AWS CLI to point to our MinIO instance
             build.systemd_properties = [
               "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
               "Environment=AWS_ACCESS_KEY_ID=minioadmin"
@@ -75,13 +74,6 @@ in
         port = CF_TEST_SERVER_PORT;
       };
 
-      s3Agent = lib.crystal-forge.makeAgentNode {
-        inherit pkgs keyPath pubPath systemBuildClosure;
-        serverHost = "s3Server";
-        serverPort = CF_TEST_SERVER_PORT;
-      };
-
-      # Attic cache setup
       atticCache = lib.crystal-forge.makeAtticCacheNode {
         inherit pkgs;
         port = 8080;
@@ -92,6 +84,7 @@ in
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
           services.crystal-forge = {
+            build.enable = true;
             cache = {
               cache_type = "Attic";
               push_after_build = true;
@@ -100,19 +93,12 @@ in
               max_retries = 2;
               retry_delay_seconds = 1;
             };
-            # Configure to use our Attic instance
             build.systemd_properties = [
               "Environment=ATTIC_SERVER_URL=http://atticCache:8080"
             ];
           };
         };
         port = CF_TEST_SERVER_PORT;
-      };
-
-      atticAgent = lib.crystal-forge.makeAgentNode {
-        inherit pkgs keyPath pubPath systemBuildClosure;
-        serverHost = "atticServer";
-        serverPort = CF_TEST_SERVER_PORT;
       };
     };
 
