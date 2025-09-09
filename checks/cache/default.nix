@@ -54,6 +54,8 @@ in
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
           services.crystal-forge = {
+            local-database = true;
+            server.enable = true;
             build.enable = true;
             cache = {
               cache_type = "S3";
@@ -84,6 +86,8 @@ in
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
           services.crystal-forge = {
+            local-database = true;
+            server.enable = true;
             build.enable = true;
             cache = {
               cache_type = "Attic";
@@ -120,6 +124,7 @@ in
       atticCache.wait_for_unit("atticd.service")
       atticCache.wait_for_unit("attic-setup.service")
       atticCache.wait_for_open_port(8080)
+
 
       # Wait for servers
       s3Server.wait_for_unit("postgresql.service")

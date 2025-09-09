@@ -39,7 +39,7 @@
 
         # Force override the PATH to avoid conflicts
         environment = {
-          PATH = lib.mkForce "${pkgs.minio-client}/bin:${pkgs.glibc.bin}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin";
+          PATH = lib.mkForce "${pkgs.minio-client}/bin:${pkgs.glibc.bin}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin:${pkgs.gnugrep}/bin";
           HOME = "/tmp";
         };
 
