@@ -13,12 +13,7 @@
 
   pkgs = inputs.nixpkgs.legacyPackages.${actualSystem};
 
-  # Use a fixed, eval-time path for the flake source
-  # This avoids reading from a derivation output during evaluation
-  srcPath = builtins.fetchGit {
-    url = "https://gitlab.com/crystal-forge/crystal-forge.git";
-    rev = "f155b4ec2f706828d75dab9c4b7ff3a891bdd3d2";
-  };
+  srcPath = ./test-flake;
 
   # Parse the flake.lock file to get dependency information
   lockJson = builtins.fromJSON (builtins.readFile (srcPath + "/flake.lock"));
@@ -143,7 +138,8 @@ in rec {
       git commit -q -m "Add production documentation"
       BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
-      git add -A
+      echo "# Project files added" >> flake.nix
+      git add -f flake.nix
       git commit -q -m "Add project files for production"
       BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
