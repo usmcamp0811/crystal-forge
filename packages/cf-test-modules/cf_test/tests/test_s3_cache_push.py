@@ -202,7 +202,7 @@ def test_s3_cache_push_failure_does_not_block_build(cf_client, s3_server):
     final_status = cf_client.execute_sql(
         """
         SELECT d.status_id, ds.name as status_name
-        FROM derivations d 
+        FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
         WHERE d.id = %s
         """,

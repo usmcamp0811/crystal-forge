@@ -209,6 +209,9 @@ def pytest_configure(config: pytest.Config) -> None:
     """
     for mark, desc in [
         ("vm_only", "requires NixOS test driver"),
+        ("s3_cache", "requires NixOS test driver"),
+        ("attic_cache", "requires NixOS test driver"),
+        ("commits", "requires NixOS test driver"),
         ("vm_internal", "internal VM-mode checks"),
         ("driver", "requires NixOS driver machine fixture(s)"),
         ("harness", "scenario harness validation"),

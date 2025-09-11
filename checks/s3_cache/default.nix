@@ -53,6 +53,22 @@ in
         inherit pkgs systemBuildClosure keyPath pubPath;
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
+          services.postgresql = {
+            enable = true;
+            settings."listen_addresses" = lib.mkForce "*";
+            authentication = lib.concatStringsSep "\n" [
+              "local   all   postgres   trust"
+              "local   all   all        peer"
+              "host    all   all 127.0.0.1/32 trust"
+              "host    all   all ::1/128      trust"
+              "host    all   all 10.0.2.2/32  trust"
+            ];
+            initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+              CREATE USER crystal_forge LOGIN;
+              CREATE DATABASE crystal_forge OWNER crystal_forge;
+              GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+            '';
+          };
           services.crystal-forge = {
             enable = true;
             local-database = true;
@@ -101,7 +117,7 @@ in
       s3Server.wait_for_unit("postgresql.service")
       s3Server.wait_for_unit("crystal-forge-server.service")
       s3Server.wait_for_open_port(5432)
-      s3Server.forward_port(5432, 5432)
+      s3Server.forward_port(5433, 5432)
 
       from cf_test.vm_helpers import wait_for_git_server_ready
       wait_for_git_server_ready(gitserver, timeout=120)
@@ -112,11 +128,15 @@ in
 
       # Set environment variables for the test
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_DB_PORT"] = "5433"  # forwarded port
+      os.environ["CF_TEST_DB_PORT"] = "5433"
       os.environ["CF_TEST_DB_USER"] = "postgres"
       os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
       os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
+
+      # Legacy single-branch data (main branch)
+      os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
+      os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
 
       # Inject machines for test access
       import cf_test
