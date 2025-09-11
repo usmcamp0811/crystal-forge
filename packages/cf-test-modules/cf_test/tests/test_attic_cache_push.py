@@ -9,7 +9,7 @@ from cf_test.scenarios import _create_base_scenario
 from cf_test.vm_helpers import SmokeTestConstants as C
 from cf_test.vm_helpers import wait_for_crystal_forge_ready
 
-pytestmark = [pytest.mark.cache]
+pytestmark = [pytest.mark.attic_cache]
 
 
 @pytest.fixture(scope="session")

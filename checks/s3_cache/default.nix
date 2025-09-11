@@ -33,7 +33,7 @@
   };
 in
   pkgs.testers.runNixOSTest {
-    name = "crystal-forge-cache-integration";
+    name = "crystal-forge-s3-cache-integration";
     skipLint = true;
     skipTypeCheck = true;
     nodes = {
@@ -80,40 +80,6 @@ in
         };
         port = CF_TEST_SERVER_PORT;
       };
-
-      atticCache = lib.crystal-forge.makeAtticCacheNode {
-        inherit pkgs;
-        port = 8080;
-      };
-
-      atticServer = lib.crystal-forge.makeServerNode {
-        inherit pkgs systemBuildClosure keyPath pubPath;
-        extraConfig = {
-          imports = [inputs.self.nixosModules.crystal-forge];
-          services.crystal-forge = {
-            enable = true;
-            local-database = true;
-            server.enable = true;
-            build.enable = true;
-            database = {
-              host = "localhost";
-              port = 5432;
-            };
-            cache = {
-              cache_type = "Attic";
-              push_after_build = true;
-              attic_cache_name = "test";
-              attic_token = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
-              max_retries = 2;
-              retry_delay_seconds = 1;
-            };
-            build.systemd_properties = [
-              "Environment=ATTIC_SERVER_URL=http://atticCache:8080"
-            ];
-          };
-        };
-        port = CF_TEST_SERVER_PORT;
-      };
     };
 
     globalTimeout = 1200; # 20 minutes for cache operations
@@ -135,7 +101,7 @@ in
       s3Server.wait_for_unit("postgresql.service")
       s3Server.wait_for_unit("crystal-forge-server.service")
       s3Server.wait_for_open_port(5432)
-      s3Server.forward_port(5433, 5432)
+      s3Server.forward_port(5432, 5432)
 
       from cf_test.vm_helpers import wait_for_git_server_ready
       wait_for_git_server_ready(gitserver, timeout=120)
@@ -146,7 +112,7 @@ in
 
       # S3 test environment
       os.environ["CF_TEST_S3_DB_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_S3_DB_PORT"] = "5433"
+      os.environ["CF_TEST_S3_DB_PORT"] = "5432"
       os.environ["CF_TEST_S3_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_S3_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
 
