@@ -110,11 +110,13 @@ in
       os.environ["CF_TEST_GIT_SERVER_URL"] = "http://gitserver/crystal-forge"
       os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
 
-      # S3 test environment
-      os.environ["CF_TEST_S3_DB_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_S3_DB_PORT"] = "5432"
-      os.environ["CF_TEST_S3_SERVER_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_S3_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
+      # Set environment variables for the test
+      os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_DB_PORT"] = "5433"  # forwarded port
+      os.environ["CF_TEST_DB_USER"] = "postgres"
+      os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
+      os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
 
       # Inject machines for test access
       import cf_test

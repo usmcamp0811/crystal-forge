@@ -68,15 +68,17 @@ class CFTestClient:
                 "password": self.config.db_password,
                 "cursor_factory": RealDictCursor,
             }
-            
+
             # In NixOS test mode, connect via forwarded port to VM
             if os.getenv("NIXOS_TEST_DRIVER") == "1":
                 # Use forwarded connection to VM postgres
                 conn_params["host"] = "127.0.0.1"  # driver host
-                conn_params["port"] = int(os.getenv("CF_TEST_DB_PORT", "5433"))  # forwarded port
+                conn_params["port"] = int(
+                    os.getenv("CF_TEST_DB_PORT", "5432")
+                )  # forwarded port
                 conn_params["user"] = "postgres"
                 conn_params["password"] = ""  # VM postgres has no password
-                
+
             self._conn = psycopg2.connect(**conn_params)
         try:
             yield self._conn
@@ -97,7 +99,9 @@ class CFTestClient:
                 return rows
 
     # VM Testing Helpers
-    def wait_until_succeeds(self, machine, cmd: str, timeout: int = 120, interval: float = 1.0) -> str:
+    def wait_until_succeeds(
+        self, machine, cmd: str, timeout: int = 120, interval: float = 1.0
+    ) -> str:
         """Wait for a command to succeed on a VM machine"""
         end = time.time() + timeout
         last = ""
@@ -109,13 +113,20 @@ class CFTestClient:
             time.sleep(interval)
         raise AssertionError(f"Timed out after {timeout}s: {cmd}\nLast output:\n{last}")
 
-    def db_query_on_vm(self, machine, sql: str, timeout: int = 60, db_name: str = "crystal_forge", db_user: str = "crystal_forge") -> str:
+    def db_query_on_vm(
+        self,
+        machine,
+        sql: str,
+        timeout: int = 60,
+        db_name: str = "crystal_forge",
+        db_user: str = "crystal_forge",
+    ) -> str:
         """Execute SQL query on a VM via psql command using temporary file"""
         temp_sql_path = f"/tmp/query_{os.getpid()}_{int(time.time())}.sql"
-        
+
         # Write the SQL to a file on the VM
         machine.succeed(f"cat > {temp_sql_path} << 'EOF'\n{sql}\nEOF")
-        
+
         try:
             # Execute the SQL file
             result = self.wait_until_succeeds(
@@ -128,13 +139,22 @@ class CFTestClient:
             # Clean up the temporary file
             machine.succeed(f"rm -f {temp_sql_path}")
 
-    def db_query_on_vm_simple(self, machine, sql: str, timeout: int = 60, db_name: str = "crystal_forge", db_user: str = "crystal_forge") -> str:
+    def db_query_on_vm_simple(
+        self,
+        machine,
+        sql: str,
+        timeout: int = 60,
+        db_name: str = "crystal_forge",
+        db_user: str = "crystal_forge",
+    ) -> str:
         """Execute simple SQL query on a VM via psql command (for basic queries without special characters)"""
         sql_escaped = sql.replace("'", "''")
         cmd = f"sudo -u {db_user} psql -d {db_name} -At -c $'{sql_escaped}'"
         return self.wait_until_succeeds(machine, cmd, timeout=timeout)
 
-    def wait_for_service_log(self, machine, service_name: str, log_pattern: str, timeout: int = 120) -> None:
+    def wait_for_service_log(
+        self, machine, service_name: str, log_pattern: str, timeout: int = 120
+    ) -> None:
         """Wait for a specific pattern to appear in service logs"""
         self.wait_until_succeeds(
             machine,
@@ -145,6 +165,7 @@ class CFTestClient:
     def send_webhook(self, machine, port: int, payload: dict) -> str:
         """Send webhook payload to server"""
         import json
+
         payload_str = json.dumps(payload).replace('"', '\\"')
         return machine.succeed(
             f"curl -s -X POST http://localhost:{port}/webhook "

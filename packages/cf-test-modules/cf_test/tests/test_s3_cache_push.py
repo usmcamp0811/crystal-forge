@@ -34,27 +34,12 @@ def gitserver():
 
 
 @pytest.fixture(scope="session")
-def s3_client():
-    import os
-
-    from cf_test import CFTestClient, CFTestConfig
-
-    # Map S3-specific environment variables to the standard ones that CFTestConfig expects
-    os.environ["CF_TEST_DB_HOST"] = os.getenv("CF_TEST_S3_DB_HOST", "127.0.0.1")
-    os.environ["CF_TEST_DB_PORT"] = os.getenv("CF_TEST_S3_DB_PORT", "5433")
-    os.environ["CF_TEST_DB_USER"] = "crystal_forge"
-    os.environ["CF_TEST_DB_PASSWORD"] = ""
-    os.environ["CF_TEST_DB_NAME"] = "crystal_forge"
-    os.environ["CF_TEST_SERVER_HOST"] = os.getenv("CF_TEST_S3_SERVER_HOST", "127.0.0.1")
-    os.environ["CF_TEST_SERVER_PORT"] = os.getenv("CF_TEST_S3_SERVER_PORT", "3000")
-
-    # Now create the config - it will read from the environment variables we just set
-    config = CFTestConfig()
-    return CFTestClient(config)
+def cf_client(cf_config):
+    return CFTestClient(cf_config)
 
 
 @pytest.mark.integration
-def test_s3_cache_push_successful_build(s3_client, s3_server, s3_cache):
+def test_s3_cache_push_successful_build(cf_client, s3_server, s3_cache):
     """Test that successful builds are pushed to S3 cache"""
 
     wait_for_crystal_forge_ready(s3_server)
@@ -69,7 +54,7 @@ def test_s3_cache_push_successful_build(s3_client, s3_server, s3_cache):
 
     # Create a scenario with a derivation ready for building
     scenario = _create_base_scenario(
-        s3_client,
+        cf_client,
         hostname="s3-cache-test-host",
         flake_name="s3-cache-test",
         repo_url=real_repo_url,
@@ -80,7 +65,7 @@ def test_s3_cache_push_successful_build(s3_client, s3_server, s3_cache):
     )
 
     # Set a mock derivation path for testing
-    s3_client.execute_sql(
+    cf_client.execute_sql(
         "UPDATE derivations SET derivation_path = '/nix/store/test-s3-cache.drv' WHERE id = %s",
         (scenario["derivation_id"],),
     )
@@ -89,7 +74,7 @@ def test_s3_cache_push_successful_build(s3_client, s3_server, s3_cache):
 
     # Wait for the build to be processed and cache push to be attempted
     # Look for cache push logs in the service
-    s3_client.wait_for_service_log(
+    cf_client.wait_for_service_log(
         s3_server,
         "crystal-forge-builder.service",
         "Starting cache push for derivation: s3-cache-test-host",
@@ -98,7 +83,7 @@ def test_s3_cache_push_successful_build(s3_client, s3_server, s3_cache):
 
     # Check for successful cache push
     try:
-        s3_client.wait_for_service_log(
+        cf_client.wait_for_service_log(
             s3_server,
             "crystal-forge-builder.service",
             "Successfully pushed",
@@ -111,7 +96,7 @@ def test_s3_cache_push_successful_build(s3_client, s3_server, s3_cache):
         cache_push_success = False
 
     # Verify the derivation reached build-complete status regardless of cache push
-    s3_client.wait_for_service_log(
+    cf_client.wait_for_service_log(
         s3_server,
         "crystal-forge-builder.service",
         "Build completed for s3-cache-test-host",
@@ -119,7 +104,7 @@ def test_s3_cache_push_successful_build(s3_client, s3_server, s3_cache):
     )
 
     # Check final derivation status
-    final_status = s3_client.execute_sql(
+    final_status = cf_client.execute_sql(
         """
         SELECT d.status_id, ds.name as status_name
         FROM derivations d
@@ -154,11 +139,11 @@ def test_s3_cache_push_successful_build(s3_client, s3_server, s3_cache):
         )
 
     # Cleanup
-    s3_client.cleanup_test_data(scenario["cleanup"])
+    cf_client.cleanup_test_data(scenario["cleanup"])
 
 
 @pytest.mark.integration
-def test_s3_cache_push_failure_does_not_block_build(s3_client, s3_server):
+def test_s3_cache_push_failure_does_not_block_build(cf_client, s3_server):
     """Test that S3 cache push failures don't prevent build completion"""
 
     wait_for_crystal_forge_ready(s3_server)
@@ -172,7 +157,7 @@ def test_s3_cache_push_failure_does_not_block_build(s3_client, s3_server):
     )
 
     scenario = _create_base_scenario(
-        s3_client,
+        cf_client,
         hostname="s3-cache-failure-test",
         flake_name="s3-cache-failure-test",
         repo_url=real_repo_url,
@@ -183,7 +168,7 @@ def test_s3_cache_push_failure_does_not_block_build(s3_client, s3_server):
     )
 
     # Set derivation path
-    s3_client.execute_sql(
+    cf_client.execute_sql(
         "UPDATE derivations SET derivation_path = '/nix/store/test-s3-cache-failure.drv' WHERE id = %s",
         (scenario["derivation_id"],),
     )
@@ -194,7 +179,7 @@ def test_s3_cache_push_failure_does_not_block_build(s3_client, s3_server):
     s3_server.succeed("systemctl stop minio.service")
 
     # Wait for build to complete despite cache failure
-    s3_client.wait_for_service_log(
+    cf_client.wait_for_service_log(
         s3_server,
         "crystal-forge-builder.service",
         "Build completed for s3-cache-failure-test",
@@ -203,7 +188,7 @@ def test_s3_cache_push_failure_does_not_block_build(s3_client, s3_server):
 
     # Check that cache push was attempted but failed gracefully
     try:
-        s3_client.wait_for_service_log(
+        cf_client.wait_for_service_log(
             s3_server,
             "crystal-forge-builder.service",
             "Cache push failed but continuing",
@@ -214,7 +199,7 @@ def test_s3_cache_push_failure_does_not_block_build(s3_client, s3_server):
         s3_server.log("⚠️ S3 cache failure log not found, but build completed")
 
     # Verify derivation still reached completion
-    final_status = s3_client.execute_sql(
+    final_status = cf_client.execute_sql(
         """
         SELECT d.status_id, ds.name as status_name
         FROM derivations d 
@@ -237,15 +222,15 @@ def test_s3_cache_push_failure_does_not_block_build(s3_client, s3_server):
     s3_server.log("✅ S3 cache failure resilience test PASSED")
 
     # Cleanup
-    s3_client.cleanup_test_data(scenario["cleanup"])
+    cf_client.cleanup_test_data(scenario["cleanup"])
 
 
 @pytest.mark.integration
-def test_s3_cache_configuration(s3_client, s3_server):
+def test_s3_cache_configuration(cf_client, s3_server):
     """Test that S3 cache type is configured correctly"""
 
     # Test S3 configuration
-    s3_config_result = s3_client.execute_sql(
+    s3_config_result = cf_client.execute_sql(
         "SELECT 1",  # Just test connection works
     )
     assert len(s3_config_result) == 1, "S3 server database should be accessible"
@@ -262,7 +247,7 @@ def test_s3_cache_configuration(s3_client, s3_server):
 
 
 @pytest.mark.integration
-def test_s3_cache_retry_mechanism(s3_client, s3_server):
+def test_s3_cache_retry_mechanism(cf_client, s3_server):
     """Test that S3 cache push retries work as expected"""
 
     wait_for_crystal_forge_ready(s3_server)
@@ -275,7 +260,7 @@ def test_s3_cache_retry_mechanism(s3_client, s3_server):
     )
 
     scenario = _create_base_scenario(
-        s3_client,
+        cf_client,
         hostname="s3-cache-retry-test",
         flake_name="s3-cache-retry-test",
         repo_url=real_repo_url,
@@ -285,7 +270,7 @@ def test_s3_cache_retry_mechanism(s3_client, s3_server):
         heartbeat_age_minutes=None,
     )
 
-    s3_client.execute_sql(
+    cf_client.execute_sql(
         "UPDATE derivations SET derivation_path = '/nix/store/test-s3-cache-retry.drv' WHERE id = %s",
         (scenario["derivation_id"],),
     )
@@ -293,7 +278,7 @@ def test_s3_cache_retry_mechanism(s3_client, s3_server):
     s3_server.log("=== Testing S3 cache retry mechanism ===")
 
     # Start build process
-    s3_client.wait_for_service_log(
+    cf_client.wait_for_service_log(
         s3_server,
         "crystal-forge-builder.service",
         "Build completed for s3-cache-retry-test",
@@ -313,4 +298,4 @@ def test_s3_cache_retry_mechanism(s3_client, s3_server):
         )
 
     # Cleanup
-    s3_client.cleanup_test_data(scenario["cleanup"])
+    cf_client.cleanup_test_data(scenario["cleanup"])
