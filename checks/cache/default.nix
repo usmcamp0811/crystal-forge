@@ -126,26 +126,16 @@ in
       os.environ["NIXOS_TEST_DRIVER"] = "1"
       start_all()
 
-      # Wait for cache services
+      # Wait for S3 cache service
       s3Cache.wait_for_unit("minio.service")
       s3Cache.wait_for_unit("minio-setup.service")
       s3Cache.wait_for_open_port(9000)
 
-      atticCache.wait_for_unit("atticd.service")
-      atticCache.wait_for_unit("attic-setup.service")
-      atticCache.wait_for_open_port(8080)
-
-
-      # Wait for servers
+      # Wait for S3 server
       s3Server.wait_for_unit("postgresql.service")
       s3Server.wait_for_unit("crystal-forge-server.service")
       s3Server.wait_for_open_port(5432)
       s3Server.forward_port(5433, 5432)
-
-      atticServer.wait_for_unit("postgresql.service")
-      atticServer.wait_for_unit("crystal-forge-server.service")
-      atticServer.wait_for_open_port(5432)
-      atticServer.forward_port(5434, 5432)
 
       from cf_test.vm_helpers import wait_for_git_server_ready
       wait_for_git_server_ready(gitserver, timeout=120)
@@ -160,29 +150,21 @@ in
       os.environ["CF_TEST_S3_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_S3_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
 
-      # Attic test environment
-      os.environ["CF_TEST_ATTIC_DB_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_ATTIC_DB_PORT"] = "5434"
-      os.environ["CF_TEST_ATTIC_SERVER_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_ATTIC_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
-
       # Inject machines for test access
       import cf_test
       cf_test._driver_machines = {
           "s3Server": s3Server,
           "s3Cache": s3Cache,
-          "atticServer": atticServer,
-          "atticCache": atticCache,
           "gitserver": gitserver,
       }
 
-      # Run cache-specific tests
+      # Run S3 cache-specific tests
       exit_code = pytest.main([
           "-vvvv",
           "--tb=short",
           "-x",
           "-s",
-          "-m", "cache",
+          "-m", "s3cache",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:
