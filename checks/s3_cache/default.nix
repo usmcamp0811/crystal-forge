@@ -116,6 +116,7 @@ in
       # Wait for S3 server
       s3Server.wait_for_unit("postgresql.service")
       s3Server.wait_for_unit("crystal-forge-server.service")
+      s3Server.wait_for_unit("crystal-forge-builder.service")
       s3Server.wait_for_open_port(5432)
       s3Server.forward_port(5433, 5432)
 
