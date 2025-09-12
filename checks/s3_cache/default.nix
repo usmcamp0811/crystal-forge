@@ -69,15 +69,10 @@ in
               GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
             '';
           };
+
           services.crystal-forge = {
             enable = true;
-            local-database = true;
-            server.enable = true;
-            build.enable = true;
-            database = {
-              host = "localhost";
-              port = 5432;
-            };
+
             cache = {
               cache_type = "S3";
               push_to = "s3://crystal-forge-cache";
@@ -87,11 +82,45 @@ in
               max_retries = 2;
               retry_delay_seconds = 1;
             };
-            build.systemd_properties = [
-              "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
-              "Environment=AWS_ACCESS_KEY_ID=minioadmin"
-              "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
+            build = {
+              enable = true;
+              systemd_properties = [
+                "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
+                "Environment=AWS_ACCESS_KEY_ID=minioadmin"
+                "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
+              ];
+            };
+            log_level = "debug";
+            flakes.watched = [
             ];
+
+            environments = [
+              {
+                name = "test";
+                description = "Computers that get on wifi";
+                is_active = true;
+                risk_profile = "MEDIUM";
+                compliance_level = "NONE";
+              }
+            ];
+            # Updated systems configuration (new requirement)
+            systems = [
+            ];
+
+            server = {
+              enable = true;
+              host = "0.0.0.0"; # Added explicit host
+              port = 3444; # Kept your custom port
+              # Note: authorized_keys moved to systems configuration above
+            };
+
+            # Database configuration (using defaults)
+            database = {
+              host = "localhost";
+              user = "crystal_forge";
+              name = "crystal_forge";
+              port = 5432;
+            };
           };
         };
         port = CF_TEST_SERVER_PORT;
@@ -116,9 +145,13 @@ in
       # Wait for S3 server
       s3Server.wait_for_unit("postgresql.service")
       s3Server.wait_for_unit("crystal-forge-server.service")
+      s3Server.succeed("systemctl list-unit-files | grep crystal-forge")
+      s3Server.succeed("systemctl restart crystal-forge-builder")
+      s3Server.succeed("ls -la /etc/systemd/system/crystal-forge*")
       s3Server.wait_for_unit("crystal-forge-builder.service")
       s3Server.wait_for_open_port(5432)
       s3Server.forward_port(5433, 5432)
+
 
       from cf_test.vm_helpers import wait_for_git_server_ready
       wait_for_git_server_ready(gitserver, timeout=120)

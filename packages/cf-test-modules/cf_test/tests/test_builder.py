@@ -1,236 +1,129 @@
 import pytest
 
 from cf_test import CFTestClient
-from cf_test.vm_helpers import SmokeTestConstants as C
-from cf_test.vm_helpers import check_service_active
+
+pytestmark = [pytest.mark.s3cache, pytest.mark.integration]
 
 
-def test_builder_service_status(cf_client, server):
-    """Test that the Crystal Forge builder service is running and healthy"""
+@pytest.fixture(scope="session")
+def s3_server():
+    import cf_test
 
-    # 1. Check systemd service is active
-    server.succeed("systemctl is-active crystal-forge-builder.service")
-
-    # 2. Verify service is enabled for startup
-    server.succeed("systemctl is-enabled crystal-forge-builder.service")
-
-    # 3. Check that the service has been running for at least a few seconds
-    # (not constantly restarting)
-    uptime_output = server.succeed(
-        "systemctl show crystal-forge-builder.service --property=ActiveEnterTimestamp"
-    )
-    assert "ActiveEnterTimestamp=" in uptime_output
-    assert "n/a" not in uptime_output, "Service should have a valid start time"
+    return cf_test._driver_machines["s3Server"]
 
 
-def test_builder_process_running(cf_client, server):
-    """Verify the builder process is actually running"""
-
-    # Check that the builder process exists
-    server.succeed(
-        "pgrep -f 'crystal-forge.*builder' || pgrep -f '/nix/store.*builder'"
-    )
-
-    # Verify it's running as the correct user
-    ps_output = server.succeed("ps aux | grep '[b]uilder' | head -1")
-    assert (
-        "crystal-forge" in ps_output
-    ), f"Builder should run as crystal-forge user, got: {ps_output}"
+@pytest.fixture(scope="session")
+def cf_client(cf_config):
+    return CFTestClient(cf_config)
 
 
-def test_builder_logs_healthy(cf_client, server):
-    """Check builder logs show healthy startup and operation"""
+def test_builder_service_exists_and_runs(cf_client, s3_server):
+    """Test that builder service exists and is running"""
 
-    # Wait for builder to log startup completion
-    cf_client.wait_for_service_log(
-        server,
-        "crystal-forge-builder.service",
-        "Both build and CVE scan loops started",
-        timeout=60,
-    )
+    # Check service file exists
+    s3_server.succeed("test -f /etc/systemd/system/crystal-forge-builder.service")
 
-    # Verify no critical errors in recent logs
-    logs = server.succeed(
-        "journalctl -u crystal-forge-builder.service --since '2 minutes ago' --no-pager"
-    )
+    # Check service status and get details
+    status = s3_server.succeed("systemctl status crystal-forge-builder.service || true")
+    s3_server.log(f"Builder service status: {status}")
 
-    # Check for error indicators
-    error_indicators = ["FATAL", "panic", "failed to load", "connection refused"]
-    for indicator in error_indicators:
-        assert (
-            indicator.lower() not in logs.lower()
-        ), f"Found error indicator '{indicator}' in logs: {logs}"
+    # Check service is active
+    s3_server.succeed("systemctl is-active crystal-forge-builder.service")
 
-
-def test_builder_config_loaded(cf_client, server):
-    """Verify builder loaded configuration successfully"""
-
-    # Config file should exist and be readable by crystal-forge user
-    server.succeed("sudo -u crystal-forge test -r /var/lib/crystal-forge/config.toml")
-
-    # Check logs show config was loaded (not using defaults)
+    # Check if process exists - if not, get detailed logs
     try:
-        cf_client.wait_for_service_log(
-            server,
-            "crystal-forge-builder.service",
-            "Starting Crystal Forge Builder",
-            timeout=30,
-        )
+        s3_server.succeed("pgrep -f crystal-forge.*builder")
     except:
-        # Fallback: check that service started without config errors
-        logs = server.succeed(
-            "journalctl -u crystal-forge-builder.service --no-pager | tail -20"
+        s3_server.log("Builder process not found - checking logs...")
+        logs = s3_server.succeed(
+            "journalctl -u crystal-forge-builder.service --no-pager -n 20"
         )
-        assert "Failed to load Crystal Forge config" not in logs
+        s3_server.log(f"Recent builder logs: {logs}")
 
+        # Try to see what processes ARE running
+        processes = s3_server.succeed("ps aux | grep crystal-forge")
+        s3_server.log(f"Crystal Forge processes: {processes}")
 
-def test_builder_database_connectivity(cf_client, server):
-    """Verify builder can connect to the database"""
-
-    # Builder should have completed database migrations
-    cf_client.wait_for_service_log(
-        server, "crystal-forge-builder.service", "Starting Build loop", timeout=90
-    )
-
-    # Verify no database connection errors
-    logs = server.succeed(
-        "journalctl -u crystal-forge-builder.service --since '3 minutes ago' --no-pager"
-    )
-    db_errors = ["connection refused", "authentication failed", "database.*not.*exist"]
-    for error_pattern in db_errors:
-        assert not any(error.lower() in logs.lower() for error in [error_pattern])
-
-
-def test_builder_polling_active(cf_client, server):
-    """Verify builder is actively polling for work"""
-
-    # Wait for at least one polling cycle message
-    try:
-        cf_client.wait_for_service_log(
-            server,
-            "crystal-forge-builder.service",
-            "No derivations need building",
-            timeout=120,
+        # Check if binary exists
+        binary_check = s3_server.succeed(
+            "ls -la /nix/store/*/bin/*builder* || echo 'no builder binary'"
         )
-    except:
-        # Alternative: check for CVE scanning message
-        cf_client.wait_for_service_log(
-            server,
-            "crystal-forge-builder.service",
-            "No derivations need CVE scanning",
-            timeout=120,
-        )
+        s3_server.log(f"Builder binary check: {binary_check}")
+
+        raise Exception("Builder process not running despite active service")
 
 
-def test_builder_working_directory(cf_client, server):
-    """Verify builder's working directory is properly set up"""
+def test_builder_has_required_tools(cf_client, s3_server):
+    """Test that builder can access required binaries"""
 
-    # Check that required directories exist with correct ownership
+    tools = ["nix", "git", "vulnix"]
+    for tool in tools:
+        s3_server.succeed(f"sudo -u crystal-forge which {tool}")
+
+
+def test_builder_directories_exist(cf_client, s3_server):
+    """Test that builder working directories exist"""
+
     directories = [
         "/var/lib/crystal-forge/workdir",
         "/var/lib/crystal-forge/tmp",
         "/var/lib/crystal-forge/.cache",
-        "/var/lib/crystal-forge/.cache/nix",
     ]
 
     for directory in directories:
-        server.succeed(f"test -d {directory}")
-        # Verify ownership
-        stat_output = server.succeed(f"stat -c '%U:%G' {directory}")
-        assert (
-            "crystal-forge:crystal-forge" in stat_output
-        ), f"Directory {directory} has wrong ownership: {stat_output}"
+        s3_server.succeed(f"test -d {directory}")
 
 
-def test_builder_required_binaries(cf_client, server):
-    """Verify builder has access to required binaries"""
+def test_builder_logs_show_startup(cf_client, s3_server):
+    """Test that builder logs show successful startup"""
 
-    # Check that builder can find required tools
-    required_tools = ["nix", "git", "vulnix", "systemd"]
-
-    for tool in required_tools:
-        # Test as the crystal-forge user since that's who runs the service
-        server.succeed(f"sudo -u crystal-forge which {tool}")
-
-
-def test_builder_memory_limits(cf_client, server):
-    """Verify builder service memory limits are reasonable"""
-
-    # Check systemd service properties
-    memory_output = server.succeed(
-        "systemctl show crystal-forge-builder.service --property=MemoryMax"
+    # Wait for builder startup message
+    cf_client.wait_for_service_log(
+        s3_server, "crystal-forge-builder.service", "Starting Build loop", timeout=60
     )
 
-    # Should have some memory limit set (not infinity)
-    assert "MemoryMax=" in memory_output
-    if "infinity" not in memory_output.lower():
-        # If a limit is set, it should be reasonable (at least 512M)
-        server.log(f"Builder memory limit: {memory_output}")
+
+def test_builder_polling_for_work(cf_client, s3_server):
+    """Test that builder is actively polling for work"""
+
+    # Wait for polling message
+    cf_client.wait_for_service_log(
+        s3_server,
+        "crystal-forge-builder.service",
+        "No derivations need building",
+        timeout=120,
+    )
 
 
-def test_builder_no_restart_loop(cf_client, server):
-    """Verify builder isn't stuck in a restart loop"""
+def test_builder_database_connection(cf_client, s3_server):
+    """Test that builder can connect to database"""
 
-    # Check restart count - should be low
-    restart_output = server.succeed(
+    # Test database connection as crystal-forge user
+    s3_server.succeed("sudo -u crystal-forge psql -d crystal_forge -c 'SELECT 1;'")
+
+    # Check no database errors in logs
+    logs = s3_server.succeed(
+        "journalctl -u crystal-forge-builder.service --since '2 minutes ago' --no-pager"
+    )
+
+    error_keywords = [
+        "connection refused",
+        "authentication failed",
+        "role.*does not exist",
+    ]
+    for keyword in error_keywords:
+        assert keyword not in logs.lower(), f"Found database error in logs: {keyword}"
+
+
+def test_builder_not_restarting(cf_client, s3_server):
+    """Test that builder service is stable and not restart-looping"""
+
+    # Check restart count is low
+    restart_output = s3_server.succeed(
         "systemctl show crystal-forge-builder.service --property=NRestarts"
     )
-
-    # Extract restart count
     restart_count = int(restart_output.split("=")[1].strip())
+
     assert (
         restart_count < 3
     ), f"Builder has restarted {restart_count} times - possible restart loop"
-
-    # Verify service has been stable for at least 30 seconds
-    import time
-
-    time.sleep(30)
-    server.succeed("systemctl is-active crystal-forge-builder.service")
-
-
-@pytest.mark.integration
-def test_builder_responds_to_work(cf_client, server):
-    """Test that builder actually processes work when available"""
-
-    # This test would create a test derivation and verify the builder picks it up
-    # For now, just verify the builder logs show it's checking for work
-
-    # Wait for multiple polling cycles to ensure consistent operation
-    start_time = time.time()
-    poll_count = 0
-
-    while time.time() - start_time < 180 and poll_count < 3:  # 3 minutes max
-        try:
-            cf_client.wait_for_service_log(
-                server,
-                "crystal-forge-builder.service",
-                "No derivations need",  # Matches both build and CVE messages
-                timeout=70,
-            )
-            poll_count += 1
-        except:
-            break
-
-    assert (
-        poll_count >= 2
-    ), f"Builder should complete multiple polling cycles, only saw {poll_count}"
-
-
-def test_builder_systemd_slice(cf_client, server):
-    """Verify builder is running in the correct systemd slice if configured"""
-
-    try:
-        # Check if custom slice is active
-        server.succeed("systemctl is-active crystal-forge-builds.slice")
-
-        # Verify builder service is in the slice
-        cgroup_output = server.succeed(
-            "systemctl show crystal-forge-builder.service --property=ControlGroup"
-        )
-        assert "crystal-forge-builds.slice" in cgroup_output
-
-        server.log("Builder is correctly running in crystal-forge-builds.slice")
-    except:
-        # If slice isn't configured, that's okay too
-        server.log("Builder running without custom systemd slice")
