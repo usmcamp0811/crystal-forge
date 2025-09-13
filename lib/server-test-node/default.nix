@@ -1,3 +1,4 @@
+# lib/server-test-node/default.nix
 {
   lib,
   system ? null,
@@ -12,41 +13,41 @@
     cfFlakePath ? null,
     port ? 3000,
     agents ? [],
-    # Separate crystal-forge specific config from general NixOS config
+    # crystal-forge-specific config (overrides defaults)
     crystalForgeConfig ? {},
-    # General NixOS configuration (everything except services.crystal-forge)
+    # General NixOS config merged on top
     extraConfig ? {},
     ...
   }: let
     # Generate keypairs for agents if not provided
-    agentKeyPairs =
-      map (agentName: {
+    agentKeyPairs = map (
+      agentName: rec {
         name = agentName;
         keyPair = lib.crystal-forge.mkKeyPair {
           inherit pkgs;
-          name = agentName;
+          name = agentName; # or: inherit name;
         };
-      })
-      agents;
+      }
+    )
+    agents;
 
     # Generate systems configuration from agents
-    agentSystems =
-      map (agent: {
-        hostname = agent.name;
-        public_key = lib.crystal-forge.mkPublicKey {
-          inherit pkgs;
-          name = agent.name;
-          keyPair = agent.keyPair;
-        };
-        environment = "test";
-        flake_name = "test-flake";
-      })
-      agentKeyPairs;
+    agentSystems = map (agent: {
+      hostname = agent.name;
+      public_key = lib.crystal-forge.mkPublicKey {
+        inherit pkgs;
+        name = agent.name;
+        keyPair = agent.keyPair;
+      };
+      environment = "test";
+      flake_name = "test-flake";
+    })
+    agentKeyPairs;
 
     # Default crystal-forge configuration
     defaultCrystalForgeConfig = {
       enable = true;
-      local-database = true;
+      "local-database" = true; # dashed keys must be quoted
       log_level = "debug";
       build.offline = true;
       database = {
@@ -91,7 +92,7 @@
       };
     };
 
-    # Agent systems configuration
+    # Agent systems configuration (only when provided)
     agentSystemsConfig =
       if agents != []
       then {
@@ -110,30 +111,44 @@
       }
       else {};
 
-    # Merge crystal-forge configurations with proper precedence
-    # User config > Agent systems > Defaults
+    # When using mkMerge, lists are concatenated. Force-replace lists we want to override.
+    forceListReplacements = cfg:
+      cfg
+      // {
+        flakes =
+          (cfg.flakes or {})
+          // {
+            watched = lib.mkForce (cfg.flakes.watched or []);
+          };
+        environments = lib.mkForce (cfg.environments or []);
+        systems = lib.mkForce (cfg.systems or []);
+      };
+
+    # Merge with precedence: defaults < agent systems < caller overrides
     finalCrystalForgeConfig = lib.mkMerge [
       defaultCrystalForgeConfig
       agentSystemsConfig
-      crystalForgeConfig
+      (forceListReplacements crystalForgeConfig)
     ];
 
     # Base system configuration
     baseConfig = {
       imports = [inputs.self.nixosModules.crystal-forge];
+
       networking.useDHCP = true;
       networking.firewall.allowedTCPPorts = [port 5432];
+
       virtualisation.writableStore = true;
       virtualisation.memorySize = 8096;
       virtualisation.cores = 8;
       virtualisation.additionalPaths = [systemBuildClosure];
 
-      environment.systemPackages = [
-        pkgs.git
-        pkgs.jq
-        pkgs.crystal-forge.default
-        pkgs.crystal-forge.cf-test-modules.runTests
-        pkgs.crystal-forge.cf-test-modules.testRunner
+      environment.systemPackages = with pkgs; [
+        git
+        jq
+        crystal-forge.default
+        crystal-forge.cf-test-modules.runTests
+        crystal-forge.cf-test-modules.testRunner
       ];
 
       environment.etc = lib.mkMerge [
