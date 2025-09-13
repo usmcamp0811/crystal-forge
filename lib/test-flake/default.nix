@@ -253,6 +253,50 @@ in rec {
       echo "5" > "$out/COMMIT_COUNT"
     '';
 
+  # in your lib where `pkgs`, `lib.crystal-forge.testFlake`, and `pkgs.path` are in scope
+  derivation-paths = pkgs:
+    pkgs.runCommand "derivation-paths.json" {
+      nativeBuildInputs = [pkgs.nix pkgs.git];
+      testFlakeSource = lib.crystal-forge.testFlake;
+      NIX_CONFIG = "experimental-features = nix-command flakes";
+      NIXPKGS_PATH = pkgs.path;
+    } ''
+          set -euo pipefail
+
+          export HOME=$TMPDIR
+          export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
+          export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
+          mkdir -p "$NIX_USER_PROFILE_DIR"
+
+          flake="git+file://$testFlakeSource?ref=main"
+
+          cf_test_sys_drv=$(
+            nix eval --impure --raw \
+              --override-input nixpkgs "path:$NIXPKGS_PATH" \
+              "$flake#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath"
+          )
+
+          test_agent_drv=$(
+            nix eval --impure --raw \
+              --override-input nixpkgs "path:$NIXPKGS_PATH" \
+              "$flake#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath"
+          )
+
+          cat >"$out" <<EOF
+      {
+        "cf-test-sys": {
+          "derivation_path": "$cf_test_sys_drv",
+          "derivation_name": "cf-test-sys",
+          "derivation_type": "nixos"
+        },
+        "test-agent": {
+          "derivation_path": "$test_agent_drv",
+          "derivation_name": "test-agent",
+          "derivation_type": "nixos"
+        }
+      }
+      EOF
+    '';
   inherit
     lockJson # Parsed flake.lock content
     nodes # Dependency nodes from flake.lock
