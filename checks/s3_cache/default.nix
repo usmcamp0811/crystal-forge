@@ -51,68 +51,62 @@ in
 
       s3Server = lib.crystal-forge.makeServerNode {
         inherit inputs pkgs systemBuildClosure keyPath pubPath;
-        extraConfig = lib.mkMerge [
-          (lib.crystal-forge.preloadTestFlake {
-            commitNumber = 5; # Latest commit on main branch
-            branch = "main";
-          })
-          {
-            imports = [inputs.self.nixosModules.crystal-forge];
-            services.crystal-forge = {
-              cache = {
-                cache_type = "S3";
-                push_to = "s3://crystal-forge-cache";
-                push_after_build = true;
-                s3_region = "us-east-1";
-                parallel_uploads = 2;
-                max_retries = 2;
-                retry_delay_seconds = 1;
-              };
-              build = {
-                enable = true;
-                systemd_properties = [
-                  "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
-                  "Environment=AWS_ACCESS_KEY_ID=minioadmin"
-                  "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
-                ];
-              };
-              # log_level = "debug";
-              flakes.watched = [
-                {
-                  name = "test-flake";
-                  repo_url = "http://gitserver/crystal-forge";
-                  auto_poll = true;
-                }
-              ];
-              environments = [
-                {
-                  name = "test";
-                  description = "Computers that get on wifi";
-                  is_active = true;
-                  risk_profile = "MEDIUM";
-                  compliance_level = "NONE";
-                }
-              ];
-              # Updated systems configuration (new requirement)
-              systems = [
-              ];
-              server = {
-                enable = true;
-                host = "0.0.0.0"; # Added explicit host
-                port = CF_TEST_SERVER_PORT; # Kept your custom port
-                # Note: authorized_keys moved to systems configuration above
-              };
-              # Database configuration (using defaults)
-              database = {
-                host = "localhost";
-                user = "crystal_forge";
-                name = "crystal_forge";
-                port = 5432;
-              };
-            };
-          }
-        ];
         port = CF_TEST_SERVER_PORT;
+
+        # Crystal Forge specific configuration
+        crystalForgeConfig = {
+          cache = {
+            cache_type = "S3";
+            push_to = "s3://crystal-forge-cache";
+            push_after_build = true;
+            s3_region = "us-east-1";
+            parallel_uploads = 2;
+            max_retries = 2;
+            retry_delay_seconds = 1;
+          };
+          build = {
+            enable = true;
+            systemd_properties = [
+              "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
+              "Environment=AWS_ACCESS_KEY_ID=minioadmin"
+              "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
+            ];
+          };
+          flakes.watched = [
+            {
+              name = "test-flake";
+              repo_url = "http://gitserver/crystal-forge";
+              auto_poll = true;
+            }
+          ];
+          environments = [
+            {
+              name = "test";
+              description = "Computers that get on wifi";
+              is_active = true;
+              risk_profile = "MEDIUM";
+              compliance_level = "NONE";
+            }
+          ];
+          systems = [];
+          server = {
+            enable = true;
+            host = "0.0.0.0";
+            port = CF_TEST_SERVER_PORT;
+          };
+          database = {
+            host = "localhost";
+            user = "crystal_forge";
+            name = "crystal_forge";
+            port = 5432;
+          };
+        };
+
+        # General NixOS configuration (non-crystal-forge stuff)
+        extraConfig = lib.crystal-forge.preloadTestFlake {
+          commitNumber = 5; # Latest commit on main branch
+          branch = "main";
+        };
       };
     };
 
