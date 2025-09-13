@@ -19,7 +19,7 @@
   testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
     cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
   '';
-  derivation-paths = lib.crystal-forge.derivation-paths;
+  derivation-paths = lib.crystal-forge.derivation-paths pkgs;
   CF_TEST_DB_PORT = 5432;
   CF_TEST_SERVER_PORT = 3000;
   systemBuildClosure = pkgs.closureInfo {

@@ -237,30 +237,36 @@
     '';
 
   # Function to create derivation-paths.json
-  derivation-paths =
+  derivation-paths = pkgs:
     pkgs.runCommand "derivation-paths.json" {
       nativeBuildInputs = [pkgs.nix pkgs.jq pkgs.git];
-      testFlakeSource = lib.crystal-forge.testFlake;
+      testFlakeSource = testFlake;
       NIX_CONFIG = "experimental-features = nix-command flakes";
+      NIXPKGS_PATH = pkgs.path;
     } ''
-            # Set up temporary nix environment
-            export HOME=$TMPDIR
-            export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
-            export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
-            mkdir -p $NIX_USER_PROFILE_DIR
+          # Set up temporary nix environment
+          export HOME=$TMPDIR
+          export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
+          export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
+          mkdir -p $NIX_USER_PROFILE_DIR
 
-            # Configure git to handle repositories safely
-            git config --global safe.directory "*"
-            git config --global user.name "Crystal Forge Test"
-            git config --global user.email "test@crystal-forge.dev"
+          # Configure git to handle repositories safely
+          git config --global safe.directory "*"
+          git config --global user.name "Crystal Forge Test"
+          git config --global user.email "test@crystal-forge.dev"
 
-            # Use direct path evaluation instead of git+file:// URL
-            cd "$testFlakeSource"
+          # Use direct path evaluation with nixpkgs override
+          cd "$testFlakeSource"
 
-            cf_test_sys_drv=$(nix eval --impure --raw ".#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath")
-            test_agent_drv=$(nix eval --impure --raw ".#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath")
+          cf_test_sys_drv=$(nix eval --impure --raw \
+            --override-input nixpkgs "path:$NIXPKGS_PATH" \
+            ".#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath")
 
-            cat > $out << EOF
+          test_agent_drv=$(nix eval --impure --raw \
+            --override-input nixpkgs "path:$NIXPKGS_PATH" \
+            ".#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath")
+
+          cat > $out << EOF
       {
         "cf-test-sys": {
           "derivation_path": "$cf_test_sys_drv",
