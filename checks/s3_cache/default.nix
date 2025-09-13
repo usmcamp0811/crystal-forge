@@ -90,8 +90,13 @@ in
                 "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
               ];
             };
-            log_level = "debug";
+            # log_level = "debug";
             flakes.watched = [
+              {
+                name = "test-flake";
+                repo_url = "http://gitserver/crystal-forge";
+                auto_poll = true;
+              }
             ];
 
             environments = [
@@ -127,7 +132,7 @@ in
       };
     };
 
-    globalTimeout = 1200; # 20 minutes for cache operations
+    globalTimeout = 200; # 20 minutes for cache operations
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
@@ -186,7 +191,7 @@ in
           "--tb=short",
           "-x",
           "-s",
-          "-m", "s3cache",
+          "-m", "builder",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:

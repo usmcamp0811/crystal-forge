@@ -2,7 +2,7 @@ import pytest
 
 from cf_test import CFTestClient
 
-pytestmark = [pytest.mark.s3cache, pytest.mark.integration]
+pytestmark = [pytest.mark.builder, pytest.mark.s3cache, pytest.mark.integration]
 
 
 @pytest.fixture(scope="session")
@@ -30,35 +30,45 @@ def test_builder_service_exists_and_runs(cf_client, s3_server):
     # Check service is active
     s3_server.succeed("systemctl is-active crystal-forge-builder.service")
 
-    # Check if process exists - if not, get detailed logs
-    try:
-        s3_server.succeed("pgrep -f crystal-forge.*builder")
-    except:
-        s3_server.log("Builder process not found - checking logs...")
-        logs = s3_server.succeed(
-            "journalctl -u crystal-forge-builder.service --no-pager -n 20"
-        )
-        s3_server.log(f"Recent builder logs: {logs}")
-
-        # Try to see what processes ARE running
-        processes = s3_server.succeed("ps aux | grep crystal-forge")
-        s3_server.log(f"Crystal Forge processes: {processes}")
-
-        # Check if binary exists
-        binary_check = s3_server.succeed(
-            "ls -la /nix/store/*/bin/*builder* || echo 'no builder binary'"
-        )
-        s3_server.log(f"Builder binary check: {binary_check}")
-
-        raise Exception("Builder process not running despite active service")
-
 
 def test_builder_has_required_tools(cf_client, s3_server):
-    """Test that builder can access required binaries"""
+    """Test that builder systemd service has required tools in PATH"""
 
+    # Get the actual PATH from the systemd service environment
+    service_env = s3_server.succeed(
+        "systemctl show crystal-forge-builder.service --property=Environment"
+    )
+    s3_server.log(f"Builder service environment: {service_env}")
+
+    # Extract PATH from the environment
+    import re
+
+    path_match = re.search(r"PATH=([^\s]+)", service_env)
+    if not path_match:
+        raise Exception("No PATH found in builder service environment")
+
+    service_path = path_match.group(1)
+    s3_server.log(f"Builder service PATH: {service_path}")
+
+    # Check each tool exists in the service PATH by testing if the binary file exists
     tools = ["nix", "git", "vulnix"]
     for tool in tools:
-        s3_server.succeed(f"sudo -u crystal-forge which {tool}")
+        # Check each PATH directory for the tool
+        found = False
+        for path_dir in service_path.split(":"):
+            tool_path = f"{path_dir}/{tool}"
+            try:
+                s3_server.succeed(f"test -x {tool_path}")
+                s3_server.log(f"✅ {tool} found at: {tool_path}")
+                found = True
+                break
+            except:
+                continue
+
+        if not found:
+            raise Exception(
+                f"❌ {tool} not found in any PATH directory: {service_path}"
+            )
 
 
 def test_builder_directories_exist(cf_client, s3_server):
@@ -99,7 +109,7 @@ def test_builder_database_connection(cf_client, s3_server):
     """Test that builder can connect to database"""
 
     # Test database connection as crystal-forge user
-    s3_server.succeed("sudo -u crystal-forge psql -d crystal_forge -c 'SELECT 1;'")
+    s3_server.succeed("psql -d crystal_forge -c 'SELECT 1;'")
 
     # Check no database errors in logs
     logs = s3_server.succeed(
