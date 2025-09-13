@@ -3,7 +3,7 @@
   system ? null,
   ...
 }: rec {
-  makeServerNode = {
+  mkServerNode = {
     pkgs,
     inputs,
     systemBuildClosure,
@@ -92,11 +92,13 @@
     };
 
     # Agent systems configuration
-    agentSystemsConfig = 
-      if agents != [] then {
+    agentSystemsConfig =
+      if agents != []
+      then {
         systems = agentSystems;
       }
-      else if pubPath != null then {
+      else if pubPath != null
+      then {
         systems = [
           {
             hostname = "agent";
@@ -127,13 +129,13 @@
       virtualisation.additionalPaths = [systemBuildClosure];
 
       environment.systemPackages = [
-        pkgs.git 
-        pkgs.jq 
-        pkgs.crystal-forge.default 
-        pkgs.crystal-forge.cf-test-modules.runTests 
+        pkgs.git
+        pkgs.jq
+        pkgs.crystal-forge.default
+        pkgs.crystal-forge.cf-test-modules.runTests
         pkgs.crystal-forge.cf-test-modules.testRunner
       ];
-      
+
       environment.etc = lib.mkMerge [
         (lib.mkIf (keyPath != null) {"agent.key".source = "${keyPath}/agent.key";})
         (lib.mkIf (pubPath != null) {"agent.pub".source = "${pubPath}/agent.pub";})
@@ -142,7 +144,6 @@
 
       services.crystal-forge = finalCrystalForgeConfig;
     };
-
   in
     # Merge base config with extra config
     lib.mkMerge [baseConfig extraConfig];
