@@ -17,7 +17,6 @@
 
   # Parse the flake.lock file to get dependency information
   lockJson = builtins.fromJSON (builtins.readFile (srcPath + "/flake.lock"));
-
   # Process each dependency node from flake.lock and prefetch it
   # Returns null for unsupported dependency types
   prefetchNode = name: node: let

@@ -19,7 +19,38 @@
   testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
     cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
   '';
+  derivation-paths =
+    pkgs.runCommand "derivation-paths.json" {
+      nativeBuildInputs = [pkgs.nix pkgs.jq];
+      testFlakeSource = lib.crystal-forge.testFlake;
+      NIX_CONFIG = "experimental-features = nix-command flakes";
+    } ''
+      # Set up temporary nix environment
+      export HOME=$TMPDIR
+      export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
+      export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
+      mkdir -p $NIX_USER_PROFILE_DIR
 
+      cd $testFlakeSource
+
+      cf_test_sys_drv=$(nix eval --impure --raw .#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath)
+      test_agent_drv=$(nix eval --impure --raw .#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath)
+
+      cat > $out << EOF
+      {
+        "cf-test-sys": {
+          "derivation_path": "$cf_test_sys_drv",
+          "derivation_name": "cf-test-sys",
+          "derivation_type": "nixos"
+        },
+        "test-agent": {
+          "derivation_path": "$test_agent_drv",
+          "derivation_name": "test-agent",
+          "derivation_type": "nixos"
+        }
+      }
+      EOF
+    '';
   CF_TEST_DB_PORT = 5432;
   CF_TEST_SERVER_PORT = 3000;
   systemBuildClosure = pkgs.closureInfo {
@@ -156,6 +187,7 @@ in
       # Legacy single-branch data (main branch)
       os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
       os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
+      os.environ["CF_TEST_DRV"] = "${derivation-paths}"
 
       # Inject machines for test access
       import cf_test
@@ -171,7 +203,7 @@ in
           "--tb=short",
           "-x",
           "-s",
-          "-m", "builder",
+          "-m", "s3cache",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:
