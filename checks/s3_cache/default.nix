@@ -50,29 +50,9 @@ in
       };
 
       s3Server = lib.crystal-forge.makeServerNode {
-        inherit pkgs systemBuildClosure keyPath pubPath;
+        inherit inputs pkgs systemBuildClosure keyPath pubPath;
         extraConfig = {
-          imports = [inputs.self.nixosModules.crystal-forge];
-          services.postgresql = {
-            enable = true;
-            settings."listen_addresses" = lib.mkForce "*";
-            authentication = lib.concatStringsSep "\n" [
-              "local   all   postgres   trust"
-              "local   all   all        peer"
-              "host    all   all 127.0.0.1/32 trust"
-              "host    all   all ::1/128      trust"
-              "host    all   all 10.0.2.2/32  trust"
-            ];
-            initialScript = pkgs.writeText "init-crystal-forge.sql" ''
-              CREATE USER crystal_forge LOGIN;
-              CREATE DATABASE crystal_forge OWNER crystal_forge;
-              GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-            '';
-          };
-
           services.crystal-forge = {
-            enable = true;
-
             cache = {
               cache_type = "S3";
               push_to = "s3://crystal-forge-cache";
@@ -115,7 +95,7 @@ in
             server = {
               enable = true;
               host = "0.0.0.0"; # Added explicit host
-              port = 3444; # Kept your custom port
+              port = CF_TEST_SERVER_PORT; # Kept your custom port
               # Note: authorized_keys moved to systems configuration above
             };
 
