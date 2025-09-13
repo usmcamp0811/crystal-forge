@@ -231,54 +231,10 @@
 
   # put with the rest of your lib where pkgs/lib/prefetchedPaths/registryEntries are in scope
 
-  # 2) JSON of drvPaths (now using path:$testFlakePath so no git needed at eval time)
-  derivation-paths =
-    pkgs.runCommand "derivation-paths.json" {
-      nativeBuildInputs = [pkgs.nix];
-      testFlakePath = lib.crystal-forge.testFlakePath;
-      NIX_CONFIG = "experimental-features = nix-command flakes";
-      NIXPKGS_PATH = pkgs.path;
-    } ''
-          set -euo pipefail
-          export HOME=$TMPDIR
-          export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
-          export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
-          mkdir -p "$NIX_USER_PROFILE_DIR"
-
-          flake="path:$testFlakePath"
-
-          cf_test_sys_drv=$(
-            nix eval --impure --raw \
-              --override-input nixpkgs "path:$NIXPKGS_PATH" \
-              "$flake#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath"
-          )
-
-          test_agent_drv=$(
-            nix eval --impure --raw \
-              --override-input nixpkgs "path:$NIXPKGS_PATH" \
-              "$flake#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath"
-          )
-
-          cat >"$out" <<EOF
-      {
-        "cf-test-sys": {
-          "derivation_path": "$cf_test_sys_drv",
-          "derivation_name": "cf-test-sys",
-          "derivation_type": "nixos"
-        },
-        "test-agent": {
-          "derivation_path": "$test_agent_drv",
-          "derivation_name": "test-agent",
-          "derivation_type": "nixos"
-        }
-      }
-      EOF
-    '';
-
   # 3) Export a closure .nar you can import inside a VM (offline)
   #    Includes: the flake tree + nixpkgs you eval against + pre-fetched deps you already computed.
   testFlakeClosureInfo = pkgs.closureInfo {
-    rootPaths = [lib.cystal-forge.testFlakePath pkgs.path] ++ lib.cystal-forge.prefetchedPaths;
+    rootPaths = [lib.crystal-forge.testFlakePath pkgs.path] ++ lib.crystal-forge.prefetchedPaths;
   };
 
   testFlakeClosureNar =
@@ -289,6 +245,8 @@
       set -euo pipefail
       nix-store --export $(cat "$ci/store-paths") > "$out"
     '';
+
+  derivation-paths = lib.crystal-forge.derivation-paths;
 in
   cfTest
   // {

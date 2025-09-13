@@ -99,7 +99,7 @@
         };
       })
     prefetchedList);
-in rec {
+
   # Create a bare git repository directly from the flake source for serving
   # This simulates a real git-tracked flake environment with development history
   testFlake =
@@ -252,36 +252,36 @@ in rec {
       echo "5" > "$out/COMMIT_COUNT"
     '';
 
-  # in your lib where `pkgs`, `lib.crystal-forge.testFlake`, and `pkgs.path` are in scope
+  # Function to create derivation-paths.json
   derivation-paths = pkgs:
     pkgs.runCommand "derivation-paths.json" {
       nativeBuildInputs = [pkgs.nix pkgs.git];
-      testFlakeSource = lib.crystal-forge.testFlake;
+      testFlakeSource = testFlake;
       NIX_CONFIG = "experimental-features = nix-command flakes";
       NIXPKGS_PATH = pkgs.path;
     } ''
-          set -euo pipefail
+            set -euo pipefail
 
-          export HOME=$TMPDIR
-          export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
-          export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
-          mkdir -p "$NIX_USER_PROFILE_DIR"
+            export HOME=$TMPDIR
+            export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
+            export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
+            mkdir -p "$NIX_USER_PROFILE_DIR"
 
-          flake="git+file://$testFlakeSource?ref=main"
+            flake="git+file://$testFlakeSource?ref=main"
 
-          cf_test_sys_drv=$(
-            nix eval --impure --raw \
-              --override-input nixpkgs "path:$NIXPKGS_PATH" \
-              "$flake#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath"
-          )
+            cf_test_sys_drv=$(
+              nix eval --impure --raw \
+                --override-input nixpkgs "path:$NIXPKGS_PATH" \
+                "$flake#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath"
+            )
 
-          test_agent_drv=$(
-            nix eval --impure --raw \
-              --override-input nixpkgs "path:$NIXPKGS_PATH" \
-              "$flake#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath"
-          )
+            test_agent_drv=$(
+              nix eval --impure --raw \
+                --override-input nixpkgs "path:$NIXPKGS_PATH" \
+                "$flake#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath"
+            )
 
-          cat >"$out" <<EOF
+            cat >"$out" <<EOF
       {
         "cf-test-sys": {
           "derivation_path": "$cf_test_sys_drv",
@@ -296,11 +296,273 @@ in rec {
       }
       EOF
     '';
+
+  # Function to create a test VM with testFlake at a specific commit
+  # Usage: mkTestVm { commit = "abc123"; branch = "main"; vmConfig = { ... }; withGitServer = true; }
+  mkTestVm = {
+    commit ? null,
+    branch ? "main",
+    vmConfig ? {},
+    withGitServer ? false,
+    gitServerPort ? 8080,
+    ...
+  }: let
+    # Create flake reference with commit or branch
+    flakeRef =
+      if commit != null
+      then "git+file://${testFlake}?rev=${commit}"
+      else "git+file://${testFlake}?ref=${branch}";
+
+    # Git URL for cloning when using git server
+    gitUrl = "git://gitserver:${toString gitServerPort}/crystal-forge.git";
+
+    systemBuildClosure = pkgs.closureInfo {
+      rootPaths = [pkgs.path] ++ prefetchedPaths;
+    };
+  in
+    pkgs.nixosTest {
+      name = "crystal-forge-test-vm-${
+        if commit != null
+        then commit
+        else branch
+      }";
+
+      nodes =
+        {
+          testvm = {
+            config,
+            pkgs,
+            ...
+          }:
+            lib.mkMerge [
+              {
+                # Base VM configuration
+                virtualisation = {
+                  memorySize = 2048;
+                  cores = 2;
+                  graphics = false;
+                  additionalPaths = prefetchedPaths;
+                  diskSize = 8192;
+                  writableStore = withGitServer; # Allow rebuilds when using git server
+                };
+
+                # Add nix registry entries for offline resolution
+                nix.registry = registryEntries;
+
+                # Enable flakes and make testFlake available
+                nix.settings.experimental-features = ["nix-command" "flakes"];
+
+                # Pre-configure git for flake operations
+                programs.git = {
+                  enable = true;
+                  config = {
+                    user.name = "Test User";
+                    user.email = "test@crystal-forge.dev";
+                  };
+                };
+
+                # Make testFlake available as environment variable
+                environment.variables =
+                  {
+                    CRYSTAL_FORGE_TEST_FLAKE = flakeRef;
+                  }
+                  // lib.optionalAttrs withGitServer {
+                    CRYSTAL_FORGE_GIT_URL = gitUrl;
+                  };
+
+                # Add helper scripts
+                environment.systemPackages =
+                  [
+                    (pkgs.writeScriptBin "cf-flake" ''
+                      #!${pkgs.bash}/bin/bash
+                      exec nix --experimental-features "nix-command flakes" "$@" "$CRYSTAL_FORGE_TEST_FLAKE"
+                    '')
+                  ]
+                  ++ lib.optionals withGitServer [
+                    (pkgs.writeScriptBin "cf-clone-and-switch" ''
+                      #!${pkgs.bash}/bin/bash
+                      set -euo pipefail
+
+                      # Clone the repository
+                      if [ ! -d /tmp/crystal-forge ]; then
+                        echo "Cloning from $CRYSTAL_FORGE_GIT_URL..."
+                        git clone "$CRYSTAL_FORGE_GIT_URL" /tmp/crystal-forge
+                      fi
+
+                      cd /tmp/crystal-forge
+
+                      # Checkout specific commit or branch
+                      ${
+                        if commit != null
+                        then ''
+                          echo "Checking out commit ${commit}..."
+                          git checkout ${commit}
+                        ''
+                        else ''
+                          echo "Checking out branch ${branch}..."
+                          git checkout ${branch}
+                        ''
+                      }
+
+                      # Show current state
+                      echo "Current commit: $(git rev-parse HEAD)"
+                      echo "Available configurations:"
+                      nix flake show
+
+                      # Switch to configuration if specified
+                      if [ $# -gt 0 ]; then
+                        echo "Switching to configuration: $1"
+                        nixos-rebuild switch --flake ".#$1"
+                      else
+                        echo "Usage: cf-clone-and-switch <configuration-name>"
+                        echo "Available configurations:"
+                        nix eval --json .#nixosConfigurations --apply builtins.attrNames
+                      fi
+                    '')
+                  ];
+              }
+              vmConfig
+            ];
+        }
+        // lib.optionalAttrs withGitServer {
+          # Add git server node when requested
+          gitserver = lib.crystal-forge.makeGitServerNode {
+            inherit pkgs systemBuildClosure;
+            port = gitServerPort;
+          };
+        };
+
+      testScript = ''
+        start_all()
+
+        ${lib.optionalString withGitServer ''
+          # Wait for git server
+          gitserver.wait_for_unit("multi-user.target")
+          gitserver.wait_for_unit("git-daemon.service")
+          gitserver.wait_for_open_port(${toString gitServerPort})
+        ''}
+
+        testvm.wait_for_unit("multi-user.target")
+
+        # Verify testFlake is accessible
+        testvm.succeed("cf-flake show --json")
+
+        # Verify we can evaluate the flake
+        testvm.succeed("nix eval $CRYSTAL_FORGE_TEST_FLAKE#description || echo 'No description found'")
+
+        ${lib.optionalString withGitServer ''
+          # Test git server connectivity
+          testvm.succeed("ping -c 1 gitserver")
+
+          # Test cloning and show available configurations
+          testvm.succeed("cf-clone-and-switch")
+        ''}
+      '';
+    };
+
+  # Function to preload testFlake at a specific commit into any VM configuration
+  # Usage: preloadTestFlake { commit = "abc123"; branch = "main"; path = "/opt/crystal-forge"; }
+  preloadTestFlake = {
+    commit ? null,
+    branch ? "main",
+    path ? "/opt/crystal-forge",
+    ...
+  }: let
+    # Create a checkout of testFlake at the specified commit/branch
+    flakeCheckout =
+      pkgs.runCommand "preloaded-test-flake" {
+        nativeBuildInputs = [pkgs.git];
+      } ''
+        set -euo pipefail
+        export HOME=$TMPDIR
+
+        # Clone the bare repo
+        git clone ${testFlake} $out
+        cd $out
+
+        # Checkout specific commit or branch
+        ${
+          if commit != null
+          then ''
+            git checkout ${commit}
+          ''
+          else ''
+            git checkout ${branch}
+          ''
+        }
+
+        # Remove .git to make it a clean source tree
+        rm -rf .git
+
+        # Add a marker file with checkout info
+        cat > PRELOADED_INFO <<EOF
+        Preloaded testFlake
+        ${
+          if commit != null
+          then "Commit: ${commit}"
+          else "Branch: ${branch}"
+        }
+        Checked out at: $(date)
+        EOF
+      '';
+  in {
+    # Configuration to add to any VM
+    environment.etc."preloaded-flake".source = flakeCheckout;
+
+    # Helper script to use the preloaded flake
+    environment.systemPackages = [
+      (pkgs.writeScriptBin "use-preloaded-flake" ''
+        #!${pkgs.bash}/bin/bash
+        set -euo pipefail
+
+        target_path="${path}"
+
+        # Copy preloaded flake to target location
+        if [ ! -d "$target_path" ]; then
+          echo "Copying preloaded flake to $target_path..."
+          mkdir -p "$(dirname "$target_path")"
+          cp -r /etc/preloaded-flake "$target_path"
+          chmod -R u+w "$target_path"
+        fi
+
+        cd "$target_path"
+
+        # Show preload info
+        cat PRELOADED_INFO
+        echo ""
+
+        # Show available configurations
+        echo "Available NixOS configurations:"
+        nix flake show --json | ${pkgs.jq}/bin/jq -r '.nixosConfigurations | keys[]'
+        echo ""
+
+        # Execute command if provided
+        if [ $# -gt 0 ]; then
+          exec "$@"
+        else
+          echo "Usage: use-preloaded-flake [command...]"
+          echo "Examples:"
+          echo "  use-preloaded-flake nix flake show"
+          echo "  use-preloaded-flake nixos-rebuild switch --flake .#cf-test-sys"
+        fi
+      '')
+    ];
+
+    # Environment variable pointing to the preloaded flake
+    environment.variables = {
+      PRELOADED_CRYSTAL_FORGE_FLAKE = path;
+    };
+  };
+in {
   inherit
     lockJson # Parsed flake.lock content
     nodes # Dependency nodes from flake.lock
     prefetchedList # List of { key, path, from } records
     prefetchedPaths # List of Nix store paths for dependencies
-    registryEntries
-    ; # Registry mappings for offline resolution
+    registryEntries # Registry mappings for offline resolution
+    testFlake # Bare git repository for testing
+    derivation-paths # Function to generate derivation paths
+    mkTestVm # Function to create test VMs at specific commits
+    preloadTestFlake # Function to preload testFlake into any VM
+    ;
 }
