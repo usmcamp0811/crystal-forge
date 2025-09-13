@@ -297,177 +297,30 @@
       EOF
     '';
 
-  # Function to create a test VM with testFlake at a specific commit
-  # Usage: mkTestVm { commit = "abc123"; branch = "main"; vmConfig = { ... }; withGitServer = true; }
-  mkTestVm = {
-    commit ? null,
-    branch ? "main",
-    vmConfig ? {},
-    withGitServer ? false,
-    gitServerPort ? 8080,
-    ...
-  }: let
-    # Create flake reference with commit or branch
-    flakeRef =
-      if commit != null
-      then "git+file://${testFlake}?rev=${commit}"
-      else "git+file://${testFlake}?ref=${branch}";
-
-    # Git URL for cloning when using git server
-    gitUrl = "git://gitserver:${toString gitServerPort}/crystal-forge.git";
-
-    systemBuildClosure = pkgs.closureInfo {
-      rootPaths = [pkgs.path] ++ prefetchedPaths;
-    };
-  in
-    pkgs.nixosTest {
-      name = "crystal-forge-test-vm-${
-        if commit != null
-        then commit
-        else branch
-      }";
-
-      nodes =
-        {
-          testvm = {
-            config,
-            pkgs,
-            ...
-          }:
-            lib.mkMerge [
-              {
-                # Base VM configuration
-                virtualisation = {
-                  memorySize = 2048;
-                  cores = 2;
-                  graphics = false;
-                  additionalPaths = prefetchedPaths;
-                  diskSize = 8192;
-                  writableStore = withGitServer; # Allow rebuilds when using git server
-                };
-
-                # Add nix registry entries for offline resolution
-                nix.registry = registryEntries;
-
-                # Enable flakes and make testFlake available
-                nix.settings.experimental-features = ["nix-command" "flakes"];
-
-                # Pre-configure git for flake operations
-                programs.git = {
-                  enable = true;
-                  config = {
-                    user.name = "Test User";
-                    user.email = "test@crystal-forge.dev";
-                  };
-                };
-
-                # Make testFlake available as environment variable
-                environment.variables =
-                  {
-                    CRYSTAL_FORGE_TEST_FLAKE = flakeRef;
-                  }
-                  // lib.optionalAttrs withGitServer {
-                    CRYSTAL_FORGE_GIT_URL = gitUrl;
-                  };
-
-                # Add helper scripts
-                environment.systemPackages =
-                  [
-                    (pkgs.writeScriptBin "cf-flake" ''
-                      #!${pkgs.bash}/bin/bash
-                      exec nix --experimental-features "nix-command flakes" "$@" "$CRYSTAL_FORGE_TEST_FLAKE"
-                    '')
-                  ]
-                  ++ lib.optionals withGitServer [
-                    (pkgs.writeScriptBin "cf-clone-and-switch" ''
-                      #!${pkgs.bash}/bin/bash
-                      set -euo pipefail
-
-                      # Clone the repository
-                      if [ ! -d /tmp/crystal-forge ]; then
-                        echo "Cloning from $CRYSTAL_FORGE_GIT_URL..."
-                        git clone "$CRYSTAL_FORGE_GIT_URL" /tmp/crystal-forge
-                      fi
-
-                      cd /tmp/crystal-forge
-
-                      # Checkout specific commit or branch
-                      ${
-                        if commit != null
-                        then ''
-                          echo "Checking out commit ${commit}..."
-                          git checkout ${commit}
-                        ''
-                        else ''
-                          echo "Checking out branch ${branch}..."
-                          git checkout ${branch}
-                        ''
-                      }
-
-                      # Show current state
-                      echo "Current commit: $(git rev-parse HEAD)"
-                      echo "Available configurations:"
-                      nix flake show
-
-                      # Switch to configuration if specified
-                      if [ $# -gt 0 ]; then
-                        echo "Switching to configuration: $1"
-                        nixos-rebuild switch --flake ".#$1"
-                      else
-                        echo "Usage: cf-clone-and-switch <configuration-name>"
-                        echo "Available configurations:"
-                        nix eval --json .#nixosConfigurations --apply builtins.attrNames
-                      fi
-                    '')
-                  ];
-              }
-              vmConfig
-            ];
-        }
-        // lib.optionalAttrs withGitServer {
-          # Add git server node when requested
-          gitserver = lib.crystal-forge.makeGitServerNode {
-            inherit pkgs systemBuildClosure;
-            port = gitServerPort;
-          };
-        };
-
-      testScript = ''
-        start_all()
-
-        ${lib.optionalString withGitServer ''
-          # Wait for git server
-          gitserver.wait_for_unit("multi-user.target")
-          gitserver.wait_for_unit("git-daemon.service")
-          gitserver.wait_for_open_port(${toString gitServerPort})
-        ''}
-
-        testvm.wait_for_unit("multi-user.target")
-
-        # Verify testFlake is accessible
-        testvm.succeed("cf-flake show --json")
-
-        # Verify we can evaluate the flake
-        testvm.succeed("nix eval $CRYSTAL_FORGE_TEST_FLAKE#description || echo 'No description found'")
-
-        ${lib.optionalString withGitServer ''
-          # Test git server connectivity
-          testvm.succeed("ping -c 1 gitserver")
-
-          # Test cloning and show available configurations
-          testvm.succeed("cf-clone-and-switch")
-        ''}
-      '';
-    };
-
   # Function to preload testFlake at a specific commit into any VM configuration
   # Usage: preloadTestFlake { commit = "abc123"; branch = "main"; path = "/opt/crystal-forge"; }
+  #        preloadTestFlake { commitNumber = 3; branch = "main"; }
   preloadTestFlake = {
     commit ? null,
+    commitNumber ? null,
     branch ? "main",
     path ? "/opt/crystal-forge",
     ...
   }: let
+    # Get the actual commit hash if commitNumber is provided
+    actualCommit =
+      if commitNumber != null
+      then let
+        branchCommitsFile = testFlake + "/${lib.strings.toUpper branch}_COMMITS";
+        allCommits = lib.strings.splitString "\n" (lib.strings.trim (builtins.readFile branchCommitsFile));
+        # commitNumber is 1-indexed, so subtract 1 for list access
+        commitIndex = commitNumber - 1;
+      in
+        if commitIndex >= 0 && commitIndex < (builtins.length allCommits)
+        then builtins.elemAt allCommits commitIndex
+        else throw "Invalid commitNumber ${toString commitNumber} for branch ${branch}. Valid range: 1-${toString (builtins.length allCommits)}"
+      else commit;
+
     # Create a checkout of testFlake at the specified commit/branch
     flakeCheckout =
       pkgs.runCommand "preloaded-test-flake" {
@@ -482,9 +335,9 @@
 
         # Checkout specific commit or branch
         ${
-          if commit != null
+          if actualCommit != null
           then ''
-            git checkout ${commit}
+            git checkout ${actualCommit}
           ''
           else ''
             git checkout ${branch}
@@ -498,9 +351,14 @@
         cat > PRELOADED_INFO <<EOF
         Preloaded testFlake
         ${
-          if commit != null
-          then "Commit: ${commit}"
+          if actualCommit != null
+          then "Commit: ${actualCommit}"
           else "Branch: ${branch}"
+        }
+        ${
+          if commitNumber != null
+          then "Commit Number: ${toString commitNumber}"
+          else ""
         }
         Checked out at: $(date)
         EOF
@@ -545,6 +403,26 @@
           echo "  use-preloaded-flake nix flake show"
           echo "  use-preloaded-flake nixos-rebuild switch --flake .#cf-test-sys"
         fi
+      '')
+
+      # Helper script to show available commits
+      (pkgs.writeScriptBin "cf-list-commits" ''
+        #!${pkgs.bash}/bin/bash
+        echo "Available test commits:"
+        echo ""
+
+        for branch in main development feature; do
+          commits_file="${testFlake}/${lib.strings.toUpper branch}_COMMITS"
+          if [ -f "$commits_file" ]; then
+            echo "Branch: $branch"
+            nl -nln "$commits_file" | sed 's/^/  /'
+            echo ""
+          fi
+        done
+
+        echo "Usage examples:"
+        echo "  preloadTestFlake { commitNumber = 3; branch = \"main\"; }"
+        echo "  preloadTestFlake { commitNumber = 1; branch = \"development\"; }"
       '')
     ];
 
