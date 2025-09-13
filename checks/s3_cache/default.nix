@@ -19,38 +19,7 @@
   testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
     cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
   '';
-  derivation-paths =
-    pkgs.runCommand "derivation-paths.json" {
-      nativeBuildInputs = [pkgs.nix pkgs.jq];
-      testFlakeSource = lib.crystal-forge.testFlake;
-      NIX_CONFIG = "experimental-features = nix-command flakes";
-    } ''
-      # Set up temporary nix environment
-      export HOME=$TMPDIR
-      export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
-      export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
-      mkdir -p $NIX_USER_PROFILE_DIR
-
-      cd $testFlakeSource
-
-      cf_test_sys_drv=$(nix eval --impure --raw .#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath)
-      test_agent_drv=$(nix eval --impure --raw .#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath)
-
-      cat > $out << EOF
-      {
-        "cf-test-sys": {
-          "derivation_path": "$cf_test_sys_drv",
-          "derivation_name": "cf-test-sys",
-          "derivation_type": "nixos"
-        },
-        "test-agent": {
-          "derivation_path": "$test_agent_drv",
-          "derivation_name": "test-agent",
-          "derivation_type": "nixos"
-        }
-      }
-      EOF
-    '';
+  derivation-paths = lib.crystal-forge.derivation-paths;
   CF_TEST_DB_PORT = 5432;
   CF_TEST_SERVER_PORT = 3000;
   systemBuildClosure = pkgs.closureInfo {
@@ -82,63 +51,67 @@ in
 
       s3Server = lib.crystal-forge.makeServerNode {
         inherit inputs pkgs systemBuildClosure keyPath pubPath;
-        extraConfig = {
-          services.crystal-forge = {
-            cache = {
-              cache_type = "S3";
-              push_to = "s3://crystal-forge-cache";
-              push_after_build = true;
-              s3_region = "us-east-1";
-              parallel_uploads = 2;
-              max_retries = 2;
-              retry_delay_seconds = 1;
-            };
-            build = {
-              enable = true;
-              systemd_properties = [
-                "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
-                "Environment=AWS_ACCESS_KEY_ID=minioadmin"
-                "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
+        extraConfig = lib.mkMerge [
+          (lib.crystal-forge.preloadTestFlake {
+            commitNumber = 5; # Latest commit on main branch
+            branch = "main";
+          })
+          {
+            imports = [inputs.self.nixosModules.crystal-forge];
+            services.crystal-forge = {
+              cache = {
+                cache_type = "S3";
+                push_to = "s3://crystal-forge-cache";
+                push_after_build = true;
+                s3_region = "us-east-1";
+                parallel_uploads = 2;
+                max_retries = 2;
+                retry_delay_seconds = 1;
+              };
+              build = {
+                enable = true;
+                systemd_properties = [
+                  "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
+                  "Environment=AWS_ACCESS_KEY_ID=minioadmin"
+                  "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
+                ];
+              };
+              # log_level = "debug";
+              flakes.watched = [
+                {
+                  name = "test-flake";
+                  repo_url = "http://gitserver/crystal-forge";
+                  auto_poll = true;
+                }
               ];
+              environments = [
+                {
+                  name = "test";
+                  description = "Computers that get on wifi";
+                  is_active = true;
+                  risk_profile = "MEDIUM";
+                  compliance_level = "NONE";
+                }
+              ];
+              # Updated systems configuration (new requirement)
+              systems = [
+              ];
+              server = {
+                enable = true;
+                host = "0.0.0.0"; # Added explicit host
+                port = CF_TEST_SERVER_PORT; # Kept your custom port
+                # Note: authorized_keys moved to systems configuration above
+              };
+              # Database configuration (using defaults)
+              database = {
+                host = "localhost";
+                user = "crystal_forge";
+                name = "crystal_forge";
+                port = 5432;
+              };
             };
-            # log_level = "debug";
-            flakes.watched = [
-              {
-                name = "test-flake";
-                repo_url = "http://gitserver/crystal-forge";
-                auto_poll = true;
-              }
-            ];
-
-            environments = [
-              {
-                name = "test";
-                description = "Computers that get on wifi";
-                is_active = true;
-                risk_profile = "MEDIUM";
-                compliance_level = "NONE";
-              }
-            ];
-            # Updated systems configuration (new requirement)
-            systems = [
-            ];
-
-            server = {
-              enable = true;
-              host = "0.0.0.0"; # Added explicit host
-              port = CF_TEST_SERVER_PORT; # Kept your custom port
-              # Note: authorized_keys moved to systems configuration above
-            };
-
-            # Database configuration (using defaults)
-            database = {
-              host = "localhost";
-              user = "crystal_forge";
-              name = "crystal_forge";
-              port = 5432;
-            };
-          };
-        };
+          }
+        ];
         port = CF_TEST_SERVER_PORT;
       };
     };

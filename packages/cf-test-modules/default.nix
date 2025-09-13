@@ -234,7 +234,7 @@
   # 3) Export a closure .nar you can import inside a VM (offline)
   #    Includes: the flake tree + nixpkgs you eval against + pre-fetched deps you already computed.
   testFlakeClosureInfo = pkgs.closureInfo {
-    rootPaths = [lib.crystal-forge.testFlakePath pkgs.path] ++ lib.crystal-forge.prefetchedPaths;
+    rootPaths = [lib.cystal-forge.testFlakePath pkgs.path] ++ lib.cystal-forge.prefetchedPaths;
   };
 
   testFlakeClosureNar =
@@ -246,7 +246,7 @@
       nix-store --export $(cat "$ci/store-paths") > "$out"
     '';
 
-  derivation-paths = lib.crystal-forge.derivation-paths;
+  derivation-paths = lib.crystal-forge.derivaiton-paths;
 in
   cfTest
   // {

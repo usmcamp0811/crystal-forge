@@ -13,7 +13,7 @@
 
   pkgs = inputs.nixpkgs.legacyPackages.${actualSystem};
 
-  srcPath = ./test-flake;
+  srcPath = ./test-flake/.;
 
   # Parse the flake.lock file to get dependency information
   lockJson = builtins.fromJSON (builtins.readFile (srcPath + "/flake.lock"));
@@ -100,23 +100,28 @@
       })
     prefetchedList);
 
-  # Create a bare git repository directly from the flake source for serving
+  # Create a git repository directly from the flake source for serving
   # This simulates a real git-tracked flake environment with development history
   testFlake =
-    pkgs.runCommand "crystal-forge-test-flake.git" {
+    pkgs.runCommand "crystal-forge-test-flake" {
       nativeBuildInputs = [pkgs.git];
     } ''
       set -eu
-      export HOME=$PWD
-      work="$TMPDIR/work"
-      # Prepare working directory
-      mkdir -p "$work"
-      cp -r ${srcPath}/. "$work/"
-      cd "$work"
+      export HOME=$TMPDIR
+
+      # Configure git with safe settings for Nix sandbox
+      git config --global init.defaultBranch main
+      git config --global user.name "Crystal Forge Test"
+      git config --global user.email "test@crystal-forge.dev"
+      git config --global safe.directory "*"
+
+      # Create the output directory and initialize git repo
+      mkdir -p "$out"
+      cp -r ${srcPath}/. "$out/"
+      cd "$out"
       chmod -R u+w .
+
       git init -q
-      git config user.name "Crystal Forge Test"
-      git config user.email "test@crystal-forge.dev"
 
       # Array to store commit hashes for each branch
       declare -A BRANCH_COMMITS
@@ -127,28 +132,27 @@
       # === MAIN BRANCH (5 commits) ===
       git checkout -b main
 
-      git add -f flake.nix
-      [ -f flake.lock ] && git add -f flake.lock
+      git add .
       git commit -q -m "Initial flake configuration"
       BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
       echo "# Crystal Forge Production Environment" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Add production documentation"
       BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
       echo "# Project files added" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Add project files for production"
       BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
       echo "# Version: 1.0.0-stable" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Release version 1.0.0"
       BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
       echo "# Production ready" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Mark as production ready"
       BRANCH_COMMITS[main]+="$(git rev-parse HEAD) "
 
@@ -158,37 +162,37 @@
       git checkout -b development main
 
       echo "# Development Environment" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Setup development environment"
       BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
       echo "# Debug flags enabled" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Enable debug flags for development"
       BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
       echo "# Development dependencies" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Add development dependencies"
       BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
       echo "# Testing framework integration" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Integrate testing framework"
       BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
       echo "# Hot reload support" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Add hot reload for development"
       BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
       echo "# Development tools configured" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Configure development tools"
       BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
       echo "# Latest development snapshot" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Development snapshot v1.1.0-dev"
       BRANCH_COMMITS[development]+="$(git rev-parse HEAD) "
 
@@ -198,90 +202,65 @@
       git checkout -b feature/experimental development
 
       echo "# Experimental features enabled" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Enable experimental features"
       BRANCH_COMMITS[feature/experimental]+="$(git rev-parse HEAD) "
 
       echo "# New algorithm implementation" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Implement new experimental algorithm"
       BRANCH_COMMITS[feature/experimental]+="$(git rev-parse HEAD) "
 
       echo "# Performance benchmarks" >> flake.nix
-      git add -f flake.nix
+      git add flake.nix
       git commit -q -m "Add performance benchmarks"
       BRANCH_COMMITS[feature/experimental]+="$(git rev-parse HEAD) "
 
       FEATURE_HEAD=$(git rev-parse HEAD)
 
-      # Create bare repository for serving
-      git init --bare "$out"
-      git -C "$out" config receive.denyCurrentBranch ignore
-
-      # Push all branches to bare repo
-      git push "$out" main:refs/heads/main
-      git push "$out" development:refs/heads/development
-      git push "$out" feature/experimental:refs/heads/feature/experimental
-
-      # Set main as default branch
-      git -C "$out" symbolic-ref HEAD refs/heads/main
-
-      # Enable Git HTTP backend
-      git -C "$out" config http.receivepack true
-      git -C "$out" config http.uploadpack true
-      git -C "$out" update-server-info
+      # Switch back to main branch so flake.nix is in the expected state
+      git checkout main
 
       # Output branch information
-      echo "$MAIN_HEAD" > "$out/MAIN_HEAD"
-      echo "$DEV_HEAD" > "$out/DEVELOPMENT_HEAD"
-      echo "$FEATURE_HEAD" > "$out/FEATURE_HEAD"
-
-      # Output all commits for each branch (space-separated)
-      echo "''${BRANCH_COMMITS[main]}" | tr ' ' '\n' | grep -v '^$' > "$out/MAIN_COMMITS"
-      echo "''${BRANCH_COMMITS[development]}" | tr ' ' '\n' | grep -v '^$' > "$out/DEVELOPMENT_COMMITS"
-      echo "''${BRANCH_COMMITS[feature/experimental]}" | tr ' ' '\n' | grep -v '^$' > "$out/FEATURE_COMMITS"
-
-      # Output commit counts for each branch
-      echo "5" > "$out/MAIN_COMMIT_COUNT"
-      echo "7" > "$out/DEVELOPMENT_COMMIT_COUNT"
-      echo "3" > "$out/FEATURE_COMMIT_COUNT"
-
-      # Legacy compatibility - use main branch data
-      echo "$MAIN_HEAD" > "$out/HEAD_COMMIT"
-      echo "''${BRANCH_COMMITS[main]}" | tr ' ' '\n' | grep -v '^$' > "$out/ALL_COMMITS"
-      echo "5" > "$out/COMMIT_COUNT"
+      echo "$MAIN_HEAD" > MAIN_HEAD
+      echo "$DEV_HEAD" > DEVELOPMENT_HEAD
+      echo "$FEATURE_HEAD" > FEATURE_HEAD
+      echo "''${BRANCH_COMMITS[main]}" | tr ' ' '\n' | grep -v '^$' > MAIN_COMMITS
+      echo "''${BRANCH_COMMITS[development]}" | tr ' ' '\n' | grep -v '^$' > DEVELOPMENT_COMMITS
+      echo "''${BRANCH_COMMITS[feature/experimental]}" | tr ' ' '\n' | grep -v '^$' > FEATURE_COMMITS
+      echo "5" > MAIN_COMMIT_COUNT
+      echo "7" > DEVELOPMENT_COMMIT_COUNT
+      echo "3" > FEATURE_COMMIT_COUNT
+      echo "$MAIN_HEAD" > HEAD_COMMIT
+      echo "''${BRANCH_COMMITS[main]}" | tr ' ' '\n' | grep -v '^$' > ALL_COMMITS
+      echo "5" > COMMIT_COUNT
     '';
 
   # Function to create derivation-paths.json
-  derivation-paths = pkgs:
+  derivation-paths =
     pkgs.runCommand "derivation-paths.json" {
-      nativeBuildInputs = [pkgs.nix pkgs.git];
-      testFlakeSource = testFlake;
+      nativeBuildInputs = [pkgs.nix pkgs.jq pkgs.git];
+      testFlakeSource = lib.crystal-forge.testFlake;
       NIX_CONFIG = "experimental-features = nix-command flakes";
-      NIXPKGS_PATH = pkgs.path;
     } ''
-            set -euo pipefail
-
+            # Set up temporary nix environment
             export HOME=$TMPDIR
             export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
             export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
-            mkdir -p "$NIX_USER_PROFILE_DIR"
+            mkdir -p $NIX_USER_PROFILE_DIR
 
-            flake="git+file://$testFlakeSource?ref=main"
+            # Configure git to handle repositories safely
+            git config --global safe.directory "*"
+            git config --global user.name "Crystal Forge Test"
+            git config --global user.email "test@crystal-forge.dev"
 
-            cf_test_sys_drv=$(
-              nix eval --impure --raw \
-                --override-input nixpkgs "path:$NIXPKGS_PATH" \
-                "$flake#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath"
-            )
+            # Use direct path evaluation instead of git+file:// URL
+            cd "$testFlakeSource"
 
-            test_agent_drv=$(
-              nix eval --impure --raw \
-                --override-input nixpkgs "path:$NIXPKGS_PATH" \
-                "$flake#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath"
-            )
+            cf_test_sys_drv=$(nix eval --impure --raw ".#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath")
+            test_agent_drv=$(nix eval --impure --raw ".#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath")
 
-            cat >"$out" <<EOF
+            cat > $out << EOF
       {
         "cf-test-sys": {
           "derivation_path": "$cf_test_sys_drv",
@@ -326,29 +305,38 @@
       pkgs.runCommand "preloaded-test-flake" {
         nativeBuildInputs = [pkgs.git];
       } ''
-        set -euo pipefail
-        export HOME=$TMPDIR
+                set -euo pipefail
+                export HOME=$TMPDIR
 
-        # Clone the bare repo
-        git clone ${testFlake} $out
-        cd $out
+                # Configure git to handle repositories safely
+                git config --global safe.directory "*"
+                git config --global user.name "Crystal Forge Test"
+                git config --global user.email "test@crystal-forge.dev"
 
-        # Checkout specific commit or branch
-        ${
+                # Copy the repository files
+                cp -r ${testFlake}/. $out/
+                cd $out
+                chmod -R u+w .
+
+                # If we have a git repository and need to checkout a specific commit/branch
+                if [ -d .git ]; then
+                  ${
           if actualCommit != null
           then ''
             git checkout ${actualCommit}
           ''
-          else ''
-            git checkout ${branch}
+          else if branch != "main"
+          then ''
+            git checkout ${branch} || echo "Branch ${branch} not found, staying on current branch"
           ''
+          else ""
         }
+                  # Remove .git to make it a clean source tree
+                  rm -rf .git
+                fi
 
-        # Remove .git to make it a clean source tree
-        rm -rf .git
-
-        # Add a marker file with checkout info
-        cat > PRELOADED_INFO <<EOF
+                # Add a marker file with checkout info
+                cat > PRELOADED_INFO <<EOF
         Preloaded testFlake
         ${
           if actualCommit != null
@@ -440,7 +428,6 @@ in {
     registryEntries # Registry mappings for offline resolution
     testFlake # Bare git repository for testing
     derivation-paths # Function to generate derivation paths
-    mkTestVm # Function to create test VMs at specific commits
     preloadTestFlake # Function to preload testFlake into any VM
     ;
 }
