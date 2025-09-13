@@ -49,7 +49,7 @@ in
         consolePort = 9001;
       };
 
-      s3Server = lib.crystal-forge.makeServerNode {
+      s3Server = lib.crystal-forge.mkServerNode {
         inherit inputs pkgs systemBuildClosure keyPath pubPath;
         port = CF_TEST_SERVER_PORT;
 

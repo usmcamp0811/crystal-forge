@@ -38,7 +38,7 @@ in
     skipLint = true;
     skipTypeCheck = true;
     nodes = {
-      server = lib.crystal-forge.makeServerNode {
+      server = lib.crystal-forge.mkServerNode {
         inherit pkgs systemBuildClosure keyPath pubPath;
         extraConfig = {
           imports = [inputs.self.nixosModules.crystal-forge];
