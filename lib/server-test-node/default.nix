@@ -1,4 +1,3 @@
-# lib/server-test-node/default.nix
 {
   lib,
   system ? null,
@@ -13,70 +12,78 @@
     cfFlakePath ? null,
     port ? 3000,
     agents ? [],
-    # crystal-forge-specific config (overrides defaults)
+    # Crystal-forge-specific config (deep merged with defaults)
     crystalForgeConfig ? {},
     # General NixOS config merged on top
     extraConfig ? {},
     ...
   }: let
     # Generate keypairs for agents if not provided
-    agentKeyPairs = map (
-      agentName: rec {
+    agentKeyPairs =
+      map (agentName: rec {
         name = agentName;
         keyPair = lib.crystal-forge.mkKeyPair {
-          inherit pkgs;
-          name = agentName; # or: inherit name;
+          inherit pkgs name;
         };
-      }
-    )
-    agents;
+      })
+      agents;
 
     # Generate systems configuration from agents
-    agentSystems = map (agent: {
-      hostname = agent.name;
-      public_key = lib.crystal-forge.mkPublicKey {
-        inherit pkgs;
-        name = agent.name;
-        keyPair = agent.keyPair;
-      };
-      environment = "test";
-      flake_name = "test-flake";
-    })
-    agentKeyPairs;
+    agentSystems =
+      map (agent: {
+        hostname = agent.name;
+        public_key = lib.crystal-forge.mkPublicKey {
+          inherit pkgs;
+          name = agent.name;
+          keyPair = agent.keyPair;
+        };
+        environment = "test";
+        flake_name = "test-flake";
+      })
+      agentKeyPairs;
 
-    # Default crystal-forge configuration
+    # Default crystal-forge configuration - use mkDefault for everything
     defaultCrystalForgeConfig = {
-      enable = true;
-      "local-database" = true; # dashed keys must be quoted
-      log_level = "debug";
-      build.offline = true;
-      database = {
-        user = "crystal_forge";
-        host = "localhost";
-        name = "crystal_forge";
+      enable = lib.mkDefault true;
+      "local-database" = lib.mkDefault true;
+      log_level = lib.mkDefault "debug";
+
+      build = {
+        offline = lib.mkDefault true;
       };
-      flakes.flake_polling_interval = "1m";
-      flakes.watched = [
-        {
-          name = "crystal-forge";
-          repo_url = "http://gitserver/crystal-forge";
-          auto_poll = true;
-          initial_commit_depth = 5;
-        }
-        {
-          name = "crystal-forge-development";
-          repo_url = "http://gitserver/crystal-forge?ref=development";
-          auto_poll = true;
-          initial_commit_depth = 7;
-        }
-        {
-          name = "crystal-forge-feature";
-          repo_url = "http://gitserver/crystal-forge?ref=feature/experimental";
-          auto_poll = true;
-          initial_commit_depth = 3;
-        }
-      ];
-      environments = [
+
+      database = {
+        user = lib.mkDefault "crystal_forge";
+        host = lib.mkDefault "localhost";
+        name = lib.mkDefault "crystal_forge";
+        port = lib.mkDefault 5432;
+      };
+
+      flakes = {
+        flake_polling_interval = lib.mkDefault "1m";
+        watched = lib.mkDefault [
+          {
+            name = "crystal-forge";
+            repo_url = "http://gitserver/crystal-forge";
+            auto_poll = true;
+            initial_commit_depth = 5;
+          }
+          {
+            name = "crystal-forge-development";
+            repo_url = "http://gitserver/crystal-forge?ref=development";
+            auto_poll = true;
+            initial_commit_depth = 7;
+          }
+          {
+            name = "crystal-forge-feature";
+            repo_url = "http://gitserver/crystal-forge?ref=feature/experimental";
+            auto_poll = true;
+            initial_commit_depth = 3;
+          }
+        ];
+      };
+
+      environments = lib.mkDefault [
         {
           name = "test";
           description = "Test environment for Crystal Forge agents and evaluation";
@@ -85,15 +92,19 @@
           compliance_level = "NONE";
         }
       ];
+
       server = {
-        inherit port;
-        enable = true;
-        host = "0.0.0.0";
+        port = lib.mkDefault port;
+        enable = lib.mkDefault true;
+        host = lib.mkDefault "0.0.0.0";
       };
+
+      # Default to empty systems - will be overridden by agent logic or user config
+      systems = lib.mkDefault [];
     };
 
-    # Agent systems configuration (only when provided)
-    agentSystemsConfig =
+    # Agent systems override (higher priority than defaults)
+    agentSystemsOverride =
       if agents != []
       then {
         systems = agentSystems;
@@ -105,31 +116,18 @@
             hostname = "agent";
             public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
             environment = "test";
-            flake_name = "crystal-forge";
+            flake_name = "test-flake";
           }
         ];
       }
       else {};
 
-    # When using mkMerge, lists are concatenated. Force-replace lists we want to override.
-    forceListReplacements = cfg:
-      cfg
-      // {
-        flakes =
-          (cfg.flakes or {})
-          // {
-            watched = lib.mkForce (cfg.flakes.watched or []);
-          };
-        environments = lib.mkForce (cfg.environments or []);
-        systems = lib.mkForce (cfg.systems or []);
-      };
-
-    # Merge with precedence: defaults < agent systems < caller overrides
-    finalCrystalForgeConfig = lib.mkMerge [
-      defaultCrystalForgeConfig
-      agentSystemsConfig
-      (forceListReplacements crystalForgeConfig)
-    ];
+    # Final crystal-forge config: defaults < agent systems < user overrides
+    # Using recursive update for deep merging instead of mkMerge
+    finalCrystalForgeConfig =
+      lib.recursiveUpdate
+      (lib.recursiveUpdate defaultCrystalForgeConfig agentSystemsOverride)
+      crystalForgeConfig;
 
     # Base system configuration
     baseConfig = {
@@ -161,5 +159,5 @@
     };
   in
     # Merge base config with extra config
-    lib.mkMerge [baseConfig extraConfig];
+    lib.recursiveUpdate baseConfig extraConfig;
 }

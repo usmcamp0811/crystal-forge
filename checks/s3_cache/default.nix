@@ -53,8 +53,9 @@ in
         inherit inputs pkgs systemBuildClosure keyPath pubPath;
         port = CF_TEST_SERVER_PORT;
 
-        # Crystal Forge specific configuration
+        # Only specify what you want to change/add for this specific test
         crystalForgeConfig = {
+          # Add S3 cache configuration
           cache = {
             cache_type = "S3";
             push_to = "s3://crystal-forge-cache";
@@ -64,14 +65,19 @@ in
             max_retries = 2;
             retry_delay_seconds = 1;
           };
+
+          # Override build config to add S3 environment variables
           build = {
             enable = true;
+            offline = true; # This will merge with the default
             systemd_properties = [
               "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
               "Environment=AWS_ACCESS_KEY_ID=minioadmin"
               "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
             ];
           };
+
+          # Override just the flakes.watched - will completely replace the default
           flakes.watched = [
             {
               name = "test-flake";
@@ -79,21 +85,25 @@ in
               auto_poll = true;
             }
           ];
+
+          # Override environments - will completely replace the default
           environments = [
             {
               name = "test";
               description = "Computers that get on wifi";
               is_active = true;
-              risk_profile = "MEDIUM";
+              risk_profile = "MEDIUM"; # Different from default LOW
               compliance_level = "NONE";
             }
           ];
-          systems = [];
+
+          # Override server config - will merge with defaults
           server = {
-            enable = true;
-            host = "0.0.0.0";
-            port = CF_TEST_SERVER_PORT;
+            port = CF_TEST_SERVER_PORT; # Override the port
+            # enable and host will use defaults
           };
+
+          # Override database config if needed
           database = {
             host = "localhost";
             user = "crystal_forge";
@@ -104,7 +114,7 @@ in
 
         # General NixOS configuration (non-crystal-forge stuff)
         extraConfig = lib.crystal-forge.preloadTestFlake {
-          commitNumber = 5; # Latest commit on main branch
+          commitNumber = 5;
           branch = "main";
         };
       };
