@@ -108,8 +108,10 @@ def test_builder_polling_for_work(cf_client, s3_server):
 def test_builder_database_connection(cf_client, s3_server):
     """Test that builder can connect to database"""
 
-    # Test database connection as crystal-forge user
-    s3_server.succeed("psql -d crystal_forge -c 'SELECT 1;'")
+    # First ensure the database user was created
+    s3_server.wait_until_succeeds(
+        "sudo -u postgres psql -c \"SELECT 1 FROM pg_roles WHERE rolname='crystal_forge';\" | grep -q '1'"
+    )
 
     # Check no database errors in logs
     logs = s3_server.succeed(
@@ -123,6 +125,11 @@ def test_builder_database_connection(cf_client, s3_server):
     ]
     for keyword in error_keywords:
         assert keyword not in logs.lower(), f"Found database error in logs: {keyword}"
+
+    # Check that database migrations ran successfully (indicates good DB connection)
+    s3_server.succeed(
+        "journalctl -u crystal-forge-server --no-pager | grep -q 'migrations'"
+    )
 
 
 def test_builder_not_restarting(cf_client, s3_server):

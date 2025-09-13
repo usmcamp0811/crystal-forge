@@ -701,7 +701,11 @@ in {
           ensureClauses.login = true;
         }
       ];
+      identMap = ''
+        crystal-forge-map crystal-forge ${cfg.database.user}
+      '';
       authentication = lib.mkAfter ''
+        local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
         local  ${cfg.database.name}  ${cfg.database.user}  trust
         host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
         host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
@@ -786,6 +790,7 @@ in {
       preStart = ''
         ${configScript}
         mkdir -p /var/lib/crystal-forge/.cache/nix
+        mkdir -p /run/crystal-forge
       '';
 
       serviceConfig = {
@@ -877,6 +882,7 @@ in {
       preStart = ''
         ${configScript}
         mkdir -p /var/lib/crystal-forge/.cache/nix
+        mkdir -p /run/crystal-forge
       '';
 
       serviceConfig = {
