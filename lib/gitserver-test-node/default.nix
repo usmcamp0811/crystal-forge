@@ -73,9 +73,10 @@
       ];
 
       # Service to create writable git repository
+      # makeGitServerNode: setup bare repo safely from a Nix store source
       systemd.services.setup-git-repo = {
         enable = true;
-        description = "Setup writable git repository";
+        description = "Initialize bare test git repository";
         after = ["systemd-tmpfiles-setup.service"];
         before = ["git-daemon.service"];
         wantedBy = ["multi-user.target"];
@@ -84,8 +85,25 @@
           Type = "oneshot";
           User = "git";
           Group = "git";
-          ExecStart = "${pkgs.bash}/bin/bash -c 'cp -r ${lib.crystal-forge.testFlake} /srv/git/crystal-forge.git && chown -R git:git /srv/git/crystal-forge.git && chmod -R u+w /srv/git/crystal-forge.git'";
-          RemainAfterExit = true; # Important: keeps the service "active" after completion
+          ExecStart = pkgs.writeShellScript "init-bare-crystal-forge-repo" ''
+            set -euo pipefail
+            src='${lib.crystal-forge.testFlake}'
+            dst='/srv/git/crystal-forge.git'
+
+            mkdir -p /srv/git
+            # Only (re)create if missing
+            if [ ! -d "$dst" ]; then
+              # Allow cloning from a repo in the Nix store (.git owned by root)
+              ${pkgs.git}/bin/git \
+                -c safe.directory='*' \
+                clone --bare "$src" "$dst"
+
+              ${pkgs.git}/bin/git -C "$dst" update-server-info
+              chown -R git:git "$dst"
+              chmod -R u+rwX,go+rX "$dst"
+            fi
+          '';
+          RemainAfterExit = true;
         };
       };
 

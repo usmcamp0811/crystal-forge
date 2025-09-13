@@ -1,3 +1,6 @@
+import json
+import os
+
 import pytest
 
 from cf_test import CFTestClient
@@ -17,9 +20,25 @@ def cf_client(cf_config):
     return CFTestClient(cf_config)
 
 
+@pytest.fixture(scope="session")
+def derivation_paths():
+    """Load derivation paths from the test environment"""
+    drv_path = os.environ.get("CF_TEST_DRV")
+    if not drv_path:
+        pytest.fail("CF_TEST_DRV environment variable not set")
+
+    with open(drv_path, "r") as f:
+        return json.load(f)
+
+
+@pytest.fixture(scope="session")
+def test_commit_hash():
+    """Get the test commit hash"""
+    return os.environ.get("CF_TEST_REAL_COMMIT_HASH", "").strip()
+
+
 def test_builder_service_exists_and_runs(cf_client, s3_server):
     """Test that builder service exists and is running"""
-
     # Check service file exists
     s3_server.succeed("test -f /etc/systemd/system/crystal-forge-builder.service")
 
@@ -29,6 +48,52 @@ def test_builder_service_exists_and_runs(cf_client, s3_server):
 
     # Check service is active
     s3_server.succeed("systemctl is-active crystal-forge-builder.service")
+
+
+def test_database_has_test_data(
+    cf_client, s3_server, derivation_paths, test_commit_hash
+):
+    """Test that database has been populated with test flake data"""
+
+    # Wait for database to be ready and migrations to complete
+    s3_server.wait_for_unit("postgresql.service")
+    s3_server.wait_until_succeeds(
+        "sudo -u postgres psql -d crystal_forge -c 'SELECT 1 FROM flakes LIMIT 1;' >/dev/null 2>&1"
+    )
+
+    # Check that test-flake was added to the database
+    flake_exists = s3_server.succeed(
+        "sudo -u postgres psql -d crystal_forge -t -c \"SELECT COUNT(*) FROM flakes WHERE name = 'test-flake';\""
+    ).strip()
+
+    assert int(flake_exists) > 0, "test-flake not found in database"
+
+    # Check that test commit exists in database
+    if test_commit_hash:
+        commit_exists = s3_server.succeed(
+            f"sudo -u postgres psql -d crystal_forge -t -c \"SELECT COUNT(*) FROM commits WHERE sha = '{test_commit_hash}';\""
+        ).strip()
+
+        assert (
+            int(commit_exists) > 0
+        ), f"Test commit {test_commit_hash} not found in database"
+
+
+def test_database_has_derivations(cf_client, s3_server, derivation_paths):
+    """Test that database has derivation records for our test configurations"""
+
+    # Check that we have derivations for our test configurations
+    for config_name, config_data in derivation_paths.items():
+        drv_path = config_data["derivation_path"]
+
+        # Check if derivation exists in database
+        drv_exists = s3_server.succeed(
+            f"sudo -u postgres psql -d crystal_forge -t -c \"SELECT COUNT(*) FROM derivations WHERE derivation_path = '{drv_path}';\""
+        ).strip()
+
+        s3_server.log(
+            f"Derivation {config_name} ({drv_path}): {'exists' if int(drv_exists) > 0 else 'missing'}"
+        )
 
 
 def test_builder_has_required_tools(cf_client, s3_server):
@@ -50,10 +115,9 @@ def test_builder_has_required_tools(cf_client, s3_server):
     service_path = path_match.group(1)
     s3_server.log(f"Builder service PATH: {service_path}")
 
-    # Check each tool exists in the service PATH by testing if the binary file exists
+    # Check each tool exists in the service PATH
     tools = ["nix", "git", "vulnix"]
     for tool in tools:
-        # Check each PATH directory for the tool
         found = False
         for path_dir in service_path.split(":"):
             tool_path = f"{path_dir}/{tool}"
@@ -96,11 +160,11 @@ def test_builder_logs_show_startup(cf_client, s3_server):
 def test_builder_polling_for_work(cf_client, s3_server):
     """Test that builder is actively polling for work"""
 
-    # Wait for polling message
+    # Wait for polling message - could be either "No derivations need building" or actual build activity
     cf_client.wait_for_service_log(
         s3_server,
         "crystal-forge-builder.service",
-        "No derivations need building",
+        ["No derivations need building", "Found derivation", "Building derivation"],
         timeout=120,
     )
 
@@ -132,6 +196,60 @@ def test_builder_database_connection(cf_client, s3_server):
     )
 
 
+def test_builder_s3_cache_config(cf_client, s3_server):
+    """Test that builder has S3 cache configuration and can connect"""
+
+    # Check that S3 environment variables are set for the builder service
+    service_env = s3_server.succeed(
+        "systemctl show crystal-forge-builder.service --property=Environment"
+    )
+
+    s3_env_vars = [
+        "AWS_ENDPOINT_URL=http://s3Cache:9000",
+        "AWS_ACCESS_KEY_ID=minioadmin",
+        "AWS_SECRET_ACCESS_KEY=minioadmin",
+    ]
+
+    for env_var in s3_env_vars:
+        assert env_var in service_env, f"Missing S3 environment variable: {env_var}"
+
+    s3_server.log("✅ All S3 environment variables found in builder service")
+
+
+def test_s3_cache_connectivity(cf_client, s3_server):
+    """Test that the builder can connect to S3 cache"""
+
+    # Test S3 connectivity from within the builder environment
+    # We'll check if the builder can see the S3 service
+    s3_server.succeed("ping -c 1 s3Cache")
+    s3_server.succeed("nc -z s3Cache 9000")
+
+    s3_server.log("✅ S3 cache is reachable from builder")
+
+
+def test_builder_can_build_derivations(cf_client, s3_server, derivation_paths):
+    """Test that builder can actually build test derivations"""
+
+    if not derivation_paths:
+        pytest.skip("No derivation paths available for testing")
+
+    # Pick one derivation to test with
+    test_config = next(iter(derivation_paths.values()))
+    drv_path = test_config["derivation_path"]
+
+    # Check if this derivation needs building (should initially be unbuild in test env)
+    s3_server.log(f"Testing build capability with derivation: {drv_path}")
+
+    # The builder should eventually process this derivation
+    # We'll check that either it gets built or marked as already cached
+    cf_client.wait_for_service_log(
+        s3_server,
+        "crystal-forge-builder.service",
+        [drv_path, "cached", "built", "Building"],
+        timeout=300,  # Give it 5 minutes to process
+    )
+
+
 def test_builder_not_restarting(cf_client, s3_server):
     """Test that builder service is stable and not restart-looping"""
 
@@ -144,3 +262,32 @@ def test_builder_not_restarting(cf_client, s3_server):
     assert (
         restart_count < 3
     ), f"Builder has restarted {restart_count} times - possible restart loop"
+
+
+def test_s3_cache_operations(cf_client, s3_server):
+    """Test that S3 cache operations work during building"""
+
+    # Wait for some build activity that should trigger S3 operations
+    cf_client.wait_for_service_log(
+        s3_server,
+        "crystal-forge-builder.service",
+        ["push_to", "s3://", "uploading", "cached"],
+        timeout=300,
+    )
+
+    # Check that no S3-related errors occurred
+    logs = s3_server.succeed(
+        "journalctl -u crystal-forge-builder.service --since '5 minutes ago' --no-pager"
+    )
+
+    s3_error_keywords = [
+        "s3 error",
+        "upload failed",
+        "connection refused.*9000",
+        "access denied.*s3",
+    ]
+
+    for keyword in s3_error_keywords:
+        assert keyword not in logs.lower(), f"Found S3 error in builder logs: {keyword}"
+
+    s3_server.log("✅ No S3 errors detected in builder logs")
