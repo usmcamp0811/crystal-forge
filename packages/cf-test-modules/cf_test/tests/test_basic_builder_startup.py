@@ -71,7 +71,7 @@ def test_database_has_test_data(
     # Check that test commit exists in database
     if test_commit_hash:
         commit_exists = s3_server.succeed(
-            f"sudo -u postgres psql -d crystal_forge -t -c \"SELECT COUNT(*) FROM commits WHERE sha = '{test_commit_hash}';\""
+            f"sudo -u postgres psql -d crystal_forge -t -c \"SELECT COUNT(*) FROM commits WHERE git_commit_hash = '{test_commit_hash}';\""
         ).strip()
 
         assert (

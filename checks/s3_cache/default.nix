@@ -145,26 +145,57 @@ in
       s3Server.wait_for_open_port(5432)
       s3Server.forward_port(5433, 5432)
 
-
       from cf_test.vm_helpers import wait_for_git_server_ready
       wait_for_git_server_ready(gitserver, timeout=120)
 
-      # Set up test environment variables
-      os.environ["CF_TEST_GIT_SERVER_URL"] = "http://gitserver/crystal-forge"
-      os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
+      # Read commit hashes directly from testFlake metadata files
+      main_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_HEAD"))}"
+      dev_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_HEAD"))}"
+      feature_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_HEAD"))}"
 
-      # Set environment variables for the test
+      # Multi-branch commit hashes (read from testFlake metadata)
+      main_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_COMMITS"))}"""
+      dev_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_COMMITS"))}"""
+      feature_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_COMMITS"))}"""
+
+      # Set up test environment variables for multi-branch test flake
+      os.environ["CF_TEST_GIT_SERVER_URL"] = "http://gitserver/crystal-forge"
+      os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
+
+      # Use main branch head as the primary test commit
+      os.environ["CF_TEST_REAL_COMMIT_HASH"] = main_head
+
+      # Branch head commits
+      os.environ["CF_TEST_MAIN_HEAD"] = main_head
+      os.environ["CF_TEST_DEVELOPMENT_HEAD"] = dev_head
+      os.environ["CF_TEST_FEATURE_HEAD"] = feature_head
+
+      # Commit lists (convert newlines to commas for easier parsing)
+      os.environ["CF_TEST_MAIN_COMMITS"] = main_commits.replace('\n', ',')
+      os.environ["CF_TEST_DEVELOPMENT_COMMITS"] = dev_commits.replace('\n', ',')
+      os.environ["CF_TEST_FEATURE_COMMITS"] = feature_commits.replace('\n', ',')
+
+      # Commit counts
+      os.environ["CF_TEST_MAIN_COMMIT_COUNT"] = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_COMMIT_COUNT"))}"
+      os.environ["CF_TEST_DEVELOPMENT_COMMIT_COUNT"] = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_COMMIT_COUNT"))}"
+      os.environ["CF_TEST_FEATURE_COMMIT_COUNT"] = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_COMMIT_COUNT"))}"
+
+      # Database connection info
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_DB_PORT"] = "5433"
       os.environ["CF_TEST_DB_USER"] = "postgres"
       os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
+
+      # Server connection info
       os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
 
-      # Legacy single-branch data (main branch)
-      os.environ["CF_TEST_REAL_COMMIT_HASH"] = "${testFlakeCommitHash}"
-      os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
+      # Derivation paths JSON
       os.environ["CF_TEST_DRV"] = "${derivation-paths}"
+
+      # Flake information for tests
+      os.environ["CF_TEST_FLAKE_NAME"] = "test-flake"
+      os.environ["CF_TEST_PRELOADED_FLAKE_PATH"] = "/etc/preloaded-flake"
 
       # Inject machines for test access
       import cf_test
