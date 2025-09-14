@@ -5,7 +5,7 @@ import pytest
 
 from cf_test import CFTestClient
 
-pytestmark = [pytest.mark.builder, pytest.mark.s3cache, pytest.mark.integration]
+pytestmark = [pytest.mark.builder,  pytest.mark.integration]
 
 
 @pytest.fixture(scope="session")

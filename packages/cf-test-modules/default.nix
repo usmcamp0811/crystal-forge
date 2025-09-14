@@ -1,5 +1,6 @@
 {
   pkgs,
+  inputs,
   lib,
   ...
 }: let
@@ -229,24 +230,13 @@
     '';
   };
 
-  # put with the rest of your lib where pkgs/lib/prefetchedPaths/registryEntries are in scope
-
-  # 3) Export a closure .nar you can import inside a VM (offline)
-  #    Includes: the flake tree + nixpkgs you eval against + pre-fetched deps you already computed.
-  testFlakeClosureInfo = pkgs.closureInfo {
-    rootPaths = [lib.cystal-forge.testFlakePath pkgs.path] ++ lib.cystal-forge.prefetchedPaths;
+  derivation-paths = lib.crystal-forge.derivation-paths {
+    inherit pkgs inputs lib;
+    testFlake = lib.crystal-forge.testFlake;
+    commitNumber = 5;
+    branch = "main";
   };
-
-  testFlakeClosureNar =
-    pkgs.runCommand "test-flake-closure.nar" {
-      nativeBuildInputs = [pkgs.nix];
-      ci = testFlakeClosureInfo;
-    } ''
-      set -euo pipefail
-      nix-store --export $(cat "$ci/store-paths") > "$out"
-    '';
-
-  derivation-paths = lib.crystal-forge.derivaiton-paths;
+  testFlake = lib.crystal-forge.testFlake;
 in
   cfTest
   // {
@@ -260,6 +250,6 @@ in
       integrationTests
       scenarioRunner
       derivation-paths
-      testFlakeClosureNar
+      testFlake
       ;
   }
