@@ -237,97 +237,36 @@
     '';
 
   # Function to create derivation-paths.json
-  derivation-paths = {
-    pkgs,
-    inputs,
-    lib,
-    testFlake,
-    commit ? null,
-    commitNumber ? null,
-    branch ? "main",
-    ...
-  }: let
-    nixpkgsRev =
-      if inputs.nixpkgs ? rev
-      then inputs.nixpkgs.rev
-      else null;
-
-    # Use clean testFlake checkout if commit/commitNumber specified
-    flakeSource = let
-      # Get the actual commit hash if commitNumber is provided
-      actualCommit =
-        if commitNumber != null
-        then let
-          branchCommitsFile = testFlake + "/${lib.strings.toUpper branch}_COMMITS";
-          allCommits = lib.strings.splitString "\n" (lib.strings.trim (builtins.readFile branchCommitsFile));
-          commitIndex = commitNumber - 1;
-        in
-          if commitIndex >= 0 && commitIndex < (builtins.length allCommits)
-          then builtins.elemAt allCommits commitIndex
-          else throw "Invalid commitNumber ${toString commitNumber} for branch ${branch}"
-        else commit;
-    in
-      # Create clean checkout at specified commit
-      pkgs.runCommand "clean-test-flake" {
-        nativeBuildInputs = [pkgs.git];
-      } ''
-        set -euo pipefail
-        export HOME=$TMPDIR
-        git config --global safe.directory "*"
-        git config --global user.name "Crystal Forge Test"
-        git config --global user.email "test@crystal-forge.dev"
-
-        git clone ${testFlake} $out/
-        cd $out
-        chmod -R u+w .
-
-        if [ -d .git ]; then
-          git checkout ${actualCommit}
-        fi
-      '';
-  in
+  derivation-paths = pkgs:
     pkgs.runCommand "derivation-paths.json" {
       nativeBuildInputs = [pkgs.nix pkgs.jq pkgs.git];
-      testFlakeSource = flakeSource;
+      testFlakeSource = testFlake;
       NIX_CONFIG = "experimental-features = nix-command flakes";
-      NIXPKGS_REV = nixpkgsRev;
       NIXPKGS_PATH = pkgs.path;
     } ''
-      set -euo pipefail
-      export HOME=$TMPDIR
-      export NIX_USER_CONF_FILES=/dev/null
+          # Set up temporary nix environment
+          export HOME=$TMPDIR
+          export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
+          export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
+          mkdir -p $NIX_USER_PROFILE_DIR
+
+          # Configure git to handle repositories safely
+          git config --global safe.directory "*"
+          git config --global user.name "Crystal Forge Test"
+          git config --global user.email "test@crystal-forge.dev"
+
+          # Use direct path evaluation with nixpkgs override
+          cd "$testFlakeSource"
+
+          cf_test_sys_drv=$(nix eval --impure --raw \
+            --override-input nixpkgs "path:$NIXPKGS_PATH" \
+            ".#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath")
 
           test_agent_drv=$(nix eval --impure --raw \
             --override-input nixpkgs "path:$NIXPKGS_PATH" \
             ".#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath")
 
-      if [ -n "''${NIXPKGS_REV:-}" ]; then
-        nixpkgs_ref_github="github:NixOS/nixpkgs/''${NIXPKGS_REV}"
-      else
-        nixpkgs_ref_github=""
-      fi
-      nixpkgs_ref_path="path:''${NIXPKGS_PATH}"
-      self_ref="path:."
-
-      eval_drv() {
-        local ref="$1"
-        nix build --dry-run --no-link --print-out-paths \
-          "$self_ref#nixosConfigurations.$2.config.system.build.toplevel.drvPath"
-      }
-
-      if [ -n "''${nixpkgs_ref_github:-}" ]; then
-        if ! cf_test_sys_drv="$(eval_drv "$nixpkgs_ref_github" cf-test-sys 2>/dev/null)"; then
-          cf_test_sys_drv="$(eval_drv "$nixpkgs_ref_path" cf-test-sys)"
-        fi
-        if ! test_agent_drv="$(eval_drv "$nixpkgs_ref_github" test-agent 2>/dev/null)"; then
-          test_agent_drv="$(eval_drv "$nixpkgs_ref_path" test-agent)"
-        fi
-      else
-        cf_test_sys_drv="$(eval_drv "$nixpkgs_ref_path" cf-test-sys)"
-        test_agent_drv="$(eval_drv "$nixpkgs_ref_path" test-agent)"
-      fi
-
-      cat > "$out" <<EOF
+          cat > $out << EOF
       {
         "cf-test-sys": {
           "derivation_path": "$cf_test_sys_drv",
