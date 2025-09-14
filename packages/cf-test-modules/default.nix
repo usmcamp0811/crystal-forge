@@ -246,7 +246,7 @@
       nix-store --export $(cat "$ci/store-paths") > "$out"
     '';
 
-  derivation-paths = lib.crystal-forge.derivaiton-paths;
+  derivation-paths = lib.crystal-forge.derivation-paths {inherit pkgs;};
 in
   cfTest
   // {

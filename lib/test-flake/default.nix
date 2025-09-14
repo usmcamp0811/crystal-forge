@@ -237,49 +237,83 @@
     '';
 
   # Function to create derivation-paths.json
-  derivation-paths = pkgs:
-    pkgs.runCommand "derivation-paths.json" {
-      nativeBuildInputs = [pkgs.nix pkgs.jq pkgs.git];
-      testFlakeSource = testFlake;
+  derivation-paths = {
+    pkgs,
+    branches ? ["main" "development" "feature/experimental"],
+    systems ? ["cf-test-sys" "test-agent"],
+    buildAllCommits ? true,
+    ...
+  }:
+    pkgs.runCommand "flake-outputs.json" {
+      nativeBuildInputs = [pkgs.nix pkgs.git pkgs.jq];
+      flk = testFlake;
       NIX_CONFIG = "experimental-features = nix-command flakes";
       NIXPKGS_PATH = pkgs.path;
     } ''
-          # Set up temporary nix environment
-          export HOME=$TMPDIR
-          export NIX_USER_PROFILE_DIR=$TMPDIR/profiles
-          export NIX_PROFILES="$NIX_USER_PROFILE_DIR/profile"
-          mkdir -p $NIX_USER_PROFILE_DIR
+      set -euo pipefail
+      export HOME=$TMPDIR
+      git config --global safe.directory "*"
+      git config --global user.name "Crystal Forge Test"
+      git config --global user.email "test@crystal-forge.dev"
 
-          # Configure git to handle repositories safely
-          git config --global safe.directory "*"
-          git config --global user.name "Crystal Forge Test"
-          git config --global user.email "test@crystal-forge.dev"
+      work="$TMPDIR/work"
+      mkdir -p "$work"
 
-          # Use direct path evaluation with nixpkgs override
-          cd "$testFlakeSource"
-
-          cf_test_sys_drv=$(nix eval --impure --raw \
-            --override-input nixpkgs "path:$NIXPKGS_PATH" \
-            ".#nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath")
-
-          test_agent_drv=$(nix eval --impure --raw \
-            --override-input nixpkgs "path:$NIXPKGS_PATH" \
-            ".#nixosConfigurations.test-agent.config.system.build.toplevel.drvPath")
-
-          cat > $out << EOF
-      {
-        "cf-test-sys": {
-          "derivation_path": "$cf_test_sys_drv",
-          "derivation_name": "cf-test-sys",
-          "derivation_type": "nixos"
-        },
-        "test-agent": {
-          "derivation_path": "$test_agent_drv",
-          "derivation_name": "test-agent",
-          "derivation_type": "nixos"
-        }
+      # Return the *evaluated* outPath (no build) for a given checkout/system.
+      build_one() {
+        local src="$1" sys="$2"
+        nix eval --raw \
+          --override-input nixpkgs "path:$NIXPKGS_PATH" \
+          "$src#nixosConfigurations.''${sys}.config.system.build.toplevel.outPath"
       }
-      EOF
+
+      # (rest of your script unchanged)
+      declare -a COMMITS
+      if ${
+        if buildAllCommits
+        then "true"
+        else "false"
+      }; then
+        for br in ${lib.concatStringsSep " " (map (b: "'${b}'") branches)}; do
+          file="$flk/$(echo "$br" | tr '/[:lower:]' '_[:upper:]')_COMMITS"
+          [ -f "$file" ] || continue
+          while IFS= read -r c; do [ -n "$c" ] && COMMITS+=( "$br:$c" ); done < <(tr -d '\r' < "$file")
+        done
+      else
+        for br in ${lib.concatStringsSep " " (map (b: "'${b}'") branches)}; do
+          headFile="$flk/$(echo "$br" | tr '/[:lower:]' '_[:upper:]')_HEAD"
+          [ -f "$headFile" ] || continue
+          COMMITS+=( "$br:$(cat "$headFile")" )
+        done
+      fi
+
+      echo '{' > "$out"
+      first_pair=true
+      for pair in "''${COMMITS[@]}"; do
+        br="''${pair%%:*}"
+        commit="''${pair#*:}"
+
+        src="$work/checkout-$(echo "$br-$commit" | tr -c '[:alnum:]' '-')"
+        mkdir -p "$src"
+        cp -r "$flk"/. "$src"/
+        chmod -R u+w "$src"
+        ( cd "$src" && git checkout -q "$commit" && rm -rf .git )
+
+        for sys in ${lib.concatStringsSep " " (map (s: "'${s}'") systems)}; do
+          outPath="$(build_one "$src" "$sys")"
+          $first_pair || echo ',' >> "$out"
+          first_pair=false
+          jq -nc \
+            --arg key    "''${br}:''${commit}:''${sys}" \
+            --arg br     "$br" \
+            --arg commit "$commit" \
+            --arg system "$sys" \
+            --arg out    "$outPath" \
+            '{ ($key): { branch:$br, commit:$commit, system:$system, outPath:$out } }' \
+            >> "$out"
+        done
+      done
+      echo '}' >> "$out"
     '';
 
   # Function to preload testFlake at a specific commit into any VM configuration
