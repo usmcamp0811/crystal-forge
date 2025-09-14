@@ -39,10 +39,7 @@ in
     skipTypeCheck = true;
     nodes = {
       server = lib.crystal-forge.mkServerNode {
-        inherit pkgs systemBuildClosure keyPath pubPath;
-        extraConfig = {
-          imports = [inputs.self.nixosModules.crystal-forge];
-        };
+        inherit pkgs inputs systemBuildClosure keyPath pubPath;
         port = CF_TEST_SERVER_PORT;
       };
     };

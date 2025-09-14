@@ -157,7 +157,23 @@
       virtualisation.memorySize = 8096;
       virtualisation.cores = 8;
       virtualisation.additionalPaths = [systemBuildClosure];
-
+      # TODO: Figure out the minimal things from this required to test
+      services.postgresql = {
+        enable = true;
+        settings."listen_addresses" = lib.mkForce "*";
+        authentication = lib.concatStringsSep "\n" [
+          "local   all   postgres   trust"
+          "local   all   all        peer"
+          "host    all   all 127.0.0.1/32 trust"
+          "host    all   all ::1/128      trust"
+          "host    all   all 10.0.2.2/32  trust"
+        ];
+        initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+          CREATE USER crystal_forge LOGIN;
+          CREATE DATABASE crystal_forge OWNER crystal_forge;
+          GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+        '';
+      };
       environment.systemPackages = with pkgs; [
         git
         jq
