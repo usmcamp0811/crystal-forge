@@ -766,26 +766,53 @@ in {
       });
     '';
 
-    systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
+    systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable (let
+      # Parse cfg.build.systemd_properties (["Environment=FOO=bar" "IOWeight=100" …])
+      parsed =
+        lib.foldl' (
+          acc: prop: let
+            kv = lib.splitString "=" prop;
+            key = lib.elemAt kv 0;
+            val = lib.concatStringsSep "=" (lib.drop 1 kv);
+          in
+            if key == "Environment"
+            then acc // {env = (acc.env or []) ++ [val];}
+            else acc // {svc = (acc.svc or {}) // {${key} = val;};}
+        ) {
+          env = [];
+          svc = {};
+        }
+        cfg.build.systemd_properties;
+
+      envFromProps = builtins.listToAttrs (map (
+          s: let
+            p = lib.splitString "=" s;
+          in {
+            name = lib.elemAt p 0;
+            value = lib.concatStringsSep "=" (lib.drop 1 p);
+          }
+        )
+        parsed.env);
+    in {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
       path = with pkgs;
-        [
-          nix
-          git
-          vulnix
-          systemd
-        ]
+        [nix git vulnix systemd]
         ++ lib.optional (cfg.cache.cache_type == "Attic") attic-client;
-      environment = {
-        RUST_LOG = cfg.log_level;
-        NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
-        TMPDIR = "/var/lib/crystal-forge/tmp";
-        XDG_RUNTIME_DIR = "/run/crystal-forge";
-      };
+
+      # Merge existing env with any Environment=… pairs from systemd_properties
+      environment = lib.mkMerge [
+        {
+          RUST_LOG = cfg.log_level;
+          NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
+          TMPDIR = "/var/lib/crystal-forge/tmp";
+          XDG_RUNTIME_DIR = "/run/crystal-forge";
+        }
+        envFromProps
+      ];
 
       preStart = ''
         ${configScript}
@@ -793,79 +820,39 @@ in {
         mkdir -p /run/crystal-forge
       '';
 
-      serviceConfig = {
-        Type = "exec";
-        ExecStart = builderScript;
-        User = "crystal-forge";
-        Group = "crystal-forge";
+      # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above
+      serviceConfig =
+        {
+          Type = "exec";
+          ExecStart = builderScript;
+          User = "crystal-forge";
+          Group = "crystal-forge";
+          Slice = "crystal-forge-builds.slice";
 
-        Slice = "crystal-forge-builds.slice";
+          StateDirectory = "crystal-forge";
+          StateDirectoryMode = "0750";
+          RuntimeDirectory = "crystal-forge";
+          RuntimeDirectoryMode = "0700";
+          CacheDirectory = "crystal-forge-nix";
+          CacheDirectoryMode = "0750";
+          WorkingDirectory = "/var/lib/crystal-forge/workdir";
 
-        # Use individual service limits that are more conservative than slice limits
-        MemoryMax =
-          lib.mkIf (cfg.build.systemd_memory_max != null)
-          (let
-            # Use half of the systemd memory max for individual service
-            memStr = cfg.build.systemd_memory_max;
-            memVal =
-              if lib.hasSuffix "G" memStr
-              then toString (lib.toInt (lib.removeSuffix "G" memStr) / 2) + "G"
-              else if lib.hasSuffix "M" memStr
-              then toString (lib.toInt (lib.removeSuffix "M" memStr) / 2) + "M"
-              else "2G";
-          in
-            memVal);
-        MemoryHigh =
-          lib.mkIf (cfg.build.systemd_memory_max != null)
-          (let
-            # Use 37.5% of systemd memory max for "high" threshold
-            memStr = cfg.build.systemd_memory_max;
-            memVal =
-              if lib.hasSuffix "G" memStr
-              then toString (lib.toInt (lib.removeSuffix "G" memStr) * 3 / 8) + "G"
-              else if lib.hasSuffix "M" memStr
-              then toString (lib.toInt (lib.removeSuffix "M" memStr) * 3 / 8) + "M"
-              else "1.5G";
-          in
-            memVal);
-        MemorySwapMax = "1G";
-        CPUQuota =
-          lib.mkIf (cfg.build.systemd_cpu_quota != null)
-          (toString (cfg.build.systemd_cpu_quota / 2) + "%"); # Half of the slice quota
+          NoNewPrivileges = true;
+          ProtectSystem = "no";
+          ProtectHome = true;
+          PrivateTmp = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectControlGroups = true;
 
-        # Use systemd-managed dirs (no hardcoded IDs)
-        StateDirectory = "crystal-forge";
-        StateDirectoryMode = "0750";
-        RuntimeDirectory = "crystal-forge";
-        RuntimeDirectoryMode = "0700";
-        CacheDirectory = "crystal-forge-nix";
-        CacheDirectoryMode = "0750";
-        WorkingDirectory = "/var/lib/crystal-forge/workdir";
+          ReadWritePaths = ["/var/lib/crystal-forge" "/tmp" "/run/crystal-forge"];
+          ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
-        NoNewPrivileges = true;
-        ProtectSystem = "no";
-        ProtectHome = true;
-        PrivateTmp = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
-
-        # Only the required write paths
-        ReadWritePaths = [
-          "/var/lib/crystal-forge"
-          "/tmp"
-          "/run/crystal-forge"
-        ];
-
-        ReadOnlyPaths = [
-          "/etc/nix"
-          "/etc/ssl/certs"
-        ];
-
-        Restart = "always";
-        RestartSec = 5;
-      };
-    };
+          Restart = "always";
+          RestartSec = 5;
+        }
+        // parsed.svc;
+    });
 
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";

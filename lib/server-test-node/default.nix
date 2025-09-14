@@ -48,8 +48,25 @@
       "local-database" = lib.mkDefault true;
       log_level = lib.mkDefault "debug";
 
+      cache = {
+        cache_type = "S3";
+        push_to = "s3://crystal-forge-cache";
+        push_after_build = true;
+        s3_region = "us-east-1";
+        parallel_uploads = 2;
+        max_retries = 2;
+        retry_delay_seconds = 1;
+      };
       build = {
-        offline = lib.mkDefault true;
+        enable = true;
+        offline = lib.mkDefault false;
+        systemd_properties = [
+          "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
+          "Environment=AWS_ACCESS_KEY_ID=minioadmin"
+          "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
+          "Environment=NIX_LOG=trace"
+          "Environment=NIX_SHOW_STATS=1"
+        ];
       };
 
       database = {

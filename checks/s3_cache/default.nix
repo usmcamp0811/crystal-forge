@@ -58,7 +58,7 @@ in
           # Add S3 cache configuration
           cache = {
             cache_type = "S3";
-            push_to = "s3://crystal-forge-cache";
+            push_to = "s3://s3Cache:9000";
             push_after_build = true;
             s3_region = "us-east-1";
             parallel_uploads = 2;
@@ -74,6 +74,8 @@ in
               "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
               "Environment=AWS_ACCESS_KEY_ID=minioadmin"
               "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
+              "Environment=NIX_LOG=trace"
+              "Environment=NIX_SHOW_STATS=1"
             ];
           };
 
@@ -120,7 +122,7 @@ in
       };
     };
 
-    globalTimeout = 200; # 20 minutes for cache operations
+    globalTimeout = 600; # 20 minutes for cache operations
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
