@@ -267,7 +267,6 @@
           "$src#nixosConfigurations.''${sys}.config.system.build.toplevel.outPath"
       }
 
-      # (rest of your script unchanged)
       declare -a COMMITS
       if ${
         if buildAllCommits
@@ -287,8 +286,19 @@
         done
       fi
 
-      echo '{' > "$out"
-      first_pair=true
+      # Initialize JSON output with empty object
+      echo '{}' > "$out"
+
+      # Check if we have any commits to process
+      if [ ''${#COMMITS[@]} -eq 0 ]; then
+        echo "Warning: No commits found to process" >&2
+        exit 0
+      fi
+
+      # Create temporary file for building JSON
+      temp_json="$TMPDIR/temp.json"
+      echo '{}' > "$temp_json"
+
       for pair in "''${COMMITS[@]}"; do
         br="''${pair%%:*}"
         commit="''${pair#*:}"
@@ -300,20 +310,29 @@
         ( cd "$src" && git checkout -q "$commit" && rm -rf .git )
 
         for sys in ${lib.concatStringsSep " " (map (s: "'${s}'") systems)}; do
-          outPath="$(build_one "$src" "$sys")"
-          $first_pair || echo ',' >> "$out"
-          first_pair=false
-          jq -nc \
-            --arg key    "''${br}:''${commit}:''${sys}" \
-            --arg br     "$br" \
-            --arg commit "$commit" \
-            --arg system "$sys" \
-            --arg out    "$outPath" \
-            '{ ($key): { branch:$br, commit:$commit, system:$system, outPath:$out } }' \
-            >> "$out"
+          # Try to build the derivation, but handle failures gracefully
+          if outPath="$(build_one "$src" "$sys" 2>/dev/null)"; then
+            # Create a new JSON object for this entry
+            jq -nc \
+              --arg key    "''${br}:''${commit}:''${sys}" \
+              --arg br     "$br" \
+              --arg commit "$commit" \
+              --arg system "$sys" \
+              --arg out    "$outPath" \
+              '{ ($key): { branch:$br, commit:$commit, system:$system, derivation_path:$out } }' \
+              > "$TMPDIR/entry.json"
+
+            # Merge with existing JSON
+            jq -s '.[0] * .[1]' "$temp_json" "$TMPDIR/entry.json" > "$TMPDIR/merged.json"
+            mv "$TMPDIR/merged.json" "$temp_json"
+          else
+            echo "Warning: Failed to evaluate $br:$commit:$sys" >&2
+          fi
         done
       done
-      echo '}' >> "$out"
+
+      # Copy final result
+      cp "$temp_json" "$out"
     '';
 
   # Function to preload testFlake at a specific commit into any VM configuration

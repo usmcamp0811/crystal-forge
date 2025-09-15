@@ -521,9 +521,11 @@ def test_build_metrics_and_performance(cf_client, s3_server, test_flake_repo_url
         s3_server.log(f"Found {len(timed_builds)} builds with timing data:")
 
         for build in timed_builds:
-            eval_time = build["evaluation_duration_ms"] / 1000.0
+            eval_time = float(build["evaluation_duration_ms"]) / 1000.0
             total_time = (
-                build["total_duration_ms"] / 1000.0 if build["total_duration_ms"] else 0
+                float(build["total_duration_ms"]) / 1000.0
+                if build["total_duration_ms"]
+                else 0
             )
 
             s3_server.log(
