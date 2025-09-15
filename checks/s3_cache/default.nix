@@ -213,7 +213,7 @@ in
           "--tb=short",
           "-x",
           "-s",
-          "-m", "dry_run",
+          "-m", "s3cache",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:

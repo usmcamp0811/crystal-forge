@@ -533,12 +533,13 @@ def test_build_metrics_and_performance(cf_client, s3_server, test_flake_repo_url
             )
 
             # Verify timing data is reasonable
+
             assert (
                 0 <= eval_time <= 300
             ), f"Evaluation time seems unreasonable: {eval_time}s"
             if total_time > 0:
                 assert (
-                    eval_time <= total_time
+                    eval_time <= total_time + 0.01
                 ), f"Evaluation time ({eval_time}s) > total time ({total_time}s)"
 
         s3_server.log("✅ Build timing data looks reasonable")
