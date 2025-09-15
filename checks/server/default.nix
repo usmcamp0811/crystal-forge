@@ -33,7 +33,7 @@
   };
 in
   pkgs.testers.runNixOSTest {
-    name = "crystal-forge-s3-cache-integration";
+    name = "crystal-forge-server-integration";
     skipLint = true;
     skipTypeCheck = true;
     nodes = {
@@ -48,28 +48,10 @@ in
 
         # Only specify what you want to change/add for this specific test
         crystalForgeConfig = {
-          # Add S3 cache configuration
-          cache = {
-            cache_type = "S3";
-            push_to = "s3://s3Cache:9000";
-            push_after_build = true;
-            s3_region = "us-east-1";
-            parallel_uploads = 2;
-            max_retries = 2;
-            retry_delay_seconds = 1;
-          };
-
           # Override build config to add S3 environment variables
           build = {
             enable = false;
             offline = true; # This will merge with the default
-            systemd_properties = [
-              "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
-              "Environment=AWS_ACCESS_KEY_ID=minioadmin"
-              "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
-              "Environment=NIX_LOG=trace"
-              "Environment=NIX_SHOW_STATS=1"
-            ];
           };
 
           # Override just the flakes.watched - will completely replace the default
@@ -125,18 +107,12 @@ in
       os.environ["NIXOS_TEST_DRIVER"] = "1"
       start_all()
 
-      # Wait for S3 cache service
-      s3Cache.wait_for_unit("minio.service")
-      s3Cache.wait_for_unit("minio-setup.service")
-      s3Cache.wait_for_open_port(9000)
 
       # Wait for S3 server
       server.wait_for_unit("postgresql.service")
       server.wait_for_unit("crystal-forge-server.service")
       server.succeed("systemctl list-unit-files | grep crystal-forge")
-      server.succeed("systemctl restart crystal-forge-builder")
       server.succeed("ls -la /etc/systemd/system/crystal-forge*")
-      server.wait_for_unit("crystal-forge-builder.service")
       server.wait_for_open_port(5432)
       server.forward_port(5433, 5432)
 

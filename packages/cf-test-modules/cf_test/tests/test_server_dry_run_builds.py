@@ -75,30 +75,18 @@ def test_server_ready_for_dry_runs(cf_client, server):
 
 def test_test_flake_setup(cf_client, server, test_flake_repo_url, test_flake_data):
     """Test that the test flake is properly set up in the database"""
+    # From the logs, we can see the test flake is already set up
     # Check if test flake exists in database
     flake_rows = cf_client.execute_sql(
         "SELECT id, name, repo_url FROM flakes WHERE repo_url = %s",
         (test_flake_repo_url,),
     )
 
-    # If not present, insert it
-    if not flake_rows:
-        cf_client.execute_sql(
-            "INSERT INTO flakes (name, repo_url) VALUES (%s, %s)",
-            ("test-flake", test_flake_repo_url),
-        )
-        server.log(f"Inserted test flake: {test_flake_repo_url}")
-
-        # Get the flake after insertion
-        flake_rows = cf_client.execute_sql(
-            "SELECT id, name, repo_url FROM flakes WHERE repo_url = %s",
-            (test_flake_repo_url,),
-        )
-
+    # The flake should already exist from server initialization
     assert len(flake_rows) == 1, f"Expected 1 test flake, found {len(flake_rows)}"
     flake_id = flake_rows[0]["id"]
 
-    # Check if we have commits for this flake
+    # Check commits for this flake - should have been initialized during server startup
     commit_rows = cf_client.execute_sql(
         "SELECT COUNT(*) as count FROM commits WHERE flake_id = %s", (flake_id,)
     )
@@ -106,20 +94,10 @@ def test_test_flake_setup(cf_client, server, test_flake_repo_url, test_flake_dat
     commit_count = commit_rows[0]["count"]
     server.log(f"Test flake has {commit_count} commits")
 
-    # If no commits, wait for initialization
-    if commit_count == 0:
-        server.log("Waiting for test flake commits to be initialized...")
-        time.sleep(10)  # Give it a moment for polling to pick up
-
-        # Check again
-        commit_rows = cf_client.execute_sql(
-            "SELECT COUNT(*) as count FROM commits WHERE flake_id = %s", (flake_id,)
-        )
-        commit_count = commit_rows[0]["count"]
-
+    # We should have at least the 5 commits that were initialized
     assert (
-        commit_count >= 1
-    ), f"Expected at least 1 commit for test flake, found {commit_count}"
+        commit_count >= 5
+    ), f"Expected at least 5 commits for test flake, found {commit_count}"
 
     return flake_id
 
