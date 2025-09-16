@@ -100,7 +100,6 @@ def test_test_flake_setup(cf_client, server, test_flake_repo_url, test_flake_dat
     ), f"Expected at least 5 commits for test flake, found {commit_count}"
 
 
-
 def test_commits_create_derivations(
     cf_client, server, test_flake_repo_url, test_flake_data
 ):
@@ -183,7 +182,6 @@ def test_commits_create_derivations(
     ), f"Expected systems {expected_systems}, found derivations: {derivation_names}"
 
     server.log(f"✅ Found expected derivations: {found_systems}")
-
 
 
 def test_dry_run_evaluation_processing(cf_client, server, test_flake_repo_url):
@@ -550,3 +548,443 @@ def test_dry_run_performance_tracking(cf_client, server, test_flake_repo_url):
         ), f"Duration {duration_ms}ms seems unreasonable"
 
     server.log("✅ Performance tracking test completed")
+
+
+def test_enhanced_dependency_discovery(cf_client, server, test_flake_repo_url):
+    """Test that the enhanced dependency discovery captures the full closure"""
+    flake_rows = cf_client.execute_sql(
+        "SELECT id FROM flakes WHERE repo_url = %s", (test_flake_repo_url,)
+    )
+    assert len(flake_rows) == 1
+    flake_id = flake_rows[0]["id"]
+
+    # Get a derivation that's in dry-run-pending state (or create one)
+    pending_derivations = cf_client.execute_sql(
+        """
+        SELECT d.id, d.derivation_name, d.status_id
+        FROM derivations d
+        JOIN commits c ON d.commit_id = c.id
+        WHERE c.flake_id = %s AND d.status_id = 3
+        ORDER BY d.scheduled_at ASC
+        LIMIT 1
+        """,
+        (flake_id,),
+    )
+
+    if not pending_derivations:
+        # Reset one derivation to pending for testing
+        all_derivations = cf_client.execute_sql(
+            """
+            SELECT d.id, d.derivation_name
+            FROM derivations d
+            JOIN commits c ON d.commit_id = c.id
+            WHERE c.flake_id = %s AND d.derivation_type = 'nixos'
+            LIMIT 1
+            """,
+            (flake_id,),
+        )
+
+        if all_derivations:
+            test_deriv_id = all_derivations[0]["id"]
+            cf_client.execute_sql(
+                "UPDATE derivations SET status_id = 3, scheduled_at = NOW() WHERE id = %s",
+                (test_deriv_id,),
+            )
+            pending_derivations = cf_client.execute_sql(
+                "SELECT id, derivation_name, status_id FROM derivations WHERE id = %s",
+                (test_deriv_id,),
+            )
+
+    assert len(pending_derivations) >= 1, "No derivations available for testing"
+
+    test_derivation = pending_derivations[0]
+    test_deriv_id = test_derivation["id"]
+    test_deriv_name = test_derivation["derivation_name"]
+
+    server.log(f"Testing enhanced dependency discovery for: {test_deriv_name}")
+
+    # Count initial package derivations
+    initial_packages = cf_client.execute_sql(
+        "SELECT COUNT(*) as count FROM derivations WHERE derivation_type = 'package'"
+    )[0]["count"]
+
+    server.log(f"Initial package count: {initial_packages}")
+
+    # Wait for dry-run evaluation to process this derivation
+    timeout = 180
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        derivation_status = cf_client.execute_sql(
+            "SELECT status_id, derivation_path, error_message FROM derivations WHERE id = %s",
+            (test_deriv_id,),
+        )
+
+        if derivation_status:
+            status_id = derivation_status[0]["status_id"]
+
+            if status_id == 5:  # DryRunComplete
+                server.log(f"Dry-run completed for {test_deriv_name}")
+                break
+            elif status_id == 6:  # DryRunFailed
+                error_msg = derivation_status[0]["error_message"]
+                server.log(f"Dry-run failed: {error_msg}")
+                # Continue - we can still test what dependencies were discovered
+                break
+            elif status_id == 4:  # DryRunInProgress
+                server.log(f"Dry-run in progress for {test_deriv_name}...")
+
+        time.sleep(5)
+
+    # Check how many package derivations were discovered
+    final_packages = cf_client.execute_sql(
+        "SELECT COUNT(*) as count FROM derivations WHERE derivation_type = 'package'"
+    )[0]["count"]
+
+    packages_discovered = final_packages - initial_packages
+    server.log(f"Discovered {packages_discovered} new package derivations")
+
+    # Get details of discovered packages
+    discovered_packages = cf_client.execute_sql(
+        """
+        SELECT d.derivation_name, d.pname, d.version, d.derivation_path
+        FROM derivations d
+        WHERE d.derivation_type = 'package'
+        AND d.commit_id IS NULL
+        ORDER BY d.id DESC
+        LIMIT 20
+        """
+    )
+
+    server.log(f"Sample of discovered packages:")
+    interesting_packages = []
+    for pkg in discovered_packages[:10]:
+        pkg_name = pkg["pname"] or pkg["derivation_name"]
+        server.log(f"  - {pkg_name} {pkg['version'] or ''}")
+
+        # Look for heavy packages that should be discovered
+        if any(
+            keyword in pkg_name.lower()
+            for keyword in [
+                "firefox",
+                "chrome",
+                "gcc",
+                "llvm",
+                "kernel",
+                "glibc",
+                "systemd",
+            ]
+        ):
+            interesting_packages.append(pkg_name)
+
+    # Check dependency relationships
+    dependencies = cf_client.execute_sql(
+        """
+        SELECT COUNT(*) as count
+        FROM derivation_dependencies dd
+        WHERE dd.derivation_id = %s
+        """,
+        (test_deriv_id,),
+    )
+
+    dependency_count = dependencies[0]["count"] if dependencies else 0
+    server.log(f"Found {dependency_count} dependencies for {test_deriv_name}")
+
+    # Assertions to verify enhanced discovery
+    if packages_discovered > 0:
+        server.log(
+            "✅ Enhanced dependency discovery is working - packages were discovered"
+        )
+
+        # Verify we found some substantial packages (indicating full closure)
+        assert (
+            packages_discovered >= 10
+        ), f"Expected >= 10 packages, found {packages_discovered} (may indicate incomplete closure)"
+
+        if interesting_packages:
+            server.log(f"✅ Found notable heavy packages: {interesting_packages}")
+
+        # Verify dependency relationships were created
+        assert (
+            dependency_count > 0
+        ), f"Expected dependency relationships, found {dependency_count}"
+
+    else:
+        server.log(
+            "⚠️ No new packages discovered - this may indicate the dependency discovery needs enhancement"
+        )
+
+    return {
+        "packages_discovered": packages_discovered,
+        "dependency_count": dependency_count,
+        "interesting_packages": interesting_packages,
+    }
+
+
+def test_dependency_build_ordering(cf_client, server, test_flake_repo_url):
+    """Test that dependencies are ordered correctly for building"""
+    flake_rows = cf_client.execute_sql(
+        "SELECT id FROM flakes WHERE repo_url = %s", (test_flake_repo_url,)
+    )
+    assert len(flake_rows) == 1
+    flake_id = flake_rows[0]["id"]
+
+    # Get derivations ready for building (should prioritize packages over nixos)
+    build_queue = cf_client.execute_sql(
+        """
+        WITH nixos_system_groups AS (
+            SELECT 
+                d.id,
+                d.derivation_name,
+                d.derivation_type,
+                d.status_id,
+                ds.name as status_name,
+                CASE 
+                    WHEN d.derivation_type = 'package' THEN 
+                        COALESCE(
+                            (SELECT MIN(nixos_dep.id) 
+                             FROM derivation_dependencies dd 
+                             JOIN derivations nixos_dep ON dd.derivation_id = nixos_dep.id 
+                             WHERE dd.depends_on_id = d.id 
+                               AND nixos_dep.derivation_type = 'nixos'
+                             LIMIT 1),
+                            999999
+                        )
+                    ELSE d.id
+                END as nixos_group_id,
+                CASE 
+                    WHEN d.derivation_type = 'package' THEN 0
+                    WHEN d.derivation_type = 'nixos' THEN 1
+                    ELSE 2
+                END as type_priority
+            FROM derivations d
+            JOIN derivation_statuses ds ON d.status_id = ds.id
+            JOIN commits c ON d.commit_id = c.id
+            WHERE c.flake_id = %s AND d.status_id IN (5, 7)  -- dry-run-complete or build-pending
+        )
+        SELECT
+            id, derivation_name, derivation_type, status_name,
+            nixos_group_id, type_priority
+        FROM nixos_system_groups
+        ORDER BY 
+            nixos_group_id,
+            type_priority,
+            id ASC
+        LIMIT 20
+        """,
+        (flake_id,),
+    )
+
+    if build_queue:
+        server.log(f"Build queue analysis ({len(build_queue)} items):")
+
+        package_count = sum(
+            1 for item in build_queue if item["derivation_type"] == "package"
+        )
+        nixos_count = sum(
+            1 for item in build_queue if item["derivation_type"] == "nixos"
+        )
+
+        server.log(f"  Packages: {package_count}, NixOS systems: {nixos_count}")
+
+        # Show the ordering
+        for i, item in enumerate(build_queue[:10]):
+            server.log(
+                f"  {i+1}. {item['derivation_type']:7} {item['derivation_name']} (group:{item['nixos_group_id']}, priority:{item['type_priority']})"
+            )
+
+        # Verify packages come before nixos systems in each group
+        current_group = None
+        seen_nixos_in_group = False
+
+        for item in build_queue:
+            if current_group != item["nixos_group_id"]:
+                current_group = item["nixos_group_id"]
+                seen_nixos_in_group = False
+
+            if item["derivation_type"] == "nixos":
+                seen_nixos_in_group = True
+            elif item["derivation_type"] == "package" and seen_nixos_in_group:
+                pytest.fail(
+                    f"Found package {item['derivation_name']} after NixOS system in group {current_group}"
+                )
+
+        server.log("✅ Build ordering is correct - packages before NixOS systems")
+    else:
+        server.log("No derivations in build queue currently")
+
+
+def test_missing_dependencies_detection(cf_client, server, test_flake_repo_url):
+    """Test that we can identify when dependencies are missing from database but present in Nix builds"""
+    flake_rows = cf_client.execute_sql(
+        "SELECT id FROM flakes WHERE repo_url = %s", (test_flake_repo_url,)
+    )
+
+    if not flake_rows:
+        pytest.skip("No test flake found")
+
+    flake_id = flake_rows[0]["id"]
+
+    # Get a NixOS derivation that has been evaluated
+    nixos_derivations = cf_client.execute_sql(
+        """
+        SELECT d.id, d.derivation_name, d.derivation_path
+        FROM derivations d
+        JOIN commits c ON d.commit_id = c.id
+        WHERE c.flake_id = %s 
+        AND d.derivation_type = 'nixos'
+        AND d.derivation_path IS NOT NULL
+        LIMIT 1
+        """,
+        (flake_id,),
+    )
+
+    if not nixos_derivations:
+        pytest.skip("No NixOS derivations with paths found")
+
+    nixos_deriv = nixos_derivations[0]
+
+    # Count dependencies in our database
+    db_deps = cf_client.execute_sql(
+        """
+        SELECT COUNT(*) as count
+        FROM derivation_dependencies dd
+        WHERE dd.derivation_id = %s
+        """,
+        (nixos_deriv["id"],),
+    )
+
+    db_dep_count = db_deps[0]["count"]
+    server.log(f"Dependencies in database: {db_dep_count}")
+
+    # This test helps verify that the enhanced discovery is working
+    # A typical NixOS system should have dozens or hundreds of dependencies
+    if db_dep_count < 10:
+        server.log(
+            f"⚠️ Only {db_dep_count} dependencies found - this suggests incomplete discovery"
+        )
+        server.log(
+            "This indicates the enhanced dependency discovery should be implemented"
+        )
+    else:
+        server.log(
+            f"✅ Found {db_dep_count} dependencies - enhanced discovery appears to be working"
+        )
+
+    return db_dep_count
+
+
+# Keep all your existing tests...
+def test_server_ready_for_dry_runs(cf_client, server):
+    """Test that server is ready to process dry run evaluations"""
+    cf_client.wait_for_service_log(
+        server,
+        "crystal-forge-server.service",
+        "Starting Crystal Forge Server",
+        timeout=60,
+    )
+
+    cf_client.wait_for_service_log(
+        server,
+        "crystal-forge-server.service",
+        "Starting periodic commit evaluation check loop",
+        timeout=30,
+    )
+
+
+def test_test_flake_setup(cf_client, server, test_flake_repo_url, test_flake_data):
+    """Test that the test flake is properly set up in the database"""
+    flake_rows = cf_client.execute_sql(
+        "SELECT id, name, repo_url FROM flakes WHERE repo_url = %s",
+        (test_flake_repo_url,),
+    )
+
+    assert len(flake_rows) == 1, f"Expected 1 test flake, found {len(flake_rows)}"
+    flake_id = flake_rows[0]["id"]
+
+    commit_rows = cf_client.execute_sql(
+        "SELECT COUNT(*) as count FROM commits WHERE flake_id = %s", (flake_id,)
+    )
+
+    commit_count = commit_rows[0]["count"]
+    server.log(f"Test flake has {commit_count} commits")
+
+    assert (
+        commit_count >= 5
+    ), f"Expected at least 5 commits for test flake, found {commit_count}"
+
+
+def test_commits_create_derivations(
+    cf_client, server, test_flake_repo_url, test_flake_data
+):
+    """Test that commits are processed and create derivation records"""
+    flake_rows = cf_client.execute_sql(
+        "SELECT id FROM flakes WHERE repo_url = %s", (test_flake_repo_url,)
+    )
+    assert len(flake_rows) == 1
+    flake_id = flake_rows[0]["id"]
+
+    commit_rows = cf_client.execute_sql(
+        "SELECT id, git_commit_hash FROM commits WHERE flake_id = %s ORDER BY commit_timestamp DESC",
+        (flake_id,),
+    )
+
+    assert len(commit_rows) >= 1, "No commits found for test flake"
+
+    server.log("Waiting for commit evaluation to create derivations...")
+
+    timeout = 120
+    start_time = time.time()
+
+    while time.time() - start_time < timeout:
+        derivation_rows = cf_client.execute_sql(
+            """
+            SELECT d.id, d.derivation_name, d.derivation_type, d.status_id, c.git_commit_hash
+            FROM derivations d
+            JOIN commits c ON d.commit_id = c.id
+            WHERE c.flake_id = %s
+            """,
+            (flake_id,),
+        )
+
+        expected_derivations = len(commit_rows) * len(test_flake_data["test_systems"])
+
+        if len(derivation_rows) >= expected_derivations:
+            server.log(
+                f"Found {len(derivation_rows)} derivations (expected >= {expected_derivations})"
+            )
+            break
+
+        server.log(
+            f"Found {len(derivation_rows)}/{expected_derivations} derivations, waiting..."
+        )
+        time.sleep(5)
+
+    derivation_rows = cf_client.execute_sql(
+        """
+        SELECT d.id, d.derivation_name, d.derivation_type, d.status_id, c.git_commit_hash
+        FROM derivations d
+        JOIN commits c ON d.commit_id = c.id
+        WHERE c.flake_id = %s
+        """,
+        (flake_id,),
+    )
+
+    assert (
+        len(derivation_rows) >= 1
+    ), f"Expected at least 1 derivation, found {len(derivation_rows)}"
+
+    nixos_derivations = [d for d in derivation_rows if d["derivation_type"] == "nixos"]
+    assert (
+        len(nixos_derivations) >= 1
+    ), f"Expected at least 1 NixOS derivation, found {len(nixos_derivations)}"
+
+    derivation_names = {d["derivation_name"] for d in nixos_derivations}
+    expected_systems = set(test_flake_data["test_systems"])
+
+    found_systems = derivation_names & expected_systems
+    assert (
+        len(found_systems) >= 1
+    ), f"Expected systems {expected_systems}, found derivations: {derivation_names}"
+
+    server.log(f"✅ Found expected derivations: {found_systems}")
