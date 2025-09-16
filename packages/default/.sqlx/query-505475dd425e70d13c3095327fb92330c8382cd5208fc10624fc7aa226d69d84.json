@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id FROM cache_push_jobs \n        WHERE derivation_id = $1 AND status = 'failed' AND attempts < 5\n        ORDER BY scheduled_at DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "505475dd425e70d13c3095327fb92330c8382cd5208fc10624fc7aa226d69d84"
+}

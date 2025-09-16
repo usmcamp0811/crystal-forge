@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE cache_push_jobs \n            SET status = 'pending', \n                store_path = $2,\n                cache_destination = $3,\n                scheduled_at = NOW()\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "74485f0a248ab292963c66849d73fefea0b25510bbd3f9d03f456bf62203ca1c"
+}

@@ -1,6 +1,6 @@
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
-use anyhow::Result;
 use tracing::{debug, error};
 
 #[derive(Debug, FromRow)]
@@ -20,7 +20,10 @@ pub struct CachePushJob {
 }
 
 /// Get derivations that need cache pushing (build-complete status)
-pub async fn get_derivations_needing_cache_push(pool: &PgPool, limit: Option<i32>) -> Result<Vec<crate::models::derivations::Derivation>> {
+pub async fn get_derivations_needing_cache_push(
+    pool: &PgPool,
+    limit: Option<i32>,
+) -> Result<Vec<crate::models::derivations::Derivation>> {
     let query = r#"
         SELECT 
             d.id,
@@ -72,7 +75,7 @@ pub async fn get_derivations_needing_cache_push(pool: &PgPool, limit: Option<i32
         "#;
 
     let derivations = sqlx::query_as(query)
-        .bind(limit.unwrap_or(10))
+        .bind(limit.unwrap_or(10) as i64) // Cast to i64
         .fetch_all(pool)
         .await?;
 
@@ -87,19 +90,67 @@ pub async fn create_cache_push_job(
     store_path: &str,
     cache_destination: Option<&str>,
 ) -> Result<i32> {
+    // First, try to find an existing pending or in-progress job
+    if let Some(existing_job_id) = sqlx::query_scalar!(
+        r#"
+        SELECT id FROM cache_push_jobs 
+        WHERE derivation_id = $1 AND status IN ('pending', 'in_progress')
+        "#,
+        derivation_id
+    )
+    .fetch_optional(pool)
+    .await?
+    {
+        debug!(
+            "Found existing cache push job {} for derivation {}",
+            existing_job_id, derivation_id
+        );
+        return Ok(existing_job_id);
+    }
+
+    // Check for failed jobs that can be retried (< 5 attempts)
+    if let Some(failed_job_id) = sqlx::query_scalar!(
+        r#"
+        SELECT id FROM cache_push_jobs 
+        WHERE derivation_id = $1 AND status = 'failed' AND attempts < 5
+        ORDER BY scheduled_at DESC
+        LIMIT 1
+        "#,
+        derivation_id
+    )
+    .fetch_optional(pool)
+    .await?
+    {
+        // Reset the failed job to pending
+        sqlx::query!(
+            r#"
+            UPDATE cache_push_jobs 
+            SET status = 'pending', 
+                store_path = $2,
+                cache_destination = $3,
+                scheduled_at = NOW()
+            WHERE id = $1
+            "#,
+            failed_job_id,
+            store_path,
+            cache_destination
+        )
+        .execute(pool)
+        .await?;
+
+        debug!(
+            "Reset failed cache push job {} to pending for derivation {}",
+            failed_job_id, derivation_id
+        );
+        return Ok(failed_job_id);
+    }
+
+    // No existing job, create a new one
     let job_id = sqlx::query_scalar!(
         r#"
         INSERT INTO cache_push_jobs (
             derivation_id, store_path, cache_destination, status
         ) VALUES ($1, $2, $3, 'pending')
-        ON CONFLICT (derivation_id) DO UPDATE SET
-            store_path = EXCLUDED.store_path,
-            cache_destination = EXCLUDED.cache_destination,
-            scheduled_at = NOW(),
-            status = CASE 
-                WHEN cache_push_jobs.status = 'failed' THEN 'pending'
-                ELSE cache_push_jobs.status
-            END
         RETURNING id
         "#,
         derivation_id,
@@ -109,7 +160,10 @@ pub async fn create_cache_push_job(
     .fetch_one(pool)
     .await?;
 
-    debug!("Created cache push job {} for derivation {}", job_id, derivation_id);
+    debug!(
+        "Created cache push job {} for derivation {}",
+        job_id, derivation_id
+    );
     Ok(job_id)
 }
 
@@ -159,11 +213,7 @@ pub async fn mark_cache_push_completed(
 }
 
 /// Mark cache push job as failed
-pub async fn mark_cache_push_failed(
-    pool: &PgPool,
-    job_id: i32,
-    error_message: &str,
-) -> Result<()> {
+pub async fn mark_cache_push_failed(pool: &PgPool, job_id: i32, error_message: &str) -> Result<()> {
     sqlx::query!(
         r#"
         UPDATE cache_push_jobs 
@@ -179,7 +229,10 @@ pub async fn mark_cache_push_failed(
     .execute(pool)
     .await?;
 
-    debug!("Marked cache push job {} as failed: {}", job_id, error_message);
+    debug!(
+        "Marked cache push job {} as failed: {}",
+        job_id, error_message
+    );
     Ok(())
 }
 
@@ -201,7 +254,10 @@ pub async fn mark_derivation_cache_pushed(pool: &PgPool, derivation_id: i32) -> 
 }
 
 /// Get pending cache push jobs
-pub async fn get_pending_cache_push_jobs(pool: &PgPool, limit: Option<i32>) -> Result<Vec<CachePushJob>> {
+pub async fn get_pending_cache_push_jobs(
+    pool: &PgPool,
+    limit: Option<i32>,
+) -> Result<Vec<CachePushJob>> {
     let jobs = sqlx::query_as!(
         CachePushJob,
         r#"
@@ -214,7 +270,7 @@ pub async fn get_pending_cache_push_jobs(pool: &PgPool, limit: Option<i32>) -> R
         ORDER BY scheduled_at ASC
         LIMIT $1
         "#,
-        limit.unwrap_or(10)
+        limit.unwrap_or(10) as i64 // Cast to i64
     )
     .fetch_all(pool)
     .await?;

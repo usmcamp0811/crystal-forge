@@ -1,11 +1,23 @@
--- Migration: Add cache push status
--- This should be added to your migrations directory
 -- Add the new status to derivation_statuses table
-INSERT INTO derivation_statuses (name, description, is_terminal, is_success, display_order)
-    VALUES ('cache-pushed', 'Derivation has been pushed to cache', TRUE, TRUE, 110);
+INSERT INTO derivation_statuses (id, name, description, is_terminal, is_success, display_order)
+SELECT
+    14,
+    'cache-pushed',
+    'Derivation has been pushed to cache',
+    TRUE,
+    TRUE,
+    100
+WHERE
+    NOT EXISTS (
+        SELECT
+            1
+        FROM
+            derivation_statuses
+        WHERE
+            name = 'cache-pushed');
 
 -- Add cache push tracking table
-CREATE TABLE cache_push_jobs (
+CREATE TABLE IF NOT EXISTS cache_push_jobs (
     id serial PRIMARY KEY,
     derivation_id integer NOT NULL REFERENCES derivations (id) ON DELETE CASCADE,
     status text NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'in_progress', 'completed', 'failed')),
@@ -17,14 +29,18 @@ CREATE TABLE cache_push_jobs (
     error_message text,
     push_size_bytes bigint,
     push_duration_ms integer,
-    cache_destination text,
-    -- Ensure we don't have duplicate pending jobs for the same derivation
-    UNIQUE (derivation_id) DEFERRABLE INITIALLY DEFERRED
+    cache_destination text
 );
 
-CREATE INDEX idx_cache_push_jobs_status ON cache_push_jobs (status);
+-- Add indexes
+CREATE INDEX IF NOT EXISTS idx_cache_push_jobs_status ON cache_push_jobs (status);
 
-CREATE INDEX idx_cache_push_jobs_derivation_id ON cache_push_jobs (derivation_id);
+CREATE INDEX IF NOT EXISTS idx_cache_push_jobs_derivation_id ON cache_push_jobs (derivation_id);
 
-CREATE INDEX idx_cache_push_jobs_scheduled_at ON cache_push_jobs (scheduled_at);
+CREATE INDEX IF NOT EXISTS idx_cache_push_jobs_scheduled_at ON cache_push_jobs (scheduled_at);
+
+-- Add unique constraint for pending/in_progress jobs
+CREATE UNIQUE INDEX IF NOT EXISTS idx_cache_push_jobs_derivation_unique ON cache_push_jobs (derivation_id)
+WHERE
+    status IN ('pending', 'in_progress');
 
