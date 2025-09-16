@@ -22,6 +22,11 @@ pub struct CacheConfig {
     pub max_retries: u32,
     #[serde(default)]
     pub retry_delay_seconds: u64,
+    #[serde(
+        default = "CacheConfig::default_poll_interval",
+        with = "duration_serde"
+    )]
+    pub poll_interval: Duration, // Add this line
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -43,6 +48,10 @@ pub struct CachePushJob {
 impl CacheConfig {
     fn default_parallel_uploads() -> u32 {
         4
+    }
+
+    fn default_poll_interval() -> Duration {
+        Duration::from_secs(30)
     }
 
     pub fn copy_command_args(&self, store_path: &str) -> Option<Vec<String>> {
@@ -115,19 +124,20 @@ impl CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            cache_type: CacheType::default(),
+            cache_type: CacheType::Nix, // Use Nix, not None
             push_to: None,
             push_after_build: false,
             signing_key: None,
             compression: None,
-            push_filter: None,
+            push_filter: None, // This is Option<Vec<String>>, not Vec<String>
             parallel_uploads: Self::default_parallel_uploads(),
-            s3_region: None,
+            s3_region: None, // This is Option<String>, not String
             s3_profile: None,
             attic_token: None,
             attic_cache_name: None,
             max_retries: 3,
             retry_delay_seconds: 5,
+            poll_interval: Self::default_poll_interval(),
         }
     }
 }
