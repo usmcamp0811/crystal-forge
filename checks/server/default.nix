@@ -76,6 +76,7 @@ in
 
           # Override server config - will merge with defaults
           server = {
+            enable = true;
             port = CF_TEST_SERVER_PORT; # Override the port
             # enable and host will use defaults
           };
@@ -111,7 +112,6 @@ in
       # Wait for S3 server
       server.wait_for_unit("postgresql.service")
       server.wait_for_unit("crystal-forge-server.service")
-      server.succeed("systemctl list-unit-files | grep crystal-forge")
       server.succeed("ls -la /etc/systemd/system/crystal-forge*")
       server.wait_for_open_port(5432)
       server.forward_port(5433, 5432)
