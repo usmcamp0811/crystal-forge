@@ -103,6 +103,7 @@ pub struct DerivationStatus {
 }
 
 impl Derivation {
+
     pub async fn push_to_cache_with_retry(
         &self,
         store_path: &str,
@@ -463,28 +464,12 @@ impl Derivation {
     ) -> Result<EvaluationResult> {
         info!("🔍 Evaluating derivation paths for: {}", flake_target);
 
-        // Get the main derivation path
+        // robust & deterministic: never scrape stderr, never depend on dry-run text
         let main_drv = eval_main_drv_path(flake_target, build_config).await?;
+        let deps = list_immediate_input_drvs(&main_drv, build_config).await?;
 
-        // Get all dependencies that would need to be built
-        let deps = list_missing_dependencies(&main_drv, build_config).await?;
-
-        info!("📍 main drv: {main_drv}");
-        info!("📍 {} dependencies that need building", deps.len());
-
-        // Log first few dependencies to verify we're capturing Firefox/Chrome etc.
-        for (i, dep) in deps.iter().take(10).enumerate() {
-            let pkg_name = dep
-                .split('/')
-                .last()
-                .and_then(|s| s.strip_suffix(".drv"))
-                .and_then(|s| s.split_once('-').map(|(_, name)| name))
-                .unwrap_or("unknown");
-            info!("  dep {}: {} ({})", i + 1, pkg_name, dep);
-        }
-        if deps.len() > 10 {
-            info!("  ... and {} more dependencies", deps.len() - 10);
-        }
+        info!("🔍 main drv: {main_drv}");
+        info!("🔍 {} immediate input drvs", deps.len());
 
         Ok(EvaluationResult {
             main_derivation_path: main_drv,
@@ -916,80 +901,6 @@ async fn list_immediate_input_drvs(
         .unwrap_or_else(Vec::new);
 
     Ok(deps)
-}
-
-async fn list_full_dependency_closure(
-    drv_path: &str,
-    build_config: &BuildConfig,
-) -> Result<Vec<String>> {
-    // Use nix-store --query to get the full closure of what needs to be built
-    let mut cmd = Command::new("nix-store");
-    cmd.args(["--query", "--requisites", "--include-outputs", drv_path]);
-    build_config.apply_to_command(&mut cmd);
-
-    let out = cmd.output().await?;
-    if !out.status.success() {
-        bail!(
-            "nix-store --query failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-
-    let closure: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|line| line.ends_with(".drv") && *line != drv_path) // Exclude the main drv
-        .map(|line| line.trim().to_string())
-        .collect();
-
-    info!("🔍 Found {} derivations in full closure", closure.len());
-    Ok(closure)
-}
-
-// Alternative approach: Get only what would actually be built
-async fn list_missing_dependencies(
-    drv_path: &str,
-    build_config: &BuildConfig,
-) -> Result<Vec<String>> {
-    // Use nix-store --dry-run to see what would actually be built
-    let mut cmd = Command::new("nix-store");
-    cmd.args(["--realise", "--dry-run", drv_path]);
-    build_config.apply_to_command(&mut cmd);
-
-    let out = cmd.output().await?;
-    if !out.status.success() {
-        bail!(
-            "nix-store --dry-run failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let mut derivation_paths = Vec::new();
-    let mut collecting = false;
-
-    for line in stderr.lines() {
-        let t = line.trim();
-        if t.contains("derivations will be built:") {
-            collecting = true;
-            continue;
-        }
-        if collecting {
-            if t.starts_with("/nix/store/") && t.ends_with(".drv") {
-                derivation_paths.push(t.to_string());
-            } else if t.is_empty() || !t.starts_with(" ") {
-                collecting = false;
-            }
-        }
-    }
-
-    // Filter out the main derivation itself
-    derivation_paths.retain(|path| path != drv_path);
-
-    info!(
-        "🔍 Found {} derivations that need building",
-        derivation_paths.len()
-    );
-    Ok(derivation_paths)
 }
 
 #[derive(Debug)]
