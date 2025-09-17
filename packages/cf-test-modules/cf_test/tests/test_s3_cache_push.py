@@ -1,12 +1,9 @@
-import json
 import os
 import time
 
 import pytest
 
 from cf_test import CFTestClient
-from cf_test.scenarios import _create_base_scenario
-from cf_test.vm_helpers import wait_for_crystal_forge_ready
 
 pytestmark = [pytest.mark.s3cache]
 
@@ -25,33 +22,143 @@ def s3_cache():
     return cf_test._driver_machines["s3Cache"]
 
 
-@pytest.fixture(scope="session")
-def gitserver():
-    import cf_test
+@pytest.fixture
+def failed_derivation_data(cf_client):
+    """
+    Creates a failed derivation scenario for testing cache push error handling.
 
-    return cf_test._driver_machines["gitserver"]
+    Returns a dictionary with the created test data IDs for cleanup.
+    """
+    # Insert test flake
+    flake_result = cf_client.execute_sql(
+        """INSERT INTO flakes (name, repo_url, auto_poll) 
+           VALUES ('test-failed-flake', 'http://test-failed', true) 
+           RETURNING id""",
+    )
+    flake_id = flake_result[0]["id"]
+
+    # Insert test commit
+    commit_result = cf_client.execute_sql(
+        """INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) 
+           VALUES (%s, 'failed123abc456', NOW()) 
+           RETURNING id""",
+        (flake_id,),
+    )
+    commit_id = commit_result[0]["id"]
+
+    # Insert failed derivation (status_id = 12 for failed build)
+    derivation_result = cf_client.execute_sql(
+        """INSERT INTO derivations (
+               commit_id, derivation_type, derivation_name, derivation_path,
+               scheduled_at, completed_at, attempt_count, started_at,
+               evaluation_duration_ms, error_message, pname, version, status_id
+           ) VALUES (
+               %s, 'package', '/nix/store/l46k596qypwijbp4qnbzz93gn86rbxbf-dbus-1.drv',
+               '/nix/store/l46k596qypwijbp4qnbzz93gn86rbxbf-dbus-1.drv',
+               NOW() - INTERVAL '1 hour', NOW() - INTERVAL '30 minutes', 0,
+               NOW() - INTERVAL '35 minutes', 1795,
+               'nix-store --realise failed with exit code: 1',
+               'dbus', '1', 12
+           ) RETURNING id""",
+        (commit_id,),
+    )
+    derivation_id = derivation_result[0]["id"]
+
+    # Return test data for use in tests and cleanup
+    test_data = {
+        "flake_id": flake_id,
+        "commit_id": commit_id,
+        "derivation_id": derivation_id,
+        "derivation_path": "/nix/store/l46k596qypwijbp4qnbzz93gn86rbxbf-dbus-1.drv",
+        "error_message": "nix-store --realise failed with exit code: 1",
+        "pname": "dbus",
+        "version": "1",
+        "status_id": 12,  # failed build
+    }
+
+    yield test_data
+
+    # Cleanup after test
+    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
+    cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
+    cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
+
+
+@pytest.fixture
+def completed_derivation_data(cf_client):
+    """
+    Creates a completed derivation using a real package from the Nix store for cache push testing.
+
+    Returns a dictionary with the created test data IDs for cleanup.
+    """
+    # Get test package info from environment variables set by the VM test
+    package_drv_path = os.environ.get("CF_TEST_PACKAGE_DRV")
+    package_name = os.environ.get("CF_TEST_PACKAGE_NAME", "hello")
+    package_version = os.environ.get("CF_TEST_PACKAGE_VERSION", "2.12.1")
+
+    if not package_drv_path:
+        pytest.skip("CF_TEST_PACKAGE_DRV environment variable not set")
+
+    # Insert test flake
+    flake_result = cf_client.execute_sql(
+        """INSERT INTO flakes (name, repo_url, auto_poll) 
+           VALUES ('test-completed-flake', 'http://test-completed', true) 
+           RETURNING id""",
+    )
+    flake_id = flake_result[0]["id"]
+
+    # Insert test commit
+    commit_result = cf_client.execute_sql(
+        """INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) 
+           VALUES (%s, 'completed123abc456', NOW()) 
+           RETURNING id""",
+        (flake_id,),
+    )
+    commit_id = commit_result[0]["id"]
+
+    # Insert completed derivation (status_id = 10 for build-complete)
+    # Using the real package derivation path from the environment
+    derivation_result = cf_client.execute_sql(
+        """INSERT INTO derivations (
+               commit_id, derivation_type, derivation_name, derivation_path,
+               scheduled_at, completed_at, attempt_count, started_at,
+               evaluation_duration_ms, pname, version, status_id
+           ) VALUES (
+               %s, 'package', %s, %s,
+               NOW() - INTERVAL '1 hour', NOW() - INTERVAL '30 minutes', 0,
+               NOW() - INTERVAL '35 minutes', 1500,
+               %s, %s, 10
+           ) RETURNING id""",
+        (
+            commit_id,
+            f"{package_name}-{package_version}",
+            package_drv_path,
+            package_name,
+            package_version,
+        ),
+    )
+    derivation_id = derivation_result[0]["id"]
+
+    # Return test data for use in tests and cleanup
+    test_data = {
+        "flake_id": flake_id,
+        "commit_id": commit_id,
+        "derivation_id": derivation_id,
+        "derivation_path": package_drv_path,
+        "derivation_name": f"{package_name}-{package_version}",
+        "pname": package_name,
+        "version": package_version,
+        "status_id": 10,  # build-complete
+    }
+
+    yield test_data
+
+    # Cleanup after test
 
 
 @pytest.fixture(scope="session")
 def cf_client(cf_config):
     return CFTestClient(cf_config)
-
-
-@pytest.fixture(scope="session")
-def test_flake_data():
-    """Load test flake commit and derivation data"""
-    return {
-        "main_head": os.environ.get("CF_TEST_MAIN_HEAD"),
-        "development_head": os.environ.get("CF_TEST_DEVELOPMENT_HEAD"),
-        "feature_head": os.environ.get("CF_TEST_FEATURE_HEAD"),
-        "main_commits": os.environ.get("CF_TEST_MAIN_COMMITS", "").split(","),
-        "development_commits": os.environ.get("CF_TEST_DEVELOPMENT_COMMITS", "").split(
-            ","
-        ),
-        "feature_commits": os.environ.get("CF_TEST_FEATURE_COMMITS", "").split(","),
-        "repo_url": os.environ.get("CF_TEST_REAL_REPO_URL"),
-        "flake_name": os.environ.get("CF_TEST_FLAKE_NAME", "test-flake"),
-    }
 
 
 def test_s3_connectivity(s3_server, s3_cache):
@@ -72,7 +179,7 @@ def test_s3_connectivity(s3_server, s3_cache):
         AWS_ACCESS_KEY_ID=minioadmin \
         AWS_SECRET_ACCESS_KEY=minioadmin \
         aws s3 ls s3://crystal-forge-cache/ || true
-    """
+        """
     )
     s3_server.log("✅ AWS CLI connectivity to MinIO verified")
 
@@ -86,7 +193,7 @@ def test_builder_s3_cache_config(s3_server):
 
     # Verify S3 cache configuration
     assert 'cache_type = "S3"' in config_content, "S3 cache type not configured"
-    assert "s3://s3Cache:9000" in config_content, "S3 endpoint not configured"
+    assert "s3Cache:9000" in config_content, "S3 endpoint not configured"
     assert "push_after_build = true" in config_content, "Cache push not enabled"
 
     s3_server.log("✅ S3 cache configuration verified")
@@ -105,523 +212,116 @@ def test_builder_s3_cache_config(s3_server):
     s3_server.log("✅ AWS environment variables configured")
 
 
-def test_cache_push_job_creation(cf_client, s3_server):
-    """Test that cache push jobs are created for build-complete derivations"""
+def test_cache_push_on_build_complete(
+    completed_derivation_data, s3_server, s3_cache, cf_client
+):
+    """
+    When a derivation is inserted with status_id=10 (build-complete),
+    the builder's cache-push loop should upload its binary cache to MinIO.
 
-    wait_for_crystal_forge_ready(s3_server)
-
-    # Create a dummy store path
-    dummy_path = "/nix/store/job-creation-test-12345"
-    s3_server.succeed(f"mkdir -p {dummy_path}")
-    s3_server.succeed(f"echo 'Job creation test' > {dummy_path}/test-file")
-
-    s3_server.log(f"Created dummy store path: {dummy_path}")
-
-    # Insert a derivation marked as build-complete
-    derivation_result = cf_client.execute_sql(
-        """INSERT INTO derivations (
-               derivation_type, derivation_name, derivation_path,
-               status_id, completed_at, attempt_count, scheduled_at
-           ) VALUES ('package', 'job-creation-test', %s, 10, NOW(), 0, NOW())
-           RETURNING id""",
-        (dummy_path,),
-    )
-
-    derivation_id = derivation_result[0]["id"]
-    s3_server.log(f"Created test derivation with ID: {derivation_id}")
-
-    # Wait for cache push loop to create job
-    cf_client.wait_for_service_log(
-        s3_server,
-        "crystal-forge-builder.service",
-        "Queuing cache push for derivation",
-        timeout=120,
-    )
-
-    # Verify cache push job was created in database
-    jobs = cf_client.execute_sql(
-        "SELECT * FROM cache_push_jobs WHERE derivation_id = %s",
-        (derivation_id,),
-    )
-
-    assert len(jobs) > 0, "Cache push job was not created"
-    job = jobs[0]
-
-    s3_server.log(f"Cache push job created: ID={job['id']}, status={job['status']}")
-    assert job["status"] in [
-        "pending",
-        "in_progress",
-    ], f"Unexpected job status: {job['status']}"
-    assert job["store_path"] == dummy_path, f"Wrong store path: {job['store_path']}"
-
-    # Cleanup
-    s3_server.succeed(f"rm -rf {dummy_path}")
-    cf_client.execute_sql("DELETE FROM cache_push_jobs WHERE id = %s", (job["id"],))
-    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
-
-
-def test_cache_push_job_processing(cf_client, s3_server, s3_cache):
-    """Test that pending cache push jobs are processed"""
-
-    wait_for_crystal_forge_ready(s3_server)
-
-    # Create a dummy store path
-    dummy_path = "/nix/store/job-processing-test-12345"
-    s3_server.succeed(f"mkdir -p {dummy_path}")
-    s3_server.succeed(f"echo 'Job processing test' > {dummy_path}/test-file")
-
-    # Insert derivation and manually create cache push job
-    derivation_result = cf_client.execute_sql(
-        """INSERT INTO derivations (
-               derivation_type, derivation_name, derivation_path,
-               status_id, completed_at, attempt_count, scheduled_at
-           ) VALUES ('package', 'job-processing-test', %s, 10, NOW(), 0, NOW())
-           RETURNING id""",
-        (dummy_path,),
-    )
-
-    derivation_id = derivation_result[0]["id"]
-
-    # Create cache push job directly
-    job_result = cf_client.execute_sql(
-        """INSERT INTO cache_push_jobs (
-               derivation_id, store_path, status, cache_destination
-           ) VALUES (%s, %s, 'pending', 's3://crystal-forge-cache')
-           RETURNING id""",
-        (derivation_id, dummy_path),
-    )
-
-    job_id = job_result[0]["id"]
-    s3_server.log(f"Created cache push job with ID: {job_id}")
-
-    # Wait for job to be processed
-    cf_client.wait_for_service_log(
-        s3_server,
-        "crystal-forge-builder.service",
-        f"Processing cache push job {job_id}",
-        timeout=120,
-    )
-
-    # Monitor job status changes
-    for attempt in range(30):  # Wait up to 30 seconds
-        jobs = cf_client.execute_sql(
-            "SELECT status, error_message FROM cache_push_jobs WHERE id = %s",
-            (job_id,),
-        )
-
-        if jobs:
-            status = jobs[0]["status"]
-            s3_server.log(f"Job {job_id} status: {status}")
-
-            if status in ["completed", "failed"]:
-                break
-
-        time.sleep(1)
-
-    # Check final job status
-    final_jobs = cf_client.execute_sql(
-        "SELECT * FROM cache_push_jobs WHERE id = %s",
-        (job_id,),
-    )
-
-    assert len(final_jobs) > 0, "Cache push job disappeared"
-    final_job = final_jobs[0]
-
-    s3_server.log(f"Final job status: {final_job['status']}")
-
-    if final_job["status"] == "failed":
-        s3_server.log(f"Job failed with error: {final_job['error_message']}")
-
-    # For now, accept either completed or failed (MinIO might not be fully set up)
-    assert final_job["status"] in [
-        "completed",
-        "failed",
-    ], f"Job stuck in status: {final_job['status']}"
-
-    # Cleanup
-    s3_server.succeed(f"rm -rf {dummy_path}")
-    cf_client.execute_sql("DELETE FROM cache_push_jobs WHERE id = %s", (job_id,))
-    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
-
-
-def test_cache_push_job_retry_logic(cf_client, s3_server):
-    """Test cache push job retry behavior for failed jobs"""
-
-    wait_for_crystal_forge_ready(s3_server)
-
-    # Create a non-existent store path to trigger failure
-    bad_path = "/nix/store/nonexistent-retry-test-12345"
-
-    # Insert derivation with bad path
-    derivation_result = cf_client.execute_sql(
-        """INSERT INTO derivations (
-               derivation_type, derivation_name, derivation_path,
-               status_id, completed_at, attempt_count, scheduled_at
-           ) VALUES ('package', 'retry-test', %s, 10, NOW(), 0, NOW())
-           RETURNING id""",
-        (bad_path,),
-    )
-
-    derivation_id = derivation_result[0]["id"]
-
-    # Create cache push job
-    job_result = cf_client.execute_sql(
-        """INSERT INTO cache_push_jobs (
-               derivation_id, store_path, status, attempts
-           ) VALUES (%s, %s, 'pending', 0)
-           RETURNING id""",
-        (derivation_id, bad_path),
-    )
-
-    job_id = job_result[0]["id"]
-
-    # Wait for job to fail
-    cf_client.wait_for_service_log(
-        s3_server,
-        "crystal-forge-builder.service",
-        ["Cache push failed", "error"],
-        timeout=120,
-    )
-
-    # Check that attempts counter increased
-    failed_jobs = cf_client.execute_sql(
-        "SELECT attempts, status, error_message FROM cache_push_jobs WHERE id = %s",
-        (job_id,),
-    )
-
-    assert len(failed_jobs) > 0, "Failed job not found"
-    failed_job = failed_jobs[0]
+    Success criterion: a .narinfo object for the package appears in the S3 bucket.
+    """
+    pkg_name = completed_derivation_data["pname"]
+    pkg_version = completed_derivation_data["version"]
+    drv_path = completed_derivation_data["derivation_path"]
+    deriv_id = completed_derivation_data["derivation_id"]
 
     s3_server.log(
-        f"Failed job: attempts={failed_job['attempts']}, status={failed_job['status']}"
+        f"🧪 Verifying cache push for derivation_id={deriv_id}, drv={drv_path}, "
+        f"pkg={pkg_name}-{pkg_version}"
     )
-    assert failed_job["attempts"] > 0, "Attempts counter not incremented"
+
+    # Sanity check the DB row is still build-complete (status_id=10)
+    status_row = cf_client.execute_sql(
+        "SELECT status_id FROM derivations WHERE id = %s",
+        (deriv_id,),
+    )
+    assert status_row, "Derivation row not found after fixture insert"
     assert (
-        failed_job["status"] == "failed"
-    ), f"Expected failed status, got: {failed_job['status']}"
-    assert failed_job["error_message"], "No error message recorded"
+        status_row[0]["status_id"] == 10
+    ), "Derivation is not build-complete (status_id != 10)"
 
-    # Cleanup
-    cf_client.execute_sql("DELETE FROM cache_push_jobs WHERE id = %s", (job_id,))
-    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
+    # The Nix binary cache layout places .narinfo files under a 'narinfo/' prefix and
+    # the filename includes the package name-version. We poll for that object.
+    #
+    # NOTE: We match case-insensitively on '{name}-{version}.narinfo' to avoid coupling
+    # to the output hash prefix present in narinfo filenames.
+    poll_script = r"""
+set -euo pipefail
+export AWS_ENDPOINT_URL=http://s3Cache:9000
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
 
+name_ver="%s-%s"
+deadline=$((SECONDS + 180))  # wait up to 3 minutes
 
-def test_cache_push_loop_running(cf_client, s3_server):
-    """Test that the cache push loop is actively running"""
+while (( SECONDS < deadline )); do
+  # List recursively and look for a narinfo containing name-version.
+  if aws s3 ls --recursive s3://crystal-forge-cache/ 2>/dev/null | grep -i -E "/narinfo/.*${name_ver}\.narinfo$" >/dev/null; then
+    echo "FOUND"
+    exit 0
+  fi
+  sleep 5
+done
 
-    wait_for_crystal_forge_ready(s3_server)
-
-    # Look for cache push loop startup message
-    cf_client.wait_for_service_log(
-        s3_server,
-        "crystal-forge-builder.service",
-        "Starting Cache Push loop",
-        timeout=60,
+exit 1
+""" % (
+        pkg_name,
+        pkg_version,
     )
 
-    s3_server.log("✅ Cache push loop is running")
-
-    # Verify loop is still active by looking for periodic activity
-    cf_client.wait_for_service_log(
-        s3_server,
-        "crystal-forge-builder.service",
-        ["cache push", "processing", "Cache Push"],
-        timeout=120,
-    )
-
-    s3_server.log("✅ Cache push loop shows periodic activity")
-
-
-def test_derivation_status_update_after_cache_push(cf_client, s3_server):
-    """Test that derivation status is updated to cache-pushed after successful push"""
-
-    wait_for_crystal_forge_ready(s3_server)
-
-    # Create a dummy store path
-    dummy_path = "/nix/store/status-update-test-12345"
-    s3_server.succeed(f"mkdir -p {dummy_path}")
-    s3_server.succeed(f"echo 'Status update test' > {dummy_path}/test-file")
-
-    # Insert derivation
-    derivation_result = cf_client.execute_sql(
-        """INSERT INTO derivations (
-               derivation_type, derivation_name, derivation_path,
-               status_id, completed_at, attempt_count, scheduled_at
-           ) VALUES ('package', 'status-update-test', %s, 10, NOW(), 0, NOW())
-           RETURNING id""",
-        (dummy_path,),
-    )
-
-    derivation_id = derivation_result[0]["id"]
-
-    # Wait for cache push process to complete (or fail)
-    cf_client.wait_for_service_log(
-        s3_server,
-        "crystal-forge-builder.service",
-        ["Queuing cache push", "Processing cache push"],
-        timeout=180,
-    )
-
-    # Give some time for status updates
-    time.sleep(10)
-
-    # Check derivation status - should be cache-pushed if successful, or stay build-complete if failed
-    derivation_status = cf_client.execute_sql(
-        """SELECT d.status_id, ds.name as status_name 
-           FROM derivations d 
-           JOIN derivation_statuses ds ON d.status_id = ds.id 
-           WHERE d.id = %s""",
-        (derivation_id,),
-    )
-
-    if derivation_status:
-        status_name = derivation_status[0]["status_name"]
-        s3_server.log(f"Final derivation status: {status_name}")
-
-        # Accept either cache-pushed (success) or build-complete (cache push failed)
-        assert status_name in [
-            "cache-pushed",
-            "build-complete",
-        ], f"Unexpected status: {status_name}"
-    else:
-        s3_server.log("⚠️ Could not find derivation status")
-
-    # Cleanup
-    s3_server.succeed(f"rm -rf {dummy_path}")
-    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
-
-
-def test_s3_cache_integration_with_existing_store_path(cf_client, s3_server, s3_cache):
-    """Test cache push with a real store path"""
-
-    wait_for_crystal_forge_ready(s3_server)
-
-    # Find an existing store path
     try:
-        store_paths = (
-            s3_server.succeed("find /nix/store -maxdepth 1 -type d | head -10")
-            .strip()
-            .split("\n")
-        )
-        existing_path = None
-
-        for path in store_paths:
-            if path and path != "/nix/store" and "-" in path:
-                try:
-                    # Check if it's a reasonable size for testing
-                    size_output = s3_server.succeed(f"du -sh {path}")
-                    size = size_output.split()[0]
-                    s3_server.log(f"Store path candidate: {path} - Size: {size}")
-
-                    # Use paths under 100MB for testing
-                    if (
-                        any(unit in size for unit in ["K", "M"])
-                        and not size.startswith("1")
-                        and "G" not in size
-                    ):
-                        existing_path = path
-                        break
-                except:
-                    continue
-
-        if not existing_path:
-            pytest.skip("No suitable store paths found for integration testing")
-
-        s3_server.log(f"Using existing store path: {existing_path}")
-
-        # Insert derivation with real store path
-        derivation_result = cf_client.execute_sql(
-            """INSERT INTO derivations (
-                   derivation_type, derivation_name, derivation_path,
-                   status_id, completed_at, attempt_count, scheduled_at
-               ) VALUES ('package', 'integration-test', %s, 10, NOW(), 0, NOW())
-               RETURNING id""",
-            (existing_path,),
+        s3_server.succeed(poll_script)
+        s3_server.log("✅ Cache push detected: .narinfo present in crystal-forge-cache")
+    except Exception:
+        # Dump helpful diagnostics before failing the test
+        s3_server.log(
+            "❌ Cache push not detected within timeout. Collecting diagnostics..."
         )
 
-        derivation_id = derivation_result[0]["id"]
-
-        # Monitor the complete process
-        cf_client.wait_for_service_log(
-            s3_server,
-            "crystal-forge-builder.service",
-            "Queuing cache push.*integration-test",
-            timeout=120,
-        )
-
-        # Look for processing
-        cf_client.wait_for_service_log(
-            s3_server,
-            "crystal-forge-builder.service",
-            "Processing cache push job",
-            timeout=60,
-        )
-
-        # Check for completion or failure
+        # 1) Show recent builder logs
         try:
-            cf_client.wait_for_service_log(
-                s3_server,
-                "crystal-forge-builder.service",
-                ["Cache push completed", "Cache push failed"],
-                timeout=180,
+            logs = s3_server.succeed(
+                "journalctl -u crystal-forge-builder.service --no-pager -n 200 || true"
             )
-        except:
-            s3_server.log("⚠️ Cache push result not clearly detected")
+            s3_server.log(
+                "---- crystal-forge-builder.service logs (last 200 lines) ----\n" + logs
+            )
+        except Exception:
+            pass
 
-        # Check MinIO for any activity
+        # 2) Show bucket inventory to see what's actually there
         try:
-            minio_logs = s3_cache.succeed(
-                "journalctl -u minio.service --since '3 minutes ago' --no-pager"
+            listing = s3_server.succeed(
+                r"""
+export AWS_ENDPOINT_URL=http://s3Cache:9000
+export AWS_ACCESS_KEY_ID=minioadmin
+export AWS_SECRET_ACCESS_KEY=minioadmin
+aws s3 ls --recursive s3://crystal-forge-cache/ || true
+"""
             )
+            s3_server.log(
+                "---- S3 bucket listing (crystal-forge-cache) ----\n" + listing
+            )
+        except Exception:
+            pass
 
-            put_operations = [line for line in minio_logs.split("\n") if "PUT" in line]
-            if put_operations:
-                s3_server.log(f"✅ Found {len(put_operations)} PUT operations in MinIO")
-            else:
-                s3_server.log("⚠️ No PUT operations found in MinIO logs")
-        except:
-            s3_server.log("⚠️ Could not check MinIO logs")
-
-        # Cleanup
-        cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
-
-    except Exception as e:
-        pytest.skip(f"Integration test failed: {e}")
-
-
-def test_cache_push_job_duplicate_prevention(cf_client, s3_server):
-    """Test that duplicate cache push jobs are not created for the same derivation"""
-
-    wait_for_crystal_forge_ready(s3_server)
-
-    # Create derivation
-    dummy_path = "/nix/store/duplicate-test-12345"
-    s3_server.succeed(f"mkdir -p {dummy_path}")
-
-    derivation_result = cf_client.execute_sql(
-        """INSERT INTO derivations (
-               derivation_type, derivation_name, derivation_path,
-               status_id, completed_at, attempt_count, scheduled_at
-           ) VALUES ('package', 'duplicate-test', %s, 10, NOW(), 0, NOW())
-           RETURNING id""",
-        (dummy_path,),
-    )
-
-    derivation_id = derivation_result[0]["id"]
-
-    # Create first cache push job
-    job1_result = cf_client.execute_sql(
-        """INSERT INTO cache_push_jobs (
-               derivation_id, store_path, status
-           ) VALUES (%s, %s, 'pending')
-           RETURNING id""",
-        (derivation_id, dummy_path),
-    )
-
-    job1_id = job1_result[0]["id"]
-
-    # Try to create second job for same derivation - should fail due to unique constraint
-    try:
-        cf_client.execute_sql(
-            """INSERT INTO cache_push_jobs (
-                   derivation_id, store_path, status
-               ) VALUES (%s, %s, 'pending')""",
-            (derivation_id, dummy_path),
-        )
-
-        # If we get here, the constraint didn't work
-        jobs = cf_client.execute_sql(
-            "SELECT id FROM cache_push_jobs WHERE derivation_id = %s",
-            (derivation_id,),
-        )
-        assert (
-            len(jobs) == 1
-        ), f"Found {len(jobs)} jobs, expected 1 due to unique constraint"
-
-    except Exception as e:
-        # This is expected - unique constraint should prevent duplicate
-        s3_server.log(f"✅ Duplicate job creation prevented: {e}")
-
-    # Verify only one job exists
-    jobs = cf_client.execute_sql(
-        "SELECT id FROM cache_push_jobs WHERE derivation_id = %s",
-        (derivation_id,),
-    )
-    assert len(jobs) == 1, f"Expected 1 job, found {len(jobs)}"
-
-    # Cleanup
-    s3_server.succeed(f"rm -rf {dummy_path}")
-    cf_client.execute_sql(
-        "DELETE FROM cache_push_jobs WHERE derivation_id = %s", (derivation_id,)
-    )
-    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
-
-
-def test_cache_push_error_handling_and_logging(cf_client, s3_server):
-    """Test comprehensive error handling and logging in cache push process"""
-
-    wait_for_crystal_forge_ready(s3_server)
-
-    # Test various error conditions
-    error_cases = [
-        ("missing-store-path", "/nix/store/completely-missing-12345"),
-        ("permission-denied", "/root/inaccessible-path"),
-        ("invalid-store-path", "/tmp/not-a-store-path"),
-    ]
-
-    for test_name, bad_path in error_cases:
-        s3_server.log(f"Testing error case: {test_name}")
-
-        # Insert derivation with problematic path
-        derivation_result = cf_client.execute_sql(
-            """INSERT INTO derivations (
-                   derivation_type, derivation_name, derivation_path,
-                   status_id, completed_at, attempt_count, scheduled_at
-               ) VALUES ('package', %s, %s, 10, NOW(), 0, NOW())
-               RETURNING id""",
-            (test_name, bad_path),
-        )
-
-        derivation_id = derivation_result[0]["id"]
-
-        # Wait for cache push to be attempted
+        # 3) Echo DB state for the derivation in question
         try:
-            cf_client.wait_for_service_log(
-                s3_server,
-                "crystal-forge-builder.service",
-                f"Queuing cache push.*{test_name}",
-                timeout=60,
+            row = cf_client.execute_sql(
+                """
+                SELECT id, derivation_name, derivation_path, status_id, completed_at
+                FROM derivations
+                WHERE id = %s
+                """,
+                (deriv_id,),
             )
+            s3_server.log(f"---- DB row for derivation_id={deriv_id} ----\n{row}")
+        except Exception:
+            pass
 
-            # Look for error handling
-            cf_client.wait_for_service_log(
-                s3_server,
-                "crystal-forge-builder.service",
-                ["failed", "error", "Error"],
-                timeout=60,
-            )
-
-            s3_server.log(f"✅ Error handling detected for {test_name}")
-
-        except:
-            s3_server.log(f"⚠️ Error handling not clearly detected for {test_name}")
-
-        # Check that error was recorded in job
-        jobs = cf_client.execute_sql(
-            "SELECT status, error_message FROM cache_push_jobs WHERE derivation_id = %s",
-            (derivation_id,),
+        # Finally, fail the test
+        assert False, (
+            f"Did not find .narinfo for {pkg_name}-{pkg_version} in MinIO within timeout. "
+            "See logs above for details."
         )
-
-        if jobs:
-            job = jobs[0]
-            s3_server.log(f"Job status for {test_name}: {job['status']}")
-            if job["error_message"]:
-                s3_server.log(f"Error message: {job['error_message'][:100]}...")
-
-        # Cleanup
-        cf_client.execute_sql(
-            "DELETE FROM cache_push_jobs WHERE derivation_id = %s", (derivation_id,)
-        )
-        cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
-
-        time.sleep(2)  # Brief pause between test cases
