@@ -8,7 +8,7 @@ from cf_test import CFTestClient
 
 pytestmark = [
     pytest.mark.builder,
-    pytest.mark.s3cache,
+    # pytest.mark.s3cache,
     pytest.mark.integration,
     pytest.mark.build_pipeline,
 ]

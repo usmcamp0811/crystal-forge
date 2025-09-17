@@ -91,6 +91,7 @@ in
           enable = true;
           "local-database" = true;
           log_level = "debug";
+          client.enable = false;
 
           # Database config
           database = {
@@ -135,24 +136,24 @@ in
           flakes = {
             flake_polling_interval = "1m";
             watched = [
-              {
-                name = "test-flake";
-                repo_url = "http://gitserver/crystal-forge";
-                auto_poll = true;
-                initial_commit_depth = 5;
-              }
+              # {
+              #   name = "test-flake";
+              #   repo_url = "http://gitserver/crystal-forge";
+              #   auto_poll = true;
+              #   initial_commit_depth = 5;
+              # }
             ];
           };
 
           # Test environment
           environments = [
-            {
-              name = "test";
-              description = "Test environment for Crystal Forge agents and evaluation";
-              is_active = true;
-              risk_profile = "LOW";
-              compliance_level = "NONE";
-            }
+            # {
+            #   name = "test";
+            #   description = "Test environment for Crystal Forge agents and evaluation";
+            #   is_active = true;
+            #   risk_profile = "LOW";
+            #   compliance_level = "NONE";
+            # }
           ];
 
           # Test system configuration

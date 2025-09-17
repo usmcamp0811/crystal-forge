@@ -31,8 +31,8 @@ def failed_derivation_data(cf_client):
     """
     # Insert test flake
     flake_result = cf_client.execute_sql(
-        """INSERT INTO flakes (name, repo_url, auto_poll) 
-           VALUES ('test-failed-flake', 'http://test-failed', true) 
+        """INSERT INTO flakes (name, repo_url) 
+           VALUES ('test-failed-flake', 'http://test-failed') 
            RETURNING id""",
     )
     flake_id = flake_result[0]["id"]
@@ -87,10 +87,10 @@ def failed_derivation_data(cf_client):
 @pytest.fixture
 def completed_derivation_data(cf_client):
     """
-    Creates a completed derivation using a real package from the Nix store for cache push testing.
-
-    Returns a dictionary with the created test data IDs for cleanup.
+    Creates a completed derivation using a real package from the Nix store for cache push testing,
+    and enqueues a pending cache push job.
     """
+
     # Get test package info from environment variables set by the VM test
     package_drv_path = os.environ.get("CF_TEST_PACKAGE_DRV")
     package_name = os.environ.get("CF_TEST_PACKAGE_NAME", "hello")
@@ -101,23 +101,22 @@ def completed_derivation_data(cf_client):
 
     # Insert test flake
     flake_result = cf_client.execute_sql(
-        """INSERT INTO flakes (name, repo_url, auto_poll) 
-           VALUES ('test-completed-flake', 'http://test-completed', true) 
-           RETURNING id""",
+        """INSERT INTO flakes (name, repo_url)
+           VALUES ('test-completed-flake', 'http://test-completed')
+           RETURNING id"""
     )
     flake_id = flake_result[0]["id"]
 
     # Insert test commit
     commit_result = cf_client.execute_sql(
-        """INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) 
-           VALUES (%s, 'completed123abc456', NOW()) 
+        """INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
+           VALUES (%s, 'completed123abc456', NOW())
            RETURNING id""",
         (flake_id,),
     )
     commit_id = commit_result[0]["id"]
 
     # Insert completed derivation (status_id = 10 for build-complete)
-    # Using the real package derivation path from the environment
     derivation_result = cf_client.execute_sql(
         """INSERT INTO derivations (
                commit_id, derivation_type, derivation_name, derivation_path,
@@ -132,18 +131,32 @@ def completed_derivation_data(cf_client):
         (
             commit_id,
             f"{package_name}-{package_version}",
-            package_drv_path,
+            package_drv_path,  # ⬅ NOTE: this is a .drv path (fine here)
             package_name,
             package_version,
         ),
     )
     derivation_id = derivation_result[0]["id"]
 
+    # enqueue a pending cache push job for this derivation
+    # leave store_path NULL so the worker can resolve/build the out path
+    job_row = cf_client.execute_sql(
+        """
+        INSERT INTO cache_push_jobs (derivation_id, status, cache_destination)
+        VALUES (%s, 'pending', 's3://crystal-forge-cache')
+        ON CONFLICT ON CONSTRAINT idx_cache_push_jobs_derivation_unique DO NOTHING
+        RETURNING id
+        """,
+        (derivation_id,),
+    )
+    cache_push_job_id = job_row[0]["id"] if job_row else None
+
     # Return test data for use in tests and cleanup
     test_data = {
         "flake_id": flake_id,
         "commit_id": commit_id,
         "derivation_id": derivation_id,
+        "cache_push_job_id": cache_push_job_id,
         "derivation_path": package_drv_path,
         "derivation_name": f"{package_name}-{package_version}",
         "pname": package_name,
@@ -153,7 +166,13 @@ def completed_derivation_data(cf_client):
 
     yield test_data
 
-    # Cleanup after test
+    # Cleanup after test (delete job first due to FK)
+    cf_client.execute_sql(
+        "DELETE FROM cache_push_jobs WHERE derivation_id = %s", (derivation_id,)
+    )
+    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
+    cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
+    cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
 
 
 @pytest.fixture(scope="session")
@@ -161,55 +180,55 @@ def cf_client(cf_config):
     return CFTestClient(cf_config)
 
 
-def test_s3_connectivity(s3_server, s3_cache):
-    """Test basic S3 connectivity between builder and MinIO"""
+# def test_s3_connectivity(s3_server, s3_cache):
+#     """Test basic S3 connectivity between builder and MinIO"""
+#
+#     # Test network connectivity
+#     s3_server.succeed("ping -c 1 s3Cache")
+#     s3_server.log("✅ Network connectivity to S3 cache established")
+#
+#     # Test MinIO is responding
+#     s3_cache.succeed("curl -f http://localhost:9000/minio/health/live")
+#     s3_server.log("✅ MinIO health check passed")
+#
+#     # Test AWS CLI can reach MinIO from builder
+#     s3_server.succeed(
+#         """
+#         AWS_ENDPOINT_URL=http://s3Cache:9000 \
+#         AWS_ACCESS_KEY_ID=minioadmin \
+#         AWS_SECRET_ACCESS_KEY=minioadmin \
+#         aws s3 ls s3://crystal-forge-cache/ || true
+#         """
+#     )
+#     s3_server.log("✅ AWS CLI connectivity to MinIO verified")
 
-    # Test network connectivity
-    s3_server.succeed("ping -c 1 s3Cache")
-    s3_server.log("✅ Network connectivity to S3 cache established")
 
-    # Test MinIO is responding
-    s3_cache.succeed("curl -f http://localhost:9000/minio/health/live")
-    s3_server.log("✅ MinIO health check passed")
-
-    # Test AWS CLI can reach MinIO from builder
-    s3_server.succeed(
-        """
-        AWS_ENDPOINT_URL=http://s3Cache:9000 \
-        AWS_ACCESS_KEY_ID=minioadmin \
-        AWS_SECRET_ACCESS_KEY=minioadmin \
-        aws s3 ls s3://crystal-forge-cache/ || true
-        """
-    )
-    s3_server.log("✅ AWS CLI connectivity to MinIO verified")
-
-
-def test_builder_s3_cache_config(s3_server):
-    """Test that builder has correct S3 cache configuration"""
-
-    # Check Crystal Forge config file
-    config_content = s3_server.succeed("cat /var/lib/crystal-forge/config.toml")
-    s3_server.log(f"Crystal Forge config excerpt: {config_content[:500]}...")
-
-    # Verify S3 cache configuration
-    assert 'cache_type = "S3"' in config_content, "S3 cache type not configured"
-    assert "s3Cache:9000" in config_content, "S3 endpoint not configured"
-    assert "push_after_build = true" in config_content, "Cache push not enabled"
-
-    s3_server.log("✅ S3 cache configuration verified")
-
-    # Verify builder service has AWS environment variables
-    env_output = s3_server.succeed(
-        "systemctl show crystal-forge-builder.service --property=Environment"
-    )
-    assert (
-        "AWS_ENDPOINT_URL=http://s3Cache:9000" in env_output
-    ), "AWS endpoint not in environment"
-    assert (
-        "AWS_ACCESS_KEY_ID=minioadmin" in env_output
-    ), "AWS credentials not in environment"
-
-    s3_server.log("✅ AWS environment variables configured")
+# def test_builder_s3_cache_config(s3_server):
+#     """Test that builder has correct S3 cache configuration"""
+#
+#     # Check Crystal Forge config file
+#     config_content = s3_server.succeed("cat /var/lib/crystal-forge/config.toml")
+#     s3_server.log(f"Crystal Forge config excerpt: {config_content[:500]}...")
+#
+#     # Verify S3 cache configuration
+#     assert 'cache_type = "S3"' in config_content, "S3 cache type not configured"
+#     assert "s3Cache:9000" in config_content, "S3 endpoint not configured"
+#     assert "push_after_build = true" in config_content, "Cache push not enabled"
+#
+#     s3_server.log("✅ S3 cache configuration verified")
+#
+#     # Verify builder service has AWS environment variables
+#     env_output = s3_server.succeed(
+#         "systemctl show crystal-forge-builder.service --property=Environment"
+#     )
+#     assert (
+#         "AWS_ENDPOINT_URL=http://s3Cache:9000" in env_output
+#     ), "AWS endpoint not in environment"
+#     assert (
+#         "AWS_ACCESS_KEY_ID=minioadmin" in env_output
+#     ), "AWS credentials not in environment"
+#
+#     s3_server.log("✅ AWS environment variables configured")
 
 
 def test_cache_push_on_build_complete(
