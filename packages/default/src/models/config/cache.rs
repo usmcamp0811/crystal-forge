@@ -100,7 +100,6 @@ impl CacheConfig {
             args.extend(["--sign-key".to_string(), key_path.clone()]);
         }
 
-        args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
         Some(args)
     }
 

@@ -55,8 +55,10 @@ in
         virtualisation.writableStore = true;
         virtualisation.memorySize = 8096;
         virtualisation.cores = 8;
-        virtualisation.additionalPaths = [systemBuildClosure];
-
+        virtualisation.additionalPaths = [
+          systemBuildClosure
+          inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
+        ];
         services.postgresql = {
           enable = true;
           settings."listen_addresses" = lib.mkForce "*";
@@ -77,6 +79,7 @@ in
         environment.systemPackages = with pkgs; [
           git
           jq
+          hello
           crystal-forge.default
           crystal-forge.cf-test-modules.runTests
           crystal-forge.cf-test-modules.testRunner
@@ -86,6 +89,7 @@ in
           "agent.key".source = "${keyPath}/agent.key";
           "agent.pub".source = "${pubPath}/agent.pub";
         };
+
 
         services.crystal-forge = {
           enable = true;
@@ -111,7 +115,7 @@ in
           # Build configuration with S3 environment variables
           build = {
             enable = true;
-            offline = true;
+            offline = false;
             systemd_properties = [
               "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
               "Environment=AWS_ACCESS_KEY_ID=minioadmin"
@@ -184,9 +188,13 @@ in
       s3Cache.wait_for_unit("minio-setup.service")
       s3Cache.wait_for_open_port(9000)
 
+      # Test that s3Server can reach s3Cache
+      s3Server.succeed("ping -c 1 s3Cache")
+      s3Server.succeed("curl -f http://s3Cache:9000/minio/health/live")
+
       # Wait for S3 server services
       s3Server.wait_for_unit("postgresql.service")
-      s3Server.wait_for_unit("crystal-forge-server.service")
+      s3Server.wait_for_unit("crystal-forge-builder.service")
       s3Server.wait_for_open_port(5432)
       s3Server.forward_port(5433, 5432)
 
@@ -204,9 +212,9 @@ in
       wait_for_git_server_ready(gitserver, timeout=60)
 
       # --- Added environment variables for completed_derivation_data ---
-      os.environ["CF_TEST_PACKAGE_DRV"] = "${pkgs.hello.drvPath}"
-      os.environ["CF_TEST_PACKAGE_NAME"] = "${pkgs.hello.pname}"
-      os.environ["CF_TEST_PACKAGE_VERSION"] = "${pkgs.hello.version}"
+      os.environ["CF_TEST_PACKAGE_DRV"] = "${inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath}"
+      os.environ["CF_TEST_PACKAGE_NAME"] = "cf-test-sys"
+      os.environ["CF_TEST_PACKAGE_VERSION"] = "0.1.0"
       # -----------------------------------------------------------------
 
       os.environ["CF_TEST_GIT_SERVER_URL"] = "http://gitserver/crystal-forge"

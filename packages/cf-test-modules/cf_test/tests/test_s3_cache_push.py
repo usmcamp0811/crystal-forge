@@ -138,17 +138,32 @@ def completed_derivation_data(cf_client):
     )
     derivation_id = derivation_result[0]["id"]
 
-    # enqueue a pending cache push job for this derivation
-    # leave store_path NULL so the worker can resolve/build the out path
-    job_row = cf_client.execute_sql(
-        """
-        INSERT INTO cache_push_jobs (derivation_id, status, cache_destination)
-        VALUES (%s, 'pending', 's3://crystal-forge-cache')
-        ON CONFLICT (derivation_id) WHERE (status = ANY (ARRAY['pending', 'in_progress'])) DO NOTHING
-        RETURNING id
-        """,
-        (derivation_id,),
-    )
+    # Get the actual store path for the hello package
+    # The environment variable contains the .drv path, but we need the output path
+    hello_store_path = os.environ.get("CF_TEST_PACKAGE_STORE_PATH")
+    if not hello_store_path:
+        # If not provided, we'll let the worker figure it out by leaving store_path NULL
+        # The worker can resolve the .drv path to the store path
+        job_row = cf_client.execute_sql(
+            """
+            INSERT INTO cache_push_jobs (derivation_id, status, cache_destination)
+            VALUES (%s, 'pending', 's3://crystal-forge-cache')
+            ON CONFLICT (derivation_id) WHERE (status = ANY (ARRAY['pending', 'in_progress'])) DO NOTHING
+            RETURNING id
+            """,
+            (derivation_id,),
+        )
+    else:
+        # Use the real store path if available
+        job_row = cf_client.execute_sql(
+            """
+            INSERT INTO cache_push_jobs (derivation_id, status, cache_destination, store_path)
+            VALUES (%s, 'pending', 's3://crystal-forge-cache', %s)
+            ON CONFLICT (derivation_id) WHERE (status = ANY (ARRAY['pending', 'in_progress'])) DO NOTHING
+            RETURNING id
+            """,
+            (derivation_id, hello_store_path),
+        )
     cache_push_job_id = job_row[0]["id"] if job_row else None
 
     # Return test data for use in tests and cleanup

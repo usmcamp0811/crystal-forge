@@ -103,7 +103,6 @@ pub struct DerivationStatus {
 }
 
 impl Derivation {
-
     pub async fn push_to_cache_with_retry(
         &self,
         store_path: &str,
@@ -723,24 +722,63 @@ impl Derivation {
             "{flake_ref}#nixosConfigurations.{system}.config.system.build.toplevel"
         ))
     }
-    /// Pushes a built derivation to the configured cache
+
+    /// Resolve a .drv path to its output store path(s)
+    pub async fn resolve_drv_to_store_path(drv_path: &str) -> Result<String> {
+        if !drv_path.ends_with(".drv") {
+            // Already a store path, return as-is
+            return Ok(drv_path.to_string());
+        }
+
+        let output = Command::new("nix-store")
+            .args(["--query", "--outputs", drv_path])
+            .output()
+            .await
+            .context("Failed to execute nix-store --query --outputs")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("nix-store --query --outputs failed: {}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let store_paths: Vec<&str> = stdout.trim().lines().collect();
+
+        if store_paths.is_empty() {
+            anyhow::bail!("No output paths found for derivation: {}", drv_path);
+        }
+
+        // Return the first output path (typically there's only one)
+        Ok(store_paths[0].to_string())
+    }
+    /// Modified push_to_cache that resolves .drv paths first
     pub async fn push_to_cache(
         &self,
-        store_path: &str,
+        path: &str, // This can be either a .drv path or store path
         cache_config: &CacheConfig,
         build_config: &BuildConfig,
     ) -> Result<()> {
         // Check if we should push this target
         if !cache_config.should_push(&self.derivation_name) {
             info!(
-                "⏭️ Skipping cache push for {} (filtered out)",
+                "⭐️ Skipping cache push for {} (filtered out)",
                 self.derivation_name
             );
             return Ok(());
         }
 
+        // Resolve .drv path to actual store path if needed
+        let store_path = if path.ends_with(".drv") {
+            info!("🔍 Resolving derivation path to store path: {}", path);
+            Self::resolve_drv_to_store_path(path).await?
+        } else {
+            path.to_string()
+        };
+
+        info!("📤 Pushing {} to cache...", store_path);
+
         // Get the nix copy command arguments
-        let args = match cache_config.copy_command_args(store_path) {
+        let args = match cache_config.copy_command_args(&store_path) {
             Some(args) => args,
             None => {
                 warn!("⚠️ No cache push configuration found, skipping cache push");
@@ -748,7 +786,6 @@ impl Derivation {
             }
         };
 
-        info!("📤 Pushing {} to cache...", store_path);
         info!("🔧 nix copy command: nix {}", args.join(" "));
 
         let mut cmd = Command::new("nix");
