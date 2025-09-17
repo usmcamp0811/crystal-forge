@@ -195,7 +195,7 @@ in
       # Configure machine access for cf_test
       import cf_test
       cf_test._driver_machines = {
-          "cfServer": cfServer,
+          "cfServer": cfServer,  # Note: using cfServer variable, mapping to "cfServer" key
           "s3Cache": s3Cache,
           "gitserver": gitserver,
       }

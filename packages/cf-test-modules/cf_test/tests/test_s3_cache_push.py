@@ -1,33 +1,13 @@
 import os
-import time
-
 import pytest
 
-from cf_test import CFTestClient
-
 pytestmark = [pytest.mark.s3cache]
-
-
-@pytest.fixture(scope="session")
-def s3_server():
-    import cf_test
-
-    return cf_test._driver_machines["cfServer"]
-
-
-@pytest.fixture(scope="session")
-def s3_cache():
-    import cf_test
-
-    return cf_test._driver_machines["s3Cache"]
 
 
 @pytest.fixture
 def failed_derivation_data(cf_client):
     """
     Creates a failed derivation scenario for testing cache push error handling.
-
-    Returns a dictionary with the created test data IDs for cleanup.
     """
     # Insert test flake
     flake_result = cf_client.execute_sql(
@@ -64,7 +44,6 @@ def failed_derivation_data(cf_client):
     )
     derivation_id = derivation_result[0]["id"]
 
-    # Return test data for use in tests and cleanup
     test_data = {
         "flake_id": flake_id,
         "commit_id": commit_id,
@@ -73,12 +52,12 @@ def failed_derivation_data(cf_client):
         "error_message": "nix-store --realise failed with exit code: 1",
         "pname": "dbus",
         "version": "1",
-        "status_id": 12,  # failed build
+        "status_id": 12,
     }
 
     yield test_data
 
-    # Cleanup after test
+    # Cleanup
     cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
     cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
     cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
@@ -87,11 +66,8 @@ def failed_derivation_data(cf_client):
 @pytest.fixture
 def completed_derivation_data(cf_client):
     """
-    Creates a completed derivation using a real package from the Nix store for cache push testing,
-    and enqueues a pending cache push job.
+    Creates a completed derivation for cache push testing.
     """
-
-    # Get test package info from environment variables set by the VM test
     package_drv_path = os.environ.get("CF_TEST_PACKAGE_DRV")
     package_name = os.environ.get("CF_TEST_PACKAGE_NAME", "hello")
     package_version = os.environ.get("CF_TEST_PACKAGE_VERSION", "2.12.1")
@@ -131,19 +107,16 @@ def completed_derivation_data(cf_client):
         (
             commit_id,
             f"{package_name}-{package_version}",
-            package_drv_path,  # NOTE: this is a .drv path (fine here)
+            package_drv_path,
             package_name,
             package_version,
         ),
     )
     derivation_id = derivation_result[0]["id"]
 
-    # Get the actual store path for the hello package
-    # The environment variable contains the .drv path, but we need the output path
+    # Create cache push job
     hello_store_path = os.environ.get("CF_TEST_PACKAGE_STORE_PATH")
     if not hello_store_path:
-        # If not provided, we'll let the worker figure it out by leaving store_path NULL
-        # The worker can resolve the .drv path to the store path
         job_row = cf_client.execute_sql(
             """
             INSERT INTO cache_push_jobs (derivation_id, status, cache_destination)
@@ -154,7 +127,6 @@ def completed_derivation_data(cf_client):
             (derivation_id,),
         )
     else:
-        # Use the real store path if available
         job_row = cf_client.execute_sql(
             """
             INSERT INTO cache_push_jobs (derivation_id, status, cache_destination, store_path)
@@ -164,9 +136,9 @@ def completed_derivation_data(cf_client):
             """,
             (derivation_id, hello_store_path),
         )
+    
     cache_push_job_id = job_row[0]["id"] if job_row else None
 
-    # Return test data for use in tests and cleanup
     test_data = {
         "flake_id": flake_id,
         "commit_id": commit_id,
@@ -176,12 +148,12 @@ def completed_derivation_data(cf_client):
         "derivation_name": f"{package_name}-{package_version}",
         "pname": package_name,
         "version": package_version,
-        "status_id": 10,  # build-complete
+        "status_id": 10,
     }
 
     yield test_data
 
-    # Cleanup after test (delete job first due to FK)
+    # Cleanup
     cf_client.execute_sql(
         "DELETE FROM cache_push_jobs WHERE derivation_id = %s", (derivation_id,)
     )
@@ -190,18 +162,11 @@ def completed_derivation_data(cf_client):
     cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
 
 
-@pytest.fixture(scope="session")
-def cf_client(cf_config):
-    return CFTestClient(cf_config)
-
-
 def test_cache_push_on_build_complete(
-    completed_derivation_data, s3_server, s3_cache, cf_client
+    completed_derivation_data, cfServer, s3Cache, cf_client
 ):
     """
-    When a derivation is inserted with status_id=10 (build-complete),
-    the builder's cache-push loop should upload its binary cache to MinIO.
-
+    When a derivation is build-complete, verify cache push to MinIO.
     Success criterion: any .narinfo object appears in the S3 bucket.
     """
     pkg_name = completed_derivation_data["pname"]
@@ -209,12 +174,12 @@ def test_cache_push_on_build_complete(
     drv_path = completed_derivation_data["derivation_path"]
     deriv_id = completed_derivation_data["derivation_id"]
 
-    s3_server.log(
+    cfServer.log(
         f"Testing cache push for derivation_id={deriv_id}, drv={drv_path}, "
         f"pkg={pkg_name}-{pkg_version}"
     )
 
-    # Sanity check the DB row is still build-complete (status_id=10)
+    # Verify derivation is build-complete (status_id=10)
     status_row = cf_client.execute_sql(
         "SELECT status_id FROM derivations WHERE id = %s",
         (deriv_id,),
@@ -224,17 +189,16 @@ def test_cache_push_on_build_complete(
         status_row[0]["status_id"] == 10
     ), "Derivation is not build-complete (status_id != 10)"
 
-    # Poll for any .narinfo files in the bucket - this proves cache push worked
+    # Poll for .narinfo files - proves cache push worked
     poll_script = r"""
 set -euo pipefail
 export AWS_ENDPOINT_URL=http://s3Cache:9000
 export AWS_ACCESS_KEY_ID=minioadmin
 export AWS_SECRET_ACCESS_KEY=minioadmin
 
-deadline=$((SECONDS + 180))  # wait up to 3 minutes
+deadline=$((SECONDS + 180))
 
 while (( SECONDS < deadline )); do
-  # Look for any .narinfo files - this proves cache push worked
   if aws s3 ls --recursive s3://crystal-forge-cache/ 2>/dev/null | grep -E "\.narinfo$" >/dev/null; then
     echo "FOUND"
     exit 0
@@ -246,28 +210,23 @@ exit 1
 """
 
     try:
-        s3_server.succeed(poll_script)
-        s3_server.log("Cache push detected: .narinfo present in crystal-forge-cache")
+        cfServer.succeed(poll_script)
+        cfServer.log("Cache push detected: .narinfo present in crystal-forge-cache")
     except Exception:
-        # Dump helpful diagnostics before failing the test
-        s3_server.log(
-            "Cache push not detected within timeout. Collecting diagnostics..."
-        )
+        cfServer.log("Cache push not detected within timeout. Collecting diagnostics...")
 
-        # 1) Show recent builder logs
+        # Show builder logs
         try:
-            logs = s3_server.succeed(
+            logs = cfServer.succeed(
                 "journalctl -u crystal-forge-builder.service --no-pager -n 200 || true"
             )
-            s3_server.log(
-                "---- crystal-forge-builder.service logs (last 200 lines) ----\n" + logs
-            )
+            cfServer.log("---- builder logs ----\n" + logs)
         except Exception:
             pass
 
-        # 2) Show bucket inventory to see what's actually there
+        # Show S3 bucket contents
         try:
-            listing = s3_server.succeed(
+            listing = cfServer.succeed(
                 r"""
 export AWS_ENDPOINT_URL=http://s3Cache:9000
 export AWS_ACCESS_KEY_ID=minioadmin
@@ -275,27 +234,23 @@ export AWS_SECRET_ACCESS_KEY=minioadmin
 aws s3 ls --recursive s3://crystal-forge-cache/ || true
 """
             )
-            s3_server.log(
-                "---- S3 bucket listing (crystal-forge-cache) ----\n" + listing
-            )
+            cfServer.log("---- S3 bucket listing ----\n" + listing)
         except Exception:
             pass
 
-        # 3) Echo DB state for the derivation in question
+        # Show DB state
         try:
             row = cf_client.execute_sql(
                 """
                 SELECT id, derivation_name, derivation_path, status_id, completed_at
-                FROM derivations
-                WHERE id = %s
+                FROM derivations WHERE id = %s
                 """,
                 (deriv_id,),
             )
-            s3_server.log(f"---- DB row for derivation_id={deriv_id} ----\n{row}")
+            cfServer.log(f"---- DB row for derivation_id={deriv_id} ----\n{row}")
         except Exception:
             pass
 
-        # Finally, fail the test
         assert False, (
             f"Did not find any .narinfo files in MinIO within timeout. "
             "See logs above for details."
