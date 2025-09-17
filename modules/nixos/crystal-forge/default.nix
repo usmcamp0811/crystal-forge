@@ -964,7 +964,7 @@ in {
         message = "Cannot specify both database.password and database.passwordFile";
       }
       {
-        assertion = cfg.server.enable || cfg.client.enable;
+        assertion = cfg.server.enable || cfg.client.enable || cfg.builder.enable;
         message = "At least one of server or client must be enabled";
       }
     ];

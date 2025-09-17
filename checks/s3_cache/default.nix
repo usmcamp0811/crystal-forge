@@ -104,7 +104,7 @@ in
           # Server config
           server = {
             port = CF_TEST_SERVER_PORT;
-            enable = true;
+            enable = false;
             host = "0.0.0.0";
           };
 
@@ -158,12 +158,12 @@ in
 
           # Test system configuration
           systems = [
-            {
-              hostname = "agent";
-              public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
-              environment = "test";
-              flake_name = "test-flake";
-            }
+            # {
+            #   hostname = "agent";
+            #   public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
+            #   environment = "test";
+            #   flake_name = "test-flake";
+            # }
           ];
         };
       };

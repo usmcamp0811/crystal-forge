@@ -28,7 +28,7 @@ pub async fn get_derivations_needing_cache_push(
         SELECT 
             d.id,
             d.commit_id,
-            d.derivation_type AS "derivation_type: crate::models::derivations::DerivationType",
+            d.derivation_type,
             d.derivation_name,
             d.derivation_path,
             d.derivation_target,
@@ -70,7 +70,7 @@ pub async fn get_derivations_needing_cache_push(
     "#;
 
     let derivations = sqlx::query_as(sql)
-        .bind(limit.unwrap_or(10)) // i32 is fine
+        .bind(limit.unwrap_or(10))
         .fetch_all(pool)
         .await?;
 
@@ -265,7 +265,7 @@ pub async fn get_pending_cache_push_jobs(
         ORDER BY scheduled_at ASC
         LIMIT $1
         "#,
-        limit.unwrap_or(10) as i64 // Cast to i64
+        limit.unwrap_or(10) as i64
     )
     .fetch_all(pool)
     .await?;

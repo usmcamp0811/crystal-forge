@@ -144,7 +144,7 @@ def completed_derivation_data(cf_client):
         """
         INSERT INTO cache_push_jobs (derivation_id, status, cache_destination)
         VALUES (%s, 'pending', 's3://crystal-forge-cache')
-        ON CONFLICT ON CONSTRAINT idx_cache_push_jobs_derivation_unique DO NOTHING
+        ON CONFLICT (derivation_id) WHERE (status = ANY (ARRAY['pending', 'in_progress'])) DO NOTHING
         RETURNING id
         """,
         (derivation_id,),
