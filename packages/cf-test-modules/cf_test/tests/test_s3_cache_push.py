@@ -12,7 +12,7 @@ pytestmark = [pytest.mark.s3cache]
 def s3_server():
     import cf_test
 
-    return cf_test._driver_machines["s3Server"]
+    return cf_test._driver_machines["cfServer"]
 
 
 @pytest.fixture(scope="session")

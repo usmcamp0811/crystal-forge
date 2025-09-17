@@ -46,7 +46,7 @@ in
         consolePort = 9001;
       };
 
-      s3Server = {
+      cfServer = {
         imports = [inputs.self.nixosModules.crystal-forge];
 
         networking.useDHCP = true;
@@ -183,83 +183,29 @@ in
       import os
       import pytest
 
-      os.environ["NIXOS_TEST_DRIVER"] = "1"
-      start_all()
+      # Set test-specific environment variables
+      os.environ.update({
+          "CF_TEST_PACKAGE_DRV": "${inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath}",
+          "CF_TEST_PACKAGE_NAME": "cf-test-sys",
+          "CF_TEST_PACKAGE_VERSION": "0.1.0",
+          "CF_TEST_SERVER_PORT": "${toString CF_TEST_SERVER_PORT}",
+          "CF_TEST_DRV": "${derivation-paths}",
+      })
 
-      # Wait for S3 cache service
-      s3Cache.wait_for_unit("minio.service")
-      s3Cache.wait_for_unit("minio-setup.service")
-      s3Cache.wait_for_open_port(9000)
-
-      # Get s3Cache IP address and set it as an environment variable
-      s3_cache_ip = s3Cache.succeed("ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'").strip()
-      s3Server.log(f"s3Cache IP: {s3_cache_ip}")
-
-      # Update the environment variable to use IP instead of hostname
-      s3Server.succeed(f"systemctl set-environment AWS_ENDPOINT_URL=http://{s3_cache_ip}:9000")
-      s3Server.succeed("systemctl daemon-reload")
-      # s3Server.succeed("systemctl restart crystal-forge-builder.service")
-
-      # Test that s3Server can reach s3Cache
-      s3Server.succeed("ping -c 1 s3Cache")
-      s3Server.succeed("curl -f http://s3Cache:9000/minio/health/live")
-      # Test direct S3 connection from s3Server
-      s3Server.log("Testing direct S3 connection...")
-
-      # First, create a simple test file to push
-      s3Server.succeed("echo 'test content' > /tmp/test-file")
-      s3Server.succeed("nix-store --add /tmp/test-file")
-
-      # Get the store path of the test file
-      test_store_path = "${inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath}"
-      s3Server.log(f"Test store path: {test_store_path}")
-
-      # Wait for S3 server services
-      s3Server.wait_for_unit("postgresql.service")
-      s3Server.wait_for_unit("crystal-forge-builder.service")
-      s3Server.wait_for_open_port(5432)
-      s3Server.forward_port(5433, 5432)
-
-      s3Server.succeed("systemctl list-unit-files | grep crystal-forge")
-
-      try:
-          s3Server.succeed("systemctl start crystal-forge-builder.service")
-          s3Server.wait_for_unit("crystal-forge-builder.service")
-          s3Server.log("✅ Builder service started successfully")
-      except:
-          s3Server.log("⚠️ Builder service not available or failed to start")
-          s3Server.succeed("systemctl status crystal-forge-server.service")
-
-      from cf_test.vm_helpers import wait_for_git_server_ready
-      wait_for_git_server_ready(gitserver, timeout=60)
-
-      # --- Added environment variables for completed_derivation_data ---
-      os.environ["CF_TEST_PACKAGE_DRV"] = "${inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath}"
-      os.environ["CF_TEST_PACKAGE_NAME"] = "cf-test-sys"
-      os.environ["CF_TEST_PACKAGE_VERSION"] = "0.1.0"
-      # -----------------------------------------------------------------
-
-      os.environ["CF_TEST_GIT_SERVER_URL"] = "http://gitserver/crystal-forge"
-      os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_DB_PORT"] = "5433"
-      os.environ["CF_TEST_DB_USER"] = "postgres"
-      os.environ["CF_TEST_DB_PASSWORD"] = ""
-
-      os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
-
-      os.environ["CF_TEST_DRV"] = "${derivation-paths}"
-
+      # Configure machine access for cf_test
       import cf_test
       cf_test._driver_machines = {
-          "s3Server": s3Server,
+          "cfServer": cfServer,
           "s3Cache": s3Cache,
           "gitserver": gitserver,
       }
 
+      # Run the s3cache tests
       exit_code = pytest.main([
-          "-vvvv", "--tb=short", "-x", "-s", "-m", "s3cache", "--pyargs", "cf_test",
+          "-vvvv", "--tb=short", "-x", "-s",
+          "-m", "s3cache", "--pyargs", "cf_test",
       ])
+
       if exit_code != 0:
           raise SystemExit(exit_code)
     '';
