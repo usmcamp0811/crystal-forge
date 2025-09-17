@@ -819,6 +819,21 @@ impl Derivation {
             store_path, redacted_args
         );
 
+        // Add debugging for environment variables
+        debug!("AWS_ENDPOINT_URL: {:?}", std::env::var("AWS_ENDPOINT_URL"));
+        debug!(
+            "AWS_ACCESS_KEY_ID: {:?}",
+            std::env::var("AWS_ACCESS_KEY_ID").map(|_| "[REDACTED]")
+        );
+        debug!(
+            "AWS_SECRET_ACCESS_KEY: {:?}",
+            std::env::var("AWS_SECRET_ACCESS_KEY").map(|_| "[REDACTED]")
+        );
+        debug!(
+            "AWS_DEFAULT_REGION: {:?}",
+            std::env::var("AWS_DEFAULT_REGION")
+        );
+
         if build_config.should_use_systemd() {
             // systemd-run scope with env injection (no Environment= unit props!)
             let mut scoped = Command::new("systemd-run");
@@ -852,18 +867,8 @@ impl Derivation {
                 }
             }
 
-            // Inject env for the transient scope (uses --setenv)
+            // FIXED: Remove the duplicate .env() calls and only use --setenv for systemd scopes
             apply_cache_env(&mut scoped);
-
-            // If using a custom S3 endpoint and AWS_EC2_METADATA_DISABLED not set, default it to true
-            let has_custom_endpoint = std::env::var_os("AWS_ENDPOINT_URL").is_some()
-                || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some()
-                || std::env::var_os("AWS_S3_ENDPOINT").is_some()
-                || std::env::var_os("S3_ENDPOINT").is_some();
-            if has_custom_endpoint && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none() {
-                scoped.env("AWS_EC2_METADATA_DISABLED", "true");
-                scoped.arg("--setenv").arg("AWS_EC2_METADATA_DISABLED=true");
-            }
 
             // Run nix copy inside the scope
             scoped.arg("--");
@@ -912,6 +917,29 @@ impl Derivation {
         }
         info!("✅ Successfully pushed {} to cache", store_path);
         Ok(())
+    }
+
+    // Fixed apply_cache_env function - only use --setenv for systemd scopes
+    fn apply_cache_env(scoped: &mut Command) {
+        for &key in CACHE_ENV_ALLOWLIST {
+            if let Ok(val) = std::env::var(key) {
+                // For systemd scopes, only use --setenv, not .env()
+                // The .env() method affects the systemd-run process itself, not the scope
+                scoped.arg("--setenv");
+                scoped.arg(format!("{key}={val}"));
+            }
+        }
+
+        // Handle AWS_EC2_METADATA_DISABLED specially
+        let has_custom_endpoint = std::env::var_os("AWS_ENDPOINT_URL").is_some()
+            || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some()
+            || std::env::var_os("AWS_S3_ENDPOINT").is_some()
+            || std::env::var_os("S3_ENDPOINT").is_some();
+
+        if has_custom_endpoint && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none() {
+            scoped.arg("--setenv");
+            scoped.arg("AWS_EC2_METADATA_DISABLED=true");
+        }
     }
 
     /// Evaluates and optionally pushes to cache in one go
@@ -1031,17 +1059,42 @@ pub async fn push_store_path_with_systemd(
 
 /// Add allowed env vars to `systemd-run`, using both process env and `--setenv`.
 fn apply_cache_env(scoped: &mut Command) {
+    debug!("Applying cache environment variables to systemd scope");
+
     for &key in CACHE_ENV_ALLOWLIST {
         if let Ok(val) = std::env::var(key) {
-            scoped.env(key, &val);
+            debug!(
+                "Setting env var in scope: {}={}",
+                key,
+                if key.contains("SECRET") {
+                    "[REDACTED]"
+                } else {
+                    &val
+                }
+            );
             scoped.arg("--setenv");
             scoped.arg(format!("{key}={val}"));
+        } else {
+            debug!("Environment variable not found: {}", key);
         }
     }
-    if let Ok(v) = std::env::var("AWS_EC2_METADATA_DISABLED") {
-        scoped.env("AWS_EC2_METADATA_DISABLED", &v);
+
+    // CRITICAL: AWS_REGION is required for S3 operations, even with custom endpoints
+    if std::env::var_os("AWS_REGION").is_none() && std::env::var_os("AWS_DEFAULT_REGION").is_none()
+    {
         scoped.arg("--setenv");
-        scoped.arg(format!("AWS_EC2_METADATA_DISABLED={v}"));
+        scoped.arg("AWS_REGION=us-east-1");
+    }
+
+    // Handle AWS_EC2_METADATA_DISABLED specially
+    let has_custom_endpoint = std::env::var_os("AWS_ENDPOINT_URL").is_some()
+        || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some()
+        || std::env::var_os("AWS_S3_ENDPOINT").is_some()
+        || std::env::var_os("S3_ENDPOINT").is_some();
+
+    if has_custom_endpoint && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none() {
+        scoped.arg("--setenv");
+        scoped.arg("AWS_EC2_METADATA_DISABLED=true");
     }
 }
 

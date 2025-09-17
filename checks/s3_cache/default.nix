@@ -80,6 +80,8 @@ in
           git
           jq
           hello
+          awscli2
+          curl
           crystal-forge.default
           crystal-forge.cf-test-modules.runTests
           crystal-forge.cf-test-modules.testRunner
@@ -89,7 +91,6 @@ in
           "agent.key".source = "${keyPath}/agent.key";
           "agent.pub".source = "${pubPath}/agent.pub";
         };
-
 
         services.crystal-forge = {
           enable = true;
@@ -117,9 +118,11 @@ in
             enable = true;
             offline = false;
             systemd_properties = [
-              "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
+              # "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
               "Environment=AWS_ACCESS_KEY_ID=minioadmin"
               "Environment=AWS_SECRET_ACCESS_KEY=minioadmin"
+              "Environment=AWS_REGION=us-east-1" # ADD THIS LINE
+              "Environment=AWS_EC2_METADATA_DISABLED=true" # ADD THIS LINE TOO
               "Environment=NIX_LOG=trace"
               "Environment=NIX_SHOW_STATS=1"
             ];
@@ -128,7 +131,7 @@ in
           # S3 cache configuration
           cache = {
             cache_type = "S3";
-            push_to = "s3://crystal-forge-cache";
+            push_to = "s3://crystal-forge-cache?endpoint=http://s3Cache:9000&scheme=http&region=us-east-1&force-path-style=true";
             push_after_build = true;
             s3_region = "us-east-1";
             parallel_uploads = 2;
@@ -188,9 +191,28 @@ in
       s3Cache.wait_for_unit("minio-setup.service")
       s3Cache.wait_for_open_port(9000)
 
+      # Get s3Cache IP address and set it as an environment variable
+      s3_cache_ip = s3Cache.succeed("ip -4 addr show eth0 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}'").strip()
+      s3Server.log(f"s3Cache IP: {s3_cache_ip}")
+
+      # Update the environment variable to use IP instead of hostname
+      s3Server.succeed(f"systemctl set-environment AWS_ENDPOINT_URL=http://{s3_cache_ip}:9000")
+      s3Server.succeed("systemctl daemon-reload")
+      # s3Server.succeed("systemctl restart crystal-forge-builder.service")
+
       # Test that s3Server can reach s3Cache
       s3Server.succeed("ping -c 1 s3Cache")
       s3Server.succeed("curl -f http://s3Cache:9000/minio/health/live")
+      # Test direct S3 connection from s3Server
+      s3Server.log("Testing direct S3 connection...")
+
+      # First, create a simple test file to push
+      s3Server.succeed("echo 'test content' > /tmp/test-file")
+      s3Server.succeed("nix-store --add /tmp/test-file")
+
+      # Get the store path of the test file
+      test_store_path = "${inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath}"
+      s3Server.log(f"Test store path: {test_store_path}")
 
       # Wait for S3 server services
       s3Server.wait_for_unit("postgresql.service")

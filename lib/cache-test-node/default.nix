@@ -18,9 +18,12 @@
     {
       virtualisation.writableStore = true;
       virtualisation.memorySize = 1024;
+
       networking.useDHCP = true;
       networking.firewall.enable = enableFirewall;
-      networking.firewall.allowedTCPPorts = lib.mkIf (!enableFirewall) [port consolePort];
+
+      # BUGFIX: you only want to open ports when the firewall is enabled
+      networking.firewall.allowedTCPPorts = lib.mkIf enableFirewall [port consolePort];
 
       services.minio = {
         enable = true;
@@ -30,40 +33,107 @@
           MINIO_ROOT_USER=${accessKey}
           MINIO_ROOT_PASSWORD=${secretKey}
         '';
+        # Optional but nice to be explicit
+        dataDir = ["/var/lib/minio"];
       };
 
-      # Create bucket and setup for nix cache usage
+      # Create bucket and set policy
       systemd.services.minio-setup = {
-        after = ["minio.service"];
+        # Ensure network is actually up and MinIO is running before we poke it
+        after = ["network-online.target" "minio.service"];
+        wants = ["network-online.target" "minio.service"];
+        requires = ["minio.service"];
         wantedBy = ["multi-user.target"];
 
-        # Force override the PATH to avoid conflicts
         environment = {
-          PATH = lib.mkForce "${pkgs.minio-client}/bin:${pkgs.glibc.bin}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin:${pkgs.gnugrep}/bin";
+          # BUGFIX: you call `ip` but didn’t have iproute2 in PATH
+          PATH =
+            lib.mkForce
+            "${pkgs.minio-client}/bin:${pkgs.iproute2}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin:${pkgs.gnugrep}/bin";
+          # keep mc state ephemeral
           HOME = "/tmp";
         };
 
         script = ''
-          sleep 3  # Give MinIO time to start
+          set -euo pipefail
+          echo "Starting MinIO setup for bucket: ${bucketName}"
 
-          # Test MinIO is responding
-          for i in {1..30}; do
-            if curl -s http://localhost:${toString port}/minio/health/live > /dev/null; then
-              echo "MinIO is ready"
+          # Prefer localhost (avoids interface name assumptions like eth0/ens3)
+          MINIO_URL="http://127.0.0.1:${toString port}"
+          echo "Using MinIO URL: $MINIO_URL"
+
+          # Wait for MinIO readiness
+          for i in {1..60}; do
+            if curl -fsS "$MINIO_URL/minio/health/live" >/dev/null; then
+              echo "MinIO is ready after $i attempts"
               break
             fi
-            echo "Waiting for MinIO... attempt $i"
-            sleep 1
+            if [ "$i" -eq 60 ]; then
+              echo "ERROR: MinIO failed to start after 60 attempts"
+              exit 1
+            fi
+            echo "Waiting for MinIO... attempt $i/60"
+            sleep 2
           done
 
-          # Configure MinIO client
-          mc alias set local http://localhost:${toString port} ${accessKey} ${secretKey}
+          echo "Configuring MinIO client..."
+          mc alias set local "$MINIO_URL" "${accessKey}" "${secretKey}"
 
-          # Create bucket if it doesn't exist
-          mc mb local/${bucketName} || echo "Bucket already exists or creation failed"
+          echo "Creating bucket: ${bucketName}"
+          if mc mb "local/${bucketName}" 2>/dev/null; then
+            echo "Created bucket"
+          elif mc ls local/ | grep -q "^${bucketName}/\?$"; then
+            echo "Bucket already exists"
+          else
+            echo "ERROR: Failed to create or find bucket"
+            exit 1
+          fi
 
-          # Verify bucket exists
-          mc ls local/ | grep ${bucketName} || echo "Bucket verification failed"
+          echo "Setting bucket policy for public read (anon download)..."
+          # For Nix substituters without AWS creds; remove if you’ll auth from Nix
+          mc anonymous set download "local/${bucketName}" || \
+            echo "WARNING: failed to set anonymous download policy"
+
+          echo "Verifying access via mc..."
+          mc ls "local/${bucketName}" >/dev/null
+
+          echo "Testing S3 path-style via curl (anonymous)…"
+          # This will only succeed if anonymous was enabled above
+          if curl -fsS "$MINIO_URL/${bucketName}/" >/dev/null; then
+            echo "S3 API test passed"
+          else
+            echo "WARNING: S3 API test failed (expected if bucket is not public)"
+          fi
+
+          echo "MinIO setup completed successfully"
+        '';
+
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          User = "root";
+          Group = "root";
+          ExitType = "main";
+        };
+      };
+
+      systemd.services.minio-verify = {
+        after = ["minio-setup.service"];
+        wants = ["minio-setup.service"];
+        wantedBy = ["multi-user.target"];
+
+        environment = {
+          PATH = lib.mkForce "${pkgs.minio-client}/bin:${pkgs.coreutils}/bin:${pkgs.curl}/bin";
+          HOME = "/tmp"; # keep mc state consistent with setup
+        };
+
+        script = ''
+          set -euo pipefail
+          echo "Verifying MinIO setup..."
+          MINIO_URL="http://127.0.0.1:${toString port}"
+          mc alias set verify "$MINIO_URL" "${accessKey}" "${secretKey}"
+          mc ls "verify/${bucketName}" >/dev/null
+          echo "Bucket verification successful"
         '';
 
         serviceConfig = {
