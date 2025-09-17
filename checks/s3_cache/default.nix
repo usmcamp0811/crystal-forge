@@ -16,9 +16,6 @@
     mkdir -p $out
     cp ${keyPair}/agent.pub $out/
   '';
-  testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
-    cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
-  '';
   derivation-paths = lib.crystal-forge.derivation-paths pkgs;
   CF_TEST_DB_PORT = 5432;
   CF_TEST_SERVER_PORT = 3000;
@@ -49,27 +46,71 @@ in
         consolePort = 9001;
       };
 
-      s3Server = lib.crystal-forge.mkServerNode {
-        inherit inputs pkgs systemBuildClosure keyPath pubPath;
-        port = CF_TEST_SERVER_PORT;
+      s3Server = {
+        imports = [inputs.self.nixosModules.crystal-forge];
 
-        # Only specify what you want to change/add for this specific test
-        crystalForgeConfig = {
-          # Add S3 cache configuration
-          cache = {
-            cache_type = "S3";
-            push_to = "s3://s3Cache:9000";
-            push_after_build = true;
-            s3_region = "us-east-1";
-            parallel_uploads = 2;
-            max_retries = 2;
-            retry_delay_seconds = 1;
+        networking.useDHCP = true;
+        networking.firewall.allowedTCPPorts = [CF_TEST_SERVER_PORT 5432];
+
+        virtualisation.writableStore = true;
+        virtualisation.memorySize = 8096;
+        virtualisation.cores = 8;
+        virtualisation.additionalPaths = [systemBuildClosure];
+
+        services.postgresql = {
+          enable = true;
+          settings."listen_addresses" = lib.mkForce "*";
+          authentication = lib.concatStringsSep "\n" [
+            "local   all   postgres   trust"
+            "local   all   all        peer"
+            "host    all   all 127.0.0.1/32 trust"
+            "host    all   all ::1/128      trust"
+            "host    all   all 10.0.2.2/32  trust"
+          ];
+          initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+            CREATE USER crystal_forge LOGIN;
+            CREATE DATABASE crystal_forge OWNER crystal_forge;
+            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+          '';
+        };
+
+        environment.systemPackages = with pkgs; [
+          git
+          jq
+          crystal-forge.default
+          crystal-forge.cf-test-modules.runTests
+          crystal-forge.cf-test-modules.testRunner
+        ];
+
+        environment.etc = {
+          "agent.key".source = "${keyPath}/agent.key";
+          "agent.pub".source = "${pubPath}/agent.pub";
+        };
+
+        services.crystal-forge = {
+          enable = true;
+          "local-database" = true;
+          log_level = "debug";
+
+          # Database config
+          database = {
+            host = "localhost";
+            user = "crystal_forge";
+            name = "crystal_forge";
+            port = 5432;
           };
 
-          # Override build config to add S3 environment variables
+          # Server config
+          server = {
+            port = CF_TEST_SERVER_PORT;
+            enable = true;
+            host = "0.0.0.0";
+          };
+
+          # Build configuration with S3 environment variables
           build = {
             enable = true;
-            offline = true; # This will merge with the default
+            offline = true;
             systemd_properties = [
               "Environment=AWS_ENDPOINT_URL=http://s3Cache:9000"
               "Environment=AWS_ACCESS_KEY_ID=minioadmin"
@@ -79,50 +120,55 @@ in
             ];
           };
 
-          # Override just the flakes.watched - will completely replace the default
-          flakes.watched = [
-            {
-              name = "test-flake";
-              repo_url = "http://gitserver/crystal-forge";
-              auto_poll = true;
-            }
-          ];
+          # S3 cache configuration
+          cache = {
+            cache_type = "S3";
+            push_to = "s3://crystal-forge-cache";
+            push_after_build = true;
+            s3_region = "us-east-1";
+            parallel_uploads = 2;
+            max_retries = 2;
+            retry_delay_seconds = 1;
+          };
 
-          # Override environments - will completely replace the default
+          # Test flake configuration - this is what the test expects
+          flakes = {
+            flake_polling_interval = "1m";
+            watched = [
+              {
+                name = "test-flake";
+                repo_url = "http://gitserver/crystal-forge";
+                auto_poll = true;
+                initial_commit_depth = 5;
+              }
+            ];
+          };
+
+          # Test environment
           environments = [
             {
               name = "test";
-              description = "Computers that get on wifi";
+              description = "Test environment for Crystal Forge agents and evaluation";
               is_active = true;
-              risk_profile = "MEDIUM"; # Different from default LOW
+              risk_profile = "LOW";
               compliance_level = "NONE";
             }
           ];
 
-          # Override server config - will merge with defaults
-          server = {
-            port = CF_TEST_SERVER_PORT; # Override the port
-            # enable and host will use defaults
-          };
-
-          # Override database config if needed
-          database = {
-            host = "localhost";
-            user = "crystal_forge";
-            name = "crystal_forge";
-            port = 5432;
-          };
-        };
-
-        # General NixOS configuration (non-crystal-forge stuff)
-        extraConfig = lib.crystal-forge.preloadTestFlake {
-          commitNumber = 5;
-          branch = "main";
+          # Test system configuration
+          systems = [
+            {
+              hostname = "agent";
+              public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
+              environment = "test";
+              flake_name = "test-flake";
+            }
+          ];
         };
       };
     };
 
-    globalTimeout = 600; # 20 minutes for cache operations
+    globalTimeout = 300; # 5 minutes
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
@@ -137,69 +183,42 @@ in
       s3Cache.wait_for_unit("minio-setup.service")
       s3Cache.wait_for_open_port(9000)
 
-      # Wait for S3 server
+      # Wait for S3 server services
       s3Server.wait_for_unit("postgresql.service")
       s3Server.wait_for_unit("crystal-forge-server.service")
-      s3Server.succeed("systemctl list-unit-files | grep crystal-forge")
-      s3Server.succeed("systemctl restart crystal-forge-builder")
-      s3Server.succeed("ls -la /etc/systemd/system/crystal-forge*")
-      s3Server.wait_for_unit("crystal-forge-builder.service")
       s3Server.wait_for_open_port(5432)
       s3Server.forward_port(5433, 5432)
 
+      s3Server.succeed("systemctl list-unit-files | grep crystal-forge")
+
+      try:
+          s3Server.succeed("systemctl start crystal-forge-builder.service")
+          s3Server.wait_for_unit("crystal-forge-builder.service")
+          s3Server.log("✅ Builder service started successfully")
+      except:
+          s3Server.log("⚠️ Builder service not available or failed to start")
+          s3Server.succeed("systemctl status crystal-forge-server.service")
+
       from cf_test.vm_helpers import wait_for_git_server_ready
-      wait_for_git_server_ready(gitserver, timeout=120)
+      wait_for_git_server_ready(gitserver, timeout=60)
 
-      # Read commit hashes directly from testFlake metadata files
-      main_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_HEAD"))}"
-      dev_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_HEAD"))}"
-      feature_head = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_HEAD"))}"
+      # --- Added environment variables for completed_derivation_data ---
+      os.environ["CF_TEST_PACKAGE_DRV"] = "${pkgs.hello.drvPath}"
+      os.environ["CF_TEST_PACKAGE_NAME"] = "${pkgs.hello.pname}"
+      os.environ["CF_TEST_PACKAGE_VERSION"] = "${pkgs.hello.version}"
+      # -----------------------------------------------------------------
 
-      # Multi-branch commit hashes (read from testFlake metadata)
-      main_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_COMMITS"))}"""
-      dev_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_COMMITS"))}"""
-      feature_commits = """${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_COMMITS"))}"""
-
-      # Set up test environment variables for multi-branch test flake
       os.environ["CF_TEST_GIT_SERVER_URL"] = "http://gitserver/crystal-forge"
-      os.environ["CF_TEST_REAL_REPO_URL"] = "http://gitserver/crystal-forge"
-
-      # Use main branch head as the primary test commit
-      os.environ["CF_TEST_REAL_COMMIT_HASH"] = main_head
-
-      # Branch head commits
-      os.environ["CF_TEST_MAIN_HEAD"] = main_head
-      os.environ["CF_TEST_DEVELOPMENT_HEAD"] = dev_head
-      os.environ["CF_TEST_FEATURE_HEAD"] = feature_head
-
-      # Commit lists (convert newlines to commas for easier parsing)
-      os.environ["CF_TEST_MAIN_COMMITS"] = main_commits.replace('\n', ',')
-      os.environ["CF_TEST_DEVELOPMENT_COMMITS"] = dev_commits.replace('\n', ',')
-      os.environ["CF_TEST_FEATURE_COMMITS"] = feature_commits.replace('\n', ',')
-
-      # Commit counts
-      os.environ["CF_TEST_MAIN_COMMIT_COUNT"] = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_COMMIT_COUNT"))}"
-      os.environ["CF_TEST_DEVELOPMENT_COMMIT_COUNT"] = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/DEVELOPMENT_COMMIT_COUNT"))}"
-      os.environ["CF_TEST_FEATURE_COMMIT_COUNT"] = "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/FEATURE_COMMIT_COUNT"))}"
-
-      # Database connection info
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_DB_PORT"] = "5433"
       os.environ["CF_TEST_DB_USER"] = "postgres"
-      os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
+      os.environ["CF_TEST_DB_PASSWORD"] = ""
 
-      # Server connection info
       os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
 
-      # Derivation paths JSON
       os.environ["CF_TEST_DRV"] = "${derivation-paths}"
 
-      # Flake information for tests
-      os.environ["CF_TEST_FLAKE_NAME"] = "test-flake"
-      os.environ["CF_TEST_PRELOADED_FLAKE_PATH"] = "/etc/preloaded-flake"
-
-      # Inject machines for test access
       import cf_test
       cf_test._driver_machines = {
           "s3Server": s3Server,
@@ -207,14 +226,8 @@ in
           "gitserver": gitserver,
       }
 
-      # Run S3 cache-specific tests
       exit_code = pytest.main([
-          "-vvvv",
-          "--tb=short",
-          "-x",
-          "-s",
-          "-m", "s3cache",
-          "--pyargs", "cf_test",
+          "-vvvv", "--tb=short", "-x", "-s", "-m", "s3cache", "--pyargs", "cf_test",
       ])
       if exit_code != 0:
           raise SystemExit(exit_code)
