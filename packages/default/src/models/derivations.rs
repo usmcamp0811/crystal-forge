@@ -17,6 +17,28 @@ use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
 use tokio::time::{Instant, interval};
 use tracing::{debug, error, info, warn};
+/// Env vars likely needed for S3-compatible cache pushes.
+
+/// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
+const CACHE_ENV_ALLOWLIST: &[&str] = &[
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+    "AWS_ENDPOINT_URL",    // generic endpoint
+    "AWS_ENDPOINT_URL_S3", // SDK v3 can use this for S3 specifically
+    "AWS_S3_ENDPOINT",
+    "S3_ENDPOINT",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "AWS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "NO_PROXY",
+    "no_proxy",
+    "NIX_CONFIG",
+];
 
 // Updated derivation model to match the new database schema
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -754,11 +776,10 @@ impl Derivation {
     /// Modified push_to_cache that resolves .drv paths first
     pub async fn push_to_cache(
         &self,
-        path: &str, // This can be either a .drv path or store path
+        path: &str,
         cache_config: &CacheConfig,
         build_config: &BuildConfig,
     ) -> Result<()> {
-        // Check if we should push this target
         if !cache_config.should_push(&self.derivation_name) {
             info!(
                 "⭐️ Skipping cache push for {} (filtered out)",
@@ -767,7 +788,7 @@ impl Derivation {
             return Ok(());
         }
 
-        // Resolve .drv path to actual store path if needed
+        // Resolve .drv -> store path if needed
         let store_path = if path.ends_with(".drv") {
             info!("🔍 Resolving derivation path to store path: {}", path);
             Self::resolve_drv_to_store_path(path).await?
@@ -775,9 +796,7 @@ impl Derivation {
             path.to_string()
         };
 
-        info!("📤 Pushing {} to cache...", store_path);
-
-        // Get the nix copy command arguments
+        // Compute nix copy args once
         let args = match cache_config.copy_command_args(&store_path) {
             Some(args) => args,
             None => {
@@ -786,18 +805,101 @@ impl Derivation {
             }
         };
 
-        info!("🔧 nix copy command: nix {}", args.join(" "));
+        // Redact secrets if they sneak into args (e.g. in --to URL query)
+        let redacted_args = {
+            let joined = args.join(" ");
+            joined
+                .replace("secret-access-key=", "secret-access-key=REDACTED")
+                .replace("access_key=", "access_key=REDACTED")
+                .replace("access-key=", "access-key=REDACTED")
+                .replace("aws_session_token=", "aws_session_token=REDACTED")
+        };
+        info!(
+            "📤 Pushing {} to cache... (nix {})",
+            store_path, redacted_args
+        );
 
+        if build_config.should_use_systemd() {
+            // systemd-run scope with env injection (no Environment= unit props!)
+            let mut scoped = Command::new("systemd-run");
+            scoped.args(["--scope", "--collect", "--quiet"]);
+
+            // Scope-safe resource-control properties
+            if let Some(ref memory_max) = build_config.systemd_memory_max {
+                scoped.args(["--property", &format!("MemoryMax={}", memory_max)]);
+            }
+            if let Some(cpu_quota) = build_config.systemd_cpu_quota {
+                scoped.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+            }
+            if let Some(timeout_stop) = build_config.systemd_timeout_stop_sec {
+                scoped.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+            }
+            // Only pass properties that make sense for scopes (drop Environment=, Restart=, etc.)
+            const SCOPE_OK_PREFIXES: &[&str] = &[
+                "Memory",
+                "CPU",
+                "Tasks",
+                "IO",
+                "Slice",
+                "Kill",
+                "OOM",
+                "Device",
+                "IPAccounting",
+            ];
+            for p in &build_config.systemd_properties {
+                if SCOPE_OK_PREFIXES.iter().any(|pre| p.starts_with(pre)) {
+                    scoped.args(["--property", p]);
+                }
+            }
+
+            // Inject env for the transient scope (uses --setenv)
+            apply_cache_env(&mut scoped);
+
+            // If using a custom S3 endpoint and AWS_EC2_METADATA_DISABLED not set, default it to true
+            let has_custom_endpoint = std::env::var_os("AWS_ENDPOINT_URL").is_some()
+                || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some()
+                || std::env::var_os("AWS_S3_ENDPOINT").is_some()
+                || std::env::var_os("S3_ENDPOINT").is_some();
+            if has_custom_endpoint && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none() {
+                scoped.env("AWS_EC2_METADATA_DISABLED", "true");
+                scoped.arg("--setenv").arg("AWS_EC2_METADATA_DISABLED=true");
+            }
+
+            // Run nix copy inside the scope
+            scoped.arg("--");
+            scoped.arg("nix");
+            scoped.args(&args);
+
+            // IMPORTANT: do NOT call build_config.apply_to_command(&mut scoped) here,
+            // because it may add service-only props like Environment= which break scopes.
+
+            let output = scoped
+                .output()
+                .await
+                .context("Failed to execute scoped nix copy")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                error!("❌ nix copy (scoped) failed: {}", stderr.trim());
+                anyhow::bail!("nix copy failed (scoped): {}", stderr.trim());
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.trim().is_empty() {
+                info!("📤 nix copy output: {}", stdout.trim());
+            }
+            info!("✅ Successfully pushed {} to cache (scoped)", store_path);
+            return Ok(());
+        }
+
+        // Fallback: direct (non-systemd) execution
         let mut cmd = Command::new("nix");
         cmd.args(&args);
-
         build_config.apply_to_command(&mut cmd);
 
         let output = cmd
             .output()
             .await
             .context("Failed to execute nix copy command")?;
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("❌ nix copy failed: {}", stderr.trim());
@@ -808,7 +910,6 @@ impl Derivation {
         if !stdout.trim().is_empty() {
             info!("📤 nix copy output: {}", stdout.trim());
         }
-
         info!("✅ Successfully pushed {} to cache", store_path);
         Ok(())
     }
@@ -892,6 +993,58 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
     })
 }
 
+/// Example place where you build the systemd-run that does `nix copy`
+pub async fn push_store_path_with_systemd(
+    store_path: &str,
+    push_to: &str,
+    // add build_config if you want to pass systemd props from it
+    // build_config: &BuildConfig,
+) -> std::io::Result<()> {
+    let mut scoped = Command::new("systemd-run");
+    scoped.args(["--scope", "--collect", "--quiet"]);
+
+    // If you have systemd props in your BuildConfig, apply them here, e.g.:
+    // if let Some(mem) = build_config.systemd_memory_max.as_deref() {
+    //     scoped.args(["--property", &format!("MemoryMax={mem}")]);
+    // }
+
+    // Ensure S3/AWS env is available inside the scope
+    apply_cache_env(&mut scoped);
+
+    // nix copy --to <cache> <path>
+    scoped.arg("--");
+    scoped.arg("nix");
+    scoped.arg("copy");
+    scoped.arg("--to");
+    scoped.arg(push_to);
+    scoped.arg(store_path);
+
+    let status = scoped.status().await?;
+    if !status.success() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("nix copy failed with status: {status}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Add allowed env vars to `systemd-run`, using both process env and `--setenv`.
+fn apply_cache_env(scoped: &mut Command) {
+    for &key in CACHE_ENV_ALLOWLIST {
+        if let Ok(val) = std::env::var(key) {
+            scoped.env(key, &val);
+            scoped.arg("--setenv");
+            scoped.arg(format!("{key}={val}"));
+        }
+    }
+    if let Ok(v) = std::env::var("AWS_EC2_METADATA_DISABLED") {
+        scoped.env("AWS_EC2_METADATA_DISABLED", &v);
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_EC2_METADATA_DISABLED={v}"));
+    }
+}
+
 async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
     // Example: "<flake>#…config.system.build.toplevel" -> ask Nix for ".drvPath"
     let mut cmd = Command::new("nix");
@@ -949,3 +1102,58 @@ pub struct PackageInfo {
 // For backward compatibility during migration
 pub type EvaluationTarget = Derivation;
 pub type TargetType = DerivationType;
+
+enum SystemdMode {
+    Scope,
+    Service,
+}
+
+fn apply_systemd_props_for_scope(build: &BuildConfig, cmd: &mut tokio::process::Command) {
+    // resource-control props that are valid for scopes
+    if let Some(ref memory_max) = build.systemd_memory_max {
+        cmd.args(["--property", &format!("MemoryMax={}", memory_max)]);
+    }
+    if let Some(cpu_quota) = build.systemd_cpu_quota {
+        cmd.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+    }
+    if let Some(timeout_stop) = build.systemd_timeout_stop_sec {
+        cmd.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+    }
+    for p in &build.systemd_properties {
+        // allow only resource-control-ish prefixes for scopes
+        const OK: &[&str] = &[
+            "Memory",
+            "CPU",
+            "Tasks",
+            "IO",
+            "Kill",
+            "OOM",
+            "Device",
+            "IPAccounting",
+        ];
+        if OK.iter().any(|pre| p.starts_with(pre)) {
+            cmd.args(["--property", p]);
+        }
+        // intentionally ignore service-only props like Environment=, Restart=, WorkingDirectory= …
+    }
+}
+
+fn apply_cache_env_scope(cmd: &mut tokio::process::Command) {
+    for &k in CACHE_ENV_ALLOWLIST {
+        if let Ok(v) = std::env::var(k) {
+            cmd.env(k, &v);
+            cmd.arg("--setenv");
+            cmd.arg(format!("{k}={v}"));
+        }
+    }
+    // Default-disable IMDS if using a custom S3 endpoint
+    if (std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none())
+        && (std::env::var_os("AWS_ENDPOINT_URL").is_some()
+            || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some()
+            || std::env::var_os("AWS_S3_ENDPOINT").is_some()
+            || std::env::var_os("S3_ENDPOINT").is_some())
+    {
+        cmd.env("AWS_EC2_METADATA_DISABLED", "true");
+        cmd.arg("--setenv").arg("AWS_EC2_METADATA_DISABLED=true");
+    }
+}
