@@ -24,11 +24,11 @@ pub async fn get_derivations_needing_cache_push(
     pool: &PgPool,
     limit: Option<i32>,
 ) -> Result<Vec<crate::models::derivations::Derivation>> {
-    let query = r#"
+    let sql = r#"
         SELECT 
             d.id,
             d.commit_id,
-            d.derivation_type as "derivation_type: crate::models::derivations::DerivationType",
+            d.derivation_type AS "derivation_type: crate::models::derivations::DerivationType",
             d.derivation_name,
             d.derivation_path,
             d.derivation_target,
@@ -46,36 +46,31 @@ pub async fn get_derivations_needing_cache_push(
             d.build_last_activity_seconds,
             d.build_last_heartbeat
         FROM derivations d
-        JOIN derivation_statuses ds ON d.status_id = ds.id
-        WHERE ds.name = 'build-complete'
-            AND d.derivation_path IS NOT NULL
-            AND NOT EXISTS (
-                SELECT 1 
-                FROM cache_push_jobs cpj 
-                WHERE cpj.derivation_id = d.id 
-                    AND cpj.status IN ('completed', 'in_progress')
+        WHERE d.status_id = (SELECT id FROM derivation_statuses WHERE name = 'build-complete')
+          AND d.derivation_path IS NOT NULL
+          -- no active job already done or running
+          AND NOT EXISTS (
+            SELECT 1
+            FROM cache_push_jobs j
+            WHERE j.derivation_id = d.id
+              AND j.status IN ('completed','in_progress')
+          )
+          -- either no job yet, or only failed ones with attempts left
+          AND (
+            NOT EXISTS (SELECT 1 FROM cache_push_jobs j2 WHERE j2.derivation_id = d.id)
+            OR EXISTS (
+              SELECT 1 FROM cache_push_jobs j3
+              WHERE j3.derivation_id = d.id
+                AND j3.status = 'failed'
+                AND j3.attempts < 5
             )
-            AND (
-                -- Either no push job exists, or only failed jobs with < 5 attempts
-                NOT EXISTS (
-                    SELECT 1 
-                    FROM cache_push_jobs cpj2 
-                    WHERE cpj2.derivation_id = d.id
-                )
-                OR EXISTS (
-                    SELECT 1 
-                    FROM cache_push_jobs cpj3 
-                    WHERE cpj3.derivation_id = d.id 
-                        AND cpj3.status = 'failed' 
-                        AND cpj3.attempts < 5
-                )
-            )
-        ORDER BY d.completed_at ASC
+          )
+        ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
-        "#;
+    "#;
 
-    let derivations = sqlx::query_as(query)
-        .bind(limit.unwrap_or(10) as i64) // Cast to i64
+    let derivations = sqlx::query_as(sql)
+        .bind(limit.unwrap_or(10)) // i32 is fine
         .fetch_all(pool)
         .await?;
 
