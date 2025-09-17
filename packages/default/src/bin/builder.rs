@@ -1,5 +1,6 @@
-use crystal_forge::builder::{run_build_loop, run_cve_scan_loop};
+use crystal_forge::builder::{run_build_loop, run_cache_push_loop, run_cve_scan_loop};
 use crystal_forge::models::config::{CachePushJob, CrystalForgeConfig};
+
 use crystal_forge::server::memory_monitor_task;
 use tokio::signal;
 use tracing::info;
@@ -24,6 +25,7 @@ async fn main() -> anyhow::Result<()> {
     // Spawn both loops
     let build_handle = tokio::spawn(run_build_loop(pool.clone()));
     let cve_scan_handle = tokio::spawn(run_cve_scan_loop(pool.clone()));
+    let cache_handle = tokio::spawn(run_cache_push_loop(pool.clone()));
 
     info!("✅ Both build and CVE scan loops started");
 
@@ -36,6 +38,9 @@ async fn main() -> anyhow::Result<()> {
     tokio::select! {
         result = build_handle => {
             tracing::error!("Build loop exited unexpectedly: {:?}", result);
+        }
+        result = cache_handle => {
+            tracing::error!("Cache push loop exited unexpectedly: {:?}", result);
         }
         result = cve_scan_handle => {
             tracing::error!("CVE scan loop exited unexpectedly: {:?}", result);
