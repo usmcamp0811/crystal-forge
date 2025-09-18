@@ -116,6 +116,24 @@ in
                 auto_poll = true;
                 initial_commit_depth = 5;
               }
+              {
+                name = "crystal-forge";
+                repo_url = "http://gitserver/crystal-forge";
+                auto_poll = true;
+                initial_commit_depth = 5;
+              }
+              {
+                name = "crystal-forge-development";
+                repo_url = "http://gitserver/crystal-forge?ref=development";
+                auto_poll = true;
+                initial_commit_depth = 7;
+              }
+              {
+                name = "crystal-forge-feature";
+                repo_url = "http://gitserver/crystal-forge?ref=feature/experimental";
+                auto_poll = true;
+                initial_commit_depth = 3;
+              }
             ];
           };
 
@@ -228,7 +246,7 @@ in
           "--tb=short",
           "-x",
           "-s",
-          "-m", "dry_run",
+          "-m", "commits",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:

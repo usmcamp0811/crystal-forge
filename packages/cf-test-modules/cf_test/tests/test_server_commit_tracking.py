@@ -1,48 +1,17 @@
-import json
 import os
 import time
-from datetime import UTC, datetime, timedelta
-from pathlib import Path
-from typing import Any, Dict, List
 
 import pytest
 
-from cf_test import CFTestClient, CFTestConfig
 from cf_test.vm_helpers import SmokeTestConstants as C
 from cf_test.vm_helpers import SmokeTestData, verify_commits_exist, verify_flake_in_db
 
-pytestmark = pytest.mark.vm_only
+pytestmark = pytest.mark.commits
 
 
 @pytest.fixture(scope="session")
 def smoke_data():
     return SmokeTestData()
-
-
-@pytest.fixture(scope="session")
-def server():
-    import cf_test
-
-    return cf_test._driver_machines["server"]
-
-
-@pytest.fixture(scope="session")
-def agent():
-    import cf_test
-
-    return cf_test._driver_machines["agent"]
-
-
-@pytest.fixture(scope="session")
-def gitserver():
-    import cf_test
-
-    return cf_test._driver_machines["gitserver"]
-
-
-@pytest.fixture(scope="session")
-def cf_client(cf_config):
-    return CFTestClient(cf_config)
 
 
 @pytest.fixture(scope="session")
@@ -88,7 +57,7 @@ def test_flake_initialization_commits(cf_client, server):
             server.succeed(
                 "journalctl -u crystal-forge-server.service | grep 'Successfully initialized 5 commits for'"
             )
-        except:
+        except Exception:
             # If no initialization log found but we have commits, something's wrong
             if start_commit_count > 0:
                 server.log(
