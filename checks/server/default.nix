@@ -46,8 +46,9 @@ in
         networking.firewall.allowedTCPPorts = [CF_TEST_SERVER_PORT 5432];
 
         virtualisation.writableStore = true;
-        virtualisation.memorySize = 4096;
+        virtualisation.memorySize = 6144; # Increased from 4GB to 6GB
         virtualisation.cores = 4;
+        virtualisation.diskSize = 8192; # Set explicit disk size to 8GB
         virtualisation.additionalPaths = [
           systemBuildClosure
           inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
@@ -80,6 +81,13 @@ in
           crystal-forge.cf-test-modules.testRunner
         ];
 
+        # Set system-wide environment variables for Nix evaluation
+        environment.variables = {
+          TMPDIR = "/tmp";
+          TMP = "/tmp";
+          TEMP = "/tmp";
+        };
+
         environment.etc = {
           "agent.key".source = "${keyPath}/agent.key";
           "agent.pub".source = "${pubPath}/agent.pub";
@@ -89,7 +97,12 @@ in
           enable = true;
           local-database = true;
           log_level = "debug";
-          client.enable = true;
+          client = {
+            enable = true;
+            server_host = "server";
+            server_port = 3000;
+            private_key = "/etc/agent.key";
+          };
 
           # Database config
           database = {
@@ -106,6 +119,11 @@ in
             host = "0.0.0.0";
           };
 
+          # Build configuration - DISABLED for server-only dry-run tests
+          build = {
+            enable = false;
+          };
+
           # Test flake configuration
           flakes = {
             flake_polling_interval = "1m";
@@ -115,24 +133,6 @@ in
                 repo_url = "http://gitserver/crystal-forge";
                 auto_poll = true;
                 initial_commit_depth = 5;
-              }
-              {
-                name = "crystal-forge";
-                repo_url = "http://gitserver/crystal-forge";
-                auto_poll = true;
-                initial_commit_depth = 5;
-              }
-              {
-                name = "crystal-forge-development";
-                repo_url = "http://gitserver/crystal-forge?ref=development";
-                auto_poll = true;
-                initial_commit_depth = 7;
-              }
-              {
-                name = "crystal-forge-feature";
-                repo_url = "http://gitserver/crystal-forge?ref=feature/experimental";
-                auto_poll = true;
-                initial_commit_depth = 3;
               }
             ];
           };
@@ -246,7 +246,7 @@ in
           "--tb=short",
           "-x",
           "-s",
-          "-m", "server",
+          "-m", "dry_run",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:
