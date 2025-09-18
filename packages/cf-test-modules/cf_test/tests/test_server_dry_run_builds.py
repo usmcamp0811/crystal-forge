@@ -5,36 +5,9 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from cf_test import CFTestClient
 from cf_test.vm_helpers import SmokeTestConstants as C
 
-pytestmark = [pytest.mark.vm_only, pytest.mark.dry_run]
-
-
-@pytest.fixture(scope="session")
-def server():
-    import cf_test
-
-    return cf_test._driver_machines["server"]
-
-
-@pytest.fixture(scope="session")
-def agent():
-    import cf_test
-
-    return cf_test._driver_machines["agent"]
-
-
-@pytest.fixture(scope="session")
-def gitserver():
-    import cf_test
-
-    return cf_test._driver_machines["gitserver"]
-
-
-@pytest.fixture(scope="session")
-def cf_client(cf_config):
-    return CFTestClient(cf_config)
+pytestmark = [pytest.mark.integration, pytest.mark.dry_run]
 
 
 @pytest.fixture(scope="session")
@@ -59,7 +32,7 @@ def test_server_ready_for_dry_runs(cf_client, server):
     # Wait for server to be fully initialized
     cf_client.wait_for_service_log(
         server,
-        "crystal-forge-server.service",  # Change this line
+        "crystal-forge-server.service",
         "Starting Crystal Forge Server",
         timeout=60,
     )
@@ -67,7 +40,7 @@ def test_server_ready_for_dry_runs(cf_client, server):
     # Wait for background tasks to start
     cf_client.wait_for_service_log(
         server,
-        "crystal-forge-server.service",  # Change this line
+        "crystal-forge-server.service",
         "Starting periodic commit evaluation check loop",
         timeout=30,
     )
@@ -98,7 +71,6 @@ def test_test_flake_setup(cf_client, server, test_flake_repo_url, test_flake_dat
     assert (
         commit_count >= 5
     ), f"Expected at least 5 commits for test flake, found {commit_count}"
-
 
 
 def test_commits_create_derivations(
@@ -183,7 +155,6 @@ def test_commits_create_derivations(
     ), f"Expected systems {expected_systems}, found derivations: {derivation_names}"
 
     server.log(f"✅ Found expected derivations: {found_systems}")
-
 
 
 def test_dry_run_evaluation_processing(cf_client, server, test_flake_repo_url):
@@ -312,21 +283,21 @@ def test_dry_run_evaluation_processing(cf_client, server, test_flake_repo_url):
             (test_deriv_id,),
         )
 
-    if final_status:
-        status_info = final_status[0]
-        # If it's still in progress after timeout, that means the dry-run started successfully
-        if status_info["status_id"] == 4:  # dry-run-inprogress
-            server.log("✅ Dry-run evaluation successfully initiated and running")
-            server.log(
-                "(Test environment constraints prevent completion, but functionality is verified)"
-            )
-            return  # This line is crucial - it exits successfully instead of failing
+        if final_status:
+            status_info = final_status[0]
+            # If it's still in progress after timeout, that means the dry-run started successfully
+            if status_info["status_id"] == 4:  # dry-run-inprogress
+                server.log("✅ Dry-run evaluation successfully initiated and running")
+                server.log(
+                    "(Test environment constraints prevent completion, but functionality is verified)"
+                )
+                return  # This line is crucial - it exits successfully instead of failing
+            else:
+                pytest.fail(
+                    f"Unexpected final status: {status_info['status_name']} ({status_info['status_id']}). Error: {status_info['error_message']}"
+                )
         else:
-            pytest.fail(
-                f"Unexpected final status: {status_info['status_name']} ({status_info['status_id']}). Error: {status_info['error_message']}"
-            )
-    else:
-        pytest.fail("Derivation disappeared during processing")
+            pytest.fail("Derivation disappeared during processing")
 
 
 def test_dry_run_creates_package_dependencies(cf_client, server, test_flake_repo_url):

@@ -16,9 +16,6 @@
     mkdir -p $out
     cp ${keyPair}/agent.pub $out/
   '';
-  testFlakeCommitHash = pkgs.runCommand "test-flake-commit" {} ''
-    cat ${lib.crystal-forge.testFlake}/HEAD_COMMIT > $out
-  '';
   derivation-paths = lib.crystal-forge.derivation-paths pkgs;
   CF_TEST_DB_PORT = 5432;
   CF_TEST_SERVER_PORT = 3000;
@@ -33,7 +30,7 @@
   };
 in
   pkgs.testers.runNixOSTest {
-    name = "crystal-forge-server-integration";
+    name = "crystal-forge-server-dry-run-integration";
     skipLint = true;
     skipTypeCheck = true;
     nodes = {
@@ -42,63 +39,111 @@ in
         port = 8080;
       };
 
-      server = lib.crystal-forge.mkServerNode {
-        inherit inputs pkgs systemBuildClosure keyPath pubPath;
-        port = CF_TEST_SERVER_PORT;
+      server = {
+        imports = [inputs.self.nixosModules.crystal-forge];
 
-        # Only specify what you want to change/add for this specific test
-        crystalForgeConfig = {
-          # Override build config to add S3 environment variables
-          build = {
-            enable = false;
-            offline = true; # This will merge with the default
-          };
+        networking.useDHCP = true;
+        networking.firewall.allowedTCPPorts = [CF_TEST_SERVER_PORT 5432];
 
-          # Override just the flakes.watched - will completely replace the default
-          flakes.watched = [
-            {
-              name = "test-flake";
-              repo_url = "http://gitserver/crystal-forge";
-              auto_poll = true;
-            }
+        virtualisation.writableStore = true;
+        virtualisation.memorySize = 4096;
+        virtualisation.cores = 4;
+        virtualisation.additionalPaths = [
+          systemBuildClosure
+          inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
+        ];
+
+        services.postgresql = {
+          enable = true;
+          settings."listen_addresses" = lib.mkForce "*";
+          authentication = lib.concatStringsSep "\n" [
+            "local   all   postgres   trust"
+            "local   all   all        peer"
+            "host    all   all 127.0.0.1/32 trust"
+            "host    all   all ::1/128      trust"
+            "host    all   all 10.0.2.2/32  trust"
           ];
+          initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+            CREATE USER crystal_forge LOGIN;
+            CREATE DATABASE crystal_forge OWNER crystal_forge;
+            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+          '';
+        };
 
-          # Override environments - will completely replace the default
-          environments = [
-            {
-              name = "test";
-              description = "Computers that get on wifi";
-              is_active = true;
-              risk_profile = "MEDIUM"; # Different from default LOW
-              compliance_level = "NONE";
-            }
-          ];
+        environment.systemPackages = with pkgs; [
+          git
+          jq
+          hello
+          curl
+          crystal-forge.default
+          crystal-forge.cf-test-modules.runTests
+          crystal-forge.cf-test-modules.testRunner
+        ];
 
-          # Override server config - will merge with defaults
-          server = {
-            enable = true;
-            port = CF_TEST_SERVER_PORT; # Override the port
-            # enable and host will use defaults
-          };
+        environment.etc = {
+          "agent.key".source = "${keyPath}/agent.key";
+          "agent.pub".source = "${pubPath}/agent.pub";
+        };
 
-          # Override database config if needed
+        services.crystal-forge = {
+          enable = true;
+          local-database = true;
+          log_level = "debug";
+          client.enable = false;
+
+          # Database config
           database = {
             host = "localhost";
             user = "crystal_forge";
             name = "crystal_forge";
             port = 5432;
           };
-        };
 
-        # General NixOS configuration (non-crystal-forge stuff)
-        extraConfig = lib.crystal-forge.preloadTestFlake {
-          commitNumber = 5;
-          branch = "main";
+          # Server config - ENABLE this for dry-run tests
+          server = {
+            enable = true;
+            port = CF_TEST_SERVER_PORT;
+            host = "0.0.0.0";
+          };
+
+          # Test flake configuration
+          flakes = {
+            flake_polling_interval = "1m";
+            watched = [
+              {
+                name = "test-flake";
+                repo_url = "http://gitserver/crystal-forge";
+                auto_poll = true;
+                initial_commit_depth = 5;
+              }
+            ];
+          };
+
+          # Test environment
+          environments = [
+            {
+              name = "test";
+              description = "Test environment for Crystal Forge dry-run evaluation";
+              is_active = true;
+              risk_profile = "LOW";
+              compliance_level = "NONE";
+            }
+          ];
+
+          # Test system configuration
+          systems = [
+            {
+              hostname = "cf-test-sys";
+              public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
+              environment = "test";
+              flake_name = "test-flake";
+            }
+          ];
         };
       };
     };
 
-    globalTimeout = 600; # 20 minutes for cache operations
+    globalTimeout = 600; # 10 minutes for dry-run operations
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
 
     testScript = ''
@@ -108,13 +153,15 @@ in
       os.environ["NIXOS_TEST_DRIVER"] = "1"
       start_all()
 
-
-      # Wait for S3 server
+      # Wait for PostgreSQL
       server.wait_for_unit("postgresql.service")
       server.wait_for_unit("crystal-forge-server.service")
-      server.succeed("ls -la /etc/systemd/system/crystal-forge*")
       server.wait_for_open_port(5432)
+      server.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
+
+      # Forward ports for test access
       server.forward_port(5433, 5432)
+      server.forward_port(${toString CF_TEST_SERVER_PORT}, ${toString CF_TEST_SERVER_PORT})
 
       from cf_test.vm_helpers import wait_for_git_server_ready
       wait_for_git_server_ready(gitserver, timeout=120)
@@ -175,7 +222,7 @@ in
           "gitserver": gitserver,
       }
 
-      # Run S3 cache-specific tests
+      # Run dry-run specific tests
       exit_code = pytest.main([
           "-vvvv",
           "--tb=short",
