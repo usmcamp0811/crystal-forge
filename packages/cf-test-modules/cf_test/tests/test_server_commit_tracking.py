@@ -6,7 +6,7 @@ import pytest
 from cf_test.vm_helpers import SmokeTestConstants as C
 from cf_test.vm_helpers import SmokeTestData, verify_commits_exist, verify_flake_in_db
 
-pytestmark = pytest.mark.commits
+pytestmark = [pytest.mark.server, pytest.mark.integration, pytest.mark.commits]
 
 
 @pytest.fixture(scope="session")

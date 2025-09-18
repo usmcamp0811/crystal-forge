@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-from cf_test import CFTestClient
 from cf_test.vm_helpers import SmokeTestConstants as C
 from cf_test.vm_helpers import (
     SmokeTestData,
@@ -15,26 +14,7 @@ from cf_test.vm_helpers import (
     wait_for_crystal_forge_ready,
 )
 
-pytestmark = pytest.mark.vm_only
-
-
-@pytest.fixture(scope="session")
-def server():
-    import cf_test
-
-    return cf_test._driver_machines["server"]
-
-
-@pytest.fixture(scope="session")
-def agent():
-    import cf_test
-
-    return cf_test._driver_machines["agent"]
-
-
-@pytest.fixture(scope="session")
-def cf_client(cf_config):
-    return CFTestClient(cf_config)
+pytestmark = [pytest.mark.server, pytest.mark.integration, pytest.mark.agent]
 
 
 @pytest.fixture(scope="session")

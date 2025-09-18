@@ -89,7 +89,7 @@ in
           enable = true;
           local-database = true;
           log_level = "debug";
-          client.enable = false;
+          client.enable = true;
 
           # Database config
           database = {
@@ -246,7 +246,7 @@ in
           "--tb=short",
           "-x",
           "-s",
-          "-m", "commits",
+          "-m", "server",
           "--pyargs", "cf_test",
       ])
       if exit_code != 0:

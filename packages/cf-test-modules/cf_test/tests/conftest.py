@@ -12,8 +12,6 @@ def pytest_configure(config: pytest.Config) -> None:
     """Register custom pytest marks to avoid warnings"""
     for mark, desc in [
         ("s3cache", "S3 cache integration tests"),
-        ("vm_only", "requires NixOS test driver"),
-        ("vm_internal", "internal VM-mode checks"),
         ("driver", "requires NixOS driver machine fixture(s)"),
         ("harness", "scenario harness validation"),
         ("slow", "Tests that take a long time"),
@@ -25,6 +23,8 @@ def pytest_configure(config: pytest.Config) -> None:
         ("timeout", "Tests with timeout constraints"),
         ("commits", "Commit tracking tests"),
         ("dry_run", "Dry run build tests"),
+        ("commits", "Test Commit tracking and polling"),
+        ("server", "Test the Server"),
         ("attic_cache", "Attic cache tests"),
         ("builder", "Builder tests"),
         ("build_pipeline", "Build pipeline tests"),
