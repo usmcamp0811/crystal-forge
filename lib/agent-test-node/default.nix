@@ -20,7 +20,7 @@
       virtualisation.memorySize = 2048;
       virtualisation.additionalPaths = [systemBuildClosure];
 
-      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.cf-test-modules.runTests pkgs.crystal-forge.cf-test-modules.testRunner];
+      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.cf-test-suite.runTests pkgs.crystal-forge.cf-test-suite.testRunner];
       networking.useDHCP = true;
       networking.firewall.enable = false;
 

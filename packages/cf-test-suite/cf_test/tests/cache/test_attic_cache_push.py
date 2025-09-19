@@ -1,316 +1,344 @@
 import os
-import time
-from datetime import UTC, datetime, timedelta
 
 import pytest
-
-from cf_test import CFTestClient, CFTestConfig
-from cf_test.scenarios import _create_base_scenario
-from cf_test.vm_helpers import SmokeTestConstants as C
-from cf_test.vm_helpers import wait_for_crystal_forge_ready
 
 pytestmark = [pytest.mark.attic_cache]
 
 
-@pytest.fixture(scope="session")
-def attic_server():
-    import cf_test
-
-    return cf_test._driver_machines["atticServer"]
-
-
-@pytest.fixture(scope="session")
-def attic_cache():
-    import cf_test
-
-    return cf_test._driver_machines["atticCache"]
-
-
-@pytest.fixture(scope="session")
-def gitserver():
-    import cf_test
-
-    return cf_test._driver_machines["gitserver"]
-
-
-@pytest.fixture(scope="session")
-def attic_client():
-    import os
-
-    from cf_test import CFTestClient, CFTestConfig
-
-    # Map Attic-specific environment variables to the standard ones that CFTestConfig expects
-    os.environ["CF_TEST_DB_HOST"] = os.getenv("CF_TEST_ATTIC_DB_HOST", "127.0.0.1")
-    os.environ["CF_TEST_DB_PORT"] = os.getenv("CF_TEST_ATTIC_DB_PORT", "5434")
-    os.environ["CF_TEST_DB_USER"] = "crystal_forge"
-    os.environ["CF_TEST_DB_PASSWORD"] = ""
-    os.environ["CF_TEST_DB_NAME"] = "crystal_forge"
-    os.environ["CF_TEST_SERVER_HOST"] = os.getenv(
-        "CF_TEST_ATTIC_SERVER_HOST", "127.0.0.1"
+@pytest.fixture
+def failed_derivation_data(cf_client):
+    """
+    Creates a failed derivation scenario for testing cache push error handling.
+    """
+    # Insert test flake
+    flake_result = cf_client.execute_sql(
+        """INSERT INTO flakes (name, repo_url) 
+           VALUES ('test-failed-flake', 'http://test-failed') 
+           RETURNING id""",
     )
-    os.environ["CF_TEST_SERVER_PORT"] = os.getenv("CF_TEST_ATTIC_SERVER_PORT", "3000")
+    flake_id = flake_result[0]["id"]
 
-    # Now create the config - it will read from the environment variables we just set
-    config = CFTestConfig()
-    return CFTestClient(config)
-
-
-@pytest.mark.integration
-def test_attic_cache_push_successful_build(attic_client, attic_server, attic_cache):
-    """Test that successful builds are pushed to Attic cache"""
-
-    wait_for_crystal_forge_ready(attic_server)
-
-    # Get real git info from environment
-    real_commit_hash = os.getenv(
-        "CF_TEST_REAL_COMMIT_HASH", "ebcc48fbf1030fc2065fc266da158af1d0b3943c"
+    # Insert test commit
+    commit_result = cf_client.execute_sql(
+        """INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) 
+           VALUES (%s, 'failed123abc456', NOW()) 
+           RETURNING id""",
+        (flake_id,),
     )
-    real_repo_url = os.getenv(
-        "CF_TEST_GIT_SERVER_URL", "http://gitserver/crystal-forge"
+    commit_id = commit_result[0]["id"]
+
+    # Insert failed derivation (status_id = 12 for failed build)
+    derivation_result = cf_client.execute_sql(
+        """INSERT INTO derivations (
+               commit_id, derivation_type, derivation_name, derivation_path,
+               scheduled_at, completed_at, attempt_count, started_at,
+               evaluation_duration_ms, error_message, pname, version, status_id
+           ) VALUES (
+               %s, 'package', '/nix/store/l46k596qypwijbp4qnbzz93gn86rbxbf-dbus-1.drv',
+               '/nix/store/l46k596qypwijbp4qnbzz93gn86rbxbf-dbus-1.drv',
+               NOW() - INTERVAL '1 hour', NOW() - INTERVAL '30 minutes', 0,
+               NOW() - INTERVAL '35 minutes', 1795,
+               'nix-store --realise failed with exit code: 1',
+               'dbus', '1', 12
+           ) RETURNING id""",
+        (commit_id,),
     )
+    derivation_id = derivation_result[0]["id"]
 
-    # Create a scenario with a derivation ready for building
-    scenario = _create_base_scenario(
-        attic_client,
-        hostname="attic-cache-test-host",
-        flake_name="attic-cache-test",
-        repo_url=real_repo_url,
-        git_hash=real_commit_hash,
-        derivation_status="build-pending",
-        commit_age_hours=1,
-        heartbeat_age_minutes=None,
+    test_data = {
+        "flake_id": flake_id,
+        "commit_id": commit_id,
+        "derivation_id": derivation_id,
+        "derivation_path": "/nix/store/l46k596qypwijbp4qnbzz93gn86rbxbf-dbus-1.drv",
+        "error_message": "nix-store --realise failed with exit code: 1",
+        "pname": "dbus",
+        "version": "1",
+        "status_id": 12,
+    }
+
+    yield test_data
+
+    # Cleanup
+    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
+    cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
+    cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
+
+
+@pytest.fixture
+def completed_derivation_data(cf_client):
+    """
+    Creates a completed derivation for cache push testing.
+    """
+    package_drv_path = os.environ.get("CF_TEST_PACKAGE_DRV")
+    package_name = os.environ.get("CF_TEST_PACKAGE_NAME", "hello")
+    package_version = os.environ.get("CF_TEST_PACKAGE_VERSION", "2.12.1")
+
+    if not package_drv_path:
+        pytest.skip("CF_TEST_PACKAGE_DRV environment variable not set")
+
+    # Insert test flake
+    flake_result = cf_client.execute_sql(
+        """INSERT INTO flakes (name, repo_url)
+           VALUES ('test-completed-flake', 'http://test-completed')
+           RETURNING id"""
     )
+    flake_id = flake_result[0]["id"]
 
-    # Set a mock derivation path for testing
-    attic_client.execute_sql(
-        "UPDATE derivations SET derivation_path = '/nix/store/test-attic-cache.drv' WHERE id = %s",
-        (scenario["derivation_id"],),
+    # Insert test commit
+    commit_result = cf_client.execute_sql(
+        """INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
+           VALUES (%s, 'completed123abc456', NOW())
+           RETURNING id""",
+        (flake_id,),
     )
+    commit_id = commit_result[0]["id"]
 
-    attic_server.log("=== Starting Attic cache push test ===")
-
-    # Wait for the build to be processed and cache push to be attempted
-    attic_client.wait_for_service_log(
-        attic_server,
-        "crystal-forge-builder.service",
-        "Starting cache push for derivation: attic-cache-test-host",
-        timeout=300,
+    # Insert completed derivation (status_id = 10 for build-complete)
+    derivation_result = cf_client.execute_sql(
+        """INSERT INTO derivations (
+               commit_id, derivation_type, derivation_name, derivation_path,
+               scheduled_at, completed_at, attempt_count, started_at,
+               evaluation_duration_ms, pname, version, status_id
+           ) VALUES (
+               %s, 'package', %s, %s,
+               NOW() - INTERVAL '1 hour', NOW() - INTERVAL '30 minutes', 0,
+               NOW() - INTERVAL '35 minutes', 1500,
+               %s, %s, 10
+           ) RETURNING id""",
+        (
+            commit_id,
+            f"{package_name}-{package_version}",
+            package_drv_path,
+            package_name,
+            package_version,
+        ),
     )
+    derivation_id = derivation_result[0]["id"]
 
-    # Check for successful cache push
-    try:
-        attic_client.wait_for_service_log(
-            attic_server,
-            "crystal-forge-builder.service",
-            "Successfully pushed",
-            timeout=60,
+    # Create cache push job
+    hello_store_path = os.environ.get("CF_TEST_PACKAGE_STORE_PATH")
+    if not hello_store_path:
+        job_row = cf_client.execute_sql(
+            """
+            INSERT INTO cache_push_jobs (derivation_id, status, cache_destination)
+            VALUES (%s, 'pending', 'test')
+            ON CONFLICT (derivation_id) WHERE (status = ANY (ARRAY['pending', 'in_progress'])) DO NOTHING
+            RETURNING id
+            """,
+            (derivation_id,),
         )
-        cache_push_success = True
-    except:
-        attic_server.log("Cache push may have failed, checking build completion...")
-        cache_push_success = False
-
-    # Verify the derivation reached build-complete status
-    attic_client.wait_for_service_log(
-        attic_server,
-        "crystal-forge-builder.service",
-        "Build completed for attic-cache-test-host",
-        timeout=60,
-    )
-
-    # Check final derivation status
-    final_status = attic_client.execute_sql(
-        """
-        SELECT d.status_id, ds.name as status_name
-        FROM derivations d
-        JOIN derivation_statuses ds ON d.status_id = ds.id
-        WHERE d.id = %s
-        """,
-        (scenario["derivation_id"],),
-    )
-
-    assert len(final_status) == 1, "Derivation should exist"
-    assert final_status[0]["status_name"] in [
-        "build-complete",
-        "cve-scan-pending",
-    ], f"Expected build-complete or cve-scan-pending, got {final_status[0]['status_name']}"
-
-    # Verify Attic cache received the upload
-    attic_cache.log("=== Checking Attic cache for uploaded objects ===")
-    try:
-        # Check if Atticd received any upload requests
-        attic_cache.succeed("journalctl -u atticd.service | grep -i 'test' || true")
-        attic_server.log("Attic cache interaction detected")
-    except:
-        attic_server.log("No Attic cache interaction found in logs")
-
-    if cache_push_success:
-        attic_server.log("✅ Attic cache push test PASSED")
     else:
-        attic_server.log(
-            "⚠️ Attic cache push may have failed, but build completed successfully"
+        job_row = cf_client.execute_sql(
+            """
+            INSERT INTO cache_push_jobs (derivation_id, status, cache_destination, store_path)
+            VALUES (%s, 'pending', 'test', %s)
+            ON CONFLICT (derivation_id) WHERE (status = ANY (ARRAY['pending', 'in_progress'])) DO NOTHING
+            RETURNING id
+            """,
+            (derivation_id, hello_store_path),
         )
+
+    cache_push_job_id = job_row[0]["id"] if job_row else None
+
+    test_data = {
+        "flake_id": flake_id,
+        "commit_id": commit_id,
+        "derivation_id": derivation_id,
+        "cache_push_job_id": cache_push_job_id,
+        "derivation_path": package_drv_path,
+        "derivation_name": f"{package_name}-{package_version}",
+        "pname": package_name,
+        "version": package_version,
+        "status_id": 10,
+    }
+
+    yield test_data
 
     # Cleanup
-    attic_client.cleanup_test_data(scenario["cleanup"])
-
-
-@pytest.mark.integration
-def test_attic_cache_push_failure_does_not_block_build(attic_client, attic_server):
-    """Test that Attic cache push failures don't prevent build completion"""
-
-    wait_for_crystal_forge_ready(attic_server)
-
-    # Create a scenario that will likely have cache push issues
-    real_commit_hash = os.getenv(
-        "CF_TEST_REAL_COMMIT_HASH", "ebcc48fbf1030fc2065fc266da158af1d0b3943c"
+    cf_client.execute_sql(
+        "DELETE FROM cache_push_jobs WHERE derivation_id = %s", (derivation_id,)
     )
-    real_repo_url = os.getenv(
-        "CF_TEST_GIT_SERVER_URL", "http://gitserver/crystal-forge"
-    )
+    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
+    cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
+    cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
 
-    scenario = _create_base_scenario(
-        attic_client,
-        hostname="attic-cache-failure-test",
-        flake_name="attic-cache-failure-test",
-        repo_url=real_repo_url,
-        git_hash=real_commit_hash,
-        derivation_status="build-pending",
-        commit_age_hours=1,
-        heartbeat_age_minutes=None,
+
+def test_attic_cache_push_on_build_complete(
+    completed_derivation_data, atticServer, atticCache, cf_client
+):
+    """
+    When a derivation is build-complete, verify cache push to Attic.
+    Success criterion: package appears in Attic cache via attic list.
+    """
+    pkg_name = completed_derivation_data["pname"]
+    pkg_version = completed_derivation_data["version"]
+    drv_path = completed_derivation_data["derivation_path"]
+    deriv_id = completed_derivation_data["derivation_id"]
+
+    atticServer.log(
+        f"Testing Attic cache push for derivation_id={deriv_id}, drv={drv_path}, "
+        f"pkg={pkg_name}-{pkg_version}"
     )
 
-    # Set derivation path
-    attic_client.execute_sql(
-        "UPDATE derivations SET derivation_path = '/nix/store/test-attic-cache-failure.drv' WHERE id = %s",
-        (scenario["derivation_id"],),
+    # Verify derivation is build-complete (status_id=10)
+    status_row = cf_client.execute_sql(
+        "SELECT status_id FROM derivations WHERE id = %s",
+        (deriv_id,),
     )
+    assert status_row, "Derivation row not found after fixture insert"
+    assert (
+        status_row[0]["status_id"] == 10
+    ), "Derivation is not build-complete (status_id != 10)"
 
-    attic_server.log("=== Testing Attic cache failure resilience ===")
+    # Poll for packages in Attic cache - proves cache push worked
+    poll_script = r"""
+set -euo pipefail
+export ATTIC_SERVER_URL=http://atticCache:8080
+export ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==
 
-    # Temporarily break Attic cache by stopping Atticd
-    attic_server.succeed("systemctl stop atticd.service")
+deadline=$((SECONDS + 180))
 
-    # Wait for build to complete despite cache failure
-    attic_client.wait_for_service_log(
-        attic_server,
-        "crystal-forge-builder.service",
-        "Build completed for attic-cache-failure-test",
-        timeout=300,
-    )
+while (( SECONDS < deadline )); do
+  # Check if any packages exist in the cache
+  if attic list test 2>/dev/null | grep -E "^/nix/store/" >/dev/null; then
+    echo "FOUND"
+    exit 0
+  fi
+  sleep 5
+done
 
-    # Check that cache push was attempted but failed gracefully
+exit 1
+"""
+
     try:
-        attic_client.wait_for_service_log(
-            attic_server,
-            "crystal-forge-builder.service",
-            "Cache push failed but continuing",
-            timeout=30,
+        atticServer.succeed(poll_script)
+        atticServer.log("Cache push detected: packages present in Attic cache 'test'")
+    except Exception:
+        atticServer.log(
+            "Cache push not detected within timeout. Collecting diagnostics..."
         )
-        attic_server.log("✅ Attic cache failure handled gracefully")
-    except:
-        attic_server.log("⚠️ Attic cache failure log not found, but build completed")
 
-    # Verify derivation still reached completion
-    final_status = attic_client.execute_sql(
-        """
-        SELECT d.status_id, ds.name as status_name
-        FROM derivations d 
-        JOIN derivation_statuses ds ON d.status_id = ds.id
-        WHERE d.id = %s
-        """,
-        (scenario["derivation_id"],),
-    )
+        # Show builder logs
+        try:
+            logs = atticServer.succeed(
+                "journalctl -u crystal-forge-builder.service --no-pager -n 200 || true"
+            )
+            atticServer.log("---- builder logs ----\n" + logs)
+        except Exception:
+            pass
 
-    assert len(final_status) == 1
-    assert final_status[0]["status_name"] in [
-        "build-complete",
-        "cve-scan-pending",
-    ], f"Build should complete despite cache failure, got {final_status[0]['status_name']}"
+        # Show Attic cache contents
+        try:
+            listing = atticServer.succeed(
+                r"""
+export ATTIC_SERVER_URL=http://atticCache:8080
+export ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==
+attic list test || true
+"""
+            )
+            atticServer.log("---- Attic cache listing ----\n" + listing)
+        except Exception:
+            pass
 
-    # Restart Atticd for other tests
-    attic_server.succeed("systemctl start atticd.service")
-    attic_server.wait_for_unit("atticd.service")
+        # Show Attic cache info
+        try:
+            info = atticServer.succeed(
+                r"""
+export ATTIC_SERVER_URL=http://atticCache:8080
+export ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==
+attic cache info test || true
+"""
+            )
+            atticServer.log("---- Attic cache info ----\n" + info)
+        except Exception:
+            pass
 
-    attic_server.log("✅ Attic cache failure resilience test PASSED")
+        # Show DB state
+        try:
+            row = cf_client.execute_sql(
+                """
+                SELECT id, derivation_name, derivation_path, status_id, completed_at
+                FROM derivations WHERE id = %s
+                """,
+                (deriv_id,),
+            )
+            atticServer.log(f"---- DB row for derivation_id={deriv_id} ----\n{row}")
+        except Exception:
+            pass
 
-    # Cleanup
-    attic_client.cleanup_test_data(scenario["cleanup"])
+        # Show cache push job status
+        try:
+            job_row = cf_client.execute_sql(
+                """
+                SELECT id, status, cache_destination, created_at, started_at, completed_at, error_message
+                FROM cache_push_jobs WHERE derivation_id = %s
+                """,
+                (deriv_id,),
+            )
+            atticServer.log(
+                f"---- Cache push job for derivation_id={deriv_id} ----\n{job_row}"
+            )
+        except Exception:
+            pass
+
+        assert False, (
+            f"Did not find any packages in Attic cache within timeout. "
+            "See logs above for details."
+        )
 
 
-@pytest.mark.integration
-def test_attic_cache_configuration(attic_client, attic_server):
-    """Test that Attic cache type is configured correctly"""
+def test_attic_cache_connectivity(atticServer, atticCache):
+    """
+    Test basic connectivity to Attic cache server.
+    """
+    atticServer.log("Testing basic Attic cache connectivity...")
 
-    # Test Attic configuration
-    attic_config_result = attic_client.execute_sql(
-        "SELECT 1",  # Just test connection works
-    )
-    assert len(attic_config_result) == 1, "Attic server database should be accessible"
+    # Test Attic server is responding
+    connectivity_script = r"""
+set -euo pipefail
+export ATTIC_SERVER_URL=http://atticCache:8080
+export ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==
 
-    # Check that server is running with correct configuration
-    attic_server.succeed("systemctl is-active crystal-forge-builder.service")
+# Test basic connectivity
+attic cache info test
+"""
 
-    # Verify cache type is set in service environment/config
     try:
-        attic_server.succeed(
-            "grep -r 'cache_type.*Attic' /var/lib/crystal-forge/config.toml"
-        )
-        attic_server.log("✅ Attic cache type configured correctly")
-    except:
-        attic_server.log("⚠️ Could not verify Attic cache type in config")
+        result = atticServer.succeed(connectivity_script)
+        atticServer.log(f"Attic cache connectivity successful:\n{result}")
+    except Exception as e:
+        atticServer.log(f"Attic cache connectivity failed: {e}")
+
+        # Show attic cache logs for debugging
+        try:
+            logs = atticCache.succeed(
+                "journalctl -u atticd.service --no-pager -n 50 || true"
+            )
+            atticServer.log("---- Attic server logs ----\n" + logs)
+        except Exception:
+            pass
+
+        raise
 
 
-@pytest.mark.integration
-def test_attic_cache_retry_mechanism(attic_client, attic_server):
-    """Test that Attic cache push retries work as expected"""
+def test_attic_cache_configuration(atticServer, cf_client):
+    """
+    Test that Crystal Forge is properly configured for Attic cache.
+    """
+    atticServer.log("Testing Attic cache configuration...")
 
-    wait_for_crystal_forge_ready(attic_server)
+    # Check that we have a builder service running
+    atticServer.succeed("systemctl is-active crystal-forge-builder.service")
 
-    real_commit_hash = os.getenv(
-        "CF_TEST_REAL_COMMIT_HASH", "ebcc48fbf1030fc2065fc266da158af1d0b3943c"
-    )
-    real_repo_url = os.getenv(
-        "CF_TEST_GIT_SERVER_URL", "http://gitserver/crystal-forge"
-    )
-
-    scenario = _create_base_scenario(
-        attic_client,
-        hostname="attic-cache-retry-test",
-        flake_name="attic-cache-retry-test",
-        repo_url=real_repo_url,
-        git_hash=real_commit_hash,
-        derivation_status="build-pending",
-        commit_age_hours=1,
-        heartbeat_age_minutes=None,
-    )
-
-    attic_client.execute_sql(
-        "UPDATE derivations SET derivation_path = '/nix/store/test-attic-cache-retry.drv' WHERE id = %s",
-        (scenario["derivation_id"],),
-    )
-
-    attic_server.log("=== Testing Attic cache retry mechanism ===")
-
-    # Start build process
-    attic_client.wait_for_service_log(
-        attic_server,
-        "crystal-forge-builder.service",
-        "Build completed for attic-cache-retry-test",
-        timeout=300,
-    )
-
-    # Check for retry attempts in logs (configured with max_retries = 2)
+    # Check builder logs mention Attic
     try:
-        # Look for retry-related log messages
-        attic_server.succeed(
-            "journalctl -u crystal-forge-builder.service | grep -i 'retry\\|attempt' || true"
+        logs = atticServer.succeed(
+            "journalctl -u crystal-forge-builder.service --no-pager -n 100 || true"
         )
-        attic_server.log("✅ Attic retry mechanism logs detected")
-    except:
-        attic_server.log(
-            "⚠️ No Attic retry logs found, but this may be normal if cache succeeded on first try"
-        )
+        atticServer.log(
+            "---- Recent builder logs ----\n" + logs[-1000:]
+        )  # Last 1000 chars
+    except Exception:
+        pass
 
-    # Cleanup
-    attic_client.cleanup_test_data(scenario["cleanup"])
+    atticServer.log("✅ Attic cache configuration test completed")

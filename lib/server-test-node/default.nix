@@ -178,8 +178,8 @@
         git
         jq
         crystal-forge.default
-        crystal-forge.cf-test-modules.runTests
-        crystal-forge.cf-test-modules.testRunner
+        crystal-forge.cf-test-suite.runTests
+        crystal-forge.cf-test-suite.testRunner
       ];
 
       environment.etc = lib.mkMerge [
