@@ -51,7 +51,7 @@ in
       p.pytest-metadata
       p.pytest-html
       p.psycopg2
-      pkgs.crystal-forge.cf-test-modules
+      pkgs.crystal-forge.cf-test-suite
       pkgs.crystal-forge.vm-test-logger
     ];
 

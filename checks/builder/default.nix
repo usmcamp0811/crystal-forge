@@ -64,8 +64,8 @@ in
           hello
           curl
           crystal-forge.default
-          crystal-forge.cf-test-modules.runTests
-          crystal-forge.cf-test-modules.testRunner
+          crystal-forge.cf-test-suite.runTests
+          crystal-forge.cf-test-suite.testRunner
         ];
 
         services.crystal-forge = {
@@ -102,7 +102,7 @@ in
     };
 
     globalTimeout = 300; # 5 minutes for builder tests
-    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-modules];
+    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-suite];
 
     testScript = ''
       import os
