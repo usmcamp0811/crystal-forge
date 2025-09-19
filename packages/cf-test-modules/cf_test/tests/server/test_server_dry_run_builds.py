@@ -7,8 +7,8 @@ import pytest
 
 from cf_test.vm_helpers import SmokeTestConstants as C
 
-pytestmark = [pytest.mark.server, pytest.mark.integration, pytest.mark.dry_run]
 
+pytestmark = [pytest.mark.server, pytest.mark.integration, pytest.mark.dry_run]
 
 def _is_enospc(msg: str) -> bool:
     """Detect Nix eval/store ENOSPC errors that are environmental, not product bugs."""

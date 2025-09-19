@@ -4,27 +4,13 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from cf_test import CFTestClient
 from cf_test.scenarios import _create_base_scenario, scenario_dry_run_failed
 from cf_test.vm_helpers import SmokeTestConstants as C
 from cf_test.vm_helpers import wait_for_crystal_forge_ready
 
-pytestmark = pytest.mark.vm_only
+pytestmark = [pytest.mark.server, pytest.mark.integration]
 
 
-@pytest.fixture(scope="session")
-def server():
-    import cf_test
-
-    return cf_test._driver_machines["server"]
-
-
-@pytest.fixture(scope="session")
-def cf_client(cf_config):
-    return CFTestClient(cf_config)
-
-
-@pytest.mark.integration
 def test_derivation_reset_on_server_startup(cf_client, server):
     """Test that server resets derivations properly on startup"""
 
@@ -220,7 +206,6 @@ def test_derivation_reset_on_server_startup(cf_client, server):
         cf_client.cleanup_test_data(scenario["cleanup"])
 
 
-@pytest.mark.integration
 def test_derivation_reset_background_loop(cf_client, server):
     """Test that background loop resets derivations properly"""
 
@@ -289,7 +274,6 @@ def test_derivation_reset_background_loop(cf_client, server):
     cf_client.cleanup_test_data(scenario["cleanup"])
 
 
-@pytest.mark.integration
 def test_attempt_count_terminal_logic(cf_client, server):
     """Test that derivations with attempt_count >= 5 become terminal"""
 
