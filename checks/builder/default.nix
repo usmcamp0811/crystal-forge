@@ -18,7 +18,7 @@
   };
 in
   pkgs.testers.runNixOSTest {
-    name = "crystal-forge-builder-test";
+    name = "crystal-forge-builder-integration-test";
     skipLint = true;
     skipTypeCheck = true;
     nodes = {

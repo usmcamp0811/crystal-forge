@@ -33,7 +33,7 @@
   };
 in
   pkgs.testers.runNixOSTest {
-    name = "crystal-forge-agent-integration";
+    name = "crystal-forge-database-test";
     # Silence flake8/mypy for untyped helper lib
     skipLint = true;
     skipTypeCheck = true;

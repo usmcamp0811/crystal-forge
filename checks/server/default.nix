@@ -30,7 +30,7 @@
   };
 in
   pkgs.testers.runNixOSTest {
-    name = "crystal-forge-server-dry-run-integration";
+    name = "crystal-forge-server-integration-test";
     skipLint = true;
     skipTypeCheck = true;
     nodes = {
