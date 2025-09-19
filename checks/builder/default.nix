@@ -102,7 +102,7 @@ in
     };
 
     globalTimeout = 300; # 5 minutes for builder tests
-    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-suite];
+    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.cf-test-suite];
 
     testScript = ''
       import os

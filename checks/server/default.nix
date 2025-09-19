@@ -162,7 +162,7 @@ in
     };
 
     globalTimeout = 600; # 10 minutes for dry-run operations
-    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.vm-test-logger pkgs.crystal-forge.cf-test-suite];
+    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.cf-test-suite];
 
     testScript = ''
       import os
