@@ -158,32 +158,10 @@
       virtualisation.memorySize = 512;
       networking.useDHCP = true;
       networking.firewall.enable = enableFirewall;
-      networking.firewall.allowedTCPPorts = lib.mkIf (!enableFirewall) [port];
+      networking.firewall.allowedTCPPorts = [port];
 
       # Install attic packages
       environment.systemPackages = with pkgs; [attic-server attic-client];
-
-      # Create a simple systemd service for atticd
-      systemd.services.atticd = {
-        description = "Attic Cache Daemon";
-        wantedBy = ["multi-user.target"];
-        after = ["network.target"];
-
-        environment = {
-          ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
-        };
-
-        serviceConfig = {
-          Type = "exec";
-          ExecStart = "${pkgs.attic-server}/bin/atticd --listen [::]:${toString port}";
-          Restart = "always";
-          RestartSec = 5;
-          User = "attic";
-          Group = "attic";
-          StateDirectory = "attic";
-          WorkingDirectory = "/var/lib/attic";
-        };
-      };
 
       # Create attic user
       users.users.attic = {
@@ -195,10 +173,35 @@
       };
       users.groups.attic = {};
 
+      # Create a simple systemd service for atticd
+      systemd.services.atticd = {
+        description = "Attic Cache Daemon";
+        wantedBy = ["multi-user.target"];
+        after = ["network-online.target"];
+        wants = ["network-online.target"];
+
+        environment = {
+          ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
+        };
+
+        serviceConfig = {
+          Type = "exec";
+          ExecStart = "${pkgs.attic-server}/bin/atticd --listen 0.0.0.0:${toString port}";
+          Restart = "always";
+          RestartSec = 5;
+          User = "attic";
+          Group = "attic";
+          StateDirectory = "attic";
+          WorkingDirectory = "/var/lib/attic";
+        };
+      };
+
       # Create initial cache setup
       systemd.services.attic-setup = {
         description = "Attic Cache Setup";
-        after = ["atticd.service"];
+        after = ["atticd.service" "network-online.target"];
+        wants = ["network-online.target"];
+        requires = ["atticd.service"];
         wantedBy = ["multi-user.target"];
 
         environment = {
@@ -206,9 +209,39 @@
         };
 
         script = ''
-          sleep 5  # Wait for atticd to start
-          ${pkgs.attic-client}/bin/attic login local http://localhost:${toString port} $ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64 || true
-          ${pkgs.attic-client}/bin/attic cache create test || true
+          echo "Starting Attic cache setup..."
+
+          # Wait for atticd to be ready
+          for i in {1..30}; do
+            if curl -s http://localhost:${toString port}/ >/dev/null 2>&1; then
+              echo "Atticd is ready after $i attempts"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: Atticd failed to start after 30 attempts"
+              exit 1
+            fi
+            echo "Waiting for atticd... attempt $i/30"
+            sleep 2
+          done
+
+          echo "Configuring attic client..."
+          ${pkgs.attic-client}/bin/attic login local http://localhost:${toString port} $ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64 || {
+            echo "Failed to login to attic server"
+            exit 1
+          }
+
+          echo "Creating test cache..."
+          ${pkgs.attic-client}/bin/attic cache create test || {
+            echo "Cache 'test' may already exist, continuing..."
+          }
+
+          echo "Configuring cache as public..."
+          ${pkgs.attic-client}/bin/attic cache configure test --public || {
+            echo "Failed to configure cache as public"
+          }
+
+          echo "Attic setup completed successfully"
         '';
 
         serviceConfig = {
@@ -216,6 +249,36 @@
           RemainAfterExit = true;
           User = "attic";
           Group = "attic";
+        };
+      };
+
+      # Add debugging service to help troubleshoot issues
+      systemd.services.attic-debug = {
+        description = "Attic Debug Info";
+        after = ["attic-setup.service"];
+        wantedBy = ["multi-user.target"];
+
+        script = ''
+          echo "=== Attic Debug Info ==="
+          echo "Checking if atticd is listening on port ${toString port}:"
+          ss -tlnp | grep :${toString port} || echo "Nothing listening on port ${toString port}"
+
+          echo "Testing HTTP connectivity:"
+          curl -v http://localhost:${toString port}/ || echo "HTTP test failed"
+
+          echo "Listing attic caches:"
+          export ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64="dGVzdCBzZWNyZXQgZm9yIGF0dGljZA=="
+          ${pkgs.attic-client}/bin/attic cache list || echo "Failed to list caches"
+
+          echo "Checking atticd service status:"
+          systemctl status atticd.service || true
+
+          echo "=== End Debug Info ==="
+        '';
+
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
         };
       };
     }

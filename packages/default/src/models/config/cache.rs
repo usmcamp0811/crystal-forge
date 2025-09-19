@@ -41,7 +41,7 @@ pub struct CacheConfig {
         default = "CacheConfig::default_poll_interval",
         with = "duration_serde"
     )]
-    pub poll_interval: Duration, // Add this line
+    pub poll_interval: Duration,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -60,6 +60,12 @@ pub struct CachePushJob {
     pub store_path: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct CacheCommand {
+    pub command: String,
+    pub args: Vec<String>,
+}
+
 impl CacheConfig {
     fn default_parallel_uploads() -> u32 {
         4
@@ -69,25 +75,33 @@ impl CacheConfig {
         Duration::from_secs(30)
     }
 
-    pub fn copy_command_args(&self, store_path: &str) -> Option<Vec<String>> {
+    /// Returns the command and arguments for cache operations
+    pub fn cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         match self.cache_type {
-            CacheType::S3 => self.s3_copy_args(store_path),
-            CacheType::Attic => self.attic_copy_args(store_path),
-            CacheType::Http | CacheType::Nix => self.nix_copy_args(store_path),
+            CacheType::S3 => self.s3_cache_command(store_path),
+            CacheType::Attic => self.attic_cache_command(store_path),
+            CacheType::Http | CacheType::Nix => self.nix_cache_command(store_path),
         }
     }
 
-    fn attic_copy_args(&self, store_path: &str) -> Option<Vec<String>> {
-        let cache_name = self.attic_cache_name.as_ref()?;
-        Some(vec![
-            "attic".to_string(),
-            "push".to_string(),
-            cache_name.clone(),
-            store_path.to_string(),
-        ])
+    /// Legacy method for backward compatibility - now just returns args
+    pub fn copy_command_args(&self, store_path: &str) -> Option<Vec<String>> {
+        self.cache_command(store_path).map(|cmd| cmd.args)
     }
 
-    fn s3_copy_args(&self, store_path: &str) -> Option<Vec<String>> {
+    fn attic_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
+        let cache_name = self.attic_cache_name.as_ref()?;
+        Some(CacheCommand {
+            command: "attic".to_string(),
+            args: vec![
+                "push".to_string(),
+                cache_name.clone(),
+                store_path.to_string(),
+            ],
+        })
+    }
+
+    fn s3_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
         let mut args = vec![
             "copy".to_string(),
@@ -100,10 +114,13 @@ impl CacheConfig {
             args.extend(["--sign-key".to_string(), key_path.clone()]);
         }
 
-        Some(args)
+        Some(CacheCommand {
+            command: "nix".to_string(),
+            args,
+        })
     }
 
-    fn nix_copy_args(&self, store_path: &str) -> Option<Vec<String>> {
+    fn nix_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
         let mut args = vec![
             "copy".to_string(),
@@ -121,7 +138,11 @@ impl CacheConfig {
         }
 
         args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
-        Some(args)
+
+        Some(CacheCommand {
+            command: "nix".to_string(),
+            args,
+        })
     }
 
     pub fn should_push(&self, target_name: &str) -> bool {
@@ -138,14 +159,14 @@ impl CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            cache_type: CacheType::Nix, // Use Nix, not None
+            cache_type: CacheType::Nix,
             push_to: None,
             push_after_build: false,
             signing_key: None,
             compression: None,
-            push_filter: None, // This is Option<Vec<String>>, not Vec<String>
+            push_filter: None,
             parallel_uploads: Self::default_parallel_uploads(),
-            s3_region: None, // This is Option<String>, not String
+            s3_region: None,
             s3_profile: None,
             attic_token: None,
             attic_cache_name: None,

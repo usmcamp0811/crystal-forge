@@ -163,8 +163,40 @@ def completed_derivation_data(cf_client):
     cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
 
 
+def test_attic_server_status(cfServer, atticCache):
+    """Check if the attic server is actually running"""
+
+    # Check if atticd service is running on the atticCache node
+    try:
+        atticCache.succeed("systemctl is-active atticd.service")
+        cfServer.log("✅ atticd service is active")
+    except Exception as e:
+        cfServer.log(f"❌ atticd service is not active: {e}")
+
+    # Check if attic server is listening on port 8080
+    try:
+        atticCache.succeed("ss -tlnp | grep :8080")
+        cfServer.log("✅ Something is listening on port 8080")
+    except Exception as e:
+        cfServer.log(f"❌ Nothing listening on port 8080: {e}")
+
+    # Check atticd logs
+    try:
+        logs = atticCache.succeed("journalctl -u atticd.service --no-pager -n 20")
+        cfServer.log(f"📋 atticd logs:\n{logs}")
+    except Exception as e:
+        cfServer.log(f"❌ Failed to get atticd logs: {e}")
+
+    # Test HTTP connectivity from cfServer to atticCache
+    try:
+        result = cfServer.succeed("curl -v http://atticCache:8080/ || true")
+        cfServer.log(f"🌐 HTTP test result:\n{result}")
+    except Exception as e:
+        cfServer.log(f"❌ HTTP test failed: {e}")
+
+
 def test_attic_cache_push_on_build_complete(
-    completed_derivation_data, atticServer, atticCache, cf_client
+    completed_derivation_data, cfServer, cf_client
 ):
     """
     When a derivation is build-complete, verify cache push to Attic.
@@ -175,7 +207,7 @@ def test_attic_cache_push_on_build_complete(
     drv_path = completed_derivation_data["derivation_path"]
     deriv_id = completed_derivation_data["derivation_id"]
 
-    atticServer.log(
+    cfServer.log(
         f"Testing Attic cache push for derivation_id={deriv_id}, drv={drv_path}, "
         f"pkg={pkg_name}-{pkg_version}"
     )
@@ -190,6 +222,30 @@ def test_attic_cache_push_on_build_complete(
         status_row[0]["status_id"] == 10
     ), "Derivation is not build-complete (status_id != 10)"
 
+    # Add diagnostics to check what's in the database
+    derivations_to_push = cf_client.execute_sql(
+        """
+        SELECT d.id, d.derivation_name, d.derivation_path, d.status_id,
+               EXISTS(SELECT 1 FROM cache_push_jobs j WHERE j.derivation_id = d.id) as has_job
+        FROM derivations d 
+        WHERE d.status_id = 10
+    """
+    )
+    cfServer.log(f"Derivations eligible for cache push: {derivations_to_push}")
+
+    # Check cache push jobs
+    cache_jobs = cf_client.execute_sql("SELECT * FROM cache_push_jobs")
+    cfServer.log(f"Cache push jobs: {cache_jobs}")
+
+    # Check builder environment variables
+    try:
+        env_check = cfServer.succeed(
+            "systemctl show crystal-forge-builder.service --property=Environment || true"
+        )
+        cfServer.log(f"Builder environment: {env_check}")
+    except Exception:
+        pass
+
     # Poll for packages in Attic cache - proves cache push worked
     poll_script = r"""
 set -euo pipefail
@@ -199,8 +255,8 @@ export ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==
 deadline=$((SECONDS + 180))
 
 while (( SECONDS < deadline )); do
-  # Check if any packages exist in the cache
-  if attic list test 2>/dev/null | grep -E "^/nix/store/" >/dev/null; then
+  # Check if any packages exist in the cache using correct command
+  if attic cache list test 2>/dev/null | grep -E "^/nix/store/" >/dev/null; then
     echo "FOUND"
     exit 0
   fi
@@ -211,45 +267,45 @@ exit 1
 """
 
     try:
-        atticServer.succeed(poll_script)
-        atticServer.log("Cache push detected: packages present in Attic cache 'test'")
+        cfServer.succeed(poll_script)
+        cfServer.log("Cache push detected: packages present in Attic cache 'test'")
     except Exception:
-        atticServer.log(
+        cfServer.log(
             "Cache push not detected within timeout. Collecting diagnostics..."
         )
 
         # Show builder logs
         try:
-            logs = atticServer.succeed(
+            logs = cfServer.succeed(
                 "journalctl -u crystal-forge-builder.service --no-pager -n 200 || true"
             )
-            atticServer.log("---- builder logs ----\n" + logs)
+            cfServer.log("---- builder logs ----\n" + logs)
         except Exception:
             pass
 
-        # Show Attic cache contents
+        # Show Attic cache contents using correct command
         try:
-            listing = atticServer.succeed(
+            listing = cfServer.succeed(
                 r"""
 export ATTIC_SERVER_URL=http://atticCache:8080
 export ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==
-attic list test || true
+attic cache list test || true
 """
             )
-            atticServer.log("---- Attic cache listing ----\n" + listing)
+            cfServer.log("---- Attic cache listing ----\n" + listing)
         except Exception:
             pass
 
         # Show Attic cache info
         try:
-            info = atticServer.succeed(
+            info = cfServer.succeed(
                 r"""
 export ATTIC_SERVER_URL=http://atticCache:8080
 export ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==
 attic cache info test || true
 """
             )
-            atticServer.log("---- Attic cache info ----\n" + info)
+            cfServer.log("---- Attic cache info ----\n" + info)
         except Exception:
             pass
 
@@ -262,22 +318,37 @@ attic cache info test || true
                 """,
                 (deriv_id,),
             )
-            atticServer.log(f"---- DB row for derivation_id={deriv_id} ----\n{row}")
+            cfServer.log(f"---- DB row for derivation_id={deriv_id} ----\n{row}")
         except Exception:
             pass
 
-        # Show cache push job status
+        # Show cache push job status - FIXED: use correct column name
         try:
             job_row = cf_client.execute_sql(
                 """
-                SELECT id, status, cache_destination, created_at, started_at, completed_at, error_message
+                SELECT id, status, cache_destination, scheduled_at, started_at, completed_at, error_message
                 FROM cache_push_jobs WHERE derivation_id = %s
                 """,
                 (deriv_id,),
             )
-            atticServer.log(
+            cfServer.log(
                 f"---- Cache push job for derivation_id={deriv_id} ----\n{job_row}"
             )
+        except Exception:
+            pass
+
+        # Test attic connectivity from cfServer
+        try:
+            attic_test = cfServer.succeed(
+                r"""
+export ATTIC_SERVER_URL=http://atticCache:8080
+export ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==
+echo "Testing attic connectivity..."
+attic --help || echo "attic command failed"
+attic cache --help || echo "attic cache command failed"
+"""
+            )
+            cfServer.log(f"---- Attic command test ----\n{attic_test}")
         except Exception:
             pass
 
@@ -287,11 +358,11 @@ attic cache info test || true
         )
 
 
-def test_attic_cache_connectivity(atticServer, atticCache):
+def test_attic_cache_connectivity(cfServer):
     """
     Test basic connectivity to Attic cache server.
     """
-    atticServer.log("Testing basic Attic cache connectivity...")
+    cfServer.log("Testing basic Attic cache connectivity...")
 
     # Test Attic server is responding
     connectivity_script = r"""
@@ -304,41 +375,31 @@ attic cache info test
 """
 
     try:
-        result = atticServer.succeed(connectivity_script)
-        atticServer.log(f"Attic cache connectivity successful:\n{result}")
+        result = cfServer.succeed(connectivity_script)
+        cfServer.log(f"Attic cache connectivity successful:\n{result}")
     except Exception as e:
-        atticServer.log(f"Attic cache connectivity failed: {e}")
-
-        # Show attic cache logs for debugging
-        try:
-            logs = atticCache.succeed(
-                "journalctl -u atticd.service --no-pager -n 50 || true"
-            )
-            atticServer.log("---- Attic server logs ----\n" + logs)
-        except Exception:
-            pass
-
+        cfServer.log(f"Attic cache connectivity failed: {e}")
         raise
 
 
-def test_attic_cache_configuration(atticServer, cf_client):
+def test_attic_cache_configuration(cfServer, cf_client):
     """
     Test that Crystal Forge is properly configured for Attic cache.
     """
-    atticServer.log("Testing Attic cache configuration...")
+    cfServer.log("Testing Attic cache configuration...")
 
     # Check that we have a builder service running
-    atticServer.succeed("systemctl is-active crystal-forge-builder.service")
+    cfServer.succeed("systemctl is-active crystal-forge-builder.service")
 
     # Check builder logs mention Attic
     try:
-        logs = atticServer.succeed(
+        logs = cfServer.succeed(
             "journalctl -u crystal-forge-builder.service --no-pager -n 100 || true"
         )
-        atticServer.log(
+        cfServer.log(
             "---- Recent builder logs ----\n" + logs[-1000:]
         )  # Last 1000 chars
     except Exception:
         pass
 
-    atticServer.log("✅ Attic cache configuration test completed")
+    cfServer.log("✅ Attic cache configuration test completed")

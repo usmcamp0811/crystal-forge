@@ -66,6 +66,10 @@ def vm_test_setup():
         machines["s3Cache"].wait_for_unit("minio-setup.service")
         machines["s3Cache"].wait_for_open_port(9000)
 
+    if "atticCache" in machines:
+        machines["atticCache"].wait_for_unit("atticd.service")
+        machines["atticCache"].wait_for_open_port(8080)
+
     if "cfServer" in machines:
         machines["cfServer"].wait_for_unit("postgresql.service")
         if (
@@ -346,3 +350,11 @@ def wait_listening():
         )
 
     return _wait
+
+
+@pytest.fixture(scope="session")
+def atticCache():
+    """Get Attic cache machine"""
+    import cf_test
+
+    return cf_test._driver_machines.get("atticCache")

@@ -796,9 +796,9 @@ impl Derivation {
             path.to_string()
         };
 
-        // Compute nix copy args once
-        let args = match cache_config.copy_command_args(&store_path) {
-            Some(args) => args,
+        // Get command and args
+        let cache_cmd = match cache_config.cache_command(&store_path) {
+            Some(cmd) => cmd,
             None => {
                 warn!("⚠️ No cache push configuration found, skipping cache push");
                 return Ok(());
@@ -807,7 +807,7 @@ impl Derivation {
 
         // Redact secrets if they sneak into args (e.g. in --to URL query)
         let redacted_args = {
-            let joined = args.join(" ");
+            let joined = cache_cmd.args.join(" ");
             joined
                 .replace("secret-access-key=", "secret-access-key=REDACTED")
                 .replace("access_key=", "access_key=REDACTED")
@@ -815,8 +815,8 @@ impl Derivation {
                 .replace("aws_session_token=", "aws_session_token=REDACTED")
         };
         info!(
-            "📤 Pushing {} to cache... (nix {})",
-            store_path, redacted_args
+            "📤 Pushing {} to cache... ({} {})",
+            store_path, cache_cmd.command, redacted_args
         );
 
         // Add debugging for environment variables
@@ -870,10 +870,10 @@ impl Derivation {
             // FIXED: Remove the duplicate .env() calls and only use --setenv for systemd scopes
             apply_cache_env(&mut scoped);
 
-            // Run nix copy inside the scope
+            // Run the cache command inside the scope
             scoped.arg("--");
-            scoped.arg("nix");
-            scoped.args(&args);
+            scoped.arg(&cache_cmd.command); // ✅ Use correct command (nix/attic)
+            scoped.args(&cache_cmd.args);
 
             // IMPORTANT: do NOT call build_config.apply_to_command(&mut scoped) here,
             // because it may add service-only props like Environment= which break scopes.
@@ -881,39 +881,43 @@ impl Derivation {
             let output = scoped
                 .output()
                 .await
-                .context("Failed to execute scoped nix copy")?;
+                .context("Failed to execute scoped cache command")?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                error!("❌ nix copy (scoped) failed: {}", stderr.trim());
-                anyhow::bail!("nix copy failed (scoped): {}", stderr.trim());
+                error!(
+                    "❌ {} (scoped) failed: {}",
+                    cache_cmd.command,
+                    stderr.trim()
+                );
+                anyhow::bail!("{} failed (scoped): {}", cache_cmd.command, stderr.trim());
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             if !stdout.trim().is_empty() {
-                info!("📤 nix copy output: {}", stdout.trim());
+                info!("📤 {} output: {}", cache_cmd.command, stdout.trim());
             }
             info!("✅ Successfully pushed {} to cache (scoped)", store_path);
             return Ok(());
         }
 
         // Fallback: direct (non-systemd) execution
-        let mut cmd = Command::new("nix");
-        cmd.args(&args);
+        let mut cmd = Command::new(&cache_cmd.command); // ✅ Use correct command
+        cmd.args(&cache_cmd.args);
         build_config.apply_to_command(&mut cmd);
 
         let output = cmd
             .output()
             .await
-            .context("Failed to execute nix copy command")?;
+            .context("Failed to execute cache command")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("❌ nix copy failed: {}", stderr.trim());
-            anyhow::bail!("nix copy failed: {}", stderr.trim());
+            error!("❌ {} failed: {}", cache_cmd.command, stderr.trim());
+            anyhow::bail!("{} failed: {}", cache_cmd.command, stderr.trim());
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
-            info!("📤 nix copy output: {}", stdout.trim());
+            info!("📤 {} output: {}", cache_cmd.command, stdout.trim());
         }
         info!("✅ Successfully pushed {} to cache", store_path);
         Ok(())
@@ -1058,9 +1062,11 @@ pub async fn push_store_path_with_systemd(
 }
 
 /// Add allowed env vars to `systemd-run`, using both process env and `--setenv`.
+/// Add allowed env vars to `systemd-run`, using both process env and `--setenv`.
 fn apply_cache_env(scoped: &mut Command) {
     debug!("Applying cache environment variables to systemd scope");
 
+    // Standard cache environment variables
     for &key in CACHE_ENV_ALLOWLIST {
         if let Ok(val) = std::env::var(key) {
             debug!(
@@ -1076,6 +1082,26 @@ fn apply_cache_env(scoped: &mut Command) {
             scoped.arg(format!("{key}={val}"));
         } else {
             debug!("Environment variable not found: {}", key);
+        }
+    }
+
+    // Attic-specific environment variables
+    let attic_env_vars = ["ATTIC_SERVER_URL", "ATTIC_TOKEN"];
+    for &key in &attic_env_vars {
+        if let Ok(val) = std::env::var(key) {
+            debug!(
+                "Setting Attic env var in scope: {}={}",
+                key,
+                if key.contains("TOKEN") {
+                    "[REDACTED]"
+                } else {
+                    &val
+                }
+            );
+            scoped.arg("--setenv");
+            scoped.arg(format!("{key}={val}"));
+        } else {
+            debug!("Attic environment variable not found: {}", key);
         }
     }
 
