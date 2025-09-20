@@ -11,12 +11,124 @@ use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::process::Output;
 use std::process::Stdio;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::watch;
 use tokio::time::{Duration, sleep};
 use tokio::time::{Instant, interval};
 use tracing::{debug, error, info, warn};
+
+/// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
+const CACHE_ENV_ALLOWLIST: &[&str] = &[
+    "HOME",
+    "XDG_CONFIG_HOME",
+    // Attic-specific (optional – Attic mainly uses config files)
+    "ATTIC_SERVER_URL",
+    "ATTIC_TOKEN",
+    // existing…
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+    "AWS_DEFAULT_REGION",
+    "AWS_REGION",
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_S3",
+    "AWS_S3_ENDPOINT",
+    "S3_ENDPOINT",
+    "AWS_SHARED_CREDENTIALS_FILE",
+    "AWS_CONFIG_FILE",
+    "AWS_CA_BUNDLE",
+    "SSL_CERT_FILE",
+    "CURL_CA_BUNDLE",
+    "NO_PROXY",
+    "no_proxy",
+    "NIX_CONFIG",
+];
+
+const DEFAULT_ATTIC_REMOTE: &str = "local";
+
+// ⬇️ change OnceCell -> OnceLock
+static ATTIC_LOGGED_REMOTES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn mark_attic_logged(remote: &str) {
+    let set = ATTIC_LOGGED_REMOTES.get_or_init(|| Mutex::new(HashSet::new()));
+    set.lock().unwrap().insert(remote.to_string());
+}
+
+fn is_attic_logged(remote: &str) -> bool {
+    let set = ATTIC_LOGGED_REMOTES.get_or_init(|| Mutex::new(HashSet::new()));
+    set.lock().unwrap().contains(remote)
+}
+
+fn clear_attic_logged(remote: &str) {
+    let set = ATTIC_LOGGED_REMOTES.get_or_init(|| Mutex::new(HashSet::new()));
+    set.lock().unwrap().remove(remote);
+}
+
+fn debug_attic_environment() {
+    debug!("=== Attic Environment Debug ===");
+    debug!("HOME: {:?}", std::env::var("HOME"));
+    debug!("XDG_CONFIG_HOME: {:?}", std::env::var("XDG_CONFIG_HOME"));
+    debug!(
+        "ATTIC_SERVER_URL: {:?}",
+        std::env::var("ATTIC_SERVER_URL").map(|_| "[SET]")
+    );
+    debug!(
+        "ATTIC_TOKEN: {:?}",
+        std::env::var("ATTIC_TOKEN").map(|_| "[SET]")
+    );
+    debug!(
+        "ATTIC_REMOTE_NAME: {:?}",
+        std::env::var("ATTIC_REMOTE_NAME")
+    );
+
+    // Check if config file exists
+    let config_path = "/var/lib/crystal-forge/.config/attic/config.toml";
+    if std::path::Path::new(config_path).exists() {
+        debug!("Attic config file exists at {}", config_path);
+        match std::fs::read_to_string(config_path) {
+            Ok(contents) => debug!("Config file contents: {}", contents),
+            Err(e) => debug!("Cannot read config file: {}", e),
+        }
+    } else {
+        debug!("Attic config file does not exist at {}", config_path);
+    }
+    debug!("=== End Attic Environment Debug ===");
+}
+
+fn apply_cache_env_to_command(cmd: &mut Command) {
+    for &key in CACHE_ENV_ALLOWLIST {
+        if let Ok(val) = std::env::var(key) {
+            cmd.env(key, val);
+        }
+    }
+
+    // Force the correct HOME and XDG_CONFIG_HOME for crystal-forge user
+    cmd.env("HOME", "/var/lib/crystal-forge");
+    cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+
+    // Add Attic-specific environment variables if they exist
+    if let Ok(val) = std::env::var("ATTIC_SERVER_URL") {
+        cmd.env("ATTIC_SERVER_URL", val);
+    }
+    if let Ok(val) = std::env::var("ATTIC_TOKEN") {
+        cmd.env("ATTIC_TOKEN", val);
+    }
+    if let Ok(val) = std::env::var("ATTIC_REMOTE_NAME") {
+        cmd.env("ATTIC_REMOTE_NAME", val);
+    }
+
+    // If you set a custom S3 endpoint, disable IMDS by default
+    let has_custom_endpoint = std::env::var_os("AWS_ENDPOINT_URL").is_some()
+        || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some()
+        || std::env::var_os("AWS_S3_ENDPOINT").is_some()
+        || std::env::var_os("S3_ENDPOINT").is_some();
+    if has_custom_endpoint && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none() {
+        cmd.env("AWS_EC2_METADATA_DISABLED", "true");
+    }
+}
 
 // Updated derivation model to match the new database schema
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -103,6 +215,37 @@ pub struct DerivationStatus {
 }
 
 impl Derivation {
+    pub async fn push_to_cache_with_retry(
+        &self,
+        store_path: &str,
+        cache_config: &CacheConfig,
+        build_config: &BuildConfig,
+    ) -> Result<()> {
+        let mut attempts = 0;
+        let max_attempts = cache_config.max_retries + 1;
+
+        while attempts < max_attempts {
+            match self
+                .push_to_cache(store_path, cache_config, build_config)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(e) if attempts < max_attempts - 1 => {
+                    warn!(
+                        "Cache push attempt {} failed: {}, retrying...",
+                        attempts + 1,
+                        e
+                    );
+                    sleep(Duration::from_secs(cache_config.retry_delay_seconds)).await;
+                    attempts += 1;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        unreachable!()
+    }
+
     pub async fn summary(&self) -> Result<String> {
         let pool = CrystalForgeConfig::db_pool().await?;
 
@@ -204,79 +347,79 @@ impl Derivation {
 
         loop {
             tokio::select! {
-                            // Read stdout
-                            line_result = stdout_reader.next_line() => {
-                                match line_result? {
-                                    Some(line) => {
-                                        last_activity = Instant::now();
-                                        debug!("nix stdout: {}", line);
+                // Read stdout
+                line_result = stdout_reader.next_line() => {
+                    match line_result? {
+                        Some(line) => {
+                            last_activity = Instant::now();
+                            debug!("nix stdout: {}", line);
 
-                                        // Check if this looks like an output path
-                                        if line.starts_with("/nix/store/") && !line.contains(".drv") {
-                                            output_lines.push(line);
-                                        }
-                                    }
-                                    None => break,
-                                }
+                            // Check if this looks like an output path
+                            if line.starts_with("/nix/store/") && !line.contains(".drv") {
+                                output_lines.push(line);
                             }
-
-                            // Read stderr (where build logs go)
-                            line_result = stderr_reader.next_line() => {
-                                match line_result? {
-                                    Some(line) => {
-                                        last_activity = Instant::now();
-
-                                        // Parse build status from nix output
-                                        if line.contains("building '") {
-                                            if let Some(start) = line.find("building '") {
-                                                if let Some(end) = line[start + 10..].find("'") {
-                                                    current_build_target = Some(line[start + 10..start + 10 + end].to_string());
-                                                    info!("🔨 Started building: {}", current_build_target.as_ref().unwrap());
-                                                }
-                                            }
-                                        } else if line.contains("built '") {
-                                            if let Some(start) = line.find("built '") {
-                                                if let Some(end) = line[start + 7..].find("'") {
-                                                    let built_target = &line[start + 7..start + 7 + end];
-                                                    info!("✅ Completed building: {}", built_target);
-                                                    current_build_target = None;
-                                                }
-                                            }
-                                        } else if line.contains("downloading '") || line.contains("fetching ") {
-                                            debug!("📥 {}", line);
-                                        } else if line.contains("error:") || line.contains("failed") {
-                                            error!("❌ Build error: {}", line);
-                                        }
-                                    }
-                                    None => break,
-                                }
-                            }
-
-                            // Periodic heartbeat
-            _ = heartbeat.tick() => {
-                let elapsed = start_time.elapsed();
-                let mins = elapsed.as_secs() / 60;
-                let secs = elapsed.as_secs() % 60;
-                let last_activity_secs = last_activity.elapsed().as_secs();
-
-                if let Some(ref target) = current_build_target {
-                    info!("⏳ Still building {}: {}m {}s elapsed, last activity {}s ago",
-                          target, mins, secs, last_activity_secs);
-                } else {
-                    info!("⏳ Build in progress: {}m {}s elapsed, last activity {}s ago",
-                          mins, secs, last_activity_secs);
+                        }
+                        None => break,
+                    }
                 }
 
-                // Database heartbeat update
-                let _ = crate::queries::derivations::update_derivation_build_status(
-                    pool,
-                    derivation_id,
-                    elapsed.as_secs() as i32,
-                    current_build_target.as_deref(),
-                    last_activity_secs as i32
-                ).await;
-            }
+                // Read stderr (where build logs go)
+                line_result = stderr_reader.next_line() => {
+                    match line_result? {
+                        Some(line) => {
+                            last_activity = Instant::now();
+
+                            // Parse build status from nix output
+                            if line.contains("building '") {
+                                if let Some(start) = line.find("building '") {
+                                    if let Some(end) = line[start + 10..].find("'") {
+                                        current_build_target = Some(line[start + 10..start + 10 + end].to_string());
+                                        info!("🔨 Started building: {}", current_build_target.as_ref().unwrap());
+                                    }
+                                }
+                            } else if line.contains("built '") {
+                                if let Some(start) = line.find("built '") {
+                                    if let Some(end) = line[start + 7..].find("'") {
+                                        let built_target = &line[start + 7..start + 7 + end];
+                                        info!("✅ Completed building: {}", built_target);
+                                        current_build_target = None;
+                                    }
+                                }
+                            } else if line.contains("downloading '") || line.contains("fetching ") {
+                                debug!("📥 {}", line);
+                            } else if line.contains("error:") || line.contains("failed") {
+                                error!("❌ Build error: {}", line);
+                            }
                         }
+                        None => break,
+                    }
+                }
+
+                // Periodic heartbeat
+                _ = heartbeat.tick() => {
+                    let elapsed = start_time.elapsed();
+                    let mins = elapsed.as_secs() / 60;
+                    let secs = elapsed.as_secs() % 60;
+                    let last_activity_secs = last_activity.elapsed().as_secs();
+
+                    if let Some(ref target) = current_build_target {
+                        info!("⏳ Still building {}: {}m {}s elapsed, last activity {}s ago",
+                              target, mins, secs, last_activity_secs);
+                    } else {
+                        info!("⏳ Build in progress: {}m {}s elapsed, last activity {}s ago",
+                              mins, secs, last_activity_secs);
+                    }
+
+                    // Database heartbeat update
+                    let _ = crate::queries::derivations::update_derivation_build_status(
+                        pool,
+                        derivation_id,
+                        elapsed.as_secs() as i32,
+                        current_build_target.as_deref(),
+                        last_activity_secs as i32
+                    ).await;
+                }
+            }
         }
 
         // Wait for process to complete
@@ -310,6 +453,7 @@ impl Derivation {
 
         Ok(output_path)
     }
+
     async fn run_dry_run(flake_target: &str, build_config: &BuildConfig) -> Result<Output> {
         // Check if systemd should be used
         if !build_config.should_use_systemd() {
@@ -526,6 +670,7 @@ impl Derivation {
             }
         }
     }
+
     async fn run_direct_nix_store_streaming(
         &self,
         drv_path: &str,
@@ -692,55 +837,248 @@ impl Derivation {
             "{flake_ref}#nixosConfigurations.{system}.config.system.build.toplevel"
         ))
     }
-    /// Pushes a built derivation to the configured cache
+
+    /// Resolve a .drv path to its output store path(s)
+    pub async fn resolve_drv_to_store_path(drv_path: &str) -> Result<String> {
+        if !drv_path.ends_with(".drv") {
+            // Already a store path, return as-is
+            return Ok(drv_path.to_string());
+        }
+
+        let output = Command::new("nix-store")
+            .args(["--query", "--outputs", drv_path])
+            .output()
+            .await
+            .context("Failed to execute nix-store --query --outputs")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("nix-store --query --outputs failed: {}", stderr.trim());
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let store_paths: Vec<&str> = stdout.trim().lines().collect();
+
+        if store_paths.is_empty() {
+            anyhow::bail!("No output paths found for derivation: {}", drv_path);
+        }
+
+        // Return the first output path (typically there's only one)
+        Ok(store_paths[0].to_string())
+    }
+
+    /// Push a store path to the configured cache. Includes robust Attic handling:
+    /// - resolves .drv -> output path
+    /// - ensures a fresh login every time
+    /// - retries once on 401 Unauthorized by redoing login
+
     pub async fn push_to_cache(
         &self,
-        store_path: &str,
+        path: &str,
         cache_config: &CacheConfig,
         build_config: &BuildConfig,
     ) -> Result<()> {
-        // Check if we should push this target
+        use tokio::process::Command;
+
         if !cache_config.should_push(&self.derivation_name) {
-            info!(
-                "⏭️ Skipping cache push for {} (filtered out)",
-                self.derivation_name
-            );
+            info!("⭐️ Skipping cache push for {}", self.derivation_name);
             return Ok(());
         }
 
-        // Get the nix copy command arguments
-        let args = match cache_config.copy_command_args(store_path) {
-            Some(args) => args,
+        // Resolve .drv -> store path if needed
+        let store_path = if path.ends_with(".drv") {
+            info!("🔍 Resolving derivation path to store path: {}", path);
+            Self::resolve_drv_to_store_path(path).await?
+        } else {
+            path.to_string()
+        };
+
+        // Get command and args from config
+        let cache_cmd = match cache_config.cache_command(&store_path) {
+            Some(cmd) => cmd,
             None => {
                 warn!("⚠️ No cache push configuration found, skipping cache push");
                 return Ok(());
             }
         };
 
-        info!("📤 Pushing {} to cache...", store_path);
-        info!("🔧 nix copy command: nix {}", args.join(" "));
+        let mut effective_command = cache_cmd.command.clone();
+        let mut effective_args = cache_cmd.args.clone();
 
-        let mut cmd = Command::new("nix");
-        cmd.args(&args);
+        // --- Special handling for Attic -------------------------------------------------------
+        if effective_command == "attic"
+            && effective_args.first().map(|s| s.as_str()) == Some("push")
+        {
+            let endpoint = std::env::var("ATTIC_SERVER_URL")
+                .context("ATTIC_SERVER_URL not set (e.g. http://atticCache:8080)")?;
+            let token = std::env::var("ATTIC_TOKEN")
+                .context("ATTIC_TOKEN not set (provide a token with push permission)")?;
+            let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
 
+            // Ensure remote:repo format in arg[1]
+            if effective_args.len() >= 2 && !effective_args[1].contains(':') {
+                effective_args[1] = format!("{}:{}", remote, effective_args[1]);
+            }
+
+            // Ensure the store path is present (some configs might omit it)
+            if !effective_args.iter().any(|a| a == &store_path) {
+                effective_args.push(store_path.clone());
+            }
+
+            // Helpful: log environment presence and file-based config once
+            debug_attic_environment();
+
+            // One-time login (per-process), persisted under /var/lib/crystal-forge
+            ensure_attic_login(&remote, &endpoint, &token).await?;
+
+            info!(
+                "📤 Pushing {} to cache... ({} {})",
+                store_path,
+                effective_command,
+                effective_args.join(" ")
+            );
+
+            // Preflight: whoami
+            {
+                let mut whoami = tokio::process::Command::new("attic");
+                whoami.arg("whoami");
+                whoami.env("HOME", "/var/lib/crystal-forge");
+                whoami.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+                apply_cache_env_to_command(&mut whoami);
+                if let Ok(out) = whoami.output().await {
+                    let s = String::from_utf8_lossy(&out.stdout);
+                    info!("attic whoami: {}", s.trim());
+                }
+            }
+
+            // Preflight: repo visibility
+            {
+                let mut info_cmd = tokio::process::Command::new("attic");
+                info_cmd.args([
+                    "cache",
+                    "info",
+                    &effective_args[1], /* e.g. local:test */
+                ]);
+                info_cmd.env("HOME", "/var/lib/crystal-forge");
+                info_cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+                apply_cache_env_to_command(&mut info_cmd);
+                if let Ok(out) = info_cmd.output().await {
+                    if !out.status.success() {
+                        warn!(
+                            "Preflight 'attic cache info {}' failed: {}",
+                            &effective_args[1],
+                            String::from_utf8_lossy(&out.stderr).trim()
+                        );
+                    }
+                }
+            }
+
+            // ---- First attempt (this was missing) ----
+            let mut cmd = tokio::process::Command::new("attic");
+            cmd.args(&effective_args);
+            cmd.env("HOME", "/var/lib/crystal-forge");
+            cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+            apply_cache_env_to_command(&mut cmd);
+
+            let mut output = cmd.output().await.context("Failed to run 'attic push'")?;
+
+            // ---- If unauthorized, redo login once and retry
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let trimmed = stderr.trim();
+                if trimmed.contains("Unauthorized")
+                    || trimmed.contains("401")
+                    || trimmed.contains("invalid token")
+                {
+                    warn!("🔐 Attic push returned 401; clearing login cache and retrying once…");
+                    clear_attic_logged(&remote);
+
+                    // Re-login with current env
+                    let endpoint = std::env::var("ATTIC_SERVER_URL")?;
+                    let token = std::env::var("ATTIC_TOKEN")?;
+                    ensure_attic_login(&remote, &endpoint, &token).await?;
+
+                    // Retry push
+                    let mut cmd2 = tokio::process::Command::new("attic");
+                    cmd2.args(&effective_args);
+                    cmd2.env("HOME", "/var/lib/crystal-forge");
+                    cmd2.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+                    apply_cache_env_to_command(&mut cmd2);
+                    output = cmd2
+                        .output()
+                        .await
+                        .context("Failed to run 'attic push' (retry)")?;
+                }
+            }
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                error!("❌ attic (direct) failed: {}", stderr.trim());
+                anyhow::bail!("attic failed (direct): {}", stderr.trim());
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.trim().is_empty() {
+                info!("📤 attic output: {}", stdout.trim());
+            }
+            info!("✅ Successfully pushed {} to cache (attic)", store_path);
+            return Ok(());
+        }
+        // --- End Attic special-case ----------------------------------------------------------
+
+        // Non-Attic tools (e.g. `nix copy --to ...`)
+        if build_config.should_use_systemd() {
+            let mut scoped = Command::new("systemd-run");
+            scoped.args(["--scope", "--collect", "--quiet"]);
+            apply_systemd_props_for_scope(build_config, &mut scoped);
+            apply_cache_env(&mut scoped);
+            scoped
+                .arg("--")
+                .arg(&effective_command)
+                .args(&effective_args);
+
+            let output = scoped
+                .output()
+                .await
+                .context("Failed to execute scoped cache command")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                error!(
+                    "❌ {} (scoped) failed: {}",
+                    effective_command,
+                    stderr.trim()
+                );
+                anyhow::bail!("{} failed (scoped): {}", effective_command, stderr.trim());
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if !stdout.trim().is_empty() {
+                info!("📤 {} output: {}", effective_command, stdout.trim());
+            }
+            info!("✅ Successfully pushed {} to cache (scoped)", store_path);
+            return Ok(());
+        }
+
+        // Direct execution for non-Attic
+        let mut cmd = Command::new(&effective_command);
+        cmd.args(&effective_args);
         build_config.apply_to_command(&mut cmd);
+        apply_cache_env_to_command(&mut cmd);
 
         let output = cmd
             .output()
             .await
-            .context("Failed to execute nix copy command")?;
-
+            .context("Failed to execute cache command")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("❌ nix copy failed: {}", stderr.trim());
-            anyhow::bail!("nix copy failed: {}", stderr.trim());
+            error!("❌ {} failed: {}", effective_command, stderr.trim());
+            anyhow::bail!("{} failed: {}", effective_command, stderr.trim());
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
-            info!("📤 nix copy output: {}", stdout.trim());
+            info!("📤 {} output: {}", effective_command, stdout.trim());
         }
-
         info!("✅ Successfully pushed {} to cache", store_path);
         Ok(())
     }
@@ -881,3 +1219,113 @@ pub struct PackageInfo {
 // For backward compatibility during migration
 pub type EvaluationTarget = Derivation;
 pub type TargetType = DerivationType;
+
+fn apply_systemd_props_for_scope(build: &BuildConfig, cmd: &mut tokio::process::Command) {
+    // resource-control props that are valid for scopes
+    if let Some(ref memory_max) = build.systemd_memory_max {
+        cmd.args(["--property", &format!("MemoryMax={}", memory_max)]);
+    }
+    if let Some(cpu_quota) = build.systemd_cpu_quota {
+        cmd.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+    }
+    if let Some(timeout_stop) = build.systemd_timeout_stop_sec {
+        cmd.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+    }
+    for p in &build.systemd_properties {
+        // allow only resource-control-ish prefixes for scopes
+        const OK: &[&str] = &[
+            "Memory",
+            "CPU",
+            "Tasks",
+            "IO",
+            "Kill",
+            "OOM",
+            "Device",
+            "IPAccounting",
+        ];
+        if OK.iter().any(|pre| p.starts_with(pre)) {
+            cmd.args(["--property", p]);
+        }
+        // intentionally ignore service-only props like Environment=, Restart=, WorkingDirectory= …
+    }
+}
+
+// Fixed apply_cache_env function - only use --setenv for systemd scopes
+fn apply_cache_env(scoped: &mut Command) {
+    for &key in CACHE_ENV_ALLOWLIST {
+        if let Ok(val) = std::env::var(key) {
+            // For systemd scopes, only use --setenv, not .env()
+            // The .env() method affects the systemd-run process itself, not the scope
+            scoped.arg("--setenv");
+            scoped.arg(format!("{key}={val}"));
+        }
+    }
+
+    // Force the correct HOME and XDG_CONFIG_HOME for crystal-forge user
+    scoped.arg("--setenv");
+    scoped.arg("HOME=/var/lib/crystal-forge");
+    scoped.arg("--setenv");
+    scoped.arg("XDG_CONFIG_HOME=/var/lib/crystal-forge/.config");
+
+    // Add Attic-specific environment variables if they exist
+    if let Ok(val) = std::env::var("ATTIC_SERVER_URL") {
+        scoped.arg("--setenv");
+        scoped.arg(format!("ATTIC_SERVER_URL={val}"));
+    }
+    if let Ok(val) = std::env::var("ATTIC_TOKEN") {
+        scoped.arg("--setenv");
+        scoped.arg(format!("ATTIC_TOKEN={val}"));
+    }
+    if let Ok(val) = std::env::var("ATTIC_REMOTE_NAME") {
+        scoped.arg("--setenv");
+        scoped.arg(format!("ATTIC_REMOTE_NAME={val}"));
+    }
+
+    // Handle AWS_EC2_METADATA_DISABLED specially
+    let has_custom_endpoint = std::env::var_os("AWS_ENDPOINT_URL").is_some()
+        || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some()
+        || std::env::var_os("AWS_S3_ENDPOINT").is_some()
+        || std::env::var_os("S3_ENDPOINT").is_some();
+
+    if has_custom_endpoint && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none() {
+        scoped.arg("--setenv");
+        scoped.arg("AWS_EC2_METADATA_DISABLED=true");
+    }
+}
+
+/// Log into Attic so the remote is available to the client.
+/// Always runs *directly* and writes config under /var/lib/crystal-forge.
+async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow::Result<()> {
+    if is_attic_logged(remote) {
+        tracing::debug!(
+            "attic: remote '{}' already initialized in this process",
+            remote
+        );
+        return Ok(());
+    }
+
+    tracing::info!("🔐 Attic login for remote '{remote}' at {endpoint}");
+    let mut cmd = tokio::process::Command::new("attic");
+    cmd.args(["login", remote, endpoint, token]);
+    // Ensure credentials are persisted under the crystal-forge account:
+    cmd.env("HOME", "/var/lib/crystal-forge");
+    cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+
+    // If you also want AWS/S3 env available for any follow-up calls attic might make:
+    apply_cache_env_to_command(&mut cmd);
+
+    let out = cmd.output().await.context("failed to run 'attic login'")?;
+    if !out.status.success() {
+        let se = String::from_utf8_lossy(&out.stderr);
+        // Treat "already exists/already configured" as success
+        if se.contains("exist") || se.contains("Already") || se.contains("already") {
+            tracing::info!("ℹ️ Attic remote '{remote}' already configured");
+            mark_attic_logged(remote);
+            return Ok(());
+        }
+        anyhow::bail!("attic login failed: {}", se.trim());
+    }
+
+    mark_attic_logged(remote);
+    Ok(())
+}
