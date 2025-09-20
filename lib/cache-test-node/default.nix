@@ -317,10 +317,12 @@
         after = ["attic-setup.service"];
         wantedBy = ["multi-user.target"];
 
-        environment = {
-          PATH = lib.mkForce "${pkgs.attic-server}/bin:${atticClient}/bin:${pkgs.curl}/bin:${pkgs.coreutils}/bin:${pkgs.gnugrep}/bin";
-        };
-
+        path = with pkgs; [
+          iproute2 # provides `ss`
+          curl
+          coreutils
+          systemd # provides `systemctl`
+        ];
         # in makeAtticCacheNode -> systemd.services.attic-debug.script
         script = ''
           echo "=== Attic Debug Info ==="

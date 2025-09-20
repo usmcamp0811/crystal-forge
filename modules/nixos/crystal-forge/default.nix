@@ -812,9 +812,19 @@ in {
           NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
           TMPDIR = "/var/lib/crystal-forge/tmp";
           XDG_RUNTIME_DIR = "/run/crystal-forge";
-          # ADD THIS LINE:
           XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+          HOME = "/var/lib/crystal-forge";
         }
+        # Add Attic-specific environment variables if using Attic cache
+        (lib.mkIf (cfg.cache.cache_type == "Attic") {
+            # Force these to be available even if not in envFromProps
+            ATTIC_SERVER_URL = envFromProps.ATTIC_SERVER_URL or "http://atticCache:8080";
+            ATTIC_REMOTE_NAME = envFromProps.ATTIC_REMOTE_NAME or "local";
+            # Only set ATTIC_TOKEN if it's provided
+          }
+          // lib.optionalAttrs (envFromProps ? ATTIC_TOKEN) {
+            ATTIC_TOKEN = envFromProps.ATTIC_TOKEN;
+          })
         envFromProps
       ];
 
@@ -822,6 +832,33 @@ in {
         ${configScript}
         mkdir -p /var/lib/crystal-forge/.cache/nix
         mkdir -p /run/crystal-forge
+        mkdir -p /var/lib/crystal-forge/.config/attic
+
+        # Ensure attic config directory has proper ownership
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
+
+        # Source the attic environment if it exists
+        if [ -f /etc/attic-env ]; then
+          echo "Loading Attic environment variables from /etc/attic-env"
+          set -a
+          source /etc/attic-env
+          set +a
+
+          # Verify the environment was loaded
+          echo "ATTIC_SERVER_URL: ''${ATTIC_SERVER_URL:-NOT_SET}"
+          echo "ATTIC_REMOTE_NAME: ''${ATTIC_REMOTE_NAME:-NOT_SET}"
+          echo "ATTIC_TOKEN: ''${ATTIC_TOKEN:+SET}"
+        fi
+
+        # Test attic configuration as the crystal-forge user
+        echo "Testing Attic configuration..."
+        runuser -u crystal-forge -- env \
+          HOME="/var/lib/crystal-forge" \
+          XDG_CONFIG_HOME="/var/lib/crystal-forge/.config" \
+          ATTIC_SERVER_URL="''${ATTIC_SERVER_URL:-}" \
+          ATTIC_TOKEN="''${ATTIC_TOKEN:-}" \
+          ATTIC_REMOTE_NAME="''${ATTIC_REMOTE_NAME:-}" \
+          attic login list || echo "Attic configuration test failed"
       '';
 
       # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above
@@ -840,6 +877,12 @@ in {
           CacheDirectory = "crystal-forge-nix";
           CacheDirectoryMode = "0750";
           WorkingDirectory = "/var/lib/crystal-forge/workdir";
+
+          # Make sure we load the environment file
+          EnvironmentFile = [
+            "-/etc/attic-env"
+            "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
+          ];
 
           NoNewPrivileges = true;
           ProtectSystem = "no";
