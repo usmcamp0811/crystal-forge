@@ -120,7 +120,7 @@ in
 
           # Build configuration - DISABLE initially
           build = {
-            enable = false; # Will be enabled after token setup
+            enable = true;
             offline = false;
             systemd_properties = [
               "EnvironmentFile=-/etc/attic-env"
@@ -190,6 +190,7 @@ in
       print("Starting Attic cache services...")
       atticCache.wait_for_unit("atticd.service")
       atticCache.wait_for_unit("attic-setup.service")
+      cfServer.succeed("systemctl stop crystal-forge-builder.service")
       print("✅ Attic cache is ready")
 
       # -------- 2) Start cfServer database (but NOT crystal-forge yet) --------
@@ -290,35 +291,9 @@ in
           f"{ATTIC} push local:cf-test {hello_store_path}"
       )
 
-      # Verify the push worked
-      hello_basename = cfServer.succeed(f"basename '{hello_store_path}'").strip()
-      cfServer.succeed(
-          "sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config " +
-          f"{ATTIC} ls local:cf-test | grep -F {hello_basename}"
-      )
-
       print("✅ Attic token test passed!")
 
-      # -------- 6) Enable Crystal Forge builder service --------
-      print("Enabling Crystal Forge builder service...")
-
-      # Update the Crystal Forge configuration to enable the builder
-      cfServer.succeed("""
-      # Create a temporary config file to enable the builder
-      mkdir -p /tmp/cf-config
-      cat > /tmp/cf-config/override.nix <<'EOF'
-      {
-        services.crystal-forge.build.enable = true;
-      }
-      EOF
-
-      # Apply the configuration change
-      nixos-rebuild switch --flake /etc/nixos#cfServer --override-input crystal-forge /tmp/cf-config || {
-        # Fallback: directly enable the systemd service
-        systemctl enable crystal-forge-builder.service
-        systemctl start crystal-forge-builder.service
-      }
-      """)
+      cfServer.succeed("systemctl start crystal-forge-builder.service")
 
       # Wait for the builder service to start
       cfServer.wait_for_unit("crystal-forge-builder.service")

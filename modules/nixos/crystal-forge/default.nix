@@ -156,6 +156,29 @@
       fi
     ''}
 
+    # Inject dynamic attic token from environment file if available and cache_type is Attic
+    ${lib.optionalString (cfg.cache.cache_type == "Attic") ''
+      if [ -f "/etc/attic-env" ]; then
+        echo "Loading Attic token from /etc/attic-env..."
+        source /etc/attic-env
+        if [ -n "''${ATTIC_TOKEN:-}" ]; then
+          echo "Injecting dynamic ATTIC_TOKEN into config..."
+          # Use sed to add or update the attic_token field in the [cache] section
+          if grep -q "attic_token" "${generatedConfigPath}"; then
+            ${pkgs.gnused}/bin/sed -i "s|attic_token = .*|attic_token = \"''${ATTIC_TOKEN}\"|" "${generatedConfigPath}"
+          else
+            # Find the [cache] section and add attic_token after it
+            ${pkgs.gnused}/bin/sed -i '/^\[cache\]/a attic_token = "'"''${ATTIC_TOKEN}"'"' "${generatedConfigPath}"
+          fi
+          echo "✅ Attic token injected successfully"
+        else
+          echo "⚠️  ATTIC_TOKEN not found in /etc/attic-env"
+        fi
+      else
+        echo "⚠️  /etc/attic-env not found - using static attic_token from config"
+      fi
+    ''}
+
     # Generate SSH keys if ssh_key_path is null and we need SSH auth
     ${lib.optionalString (cfg.auth.ssh_key_path == null && (cfg.build.enable || cfg.server.enable)) ''
       SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
