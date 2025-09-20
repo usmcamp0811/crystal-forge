@@ -57,6 +57,10 @@ in
           systemBuildClosure
           inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
         ];
+        systemd.services.crystal-forge-builder = {
+          after = ["attic-client-setup.service"];
+          wants = ["attic-client-setup.service"];
+        };
         services.postgresql = {
           enable = true;
           settings."listen_addresses" = lib.mkForce "*";
@@ -106,7 +110,7 @@ in
 
           script = ''
             set -euo pipefail
-            echo "Setting up Attic client on cfServer..."
+            echo "Setting up Attic environment for Crystal Forge..."
 
             # Wait for atticCache HTTP to be reachable
             for i in {1..60}; do
@@ -116,10 +120,6 @@ in
               fi
               if [ "$i" -eq 60 ]; then
                 echo "ERROR: Attic server failed to become available after 60 attempts"
-                echo "=== Network debugging ==="
-                ping -c 2 atticCache || echo "Cannot ping atticCache"
-                nslookup atticCache || echo "Cannot resolve atticCache"
-                nc -zv atticCache 8080 || echo "Port 8080 not reachable on atticCache"
                 exit 1
               fi
               echo "Waiting for attic server... attempt $i/60"
@@ -153,20 +153,22 @@ in
             TOKEN="$signing_input.$signature"
             echo "Minted JWT valid until $exp"
 
+            # Create shared attic config directory
             echo "Logging in to Attic server with minted token..."
             attic login local http://atticCache:8080 "$TOKEN"
 
-            echo "Verifying cache exists (local:test)…"
+            echo "Verifying cache exists (local:test)..."
+            attic cache info local:test || echo "Cache verification failed but continuing"
 
-            # Export runtime env for the builder
+            # Export environment for the builder service
             cat >/etc/attic-env <<EOF
             ATTIC_SERVER_URL=http://atticCache:8080
             ATTIC_TOKEN=$TOKEN
+            ATTIC_REMOTE_NAME=local
             EOF
             chmod 0640 /etc/attic-env
 
-            # If the builder might already be running, bounce it to pick up the new env.
-            # (This is safe in the VM test.)
+            # Restart builder to pick up new environment
             systemctl daemon-reload || true
             systemctl try-restart crystal-forge-builder.service || true
 
@@ -207,13 +209,11 @@ in
             enable = true;
             offline = false;
             systemd_properties = [
-              # Load the minted JWT + endpoint produced by attic-client-setup
-              "EnvironmentFile=/etc/attic-env"
-
-              # Optional: pin remote name (defaults to "local" in your Rust code)
+              # Ensure the environment file is loaded
+              "EnvironmentFile=-/etc/attic-env"
+              # Also set them directly as backup
+              "Environment=ATTIC_SERVER_URL=http://atticCache:8080"
               "Environment=ATTIC_REMOTE_NAME=local"
-
-              # Keep anything else you want
               "Environment=HOME=/root"
               "Environment=NIX_LOG=trace"
               "Environment=NIX_SHOW_STATS=1"
@@ -225,7 +225,7 @@ in
             cache_type = "Attic";
             push_after_build = true;
             attic_cache_name = "test";
-            attic_token = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
+            # Remove this line: attic_token = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
             max_retries = 2;
             retry_delay_seconds = 1;
           };

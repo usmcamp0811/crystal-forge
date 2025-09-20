@@ -829,22 +829,28 @@ impl Derivation {
             let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
             token_for_redact = Some(token.clone());
 
-            // perform `attic login <remote> <endpoint> <token>`
-            if build_config.should_use_systemd() {
-                let mut login = Command::new("systemd-run");
-                login.args(["--scope", "--collect", "--quiet"]);
+            // rewrite `attic push <repo>` → `attic push <remote>:<repo>` if needed
+            if effective_args.len() >= 2 && !effective_args[1].contains(':') {
+                effective_args[1] = format!("{}:{}", remote, effective_args[1]);
+            }
 
-                // Scope-safe resource-control properties (same allowlist as below)
+            // For systemd execution, we need to do login and push in sequence but with shared config
+            if build_config.should_use_systemd() {
+                // Step 1: Login
+                let mut login_cmd = Command::new("systemd-run");
+                login_cmd.args(["--scope", "--collect", "--quiet"]);
+
+                // Apply systemd properties
                 if let Some(ref memory_max) = build_config.systemd_memory_max {
-                    login.args(["--property", &format!("MemoryMax={}", memory_max)]);
+                    login_cmd.args(["--property", &format!("MemoryMax={}", memory_max)]);
                 }
                 if let Some(cpu_quota) = build_config.systemd_cpu_quota {
-                    login.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+                    login_cmd.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
                 }
                 if let Some(timeout_stop) = build_config.systemd_timeout_stop_sec {
-                    login.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+                    login_cmd.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
                 }
-                const LOGIN_SCOPE_OK_PREFIXES: &[&str] = &[
+                const SCOPE_OK_PREFIXES: &[&str] = &[
                     "Memory",
                     "CPU",
                     "Tasks",
@@ -856,57 +862,104 @@ impl Derivation {
                     "IPAccounting",
                 ];
                 for p in &build_config.systemd_properties {
-                    if LOGIN_SCOPE_OK_PREFIXES.iter().any(|pre| p.starts_with(pre)) {
-                        login.args(["--property", p]);
+                    if SCOPE_OK_PREFIXES.iter().any(|pre| p.starts_with(pre)) {
+                        login_cmd.args(["--property", p]);
                     }
                 }
 
-                // ensure env reaches the scope
-                apply_cache_env(&mut login);
+                // Apply environment variables to login
+                apply_cache_env(&mut login_cmd);
 
-                login
-                    .arg("--")
-                    .arg("attic")
-                    .arg("login")
-                    .arg(&remote)
-                    .arg(&endpoint)
-                    .arg(&token);
+                // Execute login
+                login_cmd.arg("--");
+                login_cmd.arg("attic");
+                login_cmd.arg("login");
+                login_cmd.arg(&remote);
+                login_cmd.arg(&endpoint);
+                login_cmd.arg(&token);
 
-                let out = login
+                let login_output = login_cmd
                     .output()
                     .await
-                    .context("Failed to execute 'attic login' (scoped)")?;
-                if !out.status.success() {
-                    let se = String::from_utf8_lossy(&out.stderr);
-                    if se.contains("exist") || se.contains("Already") || se.contains("already") {
-                        info!("ℹ️ Attic remote '{remote}' already configured (scoped)");
-                    } else {
-                        error!("❌ attic login (scoped) failed: {}", se.trim());
-                        anyhow::bail!("attic login failed (scoped): {}", se.trim());
+                    .context("Failed to execute scoped attic login command")?;
+
+                if !login_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&login_output.stderr);
+                    // Be lenient if already logged in
+                    if !(stderr.contains("exist")
+                        || stderr.contains("Already")
+                        || stderr.contains("already"))
+                    {
+                        error!("❌ attic login (scoped) failed: {}", stderr.trim());
+                        anyhow::bail!("attic login failed (scoped): {}", stderr.trim());
                     }
                 }
+
+                // Step 2: Push using the same configuration
+                let mut push_cmd = Command::new("systemd-run");
+                push_cmd.args(["--scope", "--collect", "--quiet"]);
+
+                // Apply same systemd properties to push
+                if let Some(ref memory_max) = build_config.systemd_memory_max {
+                    push_cmd.args(["--property", &format!("MemoryMax={}", memory_max)]);
+                }
+                if let Some(cpu_quota) = build_config.systemd_cpu_quota {
+                    push_cmd.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+                }
+                if let Some(timeout_stop) = build_config.systemd_timeout_stop_sec {
+                    push_cmd.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+                }
+                for p in &build_config.systemd_properties {
+                    if SCOPE_OK_PREFIXES.iter().any(|pre| p.starts_with(pre)) {
+                        push_cmd.args(["--property", p]);
+                    }
+                }
+
+                // Apply environment variables to push
+                apply_cache_env(&mut push_cmd);
+
+                // Execute push
+                push_cmd.arg("--");
+                push_cmd.arg(&effective_command);
+                push_cmd.args(&effective_args);
+
+                let push_output = push_cmd
+                    .output()
+                    .await
+                    .context("Failed to execute scoped attic push command")?;
+
+                if !push_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&push_output.stderr);
+                    error!("❌ attic push (scoped) failed: {}", stderr.trim());
+                    anyhow::bail!("attic push failed (scoped): {}", stderr.trim());
+                }
+
+                let stdout = String::from_utf8_lossy(&push_output.stdout);
+                if !stdout.trim().is_empty() {
+                    info!("📤 attic output: {}", stdout.trim());
+                }
+                info!("✅ Successfully pushed {} to cache (scoped)", store_path);
+                return Ok(());
             } else {
+                // For non-systemd execution, do login then push sequentially
                 let mut login = Command::new("attic");
                 login.args(["login", &remote, &endpoint, &token]);
                 build_config.apply_to_command(&mut login);
-                let out = login
+
+                let login_output = login
                     .output()
                     .await
                     .context("Failed to execute 'attic login'")?;
-                if !out.status.success() {
-                    let se = String::from_utf8_lossy(&out.stderr);
-                    if se.contains("exist") || se.contains("Already") || se.contains("already") {
-                        info!("ℹ️ Attic remote '{remote}' already configured");
-                    } else {
+
+                if !login_output.status.success() {
+                    let se = String::from_utf8_lossy(&login_output.stderr);
+                    if !(se.contains("exist") || se.contains("Already") || se.contains("already")) {
                         error!("❌ attic login failed: {}", se.trim());
                         anyhow::bail!("attic login failed: {}", se.trim());
                     }
                 }
-            }
 
-            // rewrite `attic push <repo>` → `attic push <remote>:<repo>` if needed
-            if effective_args.len() >= 2 && !effective_args[1].contains(':') {
-                effective_args[1] = format!("{}:{}", remote, effective_args[1]);
+                // Continue with the normal push command below (falls through to general execution)
             }
         }
         // ---------------------------------------------------------------------------
@@ -980,11 +1033,8 @@ impl Derivation {
 
             // Run the cache command inside the scope
             scoped.arg("--");
-            scoped.arg(&effective_command); // ✅ Use possibly rewritten command
+            scoped.arg(&effective_command);
             scoped.args(&effective_args);
-
-            // IMPORTANT: do NOT call build_config.apply_to_command(&mut scoped) here,
-            // because it may add service-only props like Environment= which break scopes.
 
             let output = scoped
                 .output()
@@ -1009,7 +1059,7 @@ impl Derivation {
         }
 
         // Fallback: direct (non-systemd) execution
-        let mut cmd = Command::new(&effective_command); // ✅ Use possibly rewritten command
+        let mut cmd = Command::new(&effective_command);
         cmd.args(&effective_args);
         build_config.apply_to_command(&mut cmd);
 

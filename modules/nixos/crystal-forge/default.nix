@@ -662,6 +662,8 @@ in {
       "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.ssh 0700 crystal-forge crystal-forge -"
       "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
+      "d /var/lib/crystal-forge/.config 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.config/attic 0755 crystal-forge crystal-forge -"
     ];
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
@@ -810,6 +812,8 @@ in {
           NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
           TMPDIR = "/var/lib/crystal-forge/tmp";
           XDG_RUNTIME_DIR = "/run/crystal-forge";
+          # ADD THIS LINE:
+          XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
         }
         envFromProps
       ];
