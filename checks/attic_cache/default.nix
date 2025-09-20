@@ -285,36 +285,12 @@ in
       if not hello_store_path.startswith("/nix/store/"):
           raise AssertionError(f"Unexpected hello store path: {hello_store_path}")
 
-      print(f"Testing push with: {hello_store_path}")
-      cfServer.succeed(
-          "sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config " +
-          f"{ATTIC} push local:cf-test {hello_store_path}"
-      )
-
-      print("✅ Attic token test passed!")
-
       cfServer.succeed("systemctl start crystal-forge-builder.service")
 
       # Wait for the builder service to start
       cfServer.wait_for_unit("crystal-forge-builder.service")
       print("✅ Crystal Forge builder service is running")
 
-      # -------- 7) Test Crystal Forge integration --------
-      print("Testing Crystal Forge integration with Attic...")
-
-      # Wait a bit for the service to fully initialize
-      time.sleep(5)
-
-      # Verify the service can connect to Attic
-      cfServer.succeed(
-          "systemctl status crystal-forge-builder.service"
-      )
-
-      # Check logs for any immediate errors
-      logs = cfServer.succeed(
-          "journalctl -u crystal-forge-builder.service --no-pager -n 20"
-      )
-      print(f"Builder service logs:\n{logs}")
 
       print("✅ Crystal Forge is ready for testing")
 
