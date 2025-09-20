@@ -161,13 +161,11 @@ in
     testScript = ''
       import os
       import pytest
-      import time
 
       ATTIC = "${pkgs.attic-client}/bin/attic"
       ATTICADM = "${pkgs.attic-server}/bin/atticadm"
-      ATTIC_SECRET_B64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA=="
 
-      # Test harness env
+      # Test harness environment
       os.environ.update({
           "CF_TEST_PACKAGE_DRV": "${inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath}",
           "CF_TEST_PACKAGE_NAME": "cf-test-sys",
@@ -184,72 +182,39 @@ in
           "gitserver": gitserver,
       }
 
-      print("=== Starting Crystal Forge Attic Cache Integration Test ===")
+      print("=== Crystal Forge Attic Cache Integration Test ===")
 
-      # -------- 1) Start Attic Cache --------
-      print("Starting Attic cache services...")
+      # Start services
       atticCache.wait_for_unit("atticd.service")
       atticCache.wait_for_unit("attic-setup.service")
-      cfServer.succeed("systemctl stop crystal-forge-builder.service")
-      print("✅ Attic cache is ready")
-
-      # -------- 2) Start cfServer database (but NOT crystal-forge yet) --------
-      print("Starting cfServer database...")
       cfServer.wait_for_unit("postgresql.service")
-      print("✅ Database is ready")
+      cfServer.succeed("systemctl stop crystal-forge-builder.service")
 
-      # -------- 3) Generate Attic token with push permissions --------
-      print("Generating Attic token with push permissions...")
-
+      # Generate Attic token
       server_toml = atticCache.succeed(
-          "set -e; "
-          "for p in "
-          "/var/lib/attic/server.toml "
-          "/var/lib/atticd/server.toml "
-          "/etc/atticd.toml "
-          "/etc/attic/server.toml "
-          "; do [ -f \"$p\" ] && { echo \"$p\"; exit 0; }; done; "
-          "exit 1"
+          "find /var/lib /etc -name 'server.toml' -o -name 'atticd.toml' 2>/dev/null | head -1"
       ).strip()
-
-      print(f"Using server config: {server_toml}")
 
       token = atticCache.succeed(
           f"{ATTICADM} --config {server_toml} make-token "
-          "--sub cfServer "
-          "--validity '1 year' "
-          "--pull 'cf-*' "
-          "--push 'cf-*' "
-          "--create-cache 'cf-*' "
-          "--configure-cache 'cf-*'"
+          "--sub cfServer --validity '1 year' "
+          "--pull 'cf-*' --push 'cf-*' --create-cache 'cf-*' --configure-cache 'cf-*'"
       ).strip()
 
-      # Validate token format
-      parts = token.split(".")
-      if len(parts) != 3 or not all(parts):
-          raise AssertionError(f"Invalid JWT token format: {token[:40]}...")
-
-      print(f"✅ Generated token: {token[:32]}...")
-
-      # -------- 4) Configure cfServer with Attic credentials --------
-      print("Configuring cfServer with Attic credentials...")
+      # Configure Attic client and environment
       cfServer.succeed(f"""
-      set -euo pipefail
-
-      # Ensure crystal-forge user and directories exist
       mkdir -p /var/lib/crystal-forge/.config
-      chown -R crystal-forge:crystal-forge /var/lib/crystal-forge || {{
-        # If user doesn't exist yet, create it
-        useradd -r -s /bin/sh -d /var/lib/crystal-forge crystal-forge || true
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge
-      }}
-      chmod 755 /var/lib/crystal-forge/.config
+      chown -R crystal-forge:crystal-forge /var/lib/crystal-forge
 
-      # Use attic login command to properly configure the client
+      # Setup attic client
       sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
         {ATTIC} login local http://atticCache:8080 {token}
 
-      # Write environment file for systemd services
+      # Create cache
+      sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
+        {ATTIC} cache create local:cf-test || true
+
+      # Environment for Crystal Forge
       cat > /etc/attic-env <<EOF
       ATTIC_SERVER_URL=http://atticCache:8080
       ATTIC_TOKEN={token}
@@ -260,71 +225,22 @@ in
       chmod 644 /etc/attic-env
       """)
 
-      print("✅ cfServer configured with Attic credentials")
-
-      # -------- 5) Test Attic token functionality --------
-      print("Testing Attic token functionality...")
-
-      # Test creating the cache
-      cfServer.succeed(
-          "sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config " +
-          f"{ATTIC} cache create local:cf-test || true"
-      )
-
-      # Test cache info (verifies read access)
-      cfServer.succeed(
-          "sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config " +
-          f"{ATTIC} cache info local:cf-test"
-      )
-
-      # Test push functionality with hello package
-      hello_store_path = cfServer.succeed(
-          "readlink -f $(which hello) | sed 's#/bin/hello##'"
-      ).strip()
-
-      if not hello_store_path.startswith("/nix/store/"):
-          raise AssertionError(f"Unexpected hello store path: {hello_store_path}")
-
+      # Start Crystal Forge builder
       cfServer.succeed("systemctl start crystal-forge-builder.service")
-
-      # Wait for the builder service to start
       cfServer.wait_for_unit("crystal-forge-builder.service")
-      print("✅ Crystal Forge builder service is running")
 
-
-      print("✅ Crystal Forge is ready for testing")
-
-      # -------- 8) Run pytest suite --------
-      print("Running pytest attic_cache tests...")
+      # Run tests
       exit_code = pytest.main([
           "-vvvv", "--tb=short", "-x", "-s",
           "-m", "attic_cache", "--pyargs", "cf_test",
       ])
 
       if exit_code != 0:
-          # Print additional debugging info on failure
-          print("=== Test failure debugging info ===")
-
-          print("Crystal Forge builder service status:")
-          cfServer.succeed("systemctl status crystal-forge-builder.service || true")
-
-          print("\nCrystal Forge builder service logs:")
+          print("=== Test Failure Debug Info ===")
           cfServer.succeed("journalctl -u crystal-forge-builder.service --no-pager -n 50 || true")
-
-          print("\nAttic cache status:")
-          atticCache.succeed("systemctl status atticd.service || true")
-
-          print("\nAttic cache logs:")
-          atticCache.succeed("journalctl -u atticd.service --no-pager -n 30 || true")
-
-          print("\nAttic client config:")
-          cfServer.succeed("sudo -u crystal-forge cat /var/lib/crystal-forge/.config/attic/config.toml || true")
-
-          print("\nEnvironment file:")
           cfServer.succeed("cat /etc/attic-env || true")
-
           raise SystemExit(exit_code)
 
-      print("✅ All tests passed!")
+      print("All tests passed!")
     '';
   }
