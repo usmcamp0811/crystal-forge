@@ -33,16 +33,13 @@
   };
 in
   pkgs.testers.runNixOSTest {
-    name = "crystal-forge-agent-integration";
+    name = "crystal-forge-database-test";
     # Silence flake8/mypy for untyped helper lib
     skipLint = true;
     skipTypeCheck = true;
     nodes = {
-      server = lib.crystal-forge.makeServerNode {
-        inherit pkgs systemBuildClosure keyPath pubPath;
-        extraConfig = {
-          imports = [inputs.self.nixosModules.crystal-forge];
-        };
+      server = lib.crystal-forge.mkServerNode {
+        inherit pkgs inputs systemBuildClosure keyPath pubPath;
         port = CF_TEST_SERVER_PORT;
       };
     };
@@ -54,8 +51,7 @@ in
       p.pytest-metadata
       p.pytest-html
       p.psycopg2
-      pkgs.crystal-forge.cf-test-modules
-      pkgs.crystal-forge.vm-test-logger
+      pkgs.crystal-forge.cf-test-suite
     ];
 
     testScript = ''

@@ -41,7 +41,7 @@ in
       export CF_TEST_MODE=devshell
 
       # Add test modules to Python path so you can import them
-      export PYTHONPATH="${pkgs.crystal-forge.cf-test-modules}/lib/python3.12/site-packages:''${PYTHONPATH:-}"
+      export PYTHONPATH="${pkgs.crystal-forge.cf-test-suite}/lib/python3.12/site-packages:''${PYTHONPATH:-}"
 
       alias full-stack='sudo echo && nix run $PROJECT_ROOT#devScripts --'
       alias server-stack='nix run $PROJECT_ROOT#devScripts.server-only --'
@@ -50,7 +50,7 @@ in
       alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
       alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'
       alias test-agent='nix run $PROJECT_ROOT#agent.test-agent --'
-      alias run-db-test='nix run .#cf-test-modules.runTests --'
+      alias run-db-test='nix run .#cf-test-suite.runTests --'
 
       echo "🔮 Welcome to the Crystal Forge Dev Environment"
       echo ""

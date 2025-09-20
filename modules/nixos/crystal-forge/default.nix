@@ -103,17 +103,38 @@
           whitelist_path = toString cfg.vulnix.whitelist_path;
         };
     }
-    // lib.optionalAttrs (cfg.cache.push_to != null) {
+    // lib.optionalAttrs (cfg.cache.push_to != null || cfg.cache.cache_type != "Nix") {
       cache =
         {
-          push_to = cfg.cache.push_to;
+          cache_type = cfg.cache.cache_type;
           push_after_build = cfg.cache.push_after_build;
-          compression = cfg.cache.compression;
-          push_filter = cfg.cache.push_filter;
           parallel_uploads = cfg.cache.parallel_uploads;
+          max_retries = cfg.cache.max_retries;
+          retry_delay_seconds = cfg.cache.retry_delay_seconds;
+        }
+        // lib.optionalAttrs (cfg.cache.push_to != null) {
+          push_to = cfg.cache.push_to;
         }
         // lib.optionalAttrs (cfg.cache.signing_key != null) {
           signing_key = toString cfg.cache.signing_key;
+        }
+        // lib.optionalAttrs (cfg.cache.compression != null) {
+          compression = cfg.cache.compression;
+        }
+        // lib.optionalAttrs (cfg.cache.push_filter != null) {
+          push_filter = cfg.cache.push_filter;
+        }
+        // lib.optionalAttrs (cfg.cache.s3_region != null) {
+          s3_region = cfg.cache.s3_region;
+        }
+        // lib.optionalAttrs (cfg.cache.s3_profile != null) {
+          s3_profile = cfg.cache.s3_profile;
+        }
+        // lib.optionalAttrs (cfg.cache.attic_token != null) {
+          attic_token = cfg.cache.attic_token;
+        }
+        // lib.optionalAttrs (cfg.cache.attic_cache_name != null) {
+          attic_cache_name = cfg.cache.attic_cache_name;
         };
     };
 
@@ -132,6 +153,29 @@
       else
         echo "ERROR: Password file not found: ${cfg.database.passwordFile}" >&2
         exit 1
+      fi
+    ''}
+
+    # Inject dynamic attic token from environment file if available and cache_type is Attic
+    ${lib.optionalString (cfg.cache.cache_type == "Attic") ''
+      if [ -f "/etc/attic-env" ]; then
+        echo "Loading Attic token from /etc/attic-env..."
+        source /etc/attic-env
+        if [ -n "''${ATTIC_TOKEN:-}" ]; then
+          echo "Injecting dynamic ATTIC_TOKEN into config..."
+          # Use sed to add or update the attic_token field in the [cache] section
+          if grep -q "attic_token" "${generatedConfigPath}"; then
+            ${pkgs.gnused}/bin/sed -i "s|attic_token = .*|attic_token = \"''${ATTIC_TOKEN}\"|" "${generatedConfigPath}"
+          else
+            # Find the [cache] section and add attic_token after it
+            ${pkgs.gnused}/bin/sed -i '/^\[cache\]/a attic_token = "'"''${ATTIC_TOKEN}"'"' "${generatedConfigPath}"
+          fi
+          echo "✅ Attic token injected successfully"
+        else
+          echo "⚠️  ATTIC_TOKEN not found in /etc/attic-env"
+        fi
+      else
+        echo "⚠️  /etc/attic-env not found - using static attic_token from config"
       fi
     ''}
 
@@ -438,6 +482,11 @@ in {
     };
 
     cache = {
+      cache_type = lib.mkOption {
+        type = lib.types.enum ["S3" "Attic" "Http" "Nix"];
+        default = "Nix";
+        description = "Type of cache to use";
+      };
       push_to = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -467,6 +516,39 @@ in {
         type = lib.types.ints.positive;
         default = 4;
         description = "Parallel uploads";
+      };
+      # S3-specific options
+      s3_region = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "S3 region for cache";
+      };
+      s3_profile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "AWS profile to use for S3 cache";
+      };
+      # Attic-specific options
+      attic_token = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Attic authentication token";
+      };
+      attic_cache_name = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Attic cache name";
+      };
+      # Retry configuration
+      max_retries = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 3;
+        description = "Maximum retry attempts for cache operations";
+      };
+      retry_delay_seconds = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 5;
+        description = "Delay between retry attempts in seconds";
       };
     };
 
@@ -603,6 +685,8 @@ in {
       "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.ssh 0700 crystal-forge crystal-forge -"
       "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
+      "d /var/lib/crystal-forge/.config 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.config/attic 0755 crystal-forge crystal-forge -"
     ];
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
@@ -642,7 +726,11 @@ in {
           ensureClauses.login = true;
         }
       ];
+      identMap = ''
+        crystal-forge-map crystal-forge ${cfg.database.user}
+      '';
       authentication = lib.mkAfter ''
+        local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
         local  ${cfg.database.name}  ${cfg.database.user}  trust
         host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
         host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
@@ -703,98 +791,138 @@ in {
       });
     '';
 
-    systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable {
+    systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable (let
+      # Parse cfg.build.systemd_properties (["Environment=FOO=bar" "IOWeight=100" …])
+      parsed =
+        lib.foldl' (
+          acc: prop: let
+            kv = lib.splitString "=" prop;
+            key = lib.elemAt kv 0;
+            val = lib.concatStringsSep "=" (lib.drop 1 kv);
+          in
+            if key == "Environment"
+            then acc // {env = (acc.env or []) ++ [val];}
+            else acc // {svc = (acc.svc or {}) // {${key} = val;};}
+        ) {
+          env = [];
+          svc = {};
+        }
+        cfg.build.systemd_properties;
+
+      envFromProps = builtins.listToAttrs (map (
+          s: let
+            p = lib.splitString "=" s;
+          in {
+            name = lib.elemAt p 0;
+            value = lib.concatStringsSep "=" (lib.drop 1 p);
+          }
+        )
+        parsed.env);
+    in {
       description = "Crystal Forge Builder";
       wantedBy = ["multi-user.target"];
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
-      path = with pkgs; [nix git vulnix systemd];
-      environment = {
-        RUST_LOG = cfg.log_level;
-        NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
-        TMPDIR = "/var/lib/crystal-forge/tmp";
-        XDG_RUNTIME_DIR = "/run/crystal-forge";
-      };
+      path = with pkgs;
+        [nix git vulnix systemd]
+        ++ lib.optional (cfg.cache.cache_type == "Attic") attic-client;
+
+      # Merge existing env with any Environment=… pairs from systemd_properties
+      environment = lib.mkMerge [
+        {
+          RUST_LOG = cfg.log_level;
+          NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
+          TMPDIR = "/var/lib/crystal-forge/tmp";
+          XDG_RUNTIME_DIR = "/run/crystal-forge";
+          XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+          HOME = "/var/lib/crystal-forge";
+        }
+        # Add Attic-specific environment variables if using Attic cache
+        (lib.mkIf (cfg.cache.cache_type == "Attic") {
+            # Force these to be available even if not in envFromProps
+            ATTIC_SERVER_URL = envFromProps.ATTIC_SERVER_URL or "http://atticCache:8080";
+            ATTIC_REMOTE_NAME = envFromProps.ATTIC_REMOTE_NAME or "local";
+            # Only set ATTIC_TOKEN if it's provided
+          }
+          // lib.optionalAttrs (envFromProps ? ATTIC_TOKEN) {
+            ATTIC_TOKEN = envFromProps.ATTIC_TOKEN;
+          })
+        envFromProps
+      ];
 
       preStart = ''
         ${configScript}
         mkdir -p /var/lib/crystal-forge/.cache/nix
+        mkdir -p /run/crystal-forge
+        mkdir -p /var/lib/crystal-forge/.config/attic
+
+        # Ensure attic config directory has proper ownership
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
+
+        # Source the attic environment if it exists
+        if [ -f /etc/attic-env ]; then
+          echo "Loading Attic environment variables from /etc/attic-env"
+          set -a
+          source /etc/attic-env
+          set +a
+
+          # Verify the environment was loaded
+          echo "ATTIC_SERVER_URL: ''${ATTIC_SERVER_URL:-NOT_SET}"
+          echo "ATTIC_REMOTE_NAME: ''${ATTIC_REMOTE_NAME:-NOT_SET}"
+          echo "ATTIC_TOKEN: ''${ATTIC_TOKEN:+SET}"
+        fi
+
+        # Test attic configuration as the crystal-forge user
+        echo "Testing Attic configuration..."
+        runuser -u crystal-forge -- env \
+          HOME="/var/lib/crystal-forge" \
+          XDG_CONFIG_HOME="/var/lib/crystal-forge/.config" \
+          ATTIC_SERVER_URL="''${ATTIC_SERVER_URL:-}" \
+          ATTIC_TOKEN="''${ATTIC_TOKEN:-}" \
+          ATTIC_REMOTE_NAME="''${ATTIC_REMOTE_NAME:-}" \
+          attic login list || echo "Attic configuration test failed"
       '';
 
-      serviceConfig = {
-        Type = "exec";
-        ExecStart = builderScript;
-        User = "crystal-forge";
-        Group = "crystal-forge";
+      # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above
+      serviceConfig =
+        {
+          Type = "exec";
+          ExecStart = builderScript;
+          User = "crystal-forge";
+          Group = "crystal-forge";
+          Slice = "crystal-forge-builds.slice";
 
-        Slice = "crystal-forge-builds.slice";
+          StateDirectory = "crystal-forge";
+          StateDirectoryMode = "0750";
+          RuntimeDirectory = "crystal-forge";
+          RuntimeDirectoryMode = "0700";
+          CacheDirectory = "crystal-forge-nix";
+          CacheDirectoryMode = "0750";
+          WorkingDirectory = "/var/lib/crystal-forge/workdir";
 
-        # Use individual service limits that are more conservative than slice limits
-        MemoryMax =
-          lib.mkIf (cfg.build.systemd_memory_max != null)
-          (let
-            # Use half of the systemd memory max for individual service
-            memStr = cfg.build.systemd_memory_max;
-            memVal =
-              if lib.hasSuffix "G" memStr
-              then toString (lib.toInt (lib.removeSuffix "G" memStr) / 2) + "G"
-              else if lib.hasSuffix "M" memStr
-              then toString (lib.toInt (lib.removeSuffix "M" memStr) / 2) + "M"
-              else "2G";
-          in
-            memVal);
-        MemoryHigh =
-          lib.mkIf (cfg.build.systemd_memory_max != null)
-          (let
-            # Use 37.5% of systemd memory max for "high" threshold
-            memStr = cfg.build.systemd_memory_max;
-            memVal =
-              if lib.hasSuffix "G" memStr
-              then toString (lib.toInt (lib.removeSuffix "G" memStr) * 3 / 8) + "G"
-              else if lib.hasSuffix "M" memStr
-              then toString (lib.toInt (lib.removeSuffix "M" memStr) * 3 / 8) + "M"
-              else "1.5G";
-          in
-            memVal);
-        MemorySwapMax = "1G";
-        CPUQuota =
-          lib.mkIf (cfg.build.systemd_cpu_quota != null)
-          (toString (cfg.build.systemd_cpu_quota / 2) + "%"); # Half of the slice quota
+          # Make sure we load the environment file
+          EnvironmentFile = [
+            "-/etc/attic-env"
+            "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
+          ];
 
-        # Use systemd-managed dirs (no hardcoded IDs)
-        StateDirectory = "crystal-forge";
-        StateDirectoryMode = "0750";
-        RuntimeDirectory = "crystal-forge";
-        RuntimeDirectoryMode = "0700";
-        CacheDirectory = "crystal-forge-nix";
-        CacheDirectoryMode = "0750";
-        WorkingDirectory = "/var/lib/crystal-forge/workdir";
+          NoNewPrivileges = true;
+          ProtectSystem = "no";
+          ProtectHome = true;
+          PrivateTmp = true;
+          ProtectKernelTunables = true;
+          ProtectKernelModules = true;
+          ProtectControlGroups = true;
 
-        NoNewPrivileges = true;
-        ProtectSystem = "no";
-        ProtectHome = true;
-        PrivateTmp = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectControlGroups = true;
+          ReadWritePaths = ["/var/lib/crystal-forge" "/tmp" "/run/crystal-forge"];
+          ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
-        # Only the required write paths
-        ReadWritePaths = [
-          "/var/lib/crystal-forge"
-          "/tmp"
-          "/run/crystal-forge"
-        ];
-
-        ReadOnlyPaths = [
-          "/etc/nix"
-          "/etc/ssl/certs"
-        ];
-
-        Restart = "always";
-        RestartSec = 5;
-      };
-    };
+          Restart = "always";
+          RestartSec = 5;
+        }
+        // parsed.svc;
+    });
 
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
@@ -811,6 +939,7 @@ in {
       preStart = ''
         ${configScript}
         mkdir -p /var/lib/crystal-forge/.cache/nix
+        mkdir -p /run/crystal-forge
       '';
 
       serviceConfig = {
@@ -905,7 +1034,7 @@ in {
         message = "Cannot specify both database.password and database.passwordFile";
       }
       {
-        assertion = cfg.server.enable || cfg.client.enable;
+        assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable;
         message = "At least one of server or client must be enabled";
       }
     ];
