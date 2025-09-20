@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE cache_push_jobs \n        SET \n            status = 'completed',\n            completed_at = NOW(),\n            push_size_bytes = $2,\n            push_duration_ms = $3\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e8904d6d5295035fc41fa27776c7067129e2b2d97fab64e3d213a88a86b750bd"
+}
