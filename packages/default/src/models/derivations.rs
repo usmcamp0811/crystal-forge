@@ -21,13 +21,19 @@ use tracing::{debug, error, info, warn};
 
 /// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
 const CACHE_ENV_ALLOWLIST: &[&str] = &[
+    "HOME",
+    "XDG_CONFIG_HOME",
+    // Attic-specific (optional – Attic mainly uses config files)
+    "ATTIC_SERVER_URL",
+    "ATTIC_TOKEN",
+    // existing…
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
     "AWS_DEFAULT_REGION",
     "AWS_REGION",
-    "AWS_ENDPOINT_URL",    // generic endpoint
-    "AWS_ENDPOINT_URL_S3", // SDK v3 can use this for S3 specifically
+    "AWS_ENDPOINT_URL",
+    "AWS_ENDPOINT_URL_S3",
     "AWS_S3_ENDPOINT",
     "S3_ENDPOINT",
     "AWS_SHARED_CREDENTIALS_FILE",
@@ -39,6 +45,8 @@ const CACHE_ENV_ALLOWLIST: &[&str] = &[
     "no_proxy",
     "NIX_CONFIG",
 ];
+
+const DEFAULT_ATTIC_REMOTE: &str = "local";
 
 // Updated derivation model to match the new database schema
 #[derive(Debug, FromRow, Serialize, Deserialize)]
@@ -805,18 +813,118 @@ impl Derivation {
             }
         };
 
+        // ---- NEW: make sure Attic is logged in and the repo is remote-qualified ----
+        let mut effective_command = cache_cmd.command.clone();
+        let mut effective_args = cache_cmd.args.clone();
+        let mut token_for_redact: Option<String> = None;
+
+        if effective_command == "attic"
+            && effective_args.first().map(|s| s.as_str()) == Some("push")
+        {
+            // pull login info from env
+            let endpoint = std::env::var("ATTIC_SERVER_URL")
+                .context("ATTIC_SERVER_URL not set (e.g. http://atticCache:8080)")?;
+            let token = std::env::var("ATTIC_TOKEN")
+                .context("ATTIC_TOKEN not set (provide a token with push permission)")?;
+            let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
+            token_for_redact = Some(token.clone());
+
+            // perform `attic login <remote> <endpoint> <token>`
+            if build_config.should_use_systemd() {
+                let mut login = Command::new("systemd-run");
+                login.args(["--scope", "--collect", "--quiet"]);
+
+                // Scope-safe resource-control properties (same allowlist as below)
+                if let Some(ref memory_max) = build_config.systemd_memory_max {
+                    login.args(["--property", &format!("MemoryMax={}", memory_max)]);
+                }
+                if let Some(cpu_quota) = build_config.systemd_cpu_quota {
+                    login.args(["--property", &format!("CPUQuota={}%", cpu_quota)]);
+                }
+                if let Some(timeout_stop) = build_config.systemd_timeout_stop_sec {
+                    login.args(["--property", &format!("TimeoutStopSec={}", timeout_stop)]);
+                }
+                const LOGIN_SCOPE_OK_PREFIXES: &[&str] = &[
+                    "Memory",
+                    "CPU",
+                    "Tasks",
+                    "IO",
+                    "Slice",
+                    "Kill",
+                    "OOM",
+                    "Device",
+                    "IPAccounting",
+                ];
+                for p in &build_config.systemd_properties {
+                    if LOGIN_SCOPE_OK_PREFIXES.iter().any(|pre| p.starts_with(pre)) {
+                        login.args(["--property", p]);
+                    }
+                }
+
+                // ensure env reaches the scope
+                apply_cache_env(&mut login);
+
+                login
+                    .arg("--")
+                    .arg("attic")
+                    .arg("login")
+                    .arg(&remote)
+                    .arg(&endpoint)
+                    .arg(&token);
+
+                let out = login
+                    .output()
+                    .await
+                    .context("Failed to execute 'attic login' (scoped)")?;
+                if !out.status.success() {
+                    let se = String::from_utf8_lossy(&out.stderr);
+                    if se.contains("exist") || se.contains("Already") || se.contains("already") {
+                        info!("ℹ️ Attic remote '{remote}' already configured (scoped)");
+                    } else {
+                        error!("❌ attic login (scoped) failed: {}", se.trim());
+                        anyhow::bail!("attic login failed (scoped): {}", se.trim());
+                    }
+                }
+            } else {
+                let mut login = Command::new("attic");
+                login.args(["login", &remote, &endpoint, &token]);
+                build_config.apply_to_command(&mut login);
+                let out = login
+                    .output()
+                    .await
+                    .context("Failed to execute 'attic login'")?;
+                if !out.status.success() {
+                    let se = String::from_utf8_lossy(&out.stderr);
+                    if se.contains("exist") || se.contains("Already") || se.contains("already") {
+                        info!("ℹ️ Attic remote '{remote}' already configured");
+                    } else {
+                        error!("❌ attic login failed: {}", se.trim());
+                        anyhow::bail!("attic login failed: {}", se.trim());
+                    }
+                }
+            }
+
+            // rewrite `attic push <repo>` → `attic push <remote>:<repo>` if needed
+            if effective_args.len() >= 2 && !effective_args[1].contains(':') {
+                effective_args[1] = format!("{}:{}", remote, effective_args[1]);
+            }
+        }
+        // ---------------------------------------------------------------------------
+
         // Redact secrets if they sneak into args (e.g. in --to URL query)
-        let redacted_args = {
-            let joined = cache_cmd.args.join(" ");
-            joined
-                .replace("secret-access-key=", "secret-access-key=REDACTED")
-                .replace("access_key=", "access_key=REDACTED")
-                .replace("access-key=", "access-key=REDACTED")
-                .replace("aws_session_token=", "aws_session_token=REDACTED")
-        };
+        let mut redacted_args = effective_args.join(" ");
+        redacted_args = redacted_args
+            .replace("secret-access-key=", "secret-access-key=REDACTED")
+            .replace("access_key=", "access_key=REDACTED")
+            .replace("access-key=", "access-key=REDACTED")
+            .replace("aws_session_token=", "aws_session_token=REDACTED");
+        if let Some(tok) = &token_for_redact {
+            redacted_args = redacted_args.replace(tok, "<REDACTED>");
+        }
+
         info!(
             "📤 Pushing {} to cache... ({} {})",
-            store_path, cache_cmd.command, redacted_args
+            store_path, effective_command, redacted_args
         );
 
         // Add debugging for environment variables
@@ -867,13 +975,13 @@ impl Derivation {
                 }
             }
 
-            // FIXED: Remove the duplicate .env() calls and only use --setenv for systemd scopes
+            // only --setenv for scopes
             apply_cache_env(&mut scoped);
 
             // Run the cache command inside the scope
             scoped.arg("--");
-            scoped.arg(&cache_cmd.command); // ✅ Use correct command (nix/attic)
-            scoped.args(&cache_cmd.args);
+            scoped.arg(&effective_command); // ✅ Use possibly rewritten command
+            scoped.args(&effective_args);
 
             // IMPORTANT: do NOT call build_config.apply_to_command(&mut scoped) here,
             // because it may add service-only props like Environment= which break scopes.
@@ -886,23 +994,23 @@ impl Derivation {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 error!(
                     "❌ {} (scoped) failed: {}",
-                    cache_cmd.command,
+                    effective_command,
                     stderr.trim()
                 );
-                anyhow::bail!("{} failed (scoped): {}", cache_cmd.command, stderr.trim());
+                anyhow::bail!("{} failed (scoped): {}", effective_command, stderr.trim());
             }
 
             let stdout = String::from_utf8_lossy(&output.stdout);
             if !stdout.trim().is_empty() {
-                info!("📤 {} output: {}", cache_cmd.command, stdout.trim());
+                info!("📤 {} output: {}", effective_command, stdout.trim());
             }
             info!("✅ Successfully pushed {} to cache (scoped)", store_path);
             return Ok(());
         }
 
         // Fallback: direct (non-systemd) execution
-        let mut cmd = Command::new(&cache_cmd.command); // ✅ Use correct command
-        cmd.args(&cache_cmd.args);
+        let mut cmd = Command::new(&effective_command); // ✅ Use possibly rewritten command
+        cmd.args(&effective_args);
         build_config.apply_to_command(&mut cmd);
 
         let output = cmd
@@ -911,13 +1019,13 @@ impl Derivation {
             .context("Failed to execute cache command")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("❌ {} failed: {}", cache_cmd.command, stderr.trim());
-            anyhow::bail!("{} failed: {}", cache_cmd.command, stderr.trim());
+            error!("❌ {} failed: {}", effective_command, stderr.trim());
+            anyhow::bail!("{} failed: {}", effective_command, stderr.trim());
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
-            info!("📤 {} output: {}", cache_cmd.command, stdout.trim());
+            info!("📤 {} output: {}", effective_command, stdout.trim());
         }
         info!("✅ Successfully pushed {} to cache", store_path);
         Ok(())
@@ -1064,63 +1172,27 @@ pub async fn push_store_path_with_systemd(
 /// Add allowed env vars to `systemd-run`, using both process env and `--setenv`.
 /// Add allowed env vars to `systemd-run`, using both process env and `--setenv`.
 fn apply_cache_env(scoped: &mut Command) {
-    debug!("Applying cache environment variables to systemd scope");
-
-    // Standard cache environment variables
     for &key in CACHE_ENV_ALLOWLIST {
         if let Ok(val) = std::env::var(key) {
-            debug!(
-                "Setting env var in scope: {}={}",
-                key,
-                if key.contains("SECRET") {
-                    "[REDACTED]"
-                } else {
-                    &val
-                }
-            );
-            scoped.arg("--setenv");
-            scoped.arg(format!("{key}={val}"));
-        } else {
-            debug!("Environment variable not found: {}", key);
+            scoped.arg("--setenv").arg(format!("{key}={val}"));
         }
     }
 
-    // Attic-specific environment variables
-    let attic_env_vars = ["ATTIC_SERVER_URL", "ATTIC_TOKEN"];
-    for &key in &attic_env_vars {
-        if let Ok(val) = std::env::var(key) {
-            debug!(
-                "Setting Attic env var in scope: {}={}",
-                key,
-                if key.contains("TOKEN") {
-                    "[REDACTED]"
-                } else {
-                    &val
-                }
-            );
-            scoped.arg("--setenv");
-            scoped.arg(format!("{key}={val}"));
-        } else {
-            debug!("Attic environment variable not found: {}", key);
-        }
+    // Ensure Attic can find its config even if XDG_CONFIG_HOME wasn’t set
+    if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+        scoped
+            .arg("--setenv")
+            .arg(format!("XDG_CONFIG_HOME={home}/.config"));
     }
 
-    // CRITICAL: AWS_REGION is required for S3 operations, even with custom endpoints
-    if std::env::var_os("AWS_REGION").is_none() && std::env::var_os("AWS_DEFAULT_REGION").is_none()
-    {
-        scoped.arg("--setenv");
-        scoped.arg("AWS_REGION=us-east-1");
-    }
-
-    // Handle AWS_EC2_METADATA_DISABLED specially
+    // If you set a custom S3 endpoint, disable IMDS by default
     let has_custom_endpoint = std::env::var_os("AWS_ENDPOINT_URL").is_some()
         || std::env::var_os("AWS_ENDPOINT_URL_S3").is_some()
         || std::env::var_os("AWS_S3_ENDPOINT").is_some()
         || std::env::var_os("S3_ENDPOINT").is_some();
-
     if has_custom_endpoint && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none() {
-        scoped.arg("--setenv");
-        scoped.arg("AWS_EC2_METADATA_DISABLED=true");
+        scoped.arg("--setenv").arg("AWS_EC2_METADATA_DISABLED=true");
     }
 }
 
@@ -1235,4 +1307,72 @@ fn apply_cache_env_scope(cmd: &mut tokio::process::Command) {
         cmd.env("AWS_EC2_METADATA_DISABLED", "true");
         cmd.arg("--setenv").arg("AWS_EC2_METADATA_DISABLED=true");
     }
+}
+
+/// Return a copy of `attic push ...` args with the repo rewritten to REMOTE:REPO if needed.
+/// If it's not an `attic push`, returns `orig` unchanged.
+fn rewrite_attic_push_args_for_remote(orig: &[String], remote: &str) -> Vec<String> {
+    if orig.first().map(String::as_str) != Some("push") || orig.len() < 2 {
+        return orig.to_vec();
+    }
+    let repo = &orig[1];
+    if repo.contains(':') {
+        return orig.to_vec(); // already remote-qualified
+    }
+    let mut new = orig.to_vec();
+    new[1] = format!("{remote}:{repo}");
+    new
+}
+
+/// Log into Attic so the remote is available to the client.
+/// Uses systemd scope if configured, otherwise runs the CLI directly.
+async fn ensure_attic_login(
+    remote: &str,
+    endpoint: &str,
+    token: &str,
+    build_config: &BuildConfig,
+) -> anyhow::Result<()> {
+    // Keep the token out of logs
+    tracing::info!("🔐 Ensuring Attic login for remote '{remote}' at {endpoint}");
+
+    if build_config.should_use_systemd() {
+        let mut cmd = tokio::process::Command::new("systemd-run");
+        cmd.args(["--scope", "--collect", "--quiet"]);
+        apply_systemd_props_for_scope(build_config, &mut cmd);
+        apply_cache_env(&mut cmd);
+        cmd.arg("--")
+            .arg("attic")
+            .arg("login")
+            .arg(remote)
+            .arg(endpoint)
+            .arg(token);
+
+        let out = cmd
+            .output()
+            .await
+            .context("failed to run 'attic login' (scoped)")?;
+        if !out.status.success() {
+            let se = String::from_utf8_lossy(&out.stderr);
+            // Be lenient if the remote already exists / is logged in
+            if se.contains("exist") || se.contains("Already") || se.contains("already") {
+                tracing::info!("ℹ️ Attic remote '{remote}' already configured (scoped)");
+            } else {
+                anyhow::bail!("attic login failed (scoped): {}", se.trim());
+            }
+        }
+    } else {
+        let mut cmd = tokio::process::Command::new("attic");
+        cmd.args(["login", remote, endpoint, token]);
+        build_config.apply_to_command(&mut cmd);
+        let out = cmd.output().await.context("failed to run 'attic login'")?;
+        if !out.status.success() {
+            let se = String::from_utf8_lossy(&out.stderr);
+            if se.contains("exist") || se.contains("Already") || se.contains("already") {
+                tracing::info!("ℹ️ Attic remote '{remote}' already configured");
+            } else {
+                anyhow::bail!("attic login failed: {}", se.trim());
+            }
+        }
+    }
+    Ok(())
 }

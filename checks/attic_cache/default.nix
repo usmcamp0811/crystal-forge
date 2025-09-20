@@ -40,7 +40,7 @@ in
       };
 
       atticCache = lib.crystal-forge.makeAtticCacheNode {
-        inherit pkgs;
+        inherit lib pkgs;
         port = 8080;
       };
 
@@ -90,6 +90,97 @@ in
           "agent.pub".source = "${pubPath}/agent.pub";
         };
 
+        # Add attic client configuration for the cfServer
+        systemd.services.attic-client-setup = {
+          description = "Setup Attic client for Crystal Forge";
+          wants = ["network-online.target"];
+          after = ["network-online.target" "attic-setup.service"];
+          before = ["crystal-forge-builder.service"];
+          wantedBy = ["multi-user.target"];
+
+          environment = {
+            HOME = "/root";
+            # + openssl for HMAC signing
+            PATH = lib.mkForce "${pkgs.attic-server}/bin:${pkgs.attic-client}/bin:${pkgs.openssl}/bin:${pkgs.curl}/bin:${pkgs.iputils}/bin:${pkgs.dnsutils}/bin:${pkgs.netcat}/bin:${pkgs.coreutils}/bin";
+          };
+
+          script = ''
+            set -euo pipefail
+            echo "Setting up Attic client on cfServer..."
+
+            # Wait for atticCache HTTP to be reachable
+            for i in {1..60}; do
+              if curl -sf http://atticCache:8080/ >/dev/null 2>&1; then
+                echo "Attic server is ready after $i attempts"
+                break
+              fi
+              if [ "$i" -eq 60 ]; then
+                echo "ERROR: Attic server failed to become available after 60 attempts"
+                echo "=== Network debugging ==="
+                ping -c 2 atticCache || echo "Cannot ping atticCache"
+                nslookup atticCache || echo "Cannot resolve atticCache"
+                nc -zv atticCache 8080 || echo "Port 8080 not reachable on atticCache"
+                exit 1
+              fi
+              echo "Waiting for attic server... attempt $i/60"
+              sleep 3
+            done
+
+            # === Mint HS256 JWT in pure shell ===
+            # This must match token-hs256-secret-base64 on the server.
+            SECRET_B64="dGVzdCBzZWNyZXQgZm9yIGF0dGljZA=="
+
+            b64url() {
+              # stdin -> base64url (no padding)
+              base64 -w0 | tr '+/' '-_' | tr -d '='
+            }
+
+            now=$(date +%s)
+            exp=$(( now + 1800 ))  # 30 minutes
+
+            header='{"alg":"HS256","typ":"JWT"}'
+            payload='{"sub":"cfServer","exp":'"$exp"'}'
+
+            header_b64=$(printf '%s' "$header"  | b64url)
+            payload_b64=$(printf '%s' "$payload" | b64url)
+            signing_input="$header_b64.$payload_b64"
+
+            # HMAC-SHA256(signing_input, secret)
+            signature=$(printf '%s' "$signing_input" \
+              | openssl dgst -sha256 -mac HMAC -macopt "key:$(printf %s "$SECRET_B64" | base64 -d)" -binary \
+              | b64url)
+
+            TOKEN="$signing_input.$signature"
+            echo "Minted JWT valid until $exp"
+
+            echo "Logging in to Attic server with minted token..."
+            attic login local http://atticCache:8080 "$TOKEN"
+
+            echo "Verifying cache exists (local:test)…"
+
+            # Export runtime env for the builder
+            cat >/etc/attic-env <<EOF
+            ATTIC_SERVER_URL=http://atticCache:8080
+            ATTIC_TOKEN=$TOKEN
+            EOF
+            chmod 0640 /etc/attic-env
+
+            # If the builder might already be running, bounce it to pick up the new env.
+            # (This is safe in the VM test.)
+            systemctl daemon-reload || true
+            systemctl try-restart crystal-forge-builder.service || true
+
+            echo "Attic client setup completed successfully"
+          '';
+
+          serviceConfig = {
+            Type = "oneshot";
+            RemainAfterExit = true;
+            User = "root";
+            Group = "root";
+          };
+        };
+
         services.crystal-forge = {
           enable = true;
           "local-database" = true;
@@ -116,8 +207,14 @@ in
             enable = true;
             offline = false;
             systemd_properties = [
-              "Environment=ATTIC_SERVER_URL=http://atticCache:8080"
-              "Environment=ATTIC_TOKEN=dGVzdCBzZWNyZXQgZm9yIGF0dGljZA=="
+              # Load the minted JWT + endpoint produced by attic-client-setup
+              "EnvironmentFile=/etc/attic-env"
+
+              # Optional: pin remote name (defaults to "local" in your Rust code)
+              "Environment=ATTIC_REMOTE_NAME=local"
+
+              # Keep anything else you want
+              "Environment=HOME=/root"
               "Environment=NIX_LOG=trace"
               "Environment=NIX_SHOW_STATS=1"
             ];
@@ -193,6 +290,19 @@ in
           "atticCache": atticCache,
           "gitserver": gitserver,
       }
+
+      atticCache.wait_for_unit("atticd.service")
+      # Wait for attic client setup to complete
+      # In your test script, ensure server setup completes first
+      atticCache.wait_for_unit("attic-setup.service")
+
+      # Then start the client setup
+      cfServer.wait_for_unit("attic-client-setup.service")
+
+      # Verify Crystal Forge builder is running
+      cfServer.wait_for_unit("crystal-forge-builder.service")
+
+      atticCache.succeed("${pkgs.attic-client}/bin/attic cache info local:test")
 
       # Run the attic cache tests
       exit_code = pytest.main([

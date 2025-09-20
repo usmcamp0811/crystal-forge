@@ -148,22 +148,38 @@
 
   makeAtticCacheNode = {
     pkgs,
+    lib,
     port ? 8080,
     enableFirewall ? false,
     extraConfig ? {},
     ...
-  }:
+  }: let
+    # Find the Attic *client* package across nixpkgs variants
+    atticClient =
+      pkgs.attic or pkgs.attic-client or (throw ''
+        Attic client package not found in pkgs.
+        Tried: pkgs.attic and pkgs.attic-client.
+        Fix by:
+          • Updating nixpkgs to a revision that includes Attic, or
+          • Adding an overlay/input that provides the Attic client.
+      '');
+  in
     {
       virtualisation.writableStore = true;
-      virtualisation.memorySize = 512;
+      virtualisation.memorySize = 1024;
+
       networking.useDHCP = true;
       networking.firewall.enable = enableFirewall;
-      networking.firewall.allowedTCPPorts = [port];
+      networking.firewall.allowedTCPPorts = lib.mkIf enableFirewall [port];
 
-      # Install attic packages
-      environment.systemPackages = with pkgs; [attic-server attic-client];
+      # Server is usually pkgs.attic-server; client is detected above
+      environment.systemPackages = [
+        atticClient
+        pkgs.attic-server
+        pkgs.curl
+        pkgs.coreutils
+      ];
 
-      # Create attic user
       users.users.attic = {
         description = "Attic service user";
         isSystemUser = true;
@@ -173,73 +189,117 @@
       };
       users.groups.attic = {};
 
-      # Create a simple systemd service for atticd
+      # PostgreSQL setup for Attic
+      services.postgresql = {
+        enable = true;
+        ensureDatabases = ["attic"];
+        ensureUsers = [
+          {
+            name = "attic";
+            ensureDBOwnership = true;
+          }
+        ];
+        authentication = ''
+          local all all peer
+          host all all 127.0.0.1/32 trust
+          host all all ::1/128 trust
+        '';
+      };
+
+      environment.etc."atticd.toml".text = ''
+        listen = "0.0.0.0:${toString port}"
+
+        [database]
+        url = "postgresql://attic@localhost/attic"
+
+        [storage]
+        type = "local"
+        path = "/var/lib/attic/storage"
+
+        [chunking]
+        nar-size-threshold = 65536
+        min-size = 16384
+        avg-size = 65536
+        max-size = 262144
+
+        [compression]
+        type = "zstd"
+        level = 8
+
+        [jwt.signing]
+        token-hs256-secret-base64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA=="
+      '';
+
       systemd.services.atticd = {
         description = "Attic Cache Daemon";
         wantedBy = ["multi-user.target"];
-        after = ["network-online.target"];
+        after = ["network-online.target" "postgresql.service"];
         wants = ["network-online.target"];
+        requires = ["postgresql.service"];
 
         environment = {
           ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
         };
 
         serviceConfig = {
-          Type = "exec";
-          ExecStart = "${pkgs.attic-server}/bin/atticd --listen 0.0.0.0:${toString port}";
+          ExecStart = "${pkgs.attic-server}/bin/atticd --config /etc/atticd.toml";
           Restart = "always";
-          RestartSec = 5;
+          RestartSec = 10;
           User = "attic";
           Group = "attic";
           StateDirectory = "attic";
+          StateDirectoryMode = "0755";
           WorkingDirectory = "/var/lib/attic";
+          ReadWritePaths = "/var/lib/attic";
         };
       };
 
-      # Create initial cache setup
       systemd.services.attic-setup = {
         description = "Attic Cache Setup";
-        after = ["atticd.service" "network-online.target"];
-        wants = ["network-online.target"];
-        requires = ["atticd.service"];
+        after = ["atticd.service" "postgresql.service"];
+        requires = ["atticd.service" "postgresql.service"];
         wantedBy = ["multi-user.target"];
 
         environment = {
-          ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
+          PATH = lib.mkForce "${pkgs.systemd}/bin:${pkgs.attic-server}/bin:${atticClient}/bin:${pkgs.curl}/bin:${pkgs.coreutils}/bin:${pkgs.gnugrep}/bin";
         };
 
         script = ''
+          set -euo pipefail
           echo "Starting Attic cache setup..."
 
-          # Wait for atticd to be ready
-          for i in {1..30}; do
-            if curl -s http://localhost:${toString port}/ >/dev/null 2>&1; then
-              echo "Atticd is ready after $i attempts"
+          BASE_URL="http://127.0.0.1:${toString port}"
+
+          # Wait for API to be reachable (any 2xx/3xx/4xx means listener is up)
+          for i in {1..60}; do
+            if curl -sf -o /dev/null -w "%{http_code}" "$BASE_URL/" | grep -qE '^(2|3|4)'; then
+              echo "atticd is up after $i attempts"
               break
             fi
-            if [ "$i" -eq 30 ]; then
-              echo "ERROR: Atticd failed to start after 30 attempts"
+            if [ "$i" -eq 60 ]; then
+              echo "ERROR: atticd did not become ready"
+              systemctl status atticd.service || true
+              journalctl -u atticd.service --no-pager -n 100 || true
               exit 1
             fi
-            echo "Waiting for atticd... attempt $i/30"
             sleep 2
           done
 
-          echo "Configuring attic client..."
-          ${pkgs.attic-client}/bin/attic login local http://localhost:${toString port} $ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64 || {
-            echo "Failed to login to attic server"
-            exit 1
-          }
+          # Mint a token with wide perms using the SAME config/secret as atticd
+          TOKEN="$(${pkgs.attic-server}/bin/atticadm --config /etc/atticd.toml \
+            make-token --sub setup --validity 1d \
+            --pull '*' --push '*' --create-cache '*' --configure-cache '*')"
 
-          echo "Creating test cache..."
-          ${pkgs.attic-client}/bin/attic cache create test || {
-            echo "Cache 'test' may already exist, continuing..."
-          }
+          # Login alias "local"
+          ${atticClient}/bin/attic login local "$BASE_URL" "$TOKEN"
 
-          echo "Configuring cache as public..."
-          ${pkgs.attic-client}/bin/attic cache configure test --public || {
-            echo "Failed to configure cache as public"
-          }
+          # Create cache "test" if missing (idempotent)
+          if ! ${atticClient}/bin/attic cache info local:test >/dev/null 2>&1; then
+            ${atticClient}/bin/attic cache create local:test
+          fi
+
+          # Make it public (idempotent)
+          ${atticClient}/bin/attic cache configure local:test --public || true
 
           echo "Attic setup completed successfully"
         '';
@@ -247,32 +307,35 @@
         serviceConfig = {
           Type = "oneshot";
           RemainAfterExit = true;
-          User = "attic";
-          Group = "attic";
+          User = "root";
+          Group = "root";
         };
       };
 
-      # Add debugging service to help troubleshoot issues
       systemd.services.attic-debug = {
         description = "Attic Debug Info";
         after = ["attic-setup.service"];
         wantedBy = ["multi-user.target"];
 
+        environment = {
+          PATH = lib.mkForce "${pkgs.attic-server}/bin:${atticClient}/bin:${pkgs.curl}/bin:${pkgs.coreutils}/bin:${pkgs.gnugrep}/bin";
+        };
+
+        # in makeAtticCacheNode -> systemd.services.attic-debug.script
         script = ''
           echo "=== Attic Debug Info ==="
-          echo "Checking if atticd is listening on port ${toString port}:"
-          ss -tlnp | grep :${toString port} || echo "Nothing listening on port ${toString port}"
+          ss -tlnp | grep ":${toString port}" || echo "Nothing listening on ${toString port}"
+          curl -sv "http://127.0.0.1:${toString port}/" || true
 
-          echo "Testing HTTP connectivity:"
-          curl -v http://localhost:${toString port}/ || echo "HTTP test failed"
+          TOKEN="$(${pkgs.attic-server}/bin/atticadm --config /etc/atticd.toml \
+              make-token --sub debug --validity 5m \
+              --pull '*' --push '*' --create-cache '*' --configure-cache '*')"
 
-          echo "Listing attic caches:"
-          export ATTICD_SERVER_TOKEN_HS256_SECRET_BASE64="dGVzdCBzZWNyZXQgZm9yIGF0dGljZA=="
-          ${pkgs.attic-client}/bin/attic cache list || echo "Failed to list caches"
+          ${atticClient}/bin/attic login debug "http://127.0.0.1:${toString port}" "$TOKEN" || true
+          ${atticClient}/bin/attic cache info debug:test || true
 
-          echo "Checking atticd service status:"
           systemctl status atticd.service || true
-
+          ls -la /var/lib/attic/ || true
           echo "=== End Debug Info ==="
         '';
 
