@@ -684,6 +684,10 @@ in {
       "d /var/lib/crystal-forge/.ssh 0700 crystal-forge crystal-forge -"
       "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
       "d /var/lib/crystal-forge/.config 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.config/attic 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.config/nix 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.local 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
     ];
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
