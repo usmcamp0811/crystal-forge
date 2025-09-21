@@ -832,7 +832,7 @@ in {
       environment = lib.mkMerge [
         {
           RUST_LOG = cfg.log_level;
-          NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
+          NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
           TMPDIR = "/var/lib/crystal-forge/tmp";
           XDG_RUNTIME_DIR = "/run/crystal-forge";
           XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
