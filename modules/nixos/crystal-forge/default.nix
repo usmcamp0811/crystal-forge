@@ -678,15 +678,12 @@ in {
 
     systemd.tmpfiles.rules = [
       "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
-      "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
-      "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/tmp 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/builds 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.ssh 0700 crystal-forge crystal-forge -"
       "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
       "d /var/lib/crystal-forge/.config 0755 crystal-forge crystal-forge -"
-      "d /var/lib/crystal-forge/.config/attic 0755 crystal-forge crystal-forge -"
     ];
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
@@ -853,7 +850,6 @@ in {
 
       preStart = ''
         ${configScript}
-        mkdir -p /var/lib/crystal-forge/.cache/nix
         mkdir -p /run/crystal-forge
         mkdir -p /var/lib/crystal-forge/.config/attic
 
@@ -933,12 +929,11 @@ in {
       path = with pkgs; [nix git];
       environment = {
         RUST_LOG = cfg.log_level;
-        NIX_USER_CACHE_DIR = "/var/lib/crystal-forge/.cache/nix";
+        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
       };
 
       preStart = ''
         ${configScript}
-        mkdir -p /var/lib/crystal-forge/.cache/nix
         mkdir -p /run/crystal-forge
       '';
 
