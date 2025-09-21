@@ -149,26 +149,23 @@
     ${lib.optionalString (cfg.database.passwordFile != null) ''
       if [ -f "${cfg.database.passwordFile}" ]; then
         PASSWORD=$(cat "${cfg.database.passwordFile}")
-        ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|''${PASSWORD}|" "${generatedConfigPath}"
+        ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|$PASSWORD|" "${generatedConfigPath}"
       else
         echo "ERROR: Password file not found: ${cfg.database.passwordFile}" >&2
         exit 1
       fi
     ''}
 
-    # Inject dynamic attic token from environment file if available and cache_type is Attic
     ${lib.optionalString (cfg.cache.cache_type == "Attic") ''
       if [ -f "/etc/attic-env" ]; then
         echo "Loading Attic token from /etc/attic-env..."
         source /etc/attic-env
-        if [ -n "''${ATTIC_TOKEN:-}" ]; then
+        if [ -n "$ATTIC_TOKEN" ]; then
           echo "Injecting dynamic ATTIC_TOKEN into config..."
-          # Use sed to add or update the attic_token field in the [cache] section
           if grep -q "attic_token" "${generatedConfigPath}"; then
-            ${pkgs.gnused}/bin/sed -i "s|attic_token = .*|attic_token = \"''${ATTIC_TOKEN}\"|" "${generatedConfigPath}"
+            ${pkgs.gnused}/bin/sed -i "s|attic_token = .*|attic_token = \"$ATTIC_TOKEN\"|" "${generatedConfigPath}"
           else
-            # Find the [cache] section and add attic_token after it
-            ${pkgs.gnused}/bin/sed -i '/^\[cache\]/a attic_token = "'"''${ATTIC_TOKEN}"'"' "${generatedConfigPath}"
+            ${pkgs.gnused}/bin/sed -i '/^\[cache\]/a attic_token = "'"$ATTIC_TOKEN"'"' "${generatedConfigPath}"
           fi
           echo "✅ Attic token injected successfully"
         else
@@ -179,12 +176,11 @@
       fi
     ''}
 
-    # Generate SSH keys if ssh_key_path is null and we need SSH auth
     ${lib.optionalString (cfg.auth.ssh_key_path == null && (cfg.build.enable || cfg.server.enable)) ''
       SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
       if [ ! -f "$SSH_KEY_PATH" ]; then
         echo "Generating SSH key for Crystal Forge Git authentication..."
-        ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(hostname)"
+        ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
         chown crystal-forge:crystal-forge "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub"
         chmod 600 "$SSH_KEY_PATH"
         chmod 644 "$SSH_KEY_PATH.pub"
@@ -193,7 +189,6 @@
         cat "$SSH_KEY_PATH.pub"
       fi
 
-      # Update config to use generated key path
       ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "${generatedConfigPath}"
     ''}
 
@@ -678,6 +673,8 @@ in {
 
     systemd.tmpfiles.rules = [
       "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/tmp 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/builds 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/workdir 0755 crystal-forge crystal-forge -"
