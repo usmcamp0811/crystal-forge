@@ -114,7 +114,7 @@ in
           # Server config
           server = {
             port = CF_TEST_SERVER_PORT;
-            enable = false;
+            enable = true;
             host = "0.0.0.0";
           };
 
