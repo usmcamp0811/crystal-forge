@@ -10,7 +10,7 @@
   # Read and parse Cargo.toml to extract version
   cargoToml = builtins.fromTOML (builtins.readFile (src + "/Cargo.toml"));
   version = cargoToml.package.version;
-
+  migrationsDir = ./migrations;
   crystal-forge = pkgs.rustPlatform.buildRustPackage rec {
     inherit src version;
     pname = "crystal-forge";
@@ -47,5 +47,46 @@
       platforms = platforms.all;
     };
   };
+  # data-only output with your .sql files staged in a stable path
+  crystal-forge-migrations = pkgs.runCommand "crystal-forge-migrations" {} ''
+    set -euo pipefail
+    mkdir -p $out/share/crystal-forge/migrations
+    cp -v ${migrationsDir}/*.sql $out/share/crystal-forge/migrations/
+  '';
+
+  # standalone CLI app to apply migrations (no inline in installPhase)
+
+  migrate = pkgs.writeShellApplication {
+    name = "crystal-forge-migrate";
+    runtimeInputs = [pkgs.postgresql pkgs.coreutils pkgs.findutils pkgs.gawk];
+    text = ''
+      set -euo pipefail
+
+      : "''${DATABASE_URL?Set DATABASE_URL, e.g. postgresql://postgres@127.0.0.1:5432/crystal_forge}"
+      MIGDIR="''${MIGDIR:-${crystal-forge-migrations}/share/crystal-forge/migrations}"
+      echo "Using migrations in: ''${MIGDIR}"
+
+      # Build a NUL-safe, lexicographically sorted list without process substitution
+      tmp_list="$(mktemp)"
+      trap 'rm -f "''${tmp_list}"' EXIT
+
+      # Find -> sort -z -> print lines (still NUL-safe via xargs -0)
+      find "''${MIGDIR}" -maxdepth 1 -type f -name '*.sql' -print0 \
+        | sort -z \
+        | xargs -0 -I{} printf '%s\n' "{}" > "''${tmp_list}"
+
+      if ! [ -s "''${tmp_list}" ]; then
+        echo "No *.sql migrations found; nothing to do."
+        exit 0
+      fi
+
+      while IFS= read -r f; do
+        echo ">> applying $(basename "''${f}")"
+        psql -v ON_ERROR_STOP=1 "''${DATABASE_URL}" -q -f "''${f}"
+      done < "''${tmp_list}"
+
+      echo "✅ migrations applied"
+    '';
+  };
 in
-  crystal-forge // {inherit srcHash;}
+  crystal-forge // {inherit srcHash migrate;}
