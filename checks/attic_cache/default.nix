@@ -114,7 +114,7 @@ in
           # Server config
           server = {
             port = CF_TEST_SERVER_PORT;
-            enable = false;
+            enable = true;
             host = "0.0.0.0";
           };
 
@@ -228,6 +228,20 @@ in
       # Start Crystal Forge builder
       cfServer.succeed("systemctl start crystal-forge-builder.service")
       cfServer.wait_for_unit("crystal-forge-builder.service")
+
+      cfServer.succeed("sleep 5")
+
+      # Wait for database schema to be ready
+      cfServer.succeed("""
+      timeout 60 bash -c '
+        while ! sudo -u postgres psql -d crystal_forge -c "SELECT 1 FROM derivations LIMIT 1;" >/dev/null 2>&1; do
+          echo "Waiting for database schema..."
+          sleep 2
+        done
+        echo "Database schema ready!"
+      '
+      """)
+      cfServer.succeed("systemctl stop crystal-forge-server.service")
 
       # Run tests
       exit_code = pytest.main([
