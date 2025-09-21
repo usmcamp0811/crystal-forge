@@ -13,7 +13,7 @@ flake-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix flake check -L -j 2 --show-trace
+    - nix flake check -L --show-trace
   only:
     - merge_requests
     - main
