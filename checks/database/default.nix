@@ -16,12 +16,9 @@
     mkdir -p $out
     cp ${keyPair}/agent.pub $out/
   '';
-  # cfFlakePath = pkgs.runCommand "cf-flake" {src = ../../.;} ''
-  #   mkdir -p $out
-  #   cp -r $src/* $out/
-  # '';
   CF_TEST_DB_PORT = 5432;
   CF_TEST_SERVER_PORT = 3000;
+
   systemBuildClosure = pkgs.closureInfo {
     rootPaths =
       [
@@ -34,17 +31,60 @@
 in
   pkgs.testers.runNixOSTest {
     name = "crystal-forge-database-test";
-    # Silence flake8/mypy for untyped helper lib
     skipLint = true;
     skipTypeCheck = true;
+
     nodes = {
-      server = lib.crystal-forge.mkServerNode {
-        inherit pkgs inputs systemBuildClosure keyPath pubPath;
-        port = CF_TEST_SERVER_PORT;
+      server = {
+        imports = [inputs.self.nixosModules.crystal-forge];
+
+        networking.useDHCP = true;
+        networking.firewall.allowedTCPPorts = [CF_TEST_SERVER_PORT 5432];
+
+        virtualisation.writableStore = true;
+
+        services.postgresql = {
+          enable = true;
+          settings."listen_addresses" = lib.mkForce "*";
+          authentication = lib.concatStringsSep "\n" [
+            "local   all   postgres   trust"
+            "local   all   all        peer"
+            "host    all   all 127.0.0.1/32 trust"
+            "host    all   all ::1/128      trust"
+            "host    all   all 10.0.2.2/32  trust"
+          ];
+          initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+            CREATE USER crystal_forge LOGIN;
+            CREATE DATABASE crystal_forge OWNER crystal_forge;
+            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+          '';
+        };
+
+        environment.systemPackages = with pkgs; [
+          git
+          jq
+          curl
+          crystal-forge.default
+          crystal-forge.default.migrate # provides `crystal-forge-migrate`
+          crystal-forge.cf-test-suite.runTests
+          crystal-forge.cf-test-suite.testRunner
+        ];
+
+        environment.variables = {
+          TMPDIR = "/tmp";
+          TMP = "/tmp";
+          TEMP = "/tmp";
+        };
+
+        environment.etc = {
+          "agent.key".source = "${keyPath}/agent.key";
+          "agent.pub".source = "${pubPath}/agent.pub";
+        };
       };
     };
 
-    globalTimeout = 120; # Increased timeout for flake operations
+    globalTimeout = 120;
+
     extraPythonPackages = p: [
       p.pytest
       p.pytest-xdist
@@ -57,32 +97,37 @@ in
     testScript = ''
       import os
       import pytest
-      # --- Boot VMs first; otherwise any wait_* will hang
+
       os.environ["NIXOS_TEST_DRIVER"] = "1"
       start_all()
 
       server.wait_for_unit("postgresql.service")
       server.wait_for_open_port(5432)
+
+      # --- Run DB migrations inside the VM (before exposing the port to host)
+      server.succeed(
+        "DATABASE_URL='postgresql://postgres@127.0.0.1:5432/crystal_forge' crystal-forge-migrate"
+      )
+
+      # Forward DB to host for the python tests
       server.forward_port(5433, 5432)
 
-      # Set environment variables for the test
+      # Test env for client/fixtures
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
-      os.environ["CF_TEST_DB_PORT"] = "5433"  # forwarded port
+      os.environ["CF_TEST_DB_PORT"] = "5433"
       os.environ["CF_TEST_DB_USER"] = "postgres"
-      os.environ["CF_TEST_DB_PASSWORD"] = ""  # no password for VM postgres
+      os.environ["CF_TEST_DB_PASSWORD"] = ""
       os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
       os.environ["CF_TEST_SERVER_PORT"] = "${toString CF_TEST_SERVER_PORT}"
-      # Inject machines so cf_test fixtures can drive them
+
       import cf_test
-      cf_test._driver_machines = {
-          "server": server,
-      }
-      # Run only VM-marked tests from cf_test package
+      cf_test._driver_machines = { "server": server }
+
       exit_code = pytest.main([
           "-vvvv",
           "--tb=short",
           "-x",
-          "-s",  # Add -s to see print output immediately
+          "-s",
           "-m", "database",
           "--pyargs", "cf_test",
       ])
