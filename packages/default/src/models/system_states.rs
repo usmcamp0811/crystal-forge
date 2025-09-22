@@ -124,10 +124,9 @@ pub struct SystemState {
     pub agent_version: Option<String>,
     pub agent_build_hash: Option<String>,
     pub nixos_version: Option<String>,
-
     // ───── Agent Compatibility ─────
-    pub agent_compatible: Option<bool>,
-    pub partial_data: Option<bool>,
+    // pub agent_compatible: Option<bool>,
+    // pub partial_data: Option<bool>,
 }
 
 impl SystemState {
@@ -181,10 +180,9 @@ impl SystemState {
             agent_version: v1.agent_version,
             agent_build_hash: v1.agent_build_hash,
             nixos_version: v1.nixos_version,
-
-            // ───── Agent Compatibility (defaults for V1) ─────
-            agent_compatible: Some(true),
-            partial_data: Some(false),
+            // // ───── Agent Compatibility (defaults for V1) ─────
+            // agent_compatible: Some(true),
+            // partial_data: Some(false),
         }
     }
 
@@ -261,10 +259,9 @@ impl SystemState {
             agent_version: Some("0.1.0-test".to_string()),
             agent_build_hash: Some("test-build".to_string()),
             nixos_version: Some("25.11".to_string()),
-
-            // Agent compatibility
-            agent_compatible: Some(true),
-            partial_data: Some(false),
+            // // Agent compatibility
+            // agent_compatible: Some(true),
+            // partial_data: Some(false),
         })
     }
 
@@ -368,8 +365,8 @@ impl SystemState {
             agent_version,
             agent_build_hash,
             nixos_version,
-            agent_compatible: Some(true), // Default to compatible
-            partial_data: Some(false),    // Default to complete data
+            // agent_compatible: Some(true), // Default to compatible
+            // partial_data: Some(false),    // Default to complete data
         })
     }
 }

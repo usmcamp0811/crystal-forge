@@ -52,9 +52,9 @@ pub struct System {
     pub derivation: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub desired_derivation: Option<String>,
-    pub deployment_policy: String, // Will be converted to/from DeploymentPolicy enum
-    pub server_public_key: Option<String>,
+    // pub desired_derivation: Option<String>,
+    // pub deployment_policy: String, // Will be converted to/from DeploymentPolicy enum
+    // pub server_public_key: Option<String>,
 }
 
 impl System {
@@ -79,33 +79,33 @@ impl System {
             derivation: "".into(), // leave empty; DB or later logic sets it
             created_at: chrono::Utc::now(), // placeholder; overwritten by DB
             updated_at: chrono::Utc::now(), // placeholder; overwritten by DB
-            desired_derivation: None,
-            deployment_policy: DeploymentPolicy::Manual.to_string(),
-            server_public_key: None,
+                                   // desired_derivation: None,
+                                   // deployment_policy: DeploymentPolicy::Manual.to_string(),
+                                   // server_public_key: None,
         };
         insert_system(pool, &system).await
     }
 
-    /// Get the deployment policy as an enum
-    pub fn get_deployment_policy(&self) -> Result<DeploymentPolicy> {
-        self.deployment_policy.parse()
-    }
-
-    /// Set the deployment policy from an enum
-    pub fn set_deployment_policy(&mut self, policy: DeploymentPolicy) {
-        self.deployment_policy = policy.to_string();
-    }
-
-    /// Check if the system has a desired derivation set
-    pub fn has_pending_deployment(&self) -> bool {
-        self.desired_derivation.is_some()
-    }
-
-    /// Check if the system is configured for automatic deployments
-    pub fn is_auto_deployment_enabled(&self) -> bool {
-        matches!(
-            self.get_deployment_policy(),
-            Ok(DeploymentPolicy::AutoLatest)
-        )
-    }
+    // /// Get the deployment policy as an enum
+    // pub fn get_deployment_policy(&self) -> Result<DeploymentPolicy> {
+    //     self.deployment_policy.parse()
+    // }
+    //
+    // /// Set the deployment policy from an enum
+    // pub fn set_deployment_policy(&mut self, policy: DeploymentPolicy) {
+    //     self.deployment_policy = policy.to_string();
+    // }
+    //
+    // /// Check if the system has a desired derivation set
+    // pub fn has_pending_deployment(&self) -> bool {
+    //     self.desired_derivation.is_some()
+    // }
+    //
+    // /// Check if the system is configured for automatic deployments
+    // pub fn is_auto_deployment_enabled(&self) -> bool {
+    //     matches!(
+    //         self.get_deployment_policy(),
+    //         Ok(DeploymentPolicy::AutoLatest)
+    //     )
+    // }
 }
