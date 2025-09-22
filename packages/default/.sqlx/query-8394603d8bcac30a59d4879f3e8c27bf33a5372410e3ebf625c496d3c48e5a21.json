@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat\n        FROM derivations\n        WHERE status_id = $1\n        AND attempt_count < 5\n        ORDER BY scheduled_at DESC\n        ",
+  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        error_message = $2\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled\n                    ",
   "describe": {
     "columns": [
       {
@@ -97,10 +97,17 @@
         "ordinal": 18,
         "name": "build_last_heartbeat",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 19,
+        "name": "cf_agent_enabled",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
+        "Int4",
+        "Text",
         "Int4"
       ]
     },
@@ -123,8 +130,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "d3a78e7d5df85d92333bd66b9c644e7976d99338ba4e1ff1407bddc966f97c13"
+  "hash": "8394603d8bcac30a59d4879f3e8c27bf33a5372410e3ebf625c496d3c48e5a21"
 }

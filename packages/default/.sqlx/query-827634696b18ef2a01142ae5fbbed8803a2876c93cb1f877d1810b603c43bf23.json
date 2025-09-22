@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE derivations SET \n                status_id = $1,\n                attempt_count = $2,\n                completed_at = NOW(),\n                evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,\n                error_message = $3\n            WHERE id = $4\n            RETURNING\n                id,\n                commit_id,\n                derivation_type as \"derivation_type: DerivationType\",\n                derivation_name,\n                derivation_path,\n                derivation_target,\n                scheduled_at,\n                completed_at,\n                started_at,\n                attempt_count,\n                evaluation_duration_ms,\n                error_message,\n                pname,\n                version,\n                status_id,\n                build_elapsed_seconds,\n                build_current_target,\n                build_last_activity_seconds,\n                build_last_heartbeat\n            ",
+  "query": "\n                INSERT INTO derivations (\n                    commit_id,\n                    derivation_type, \n                    derivation_name, \n                    derivation_path, \n                    pname, \n                    version, \n                    status_id, \n                    attempt_count\n                )\n                VALUES ($1, $2, $3, $4, $5, $6, $7, 0)\n                ON CONFLICT (derivation_path) DO UPDATE SET\n                    derivation_name = EXCLUDED.derivation_name,\n                    pname = EXCLUDED.pname,\n                    version = EXCLUDED.version,\n                    status_id = CASE \n                        WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.status_id  -- Keep terminal states\n                        ELSE EXCLUDED.status_id  -- Update to new status if not terminal\n                    END,\n                    scheduled_at = CASE \n                        WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.scheduled_at  -- Keep terminal timestamps\n                        ELSE NOW()  -- Update timestamp for non-terminal\n                    END\n                RETURNING \n                    id,\n                    commit_id,\n                    derivation_type as \"derivation_type: DerivationType\",\n                    derivation_name,\n                    derivation_path,\n                    derivation_target,\n                    scheduled_at,\n                    completed_at,\n                    started_at,\n                    attempt_count,\n                    evaluation_duration_ms,\n                    error_message,\n                    pname,\n                    version,\n                    status_id,\n                    build_elapsed_seconds,\n                    build_current_target,\n                    build_last_activity_seconds,\n                    build_last_heartbeat,\n                    cf_agent_enabled\n                ",
   "describe": {
     "columns": [
       {
@@ -97,13 +97,21 @@
         "ordinal": 18,
         "name": "build_last_heartbeat",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 19,
+        "name": "cf_agent_enabled",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
         "Int4",
-        "Int4",
         "Text",
+        "Text",
+        "Text",
+        "Varchar",
+        "Varchar",
         "Int4"
       ]
     },
@@ -126,8 +134,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "0571b7289fbb36f038c160593172cf0ba546951fb302b8146da051b8aad802fc"
+  "hash": "827634696b18ef2a01142ae5fbbed8803a2876c93cb1f877d1810b603c43bf23"
 }
