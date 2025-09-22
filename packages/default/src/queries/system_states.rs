@@ -158,6 +158,8 @@ mod tests {
             agent_version: Some("1.0.0".to_string()),
             agent_build_hash: Some("abc123".to_string()),
             nixos_version: Some("23.05".to_string()),
+            agent_compatible: Some(true),
+            partial_data: Some(false),
         };
 
         let json = serde_json::to_vec(&current_state).unwrap();
