@@ -94,21 +94,17 @@ impl ToString for DerivationType {
 }
 
 impl Derivation {
-    /// Set the Crystal Forge agent enabled status
-    pub fn set_cf_agent_enabled(&mut self, enabled: bool) {
-        self.cf_agent_enabled = Some(enabled);
-    }
-
     /// Check if this derivation is safe for deployment
     /// (has Crystal Forge agent enabled and is a successful build)
     pub fn is_deployment_safe(&self) -> bool {
-        self.is_cf_agent_enabled()
+        // Decide your default; here `None` => false.
+        self.cf_agent_enabled.unwrap_or(false)
     }
 
     /// Check if this derivation is eligible for deployment
     /// Must be a NixOS derivation with CF agent enabled
     pub fn is_deployable(&self) -> bool {
-        matches!(self.derivation_type, DerivationType::NixOS) && self.is_cf_agent_enabled()
+        matches!(self.derivation_type, DerivationType::NixOS) && self.is_deployment_safe()
     }
 
     pub async fn summary(&self) -> anyhow::Result<String> {

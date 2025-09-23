@@ -5,12 +5,6 @@ use serde_json::Value;
 use tokio::process::Command;
 use tracing::{debug, error, info};
 
-#[derive(Debug, Clone)]
-pub struct EvaluationResult {
-    pub main_derivation_path: String,
-    pub dependency_derivation_paths: Vec<String>,
-}
-
 #[derive(Debug)]
 pub struct PackageInfo {
     pub pname: Option<String>,

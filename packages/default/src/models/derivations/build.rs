@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 pub struct EvaluationResult {
     pub main_derivation_path: String,
     pub dependency_derivation_paths: Vec<String>,
+    pub cf_agent_enabled: bool,
 }
 
 impl Derivation {
@@ -42,7 +43,8 @@ impl Derivation {
                     self.evaluate_and_build_nixos(pool, &flake_target, build_config)
                         .await
                 } else {
-                    self.evaluate_nixos_dry_run(pool, &flake_target, build_config)
+                    &self
+                        .evaluate_nixos_dry_run(pool, &flake_target, build_config)
                         .await
                 }
             }
@@ -95,12 +97,13 @@ impl Derivation {
     }
 
     async fn evaluate_nixos_dry_run(
-        &self,
+        &mut self,
         pool: &PgPool,
         flake_target: &str,
         build_config: &BuildConfig,
     ) -> Result<String> {
         let eval_result = Self::dry_run_derivation_path(flake_target, build_config).await?;
+        self.cf_agent_enabled = Some(eval_result.cf_agent_enabled);
 
         // Insert dependencies into database
         if !eval_result.dependency_derivation_paths.is_empty() {
@@ -170,6 +173,7 @@ impl Derivation {
 
         let main_drv = eval_main_drv_path(flake_target, build_config).await?;
         let deps = list_immediate_input_drvs(&main_drv, build_config).await?;
+        let cf_agent_enabled = is_cf_agent_enabled(flake_target).await?;
 
         info!("🔍 main drv: {main_drv}");
         info!("🔍 {} immediate input drvs", deps.len());
@@ -177,6 +181,7 @@ impl Derivation {
         Ok(EvaluationResult {
             main_derivation_path: main_drv,
             dependency_derivation_paths: deps,
+            cf_agent_enabled: cf_agent_enabled,
         })
     }
 
@@ -453,7 +458,7 @@ impl Derivation {
 }
 
 /// Check if this derivation has Crystal Forge agent enabled
-pub async fn is_cf_agent_enabled(flake_target: &str) -> bool {
+pub async fn is_cf_agent_enabled(flake_target: &str) -> Result<bool> {
     let cf_enabled_systemd_cmd = || {
         let mut cmd = build_config.systemd_scoped_cmd_base();
         cmd.args([
@@ -462,6 +467,7 @@ pub async fn is_cf_agent_enabled(flake_target: &str) -> bool {
             "--json",
             &format!("{}.config.services.crystal-forge.enable", flake_target),
         ]);
+        cmd
     };
     let cf_enabled_output = Derivation::execute_with_systemd_fallback(
         build_config,
