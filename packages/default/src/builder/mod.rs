@@ -130,18 +130,19 @@ pub async fn run_cache_push_loop(pool: PgPool) {
 async fn build_derivations(pool: &PgPool, build_config: &BuildConfig) -> Result<()> {
     // Get derivations ready for building (those with dry-run-complete status)
     match get_derivations_ready_for_build(pool).await {
-        Ok(derivations) => {
+        Ok(mut derivations) => {
+            // Add 'mut' here
             if derivations.is_empty() {
                 info!("🔍 No derivations need building");
                 return Ok(());
             }
-            for derivation in &derivations {
+            for derivation in &mut derivations {
+                // Change from &derivations to &mut derivations
                 info!(
                     "🏗️ Starting build for derivation: {}",
                     derivation.derivation_name
                 );
                 mark_target_build_in_progress(pool, derivation.id).await?;
-
                 // Build the derivation
                 match derivation
                     .evaluate_and_build(pool, true, build_config)
@@ -152,7 +153,6 @@ async fn build_derivations(pool: &PgPool, build_config: &BuildConfig) -> Result<
                             "✅ Build completed for {}: {}",
                             derivation.derivation_name, store_path
                         );
-
                         // Mark as build complete
                         use crate::queries::derivations::mark_target_build_complete;
                         mark_target_build_complete(pool, derivation.id).await?;

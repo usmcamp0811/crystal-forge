@@ -22,7 +22,7 @@ pub struct EvaluationResult {
 impl Derivation {
     /// High-level function that handles both NixOS and Package derivations
     pub async fn evaluate_and_build(
-        &self,
+        &mut self,
         pool: &PgPool,
         full_build: bool,
         build_config: &BuildConfig,
@@ -43,8 +43,7 @@ impl Derivation {
                     self.evaluate_and_build_nixos(pool, &flake_target, build_config)
                         .await
                 } else {
-                    &self
-                        .evaluate_nixos_dry_run(pool, &flake_target, build_config)
+                    self.evaluate_nixos_dry_run(pool, &flake_target, build_config)
                         .await
                 }
             }
@@ -103,7 +102,7 @@ impl Derivation {
         build_config: &BuildConfig,
     ) -> Result<String> {
         let eval_result = Self::dry_run_derivation_path(flake_target, build_config).await?;
-        self.cf_agent_enabled = Some(eval_result.cf_agent_enabled);
+        self.cf_agent_enabled = Some(eval_result.cf_agent_enabled); // This line needs &mut self
 
         // Insert dependencies into database
         if !eval_result.dependency_derivation_paths.is_empty() {
@@ -173,7 +172,7 @@ impl Derivation {
 
         let main_drv = eval_main_drv_path(flake_target, build_config).await?;
         let deps = list_immediate_input_drvs(&main_drv, build_config).await?;
-        let cf_agent_enabled = is_cf_agent_enabled(flake_target).await?;
+        let cf_agent_enabled = is_cf_agent_enabled(flake_target, build_config).await?;
 
         info!("🔍 main drv: {main_drv}");
         info!("🔍 {} immediate input drvs", deps.len());
@@ -458,7 +457,7 @@ impl Derivation {
 }
 
 /// Check if this derivation has Crystal Forge agent enabled
-pub async fn is_cf_agent_enabled(flake_target: &str) -> Result<bool> {
+pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig) -> Result<bool> {
     let cf_enabled_systemd_cmd = || {
         let mut cmd = build_config.systemd_scoped_cmd_base();
         cmd.args([
@@ -507,29 +506,25 @@ pub async fn is_cf_agent_enabled(flake_target: &str) -> Result<bool> {
                 flake_target
             ),
         ],
-        "check if Crystal Forge module is enabled",
+        "check if Crystal Forge client is enabled",
     )
     .await?;
 
     if !cf_enabled_output.status.success() {
         bail!(
             "nix eval failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&cf_enabled_output.stderr).trim()
         );
     }
     if !cf_client_enabled_output.status.success() {
         bail!(
             "nix eval failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            String::from_utf8_lossy(&cf_client_enabled_output.stderr).trim()
         );
     }
     let cf_enabled = serde_json::from_slice::<bool>(&cf_enabled_output.stdout)?;
     let cf_client_enabled = serde_json::from_slice::<bool>(&cf_client_enabled_output.stdout)?;
-    if cf_enabled && cf_client_enabled {
-        Ok(true)
-    } else {
-        Ok(false)
-    }
+    Ok(cf_enabled && cf_client_enabled)
 }
 
 async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {

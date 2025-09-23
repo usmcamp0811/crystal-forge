@@ -259,7 +259,7 @@ impl Derivation {
 
     /// Evaluates and optionally pushes to cache in one go
     pub async fn evaluate_and_push_to_cache(
-        &self,
+        &mut self,
         pool: &PgPool,
         full_build: bool,
         build_config: &BuildConfig,
