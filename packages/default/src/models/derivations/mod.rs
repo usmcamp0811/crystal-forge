@@ -94,11 +94,6 @@ impl ToString for DerivationType {
 }
 
 impl Derivation {
-    /// Check if this derivation has Crystal Forge agent enabled
-    pub fn is_cf_agent_enabled(&self) -> bool {
-        self.cf_agent_enabled.unwrap_or(false)
-    }
-
     /// Set the Crystal Forge agent enabled status
     pub fn set_cf_agent_enabled(&mut self, enabled: bool) {
         self.cf_agent_enabled = Some(enabled);

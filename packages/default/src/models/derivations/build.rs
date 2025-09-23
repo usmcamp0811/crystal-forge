@@ -4,6 +4,7 @@ use crate::models::config::BuildConfig;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use sqlx::PgPool;
+use std::option::Option;
 use std::path::Path;
 use std::process::{Output, Stdio};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -33,7 +34,9 @@ impl Derivation {
 
                 let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
                 let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
-                let flake_target = self.build_flake_target_string(&flake, &commit).await?;
+                let flake_target = self
+                    .build_flake_target_string(&flake, &commit, true)
+                    .await?;
 
                 if full_build {
                     self.evaluate_and_build_nixos(pool, &flake_target, build_config)
@@ -411,6 +414,7 @@ impl Derivation {
         &self,
         flake: &crate::models::flakes::Flake,
         commit: &crate::models::commits::Commit,
+        include_build_toplevel: bool,
     ) -> Result<String> {
         let system = &self.derivation_name;
         let flake_ref = if Path::new(&flake.repo_url).exists() {
@@ -438,9 +442,87 @@ impl Derivation {
                 flake.repo_url, commit.git_commit_hash
             )
         };
-        Ok(format!(
-            "{flake_ref}#nixosConfigurations.{system}.config.system.build.toplevel"
-        ))
+        if include_build_toplevel {
+            Ok(format!(
+                "{flake_ref}#nixosConfigurations.{system}.config.system.build.toplevel"
+            ))
+        } else {
+            Ok(format!("{flake_ref}#nixosConfigurations.{system}"))
+        }
+    }
+}
+
+/// Check if this derivation has Crystal Forge agent enabled
+pub async fn is_cf_agent_enabled(flake_target: &str) -> bool {
+    let cf_enabled_systemd_cmd = || {
+        let mut cmd = build_config.systemd_scoped_cmd_base();
+        cmd.args([
+            "nix",
+            "eval",
+            "--json",
+            &format!("{}.config.services.crystal-forge.enable", flake_target),
+        ]);
+    };
+    let cf_enabled_output = Derivation::execute_with_systemd_fallback(
+        build_config,
+        cf_enabled_systemd_cmd,
+        &[
+            "nix",
+            "eval",
+            "--json",
+            &format!("{}.config.services.crystal-forge.enable", flake_target),
+        ],
+        "check if Crystal Forge module is enabled",
+    )
+    .await?;
+
+    let cf_client_enabled_systemd_cmd = || {
+        let mut cmd = build_config.systemd_scoped_cmd_base();
+        cmd.args([
+            "nix",
+            "eval",
+            "--json",
+            &format!(
+                "{}.config.services.crystal-forge.client.enable",
+                flake_target
+            ),
+        ]);
+        cmd
+    };
+    let cf_client_enabled_output = Derivation::execute_with_systemd_fallback(
+        build_config,
+        cf_client_enabled_systemd_cmd,
+        &[
+            "nix",
+            "eval",
+            "--json",
+            &format!(
+                "{}.config.services.crystal-forge.client.enable",
+                flake_target
+            ),
+        ],
+        "check if Crystal Forge module is enabled",
+    )
+    .await?;
+
+    if !cf_enabled_output.status.success() {
+        bail!(
+            "nix eval failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if !cf_client_enabled_output.status.success() {
+        bail!(
+            "nix eval failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let cf_enabled = serde_json::from_slice::<bool>(&cf_enabled_output.stdout)?;
+    let cf_client_enabled = serde_json::from_slice::<bool>(&cf_client_enabled_output.stdout)?;
+    if cf_enabled && cf_client_enabled {
+        Ok(true)
+    } else {
+        Ok(false)
     }
 }
 
