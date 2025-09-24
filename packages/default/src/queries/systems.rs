@@ -43,7 +43,7 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         deployment_policy,
         server_public_key
     )
-    VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+    VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7, $8, $9)
     ON CONFLICT (hostname) DO UPDATE SET
         environment_id = EXCLUDED.environment_id,
         is_active = EXCLUDED.is_active,
