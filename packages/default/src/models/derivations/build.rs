@@ -465,6 +465,7 @@ impl Derivation {
 
 /// Check if this derivation has Crystal Forge agent enabled
 pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig) -> Result<bool> {
+    // This is so we dont try and reach the interwebs during testing in Nix VM tests
     if std::env::var("NIX_BUILD_TOP").is_ok() || flake_target.contains("cf-test-sys") {
         return Ok(true); // Assume enabled in tests
     }
