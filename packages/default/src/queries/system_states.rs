@@ -83,7 +83,6 @@ pub async fn insert_system_state(
             state.agent_version.as_deref().unwrap_or("unknown")
         );
     }
-
     Ok(())
 }
 pub async fn get_last_system_state_by_hostname(
@@ -184,6 +183,9 @@ mod tests {
             derivation: "test".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            desired_derivation: None,
+            deployment_policy: "manual".to_string(),
+            server_public_key: None,
         };
 
         let mock_request = VerifiedAgentRequest {
@@ -257,6 +259,9 @@ mod tests {
             derivation: "test".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            desired_derivation: None,
+            deployment_policy: "manual".to_string(),
+            server_public_key: None,
         };
 
         let mock_request = VerifiedAgentRequest {

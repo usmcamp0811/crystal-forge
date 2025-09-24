@@ -38,7 +38,10 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         flake_id,
         derivation,
         created_at,
-        updated_at
+        updated_at,
+        desired_derivation,
+        deployment_policy,
+        server_public_key
     )
     VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
     ON CONFLICT (hostname) DO UPDATE SET
@@ -57,6 +60,9 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
     .bind(&system.public_key.to_base64())
     .bind(system.flake_id)
     .bind(&system.derivation)
+    .bind(&system.desired_derivation)
+    .bind(&system.deployment_policy)
+    .bind(&system.server_public_key)
     .fetch_one(pool)
     .await?;
     Ok(inserted)
