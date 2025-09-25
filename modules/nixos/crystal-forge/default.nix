@@ -581,20 +581,10 @@ in {
             default = null;
             description = "Flake ref name";
           };
-          desired_derivation = lib.mkOption {
-            type = lib.types.nullOr lib.types.str;
-            default = null;
-            description = "Desired derivation hash for system";
-          };
           deployment_policy = lib.mkOption {
             type = lib.types.enum ["manual" "auto_latest" "pinned"];
             default = "manual";
             description = "Deployment policy for the system";
-          };
-          server_public_key = lib.mkOption {
-            type = lib.types.nullOr lib.types.str;
-            default = null;
-            description = "Server's public key for encrypted communication";
           };
         };
       });
