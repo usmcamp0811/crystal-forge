@@ -8,7 +8,16 @@
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
 
-  baseConfig =
+  # Recursively remove any null values so TOML generation won’t choke.
+  stripNulls = v:
+    if builtins.isAttrs v
+    then lib.filterAttrs (_: vv: vv != null) (lib.mapAttrs (_: stripNulls) v)
+    else if builtins.isList v
+    then lib.filter (x: x != null) (map stripNulls v)
+    else v;
+
+  # Build the raw config first (your existing baseConfig logic, unchanged)
+  baseConfigRaw =
     {
       database = {
         host = cfg.database.host;
@@ -35,6 +44,8 @@
       };
     }
     // lib.optionalAttrs (cfg.systems != []) {
+      # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_derivation, server_public_key)
+      # We’ll strip them globally via stripNulls below.
       systems = cfg.systems;
     }
     // lib.optionalAttrs (cfg.flakes.watched != []) {
@@ -137,6 +148,9 @@
           attic_cache_name = cfg.cache.attic_cache_name;
         };
     };
+
+  # Now sanitize away any nulls before TOML generation
+  baseConfig = stripNulls baseConfigRaw;
 
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
   generatedConfigPath = "/var/lib/crystal-forge/config.toml";
