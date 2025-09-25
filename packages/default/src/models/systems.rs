@@ -65,10 +65,15 @@ impl System {
         hostname: String,
         environment_id: Option<Uuid>,
         is_active: bool,
-        public_key_base64: String,
+        public_key_base64: String, // Fixed parameter name
         flake_id: Option<i32>,
-    ) -> Result<System> {
+        desired_derivation: Option<String>,
+        deployment_policy: String,
+        server_public_key: Option<String>,
+    ) -> Result<Self> {
         let public_key = PublicKey::from_base64(&public_key_base64, &hostname)?;
+        let _deployment_policy_enum = deployment_policy.parse::<DeploymentPolicy>()?; // Validate it parses correctly
+
         let system = System {
             id: Uuid::nil(), // placeholder; DB will assign real UUID
             hostname,
@@ -79,9 +84,9 @@ impl System {
             derivation: "".into(), // leave empty; DB or later logic sets it
             created_at: chrono::Utc::now(), // placeholder; overwritten by DB
             updated_at: chrono::Utc::now(), // placeholder; overwritten by DB
-            desired_derivation: None,
-            deployment_policy: DeploymentPolicy::Manual.to_string(),
-            server_public_key: None,
+            desired_derivation,    // Use the input parameter
+            deployment_policy,     // Use the input parameter (as string for DB storage)
+            server_public_key,     // Use the input parameter
         };
         insert_system(pool, &system).await
     }
