@@ -712,6 +712,7 @@ in {
       "d /var/lib/crystal-forge/.config/nix 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
+      "d /var/lib/crystal-forge/.config/nix 0755 crystal-forge crystal-forge -"
     ];
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
@@ -783,6 +784,7 @@ in {
         DB_USER = cfg.database.user;
         DB_PASSWORD = lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
         JOB_DIR = "${pkgs.crystal-forge.run-postgres-jobs}/jobs";
+        NIX_CONFIG_DIR = "/var/lib/crystal-forge/.config/nix";
       };
 
       script =
@@ -939,7 +941,12 @@ in {
           ProtectKernelModules = true;
           ProtectControlGroups = true;
 
-          ReadWritePaths = ["/var/lib/crystal-forge" "/tmp" "/run/crystal-forge"];
+          ReadWritePaths = [
+            "/var/lib/crystal-forge"
+            "/tmp"
+            "/run/crystal-forge"
+            "/var/cache/crystal-forge-nix"
+          ];
           ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
           Restart = "always";
@@ -982,7 +989,12 @@ in {
         NoNewPrivileges = true;
         ProtectSystem = "no";
         ProtectHome = true;
-        ReadWritePaths = ["/var/lib/crystal-forge"];
+        ReadWritePaths = [
+          "/var/lib/crystal-forge"
+          "/tmp"
+          "/run/crystal-forge"
+          "/var/cache/crystal-forge-nix"
+        ];
         PrivateTmp = true;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
