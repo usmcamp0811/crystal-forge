@@ -40,8 +40,7 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         created_at,
         updated_at,
         desired_target,
-        deployment_policy,
-        server_public_key
+        deployment_policy
     )
     VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW(), $7, $8, $9)
     ON CONFLICT (hostname) DO UPDATE SET
@@ -52,7 +51,6 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         derivation = EXCLUDED.derivation,
         desired_target = EXCLUDED.desired_target,
         deployment_policy = EXCLUDED.deployment_policy,
-        server_public_key = EXCLUDED.server_public_key,
         updated_at = NOW()
     RETURNING *
     "#,
@@ -65,7 +63,6 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
     .bind(&system.derivation)
     .bind(&system.desired_target)
     .bind(&system.deployment_policy)
-    .bind(&system.server_public_key)
     .fetch_one(pool)
     .await?;
     Ok(inserted)

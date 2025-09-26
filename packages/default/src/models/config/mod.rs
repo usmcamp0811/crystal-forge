@@ -247,7 +247,6 @@ impl CrystalForgeConfig {
                 flake_id,
                 config.desired_target.clone(),
                 config.deployment_policy.clone(),
-                None,
             )
             .await?;
             insert_system(pool, &system).await;

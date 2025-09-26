@@ -54,7 +54,6 @@ pub struct System {
     pub updated_at: DateTime<Utc>,
     pub desired_target: Option<String>,
     pub deployment_policy: String, // Will be converted to/from DeploymentPolicy enum
-    pub server_public_key: Option<String>,
 }
 
 impl System {
@@ -69,7 +68,6 @@ impl System {
         flake_id: Option<i32>,
         desired_target: Option<String>,
         deployment_policy: String,
-        server_public_key: Option<String>,
     ) -> Result<Self> {
         let public_key = PublicKey::from_base64(&public_key_base64, &hostname)?;
         let _deployment_policy_enum = deployment_policy.parse::<DeploymentPolicy>()?; // Validate it parses correctly
@@ -86,7 +84,6 @@ impl System {
             updated_at: chrono::Utc::now(), // placeholder; overwritten by DB
             desired_target,
             deployment_policy, // Use the input parameter (as string for DB storage)
-            server_public_key,
         };
         insert_system(pool, &system).await
     }

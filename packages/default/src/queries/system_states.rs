@@ -185,7 +185,6 @@ mod tests {
             updated_at: Utc::now(),
             desired_target: None,
             deployment_policy: "manual".to_string(),
-            server_public_key: None,
         };
 
         let mock_request = VerifiedAgentRequest {
@@ -261,7 +260,6 @@ mod tests {
             updated_at: Utc::now(),
             desired_target: None,
             deployment_policy: "manual".to_string(),
-            server_public_key: None,
         };
 
         let mock_request = VerifiedAgentRequest {

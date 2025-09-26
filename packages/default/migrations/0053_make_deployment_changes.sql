@@ -2,8 +2,7 @@
 -- Add deployment-related columns to the systems table
 ALTER TABLE public.systems
     ADD COLUMN desired_target text,
-    ADD COLUMN deployment_policy text DEFAULT 'manual' CHECK (deployment_policy IN ('manual', 'auto_latest', 'pinned')),
-    ADD COLUMN server_public_key text;
+    ADD COLUMN deployment_policy text DEFAULT 'manual' CHECK (deployment_policy IN ('manual', 'auto_latest', 'pinned'));
 
 -- Migration 2: Add cf_agent_enabled column to derivations table
 -- Tracks whether a derivation has Crystal Forge client enabled
