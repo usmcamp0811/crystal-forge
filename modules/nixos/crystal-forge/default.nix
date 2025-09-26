@@ -511,6 +511,11 @@ in {
         default = null;
         description = "Signing key path";
       };
+      public_key = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Public key for verifying cache signatures (used in trusted-public-keys)";
+      };
       compression = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -603,7 +608,6 @@ in {
           flake_name = "dotfiles";
           desired_target = null;
           deployment_policy = "manual";
-          server_public_key = null;
         }
       ];
     };
@@ -680,10 +684,40 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable) {
+    nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable || cfg.client.enable) {
       experimental-features = ["nix-command" "flakes"];
       allowed-users = ["root" "crystal-forge"];
       trusted-users = ["root" "crystal-forge"];
+
+      # Add substituters based on cache configuration
+      substituters = lib.mkMerge [
+        # Keep existing substituters
+        (lib.mkBefore config.nix.settings.substituters or [])
+        # Add S3 cache as substituter
+        (lib.mkIf (cfg.cache.cache_type == "S3" && cfg.cache.public_key != null) [
+          cfg.cache.public_key
+        ])
+        # Add Attic cache as substituter
+        (lib.mkIf (cfg.cache.cache_type == "Attic" && cfg.cache.push_to != null) [
+          cfg.cache.push_to
+        ])
+      ];
+
+      # Add trusted public keys if using cache
+      trusted-public-keys = lib.mkMerge [
+        # Keep existing keys
+        (lib.mkBefore config.nix.settings.trusted-public-keys or [])
+        # Add cache signing key for S3 caches
+        (lib.mkIf (cfg.cache.cache_type == "S3" && cfg.cache.signing_key != null) [
+          (builtins.readFile cfg.cache.signing_key)
+        ])
+        # Note: Attic handles authentication differently, typically doesn't use signing keys in nix.conf
+      ];
+
+      # For S3 caches, ensure credentials are available if using profiles
+      extra-platforms =
+        lib.mkIf (cfg.cache.cache_type == "S3")
+        config.nix.settings.extra-platforms or [];
     };
 
     users.users.crystal-forge = lib.mkIf (cfg.server.enable || cfg.build.enable) {
