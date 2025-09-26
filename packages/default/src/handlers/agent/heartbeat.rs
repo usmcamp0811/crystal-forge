@@ -1,5 +1,5 @@
 use crate::handlers::agent_request::{
-    CFState, authenticate_agent_request, try_deserialize_system_state,
+    CFState, authenticate_agent_request, deserialize_system_state_versioned,
 };
 use crate::models::{
     agent_heartbeats::AgentHeartbeat,
@@ -36,7 +36,7 @@ pub async fn log(
     };
 
     // Try to deserialize with version detection
-    let (payload, version_compatible) = match try_deserialize_system_state(&agent_request) {
+    let (payload, version_compatible) = match deserialize_system_state_versioned(&agent_request) {
         Ok((state, compatible)) => (state, compatible),
         Err(e) => {
             debug!("❌ All deserialization attempts failed: {e}");

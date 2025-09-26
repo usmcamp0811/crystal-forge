@@ -119,7 +119,7 @@ pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::agent_request::try_deserialize_system_state;
+    use crate::handlers::agent_request::deserialize_system_state_versioned;
     use crate::models::system_states::{SystemState, SystemStateV1};
     use anyhow::Result;
     use chrono::Utc;
@@ -195,7 +195,7 @@ mod tests {
             body: json.into(),
         };
 
-        let (parsed, compatible) = try_deserialize_system_state(&mock_request).unwrap();
+        let (parsed, compatible) = deserialize_system_state_versioned(&mock_request).unwrap();
 
         assert!(compatible, "Current version should be compatible");
         assert_eq!(parsed.hostname, "test-host");
@@ -271,7 +271,7 @@ mod tests {
             body: json.into(),
         };
 
-        let (parsed, compatible) = try_deserialize_system_state(&mock_request).unwrap();
+        let (parsed, compatible) = deserialize_system_state_versioned(&mock_request).unwrap();
 
         assert_eq!(parsed.hostname, "test-host-v1");
     }
