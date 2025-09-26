@@ -84,9 +84,9 @@ impl System {
             derivation: "".into(), // leave empty; DB or later logic sets it
             created_at: chrono::Utc::now(), // placeholder; overwritten by DB
             updated_at: chrono::Utc::now(), // placeholder; overwritten by DB
-            desired_derivation,    // Use the input parameter
-            deployment_policy,     // Use the input parameter (as string for DB storage)
-            server_public_key,     // Use the input parameter
+            desired_derivation,
+            deployment_policy, // Use the input parameter (as string for DB storage)
+            server_public_key,
         };
         insert_system(pool, &system).await
     }

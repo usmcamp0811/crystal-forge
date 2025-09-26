@@ -250,6 +250,7 @@ impl CrystalForgeConfig {
                 None,
             )
             .await?;
+            insert_system(pool, &system).await;
         }
 
         Ok(())
