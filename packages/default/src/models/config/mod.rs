@@ -233,7 +233,7 @@ impl CrystalForgeConfig {
                             .id
                     }
                 };
-                Some(id) // wrap in Some() to match Option<i32>
+                Some(id)
             } else {
                 None
             };
@@ -245,7 +245,7 @@ impl CrystalForgeConfig {
                 true,
                 config.public_key.clone(),
                 flake_id,
-                None,
+                config.desired_derivation.clone(),
                 config.deployment_policy.clone(),
                 None,
             )
