@@ -122,6 +122,7 @@ in
           # Build configuration - DISABLED for server-only dry-run tests
           build = {
             enable = false;
+            offline = true;
           };
 
           # Test flake configuration
