@@ -690,34 +690,12 @@ in {
       trusted-users = ["root" "crystal-forge"];
 
       # Add substituters based on cache configuration
-      substituters = lib.mkMerge [
-        # Keep existing substituters
-        (lib.mkBefore config.nix.settings.substituters or [])
-        # Add S3 cache as substituter
-        (lib.mkIf (cfg.cache.cache_type == "S3" && cfg.cache.public_key != null) [
-          cfg.cache.public_key
-        ])
-        # Add Attic cache as substituter
-        (lib.mkIf (cfg.cache.cache_type == "Attic" && cfg.cache.push_to != null) [
-          cfg.cache.push_to
-        ])
+      substituters = lib.mkIf (cfg.cache.push_to != null) [
+        cfg.cache.push_to
       ];
-
-      # Add trusted public keys if using cache
-      trusted-public-keys = lib.mkMerge [
-        # Keep existing keys
-        (lib.mkBefore config.nix.settings.trusted-public-keys or [])
-        # Add cache signing key for S3 caches
-        (lib.mkIf (cfg.cache.cache_type == "S3" && cfg.cache.signing_key != null) [
-          (builtins.readFile cfg.cache.signing_key)
-        ])
-        # Note: Attic handles authentication differently, typically doesn't use signing keys in nix.conf
+      trusted-public-keys = lib.mkIf (cfg.cache.public_key != null) [
+        cfg.cache.public_key
       ];
-
-      # For S3 caches, ensure credentials are available if using profiles
-      extra-platforms =
-        lib.mkIf (cfg.cache.cache_type == "S3")
-        config.nix.settings.extra-platforms or [];
     };
 
     users.users.crystal-forge = lib.mkIf (cfg.server.enable || cfg.build.enable) {
