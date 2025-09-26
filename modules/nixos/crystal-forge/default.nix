@@ -44,7 +44,7 @@
       };
     }
     // lib.optionalAttrs (cfg.systems != []) {
-      # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_derivation, server_public_key)
+      # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
       # We’ll strip them globally via stripNulls below.
       systems = cfg.systems;
     }
@@ -581,7 +581,7 @@ in {
             default = null;
             description = "Flake ref name";
           };
-          desired_derivation = lib.mkOption {
+          desired_target = lib.mkOption {
             type = lib.types.nullOr lib.types.str;
             default = null;
             description = "Desired derivation hash for system";
@@ -601,7 +601,7 @@ in {
           public_key = "base64encodedkey";
           environment = "production";
           flake_name = "dotfiles";
-          desired_derivation = null;
+          desired_target = null;
           deployment_policy = "manual";
           server_public_key = null;
         }

@@ -183,7 +183,7 @@ mod tests {
             derivation: "test".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            desired_derivation: None,
+            desired_target: None,
             deployment_policy: "manual".to_string(),
             server_public_key: None,
         };
@@ -259,7 +259,7 @@ mod tests {
             derivation: "test".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
-            desired_derivation: None,
+            desired_target: None,
             deployment_policy: "manual".to_string(),
             server_public_key: None,
         };

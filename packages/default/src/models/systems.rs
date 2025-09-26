@@ -52,7 +52,7 @@ pub struct System {
     pub derivation: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    pub desired_derivation: Option<String>,
+    pub desired_target: Option<String>,
     pub deployment_policy: String, // Will be converted to/from DeploymentPolicy enum
     pub server_public_key: Option<String>,
 }
@@ -67,7 +67,7 @@ impl System {
         is_active: bool,
         public_key_base64: String, // Fixed parameter name
         flake_id: Option<i32>,
-        desired_derivation: Option<String>,
+        desired_target: Option<String>,
         deployment_policy: String,
         server_public_key: Option<String>,
     ) -> Result<Self> {
@@ -84,7 +84,7 @@ impl System {
             derivation: "".into(), // leave empty; DB or later logic sets it
             created_at: chrono::Utc::now(), // placeholder; overwritten by DB
             updated_at: chrono::Utc::now(), // placeholder; overwritten by DB
-            desired_derivation,
+            desired_target,
             deployment_policy, // Use the input parameter (as string for DB storage)
             server_public_key,
         };
@@ -103,7 +103,7 @@ impl System {
 
     /// Check if the system has a desired derivation set
     pub fn has_pending_deployment(&self) -> bool {
-        self.desired_derivation.is_some()
+        self.desired_target.is_some()
     }
 
     /// Check if the system is configured for automatic deployments

@@ -245,7 +245,7 @@ impl CrystalForgeConfig {
                 true,
                 config.public_key.clone(),
                 flake_id,
-                config.desired_derivation.clone(),
+                config.desired_target.clone(),
                 config.deployment_policy.clone(),
                 None,
             )

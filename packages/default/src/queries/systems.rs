@@ -39,7 +39,7 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         derivation,
         created_at,
         updated_at,
-        desired_derivation,
+        desired_target,
         deployment_policy,
         server_public_key
     )
@@ -50,7 +50,7 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         public_key = EXCLUDED.public_key,
         flake_id = EXCLUDED.flake_id,
         derivation = EXCLUDED.derivation,
-        desired_derivation = EXCLUDED.desired_derivation,
+        desired_target = EXCLUDED.desired_target,
         deployment_policy = EXCLUDED.deployment_policy,
         server_public_key = EXCLUDED.server_public_key,
         updated_at = NOW()
@@ -63,10 +63,36 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
     .bind(&system.public_key.to_base64())
     .bind(system.flake_id)
     .bind(&system.derivation)
-    .bind(&system.desired_derivation)
+    .bind(&system.desired_target)
     .bind(&system.deployment_policy)
     .bind(&system.server_public_key)
     .fetch_one(pool)
     .await?;
     Ok(inserted)
+}
+
+pub async fn get_desired_target_by_hostname(
+    pool: &PgPool,
+    hostname: &str,
+) -> Result<Option<String>> {
+    let result = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT desired_target FROM systems WHERE hostname = $1",
+    )
+    .bind(hostname)
+    .fetch_optional(pool)
+    .await?;
+
+    // Handle the nested Option from fetch_optional + nullable column
+    Ok(result.flatten())
+}
+
+pub async fn get_desired_target_by_id(pool: &PgPool, system_id: Uuid) -> Result<Option<String>> {
+    let result =
+        sqlx::query_scalar::<_, Option<String>>("SELECT desired_target FROM systems WHERE id = $1")
+            .bind(system_id)
+            .fetch_optional(pool)
+            .await?;
+
+    // Handle the nested Option from fetch_optional + nullable column
+    Ok(result.flatten())
 }
