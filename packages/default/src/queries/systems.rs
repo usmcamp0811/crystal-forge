@@ -86,7 +86,7 @@ pub async fn get_desired_target_by_hostname(
     Ok(result.flatten())
 }
 
-pub async fn get_desired_target_by_id(pool: &PgPool, system_id: Uuid) -> Result<Option<String>> {
+pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<Option<String>> {
     let result =
         sqlx::query_scalar::<_, Option<String>>("SELECT desired_target FROM systems WHERE id = $1")
             .bind(system_id)

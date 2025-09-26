@@ -6,4 +6,5 @@ pub struct SystemConfig {
     pub environment: String,
     pub flake_name: Option<String>, // just the flake name reference
     pub deployment_policy: String,  // Will be converted to/from DeploymentPolicy enum
+    pub desired_target: Option<String>,
 }
