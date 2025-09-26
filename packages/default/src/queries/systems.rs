@@ -50,6 +50,9 @@ pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
         public_key = EXCLUDED.public_key,
         flake_id = EXCLUDED.flake_id,
         derivation = EXCLUDED.derivation,
+        desired_derivation = EXCLUDED.desired_derivation,
+        deployment_policy = EXCLUDED.deployment_policy,
+        server_public_key = EXCLUDED.server_public_key,
         updated_at = NOW()
     RETURNING *
     "#,
