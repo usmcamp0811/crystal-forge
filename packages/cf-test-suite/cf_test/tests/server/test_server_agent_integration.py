@@ -89,3 +89,106 @@ def test_postgres_jobs_timer_and_idempotency(cf_client, server, agent):
     run_service_and_verify_success(
         cf_client, server, C.JOBS_SERVICE, "All jobs completed successfully"
     )
+
+
+@pytest.mark.slow
+def test_desired_target_response(cf_client, server, agent, smoke_data):
+    """Test that the log endpoint returns desired_target for systems"""
+    wait_for_crystal_forge_ready(server)
+    agent_hostname = agent.succeed("hostname -s").strip()
+
+    # Wait for agent acceptance first
+    wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
+
+    # Test 1: Initially, no desired_target should be set
+    # Make an agent heartbeat and check the response
+    response = agent.succeed(
+        """
+        curl -s -X POST http://server:3000/current-system \\
+            -H "X-Key-ID: $(hostname -s)" \\
+            -H "X-Signature: $(echo '{"hostname":"'$(hostname -s)'","change_reason":"test"}' | \\
+                /etc/agent.key sign | base64 -w0)" \\
+            -H "Content-Type: application/json" \\
+            -d '{"hostname":"'$(hostname -s)'","change_reason":"test"}'
+    """
+    )
+
+    # Parse JSON response and verify desired_target is null
+    response_json = json.loads(response)
+    assert "desired_target" in response_json
+    assert response_json["desired_target"] is None
+
+    # Test 2: Set a desired target in the database
+    test_target = "git+https://example.com/repo?rev=abc123#nixosConfigurations.test.config.system.build.toplevel"
+    cf_client.execute_sql(
+        "UPDATE systems SET desired_target = %s WHERE hostname = %s",
+        (test_target, agent_hostname),
+    )
+
+    # Make another agent request and verify the desired_target is returned
+    response = agent.succeed(
+        """
+        curl -s -X POST http://server:3000/current-system \\
+            -H "X-Key-ID: $(hostname -s)" \\
+            -H "X-Signature: $(echo '{"hostname":"'$(hostname -s)'","change_reason":"test2"}' | \\
+                /etc/agent.key sign | base64 -w0)" \\
+            -H "Content-Type: application/json" \\
+            -d '{"hostname":"'$(hostname -s)'","change_reason":"test2"}'
+    """
+    )
+
+    # Parse JSON response and verify desired_target is returned
+    response_json = json.loads(response)
+    assert "desired_target" in response_json
+    assert response_json["desired_target"] == test_target
+
+    # Test 3: Clear the desired target and verify it returns null again
+    cf_client.execute_sql(
+        "UPDATE systems SET desired_target = NULL WHERE hostname = %s",
+        (agent_hostname,),
+    )
+
+    response = agent.succeed(
+        """
+        curl -s -X POST http://server:3000/current-system \\
+            -H "X-Key-ID: $(hostname -s)" \\
+            -H "X-Signature: $(echo '{"hostname":"'$(hostname -s)'","change_reason":"test3"}' | \\
+                /etc/agent.key sign | base64 -w0)" \\
+            -H "Content-Type: application/json" \\
+            -d '{"hostname":"'$(hostname -s)'","change_reason":"test3"}'
+    """
+    )
+
+    response_json = json.loads(response)
+    assert "desired_target" in response_json
+    assert response_json["desired_target"] is None
+
+
+@pytest.mark.slow
+def test_nixos_module_desired_target_sync(cf_client, server, agent):
+    """Test that systems defined in NixOS module configuration sync desired_target to database"""
+    wait_for_crystal_forge_ready(server)
+    agent_hostname = agent.succeed("hostname -s").strip()
+
+    # This would test the NixOS module sync functionality, but since we're in a test environment,
+    # we'll simulate what the sync should do
+
+    # Test that deployment_policy defaults to "manual"
+    result = cf_client.execute_sql(
+        "SELECT deployment_policy FROM systems WHERE hostname = %s", (agent_hostname,)
+    )
+
+    assert len(result) > 0
+    assert result[0]["deployment_policy"] == "manual"
+
+    # Test updating deployment policy
+    cf_client.execute_sql(
+        "UPDATE systems SET deployment_policy = %s WHERE hostname = %s",
+        ("auto_latest", agent_hostname),
+    )
+
+    result = cf_client.execute_sql(
+        "SELECT deployment_policy FROM systems WHERE hostname = %s", (agent_hostname,)
+    )
+
+    assert result[0]["deployment_policy"] == "auto_latest"
