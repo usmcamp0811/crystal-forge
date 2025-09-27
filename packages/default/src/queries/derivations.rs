@@ -1332,3 +1332,48 @@ pub async fn clear_derivation_build_status(
     
     Ok(())
 }
+
+pub async fn get_latest_successful_derivation_for_flake(
+    pool: &PgPool, 
+    flake_id: i32
+) -> Result<Option<Derivation>> {
+    let derivation = sqlx::query_as::<_, Derivation>(
+        r#"
+        SELECT 
+            d.id,
+            d.commit_id,
+            d.derivation_type,
+            d.derivation_name,
+            d.derivation_path,
+            d.scheduled_at,
+            d.completed_at,
+            d.started_at,
+            d.attempt_count,
+            d.evaluation_duration_ms,
+            d.error_message,
+            d.pname,
+            d.version,
+            d.status_id,
+            d.derivation_target,
+            d.build_elapsed_seconds,
+            d.build_current_target,
+            d.build_last_activity_seconds,
+            d.build_last_heartbeat,
+            d.cf_agent_enabled
+        FROM derivations d
+        INNER JOIN commits c ON d.commit_id = c.id
+        INNER JOIN derivation_statuses ds ON d.status_id = ds.id
+        WHERE c.flake_id = $1
+        AND ds.name = 'cache-pushed'
+        AND ds.is_success = true
+        AND d.derivation_type = 'nixos'
+        ORDER BY d.completed_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(derivation)
+}
