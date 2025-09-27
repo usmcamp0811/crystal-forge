@@ -1,47 +1,49 @@
 use crate::models::config::CrystalForgeConfig;
 use crate::models::systems::DeploymentPolicy;
+use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
 use crate::queries::derivations::get_latest_successful_derivation_for_flake;
-use crate::queries::systems::{get_systems_with_auto_latest_policy, update_desired_target};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant, sleep};
 use tracing::{debug, error, info, warn};
 
-/// Deployment evaluator that manages automatic deployment policies
-pub struct DeploymentEvaluator {
+/// Manages automatic deployment policies for systems
+/// Only handles auto_latest policy - manual and pinned policies are set by admin intervention
+pub struct DeploymentPolicyManager {
     config: CrystalForgeConfig,
     pool: PgPool,
 }
 
-impl DeploymentEvaluator {
+impl DeploymentPolicyManager {
     pub fn new(config: CrystalForgeConfig, pool: PgPool) -> Self {
         Self { config, pool }
     }
 
-    /// Main deployment evaluation loop
+    /// Main deployment policy management loop
+    /// Only processes systems with auto_latest policy - manual/pinned policies don't need automatic updates
     pub async fn run(&self) -> Result<()> {
-        let interval = self.config.deployment.poll_interval;
+        let interval = self.config.deployment_poll_interval;
         info!(
-            "🚀 Starting deployment evaluator (poll interval: {:?})",
+            "🚀 Starting deployment policy manager (poll interval: {:?})",
             interval
         );
 
         loop {
             let start_time = Instant::now();
 
-            match self.evaluate_deployments().await {
+            match self.update_auto_latest_policies().await {
                 Ok(stats) => {
                     let elapsed = start_time.elapsed();
                     info!(
-                        "✅ Deployment evaluation completed: {} systems checked, {} updated ({:.2}s)",
+                        "✅ Policy update completed: {} systems checked, {} updated ({:.2}s)",
                         stats.systems_checked,
                         stats.systems_updated,
                         elapsed.as_secs_f64()
                     );
                 }
                 Err(e) => {
-                    error!("❌ Deployment evaluation failed: {:#}", e);
+                    error!("❌ Policy update failed: {:#}", e);
                 }
             }
 
@@ -49,9 +51,9 @@ impl DeploymentEvaluator {
         }
     }
 
-    /// Evaluate deployment policies for all systems
-    async fn evaluate_deployments(&self) -> Result<EvaluationStats> {
-        let mut stats = EvaluationStats::default();
+    /// Update desired_target for all systems with auto_latest policy
+    async fn update_auto_latest_policies(&self) -> Result<PolicyUpdateStats> {
+        let mut stats = PolicyUpdateStats::default();
 
         // Get all systems with auto_latest policy
         let auto_latest_systems = get_systems_with_auto_latest_policy(&self.pool)
@@ -80,15 +82,12 @@ impl DeploymentEvaluator {
 
         // Process each flake
         for (flake_id, systems) in systems_by_flake {
-            match self.evaluate_flake_deployments(flake_id, systems).await {
+            match self.update_flake_systems_to_latest(flake_id, systems).await {
                 Ok(updated_count) => {
                     stats.systems_updated += updated_count;
                 }
                 Err(e) => {
-                    error!(
-                        "Failed to evaluate deployments for flake {}: {:#}",
-                        flake_id, e
-                    );
+                    error!("Failed to update systems for flake {}: {:#}", flake_id, e);
                 }
             }
         }
@@ -96,8 +95,8 @@ impl DeploymentEvaluator {
         Ok(stats)
     }
 
-    /// Evaluate deployments for all systems using a specific flake
-    async fn evaluate_flake_deployments(
+    /// Update all systems using a specific flake to the latest successful derivation
+    async fn update_flake_systems_to_latest(
         &self,
         flake_id: i32,
         systems: Vec<crate::models::systems::System>,
@@ -112,12 +111,13 @@ impl DeploymentEvaluator {
                 }
             };
 
-        let latest_target = self.build_flake_target(&latest_derivation)?;
+        // Get the flake target from the successful derivation
+        let latest_flake_target = self.get_derivation_flake_target(&latest_derivation)?;
         let mut updated_count = 0;
 
         for system in systems {
-            // Skip if system already has the latest target
-            if system.desired_target.as_ref() == Some(&latest_target) {
+            // Skip if system already has the latest flake target as desired target
+            if system.desired_target.as_ref() == Some(&latest_flake_target) {
                 debug!("System {} already has latest target", system.hostname);
                 continue;
             }
@@ -141,14 +141,16 @@ impl DeploymentEvaluator {
                 }
             }
 
-            // Update the system's desired target
-            match update_desired_target(&self.pool, &system.hostname, Some(&latest_target)).await {
+            // Update the system's desired target to the latest flake target
+            match update_desired_target(&self.pool, &system.hostname, Some(&latest_flake_target))
+                .await
+            {
                 Ok(()) => {
                     info!(
                         "📋 Updated desired target for {}: {} -> {}",
                         system.hostname,
                         system.desired_target.as_deref().unwrap_or("(none)"),
-                        latest_target
+                        latest_flake_target
                     );
                     updated_count += 1;
                 }
@@ -164,20 +166,18 @@ impl DeploymentEvaluator {
         Ok(updated_count)
     }
 
-    /// Build flake target string from derivation
-    fn build_flake_target(
+    /// Get the flake target from a successful derivation for deployment
+    /// For deployments, we need the flake target that agents can actually deploy
+    fn get_derivation_flake_target(
         &self,
         derivation: &crate::models::derivations::Derivation,
     ) -> Result<String> {
-        // This would build the flake target string from the derivation
-        // For now, return the derivation target if available, or construct from derivation name
+        // derivation_target should contain the flake target for deployments
         if let Some(target) = &derivation.derivation_target {
             Ok(target.clone())
         } else {
-            // Construct flake target - this would need to be implemented based on your flake structure
-            // For example: "git+https://gitlab.com/user/repo?rev=commit#nixosConfigurations.hostname.config.system.build.toplevel"
             anyhow::bail!(
-                "Derivation {} has no target and target construction not implemented",
+                "Derivation {} has no derivation_target - cannot determine flake target for deployment",
                 derivation.id
             );
         }
@@ -185,21 +185,21 @@ impl DeploymentEvaluator {
 }
 
 #[derive(Default)]
-struct EvaluationStats {
+struct PolicyUpdateStats {
     systems_checked: usize,
     systems_updated: usize,
 }
 
-/// Spawn the deployment evaluator as a background task
-pub async fn spawn_deployment_evaluator(
+/// Spawn the deployment policy manager as a background task
+pub async fn spawn_deployment_policy_manager(
     config: CrystalForgeConfig,
     pool: PgPool,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let evaluator = DeploymentEvaluator::new(config, pool);
+    let manager = DeploymentPolicyManager::new(config, pool);
 
     let handle = tokio::spawn(async move {
-        if let Err(e) = evaluator.run().await {
-            error!("💥 Deployment evaluator crashed: {:#}", e);
+        if let Err(e) = manager.run().await {
+            error!("💥 Deployment policy manager crashed: {:#}", e);
         }
     });
 

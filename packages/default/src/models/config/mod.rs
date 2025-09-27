@@ -37,6 +37,19 @@ use std::time::Duration;
 use tokio_postgres::NoTls;
 use tracing::{debug, info};
 
+mod duration_serde {
+    use serde::{Deserialize, Deserializer};
+    use std::time::Duration;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct CrystalForgeConfig {
@@ -60,6 +73,8 @@ pub struct CrystalForgeConfig {
     pub cache: CacheConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(with = "duration_serde")]
+    pub deployment_poll_interval: Duration,
 }
 
 impl Default for CrystalForgeConfig {
@@ -75,6 +90,7 @@ impl Default for CrystalForgeConfig {
             build: BuildConfig::default(),
             cache: CacheConfig::default(),
             auth: AuthConfig::default(),
+            deployment_poll_interval: Duration::from_secs(15 * 60),
         }
     }
 }
