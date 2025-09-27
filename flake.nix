@@ -11,7 +11,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     nixos-compose = {
-      url = "git+https://gitlab.inria.fr/nixos-compose/nixos-compose.git";
+      url = "github:oar-team/nixos-compose/25.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

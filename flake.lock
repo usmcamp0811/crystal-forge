@@ -116,16 +116,16 @@
         ]
       },
       "locked": {
-        "lastModified": 1750939132,
-        "narHash": "sha256-IPcKLZZ+ZNOVTyKieQyioJKOne2k7p9Nqh5Om5Er/dE=",
+        "lastModified": 1756999780,
+        "narHash": "sha256-4/vC9w+eexK12RCv8uHMjRbyUtWZJyL2sDC1bdzjhyE=",
         "owner": "oar-team",
         "repo": "nur-kapack",
-        "rev": "556406449690c41d3864c35e08bafd8fc4d36f67",
+        "rev": "ba4f24ec8ded2ab933481112898319cdfcccee97",
         "type": "github"
       },
       "original": {
         "owner": "oar-team",
-        "ref": "master",
+        "ref": "25.05",
         "repo": "nur-kapack",
         "type": "github"
       }
@@ -139,17 +139,18 @@
         ]
       },
       "locked": {
-        "lastModified": 1755102734,
-        "narHash": "sha256-+YcmSGEu5GAkedoKKpW/VeTDCdgJEFyvKbolQ7Y9PG4=",
-        "ref": "refs/heads/24.11",
-        "rev": "a2dd4172551ce11daa64dfbe46a4e8c25ec7c125",
-        "revCount": 670,
-        "type": "git",
-        "url": "https://gitlab.inria.fr/nixos-compose/nixos-compose.git"
+        "lastModified": 1757000851,
+        "narHash": "sha256-mTGgjQtWYzmVo3sNhp5hkcFzRrG9N2ZHgXbCK3KvsD4=",
+        "owner": "oar-team",
+        "repo": "nixos-compose",
+        "rev": "cd13d8e7b20019993e57dc386ce30aae4196dc5a",
+        "type": "github"
       },
       "original": {
-        "type": "git",
-        "url": "https://gitlab.inria.fr/nixos-compose/nixos-compose.git"
+        "owner": "oar-team",
+        "ref": "25.05",
+        "repo": "nixos-compose",
+        "type": "github"
       }
     },
     "nixpkgs": {

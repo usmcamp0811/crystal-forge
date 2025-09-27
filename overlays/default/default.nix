@@ -5,5 +5,6 @@
   ...
 }: final: prev: {
   process-compose-flake = import process-compose-flake.lib {pkgs = final;};
-  nxc = nixos-compose.lib;
+  nxc-lib = nixos-compose.lib;
+  nxc = nixos-compose.packages.${prev.system}.nixos-compose;
 }
