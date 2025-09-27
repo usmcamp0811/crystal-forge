@@ -5,61 +5,45 @@
   inputs,
   ...
 }: let
-  # Use nixos-compose to build the composition
-  composed = inputs.nixos-compose.lib.compose {
-    inherit system;
-    nixpkgs = inputs.nixpkgs;
-    composition = ./composition.nix;
-    extraConfigurations = [
-      inputs.self.nixosModules.crystal-forge
-    ];
+  # Import your dev composition directly - this returns a derivation
+  devTest = import ./composition.nix {
+    inherit lib inputs pkgs;
   };
 
-  # Get the composition info JSON
-  vmComposition = composed."composition::vm";
-
-  composeInfo = lib.importJSON vmComposition;
-  qemuScriptPath = composeInfo.all.qemu_script;
-in
-  # Create a wrapper script that uses nxc to start the VM
-  pkgs.writeShellApplication {
-    name = "dev-env-vm";
-    runtimeInputs = [
-      pkgs.vde2
-      pkgs.nxc
-      pkgs.openssh # for ssh-keygen
+  # Create a development VM runner
+  devScript = pkgs.writeShellApplication {
+    name = "crystal-forge-dev";
+    runtimeInputs = with pkgs; [
+      qemu
+      socat
+      vde2
     ];
     text = ''
-      # Create SSH key if needed
-      mkdir -p ~/.ssh
-      if [ ! -f ~/.ssh/id_rsa ]; then
-        ssh-keygen -t rsa -b 2048 -f ~/.ssh/id_rsa -N ""
-      fi
+      echo "Starting Crystal Forge Development Environment..."
+      echo ""
+      echo "This will start:"
+      echo "  - Crystal Forge server with PostgreSQL"
+      echo "  - Git server with test repositories"
+      echo "  - Interactive Python shell for VM control"
+      echo ""
+      echo "Once started, you'll have access to:"
+      echo "  - Crystal Forge API at http://localhost:3000"
+      echo "  - PostgreSQL at localhost:5433"
+      echo "  - Git server at http://localhost:8080"
+      echo ""
+      echo "Use server.shell_interact() to get a shell on the main server"
+      echo ""
 
-      # Create minimal working directory
-      WORK_DIR=$(mktemp -d)
-      cd "$WORK_DIR"
-
-      # Copy composition
-      cp ${./composition.nix} composition.nix
-
-      # Create nxc.json
-      cat > nxc.json << 'EOF'
-      {
-        "composition": "composition.nix",
-        "default_flavour": "vm"
-      }
-      EOF
-
-      # Create the build directory with symlink
-      mkdir -p build
-      ln -sf ${vmComposition} build/composition::vm
-
-      # Now nxc start works!
-      exec nxc start --interactive
+      # Run the test with interactive driver
+      ${devTest.driverInteractive}/bin/nixos-test-driver
     '';
-  }
+  };
+in
+  devScript
   // {
-    inherit composed vmComposition;
-    nxc = pkgs.nxc;
+    # Expose the test components for debugging/inspection
+    inherit devTest;
+    test = devTest;
+    driver = devTest.driver;
+    driverInteractive = devTest.driverInteractive;
   }
