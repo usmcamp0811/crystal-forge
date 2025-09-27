@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -192,3 +193,188 @@ def test_nixos_module_desired_target_sync(cf_client, server, agent):
     )
 
     assert result[0]["deployment_policy"] == "auto_latest"
+
+
+@pytest.mark.slow
+def test_deployment_policy_manager_auto_latest(cf_client, server, agent):
+    """Test that deployment policy manager updates desired_target for auto_latest systems"""
+    wait_for_crystal_forge_ready(server)
+    agent_hostname = agent.succeed("hostname -s").strip()
+
+    # Wait for agent acceptance first
+    wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
+
+    # Test setup: Create a flake and commit scenario for the agent
+    now = datetime.now(UTC)
+
+    # Create flake for the agent system
+    flake_id = cf_client.execute_sql(
+        """
+        INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
+        VALUES (%s, %s, true, %s, %s)
+        RETURNING id
+        """,
+        ("test-auto-latest", "https://example.com/test-auto-latest.git", now, now),
+    )[0]["id"]
+
+    # Update the agent system to use this flake and set auto_latest policy
+    cf_client.execute_sql(
+        """
+        UPDATE systems 
+        SET flake_id = %s, deployment_policy = 'auto_latest', desired_target = NULL
+        WHERE hostname = %s
+        """,
+        (flake_id, agent_hostname),
+    )
+
+    # Create a commit
+    git_hash = "abc123def456"
+    commit_id = cf_client.execute_sql(
+        """
+        INSERT INTO commits (flake_id, git_commit_hash, commit_message, author_name, author_email, timestamp, created_at)
+        VALUES (%s, %s, 'Test commit for auto_latest', 'Test Author', 'test@example.com', %s, %s)
+        RETURNING id
+        """,
+        (flake_id, git_hash, now, now),
+    )[0]["id"]
+
+    # Create a successful derivation for this commit
+    derivation_target = f"git+https://example.com/test-auto-latest.git?rev={git_hash}#nixosConfigurations.{agent_hostname}.config.system.build.toplevel"
+    derivation_id = cf_client.execute_sql(
+        """
+        INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path, derivation_target,
+            status_id, attempt_count, scheduled_at, started_at, completed_at
+        )
+        VALUES (
+            %s, 'nixos', %s, '/nix/store/test-derivation.drv', %s,
+            (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
+            1, %s, %s, %s
+        )
+        RETURNING id
+        """,
+        (
+            commit_id,
+            agent_hostname,
+            derivation_target,
+            now - timedelta(minutes=10),
+            now - timedelta(minutes=9),
+            now - timedelta(minutes=5),
+        ),
+    )[0]["id"]
+
+    # Verify initial state - no desired_target set
+    result = cf_client.execute_sql(
+        "SELECT desired_target, deployment_policy FROM systems WHERE hostname = %s",
+        (agent_hostname,),
+    )
+    assert result[0]["desired_target"] is None
+    assert result[0]["deployment_policy"] == "auto_latest"
+
+    # Trigger the deployment policy manager by running the postgres jobs
+    # This should update the desired_target for our auto_latest system
+    run_service_and_verify_success(
+        cf_client, server, C.JOBS_SERVICE, "All jobs completed successfully"
+    )
+
+    # Wait a moment for the policy manager to process
+    import time
+
+    time.sleep(2)
+
+    # Verify that desired_target has been updated to the latest successful derivation
+    result = cf_client.execute_sql(
+        "SELECT desired_target FROM systems WHERE hostname = %s", (agent_hostname,)
+    )
+
+    assert result[0]["desired_target"] == derivation_target, (
+        f"Expected desired_target to be {derivation_target}, "
+        f"but got {result[0]['desired_target']}"
+    )
+
+    # Test that agent receives the updated desired_target
+    response = agent.succeed(
+        """
+        curl -s -X POST http://server:3000/current-system \\
+            -H "X-Key-ID: $(hostname -s)" \\
+            -H "X-Signature: $(echo '{"hostname":"'$(hostname -s)'","change_reason":"policy_test"}' | \\
+                /etc/agent.key sign | base64 -w0)" \\
+            -H "Content-Type: application/json" \\
+            -d '{"hostname":"'$(hostname -s)'","change_reason":"policy_test"}'
+        """
+    )
+
+    response_json = json.loads(response)
+    assert "desired_target" in response_json
+    assert response_json["desired_target"] == derivation_target
+
+    # Test with a newer commit to verify auto-update behavior
+    git_hash_new = "def456abc789"
+    commit_id_new = cf_client.execute_sql(
+        """
+        INSERT INTO commits (flake_id, git_commit_hash, commit_message, author_name, author_email, timestamp, created_at)
+        VALUES (%s, %s, 'Newer commit for auto_latest', 'Test Author', 'test@example.com', %s, %s)
+        RETURNING id
+        """,
+        (
+            flake_id,
+            git_hash_new,
+            now + timedelta(minutes=10),
+            now + timedelta(minutes=10),
+        ),
+    )[0]["id"]
+
+    # Create a successful derivation for the new commit
+    derivation_target_new = f"git+https://example.com/test-auto-latest.git?rev={git_hash_new}#nixosConfigurations.{agent_hostname}.config.system.build.toplevel"
+    cf_client.execute_sql(
+        """
+        INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path, derivation_target,
+            status_id, attempt_count, scheduled_at, started_at, completed_at
+        )
+        VALUES (
+            %s, 'nixos', %s, '/nix/store/test-derivation-new.drv', %s,
+            (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
+            1, %s, %s, %s
+        )
+        """,
+        (
+            commit_id_new,
+            agent_hostname,
+            derivation_target_new,
+            now + timedelta(minutes=1),
+            now + timedelta(minutes=2),
+            now + timedelta(minutes=5),
+        ),
+    )
+
+    # Run the policy manager again
+    run_service_and_verify_success(
+        cf_client, server, C.JOBS_SERVICE, "All jobs completed successfully"
+    )
+
+    time.sleep(2)
+
+    # Verify desired_target updated to the newer derivation
+    result = cf_client.execute_sql(
+        "SELECT desired_target FROM systems WHERE hostname = %s", (agent_hostname,)
+    )
+
+    assert result[0]["desired_target"] == derivation_target_new, (
+        f"Expected desired_target to be updated to {derivation_target_new}, "
+        f"but got {result[0]['desired_target']}"
+    )
+
+    # Clean up test data
+    cf_client.execute_sql(
+        "DELETE FROM derivations WHERE commit_id IN (%s, %s)",
+        (commit_id, commit_id_new),
+    )
+    cf_client.execute_sql(
+        "DELETE FROM commits WHERE id IN (%s, %s)", (commit_id, commit_id_new)
+    )
+    cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
+    cf_client.execute_sql(
+        "UPDATE systems SET flake_id = NULL, deployment_policy = 'manual', desired_target = NULL WHERE hostname = %s",
+        (agent_hostname,),
+    )
