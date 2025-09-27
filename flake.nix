@@ -10,6 +10,10 @@
       url = "github:snowfallorg/lib";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    nixos-compose = {
+      url = "git+https://gitlab.inria.fr/nixos-compose/nixos-compose.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs: let
