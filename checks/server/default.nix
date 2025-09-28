@@ -65,7 +65,6 @@ in
           "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
           "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
           "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
-          "Z /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -" # Add this line
         ];
 
         services.postgresql = {

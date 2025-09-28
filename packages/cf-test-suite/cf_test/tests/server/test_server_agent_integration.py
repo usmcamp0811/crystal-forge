@@ -1,19 +1,15 @@
 import json
+import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from cf_test.vm_helpers import SmokeTestConstants as C
-from cf_test.vm_helpers import (
-    SmokeTestData,
-    check_keys_exist,
-    check_timer_active,
-    get_system_hash,
-    run_service_and_verify_success,
-    verify_db_state,
-    wait_for_agent_acceptance,
-    wait_for_crystal_forge_ready,
-)
+from cf_test.vm_helpers import (SmokeTestData, check_keys_exist,
+                                check_timer_active, get_system_hash,
+                                run_service_and_verify_success,
+                                verify_db_state, wait_for_agent_acceptance,
+                                wait_for_crystal_forge_ready)
 
 pytestmark = [pytest.mark.server, pytest.mark.integration, pytest.mark.agent]
 
@@ -588,3 +584,158 @@ def test_agent_deployment_result_enum_coverage(cf_client, server, agent):
         or "failed" in agent_logs.lower()
         or "error" in agent_logs.lower()
     )
+
+@pytest.mark.slow
+def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_client, server, agent):
+    """Test that agent skips deployment when desired_target resolves to same derivation path as current system"""
+    wait_for_crystal_forge_ready(server)
+    agent_hostname = agent.succeed("hostname -s").strip()
+
+    wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
+
+    # Get the current derivation path that the agent is running
+    current_derivation_path = agent.succeed("readlink /run/current-system").strip()
+    
+    # Create a test scenario where we have the same derivation but from different git hashes
+    # This simulates when two different commits/refs point to the same actual build result
+    
+    # Test 1: Set a desired target that should resolve to the same derivation path
+    # In a real scenario, this could happen when:
+    # - Two commits have identical content (e.g., merge commits, reverts, etc.)
+    # - A tag and branch point to the same commit
+    # - Manual testing with the same configuration
+    test_target_same_path = f"git+https://example.com/repo?rev=same-content-123#nixosConfigurations.{agent_hostname}.config.system.build.toplevel"
+    
+    # Mock the scenario by setting up database state that represents a desired target
+    # that would resolve to the same derivation path
+    now = datetime.now(UTC)
+    
+    # Create a flake for testing
+    flake_id = cf_client.execute_sql(
+        """
+        INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
+        VALUES (%s, %s, true, %s, %s)
+        RETURNING id
+        """,
+        ("test-same-derivation", "https://example.com/test-same-derivation.git", now, now),
+    )[0]["id"]
+    
+    # Create a commit
+    commit_id = cf_client.execute_sql(
+        """
+        INSERT INTO commits (flake_id, git_commit_hash, commit_message, author_name, author_email, timestamp, created_at)
+        VALUES (%s, %s, 'Same content commit', 'Test Author', 'test@example.com', %s, %s)
+        RETURNING id
+        """,
+        (flake_id, "same-content-123", now, now),
+    )[0]["id"]
+    
+    # Create a derivation that has the SAME derivation_path as current system
+    # This simulates the case where different git refs produce identical builds
+    cf_client.execute_sql(
+        """
+        INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path, derivation_target,
+            status_id, attempt_count, scheduled_at, started_at, completed_at
+        )
+        VALUES (
+            %s, 'nixos', %s, %s, %s,
+            (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
+            1, %s, %s, %s
+        )
+        """,
+        (
+            commit_id,
+            agent_hostname,
+            current_derivation_path,  # Same as current system!
+            test_target_same_path,
+            now - timedelta(minutes=10),
+            now - timedelta(minutes=9),
+            now - timedelta(minutes=5),
+        ),
+    )
+    
+    # Set the desired target
+    cf_client.execute_sql(
+        "UPDATE systems SET desired_target = %s WHERE hostname = %s",
+        (test_target_same_path, agent_hostname),
+    )
+
+    # Clear agent logs before test
+    agent.succeed("journalctl --vacuum-time=1s")
+
+    # Trigger a heartbeat
+    agent.succeed("touch /run/current-system")
+    time.sleep(5)
+
+    # Check agent logs - should NOT attempt deployment
+    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    
+    # The agent should recognize it's already on the target and skip deployment
+    assert any(phrase in agent_logs for phrase in [
+        "Already on target",
+        "Same derivation path",
+        "Skipping deployment - already current",
+        "No deployment needed - already on desired target"
+    ]), f"Agent should skip deployment when desired target has same derivation path. Logs: {agent_logs}"
+    
+    # Should NOT see deployment attempt messages
+    assert "Starting deployment execution" not in agent_logs, "Agent should not attempt deployment for same derivation path"
+    
+    # Test 2: Change to a different derivation path to verify deployment would still work
+    different_derivation_path = "/nix/store/different-hash-system"
+    test_target_different = f"git+https://example.com/repo?rev=different-content-456#nixosConfigurations.{agent_hostname}.config.system.build.toplevel"
+    
+    # Create another commit with different derivation path
+    commit_id_different = cf_client.execute_sql(
+        """
+        INSERT INTO commits (flake_id, git_commit_hash, commit_message, author_name, author_email, timestamp, created_at)
+        VALUES (%s, %s, 'Different content commit', 'Test Author', 'test@example.com', %s, %s)
+        RETURNING id
+        """,
+        (flake_id, "different-content-456", now + timedelta(minutes=1), now + timedelta(minutes=1)),
+    )[0]["id"]
+    
+    cf_client.execute_sql(
+        """
+        INSERT INTO derivations (
+            commit_id, derivation_type, derivation_name, derivation_path, derivation_target,
+            status_id, attempt_count, scheduled_at, started_at, completed_at
+        )
+        VALUES (
+            %s, 'nixos', %s, %s, %s,
+            (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
+            1, %s, %s, %s
+        )
+        """,
+        (
+            commit_id_different,
+            agent_hostname,
+            different_derivation_path,  # Different path
+            test_target_different,
+            now - timedelta(minutes=5),
+            now - timedelta(minutes=4),
+            now - timedelta(minutes=1),
+        ),
+    )
+    
+    # Update desired target to the different one
+    cf_client.execute_sql(
+        "UPDATE systems SET desired_target = %s WHERE hostname = %s",
+        (test_target_different, agent_hostname),
+    )
+    
+    # Clear logs and trigger heartbeat
+    agent.succeed("journalctl --vacuum-time=1s")
+    agent.succeed("touch /run/current-system")
+    time.sleep(5)
+    
+    # This time should attempt deployment since derivation paths differ
+    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    assert "Starting deployment execution" in agent_logs, "Agent should attempt deployment for different derivation path"
+    
+    # Clean up test data
+    cf_client.execute_sql("DELETE FROM derivations WHERE commit_id IN (%s, %s)", (commit_id, commit_id_different))
+    cf_client.execute_sql("DELETE FROM commits WHERE id IN (%s, %s)", (commit_id, commit_id_different))
+    cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
+    cf_client.execute_sql("UPDATE systems SET desired_target = NULL WHERE hostname = %s", (agent_hostname,))
