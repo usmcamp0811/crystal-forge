@@ -5,6 +5,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
+    deployment::spawn_deployment_policy_manager,
     flake::commits::initialize_flake_commits,
     handlers::{
         agent::{heartbeat, state},
@@ -45,11 +46,13 @@ async fn main() -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
     let background_pool = pool.clone();
+    let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
     // TODO: Update this to get the first N commits on the first time
     reset_non_terminal_derivations(&pool).await?;
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
     spawn_background_tasks(cfg.clone(), background_pool);
+    spawn_deployment_policy_manager(cfg.clone(), deployment_pool).await?;
 
     // Start HTTP server
     info!("Starting Crystal Forge Server...");

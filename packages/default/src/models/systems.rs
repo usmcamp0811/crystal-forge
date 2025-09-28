@@ -8,6 +8,39 @@ use sqlx::PgPool;
 use std::option::Option;
 use uuid::Uuid;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum DeploymentPolicy {
+    #[serde(rename = "manual")]
+    Manual,
+    #[serde(rename = "auto_latest")]
+    AutoLatest,
+    #[serde(rename = "pinned")]
+    Pinned,
+}
+
+impl std::fmt::Display for DeploymentPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeploymentPolicy::Manual => write!(f, "manual"),
+            DeploymentPolicy::AutoLatest => write!(f, "auto_latest"),
+            DeploymentPolicy::Pinned => write!(f, "pinned"),
+        }
+    }
+}
+
+impl std::str::FromStr for DeploymentPolicy {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "manual" => Ok(DeploymentPolicy::Manual),
+            "auto_latest" => Ok(DeploymentPolicy::AutoLatest),
+            "pinned" => Ok(DeploymentPolicy::Pinned),
+            _ => Err(anyhow::anyhow!("Invalid deployment policy: {}", s)),
+        }
+    }
+}
+
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct System {
     pub id: Uuid,
@@ -19,6 +52,8 @@ pub struct System {
     pub derivation: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub desired_target: Option<String>,
+    pub deployment_policy: String, // Will be converted to/from DeploymentPolicy enum
 }
 
 impl System {
@@ -29,10 +64,13 @@ impl System {
         hostname: String,
         environment_id: Option<Uuid>,
         is_active: bool,
-        public_key_base64: String,
+        public_key_base64: String, // Fixed parameter name
         flake_id: Option<i32>,
-    ) -> Result<System> {
+        desired_target: Option<String>,
+        deployment_policy: String,
+    ) -> Result<Self> {
         let public_key = PublicKey::from_base64(&public_key_base64, &hostname)?;
+        let _deployment_policy_enum = deployment_policy.parse::<DeploymentPolicy>()?; // Validate it parses correctly
 
         let system = System {
             id: Uuid::nil(), // placeholder; DB will assign real UUID
@@ -44,8 +82,32 @@ impl System {
             derivation: "".into(), // leave empty; DB or later logic sets it
             created_at: chrono::Utc::now(), // placeholder; overwritten by DB
             updated_at: chrono::Utc::now(), // placeholder; overwritten by DB
+            desired_target,
+            deployment_policy, // Use the input parameter (as string for DB storage)
         };
-
         insert_system(pool, &system).await
+    }
+
+    /// Get the deployment policy as an enum
+    pub fn get_deployment_policy(&self) -> Result<DeploymentPolicy> {
+        self.deployment_policy.parse()
+    }
+
+    /// Set the deployment policy from an enum
+    pub fn set_deployment_policy(&mut self, policy: DeploymentPolicy) {
+        self.deployment_policy = policy.to_string();
+    }
+
+    /// Check if the system has a desired derivation set
+    pub fn has_pending_deployment(&self) -> bool {
+        self.desired_target.is_some()
+    }
+
+    /// Check if the system is configured for automatic deployments
+    pub fn is_auto_deployment_enabled(&self) -> bool {
+        matches!(
+            self.get_deployment_policy(),
+            Ok(DeploymentPolicy::AutoLatest)
+        )
     }
 }

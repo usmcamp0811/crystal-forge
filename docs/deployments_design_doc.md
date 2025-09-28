@@ -32,7 +32,7 @@ This maintains the existing communication pattern while adding server-to-agent c
 
 ```sql
 ALTER TABLE systems
-  ADD COLUMN desired_derivation TEXT,
+  ADD COLUMN desired_target TEXT,
   ADD COLUMN deployment_policy TEXT DEFAULT 'manual'
     CHECK (deployment_policy IN ('manual', 'auto_latest', 'pinned')),
   ADD COLUMN server_public_key TEXT;
@@ -57,7 +57,7 @@ ALTER TABLE derivations
 
 **Per-system deployment policies:**
 
-1. **`manual`** (default): Admin explicitly sets `desired_derivation`
+1. **`manual`** (default): Admin explicitly sets `desired_target`
 2. **`auto_latest`**: Always deploy latest successful derivation for system's flake
 3. **`pinned`**: Stay on current derivation until manually changed
 
@@ -177,7 +177,7 @@ Leverage existing Crystal Forge auto-discovery:
 #### Rollback Strategy
 
 - Manual rollback only (for initial implementation)
-- Admin sets `desired_derivation` to previous known-good derivation
+- Admin sets `desired_target` to previous known-good derivation
 - Future enhancement: automatic rollback on deployment failure
 
 ### Implementation Phases

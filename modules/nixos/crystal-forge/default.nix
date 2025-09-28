@@ -8,7 +8,16 @@
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
 
-  baseConfig =
+  # Recursively remove any null values so TOML generation won’t choke.
+  stripNulls = v:
+    if builtins.isAttrs v
+    then lib.filterAttrs (_: vv: vv != null) (lib.mapAttrs (_: stripNulls) v)
+    else if builtins.isList v
+    then lib.filter (x: x != null) (map stripNulls v)
+    else v;
+
+  # Build the raw config first (your existing baseConfig logic, unchanged)
+  baseConfigRaw =
     {
       database = {
         host = cfg.database.host;
@@ -35,6 +44,8 @@
       };
     }
     // lib.optionalAttrs (cfg.systems != []) {
+      # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
+      # We’ll strip them globally via stripNulls below.
       systems = cfg.systems;
     }
     // lib.optionalAttrs (cfg.flakes.watched != []) {
@@ -137,6 +148,9 @@
           attic_cache_name = cfg.cache.attic_cache_name;
         };
     };
+
+  # Now sanitize away any nulls before TOML generation
+  baseConfig = stripNulls baseConfigRaw;
 
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
   generatedConfigPath = "/var/lib/crystal-forge/config.toml";
@@ -497,6 +511,11 @@ in {
         default = null;
         description = "Signing key path";
       };
+      public_key = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Public key for verifying cache signatures (used in trusted-public-keys)";
+      };
       compression = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -567,6 +586,16 @@ in {
             default = null;
             description = "Flake ref name";
           };
+          desired_target = lib.mkOption {
+            type = lib.types.nullOr lib.types.str;
+            default = null;
+            description = "Desired derivation hash for system";
+          };
+          deployment_policy = lib.mkOption {
+            type = lib.types.enum ["manual" "auto_latest" "pinned"];
+            default = "manual";
+            description = "Deployment policy for the system";
+          };
         };
       });
       default = [];
@@ -577,6 +606,8 @@ in {
           public_key = "base64encodedkey";
           environment = "production";
           flake_name = "dotfiles";
+          desired_target = null;
+          deployment_policy = "manual";
         }
       ];
     };
@@ -653,10 +684,18 @@ in {
   };
 
   config = lib.mkIf cfg.enable {
-    nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable) {
+    nix.settings = lib.mkIf (cfg.server.enable || cfg.build.enable || cfg.client.enable) {
       experimental-features = ["nix-command" "flakes"];
       allowed-users = ["root" "crystal-forge"];
       trusted-users = ["root" "crystal-forge"];
+
+      # Add substituters based on cache configuration
+      substituters = lib.mkIf (cfg.cache.push_to != null) [
+        cfg.cache.push_to
+      ];
+      trusted-public-keys = lib.mkIf (cfg.cache.public_key != null) [
+        cfg.cache.public_key
+      ];
     };
 
     users.users.crystal-forge = lib.mkIf (cfg.server.enable || cfg.build.enable) {
@@ -685,6 +724,7 @@ in {
       "d /var/lib/crystal-forge/.config/nix 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
+      "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
     ];
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
@@ -756,6 +796,7 @@ in {
         DB_USER = cfg.database.user;
         DB_PASSWORD = lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
         JOB_DIR = "${pkgs.crystal-forge.run-postgres-jobs}/jobs";
+        NIX_CONFIG_DIR = "/var/lib/crystal-forge/.config/nix";
       };
 
       script =
@@ -912,7 +953,12 @@ in {
           ProtectKernelModules = true;
           ProtectControlGroups = true;
 
-          ReadWritePaths = ["/var/lib/crystal-forge" "/tmp" "/run/crystal-forge"];
+          ReadWritePaths = [
+            "/var/lib/crystal-forge"
+            "/tmp"
+            "/run/crystal-forge"
+            "/var/cache/crystal-forge-nix"
+          ];
           ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
           Restart = "always";
@@ -955,7 +1001,12 @@ in {
         NoNewPrivileges = true;
         ProtectSystem = "no";
         ProtectHome = true;
-        ReadWritePaths = ["/var/lib/crystal-forge"];
+        ReadWritePaths = [
+          "/var/lib/crystal-forge"
+          "/tmp"
+          "/run/crystal-forge"
+          "/var/cache/crystal-forge-nix"
+        ];
         PrivateTmp = true;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;

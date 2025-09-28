@@ -5,3 +5,4 @@ pub mod models;
 pub mod queries;
 pub mod server;
 pub mod vulnix;
+pub mod deployment;

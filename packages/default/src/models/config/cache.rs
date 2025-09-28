@@ -1,18 +1,6 @@
+use crate::models::config::duration_serde;
 use serde::Deserialize;
 use std::time::Duration;
-
-mod duration_serde {
-    use serde::{Deserialize, Deserializer};
-    use std::time::Duration;
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let secs = u64::deserialize(deserializer)?;
-        Ok(Duration::from_secs(secs))
-    }
-}
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CacheConfig {
