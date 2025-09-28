@@ -1,20 +1,38 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use crystal_forge::deployment::agent::{AgentDeploymentManager, DeploymentResult};
+use crystal_forge::handlers::agent::heartbeat::LogResponse;
 use crystal_forge::models::config::CrystalForgeConfig;
 use crystal_forge::models::system_states::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};
 use reqwest::blocking::Client;
 use serde_json::Value;
-use std::{ffi::OsStr, fs, path::PathBuf, process::Command};
+use std::{ffi::OsStr, fs, path::PathBuf, process::Command, sync::Arc};
+use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
+// Agent state that holds the deployment manager
+struct AgentState {
+    deployment_manager: AgentDeploymentManager,
+}
+
+impl AgentState {
+    fn new() -> Result<Self> {
+        let cfg = CrystalForgeConfig::load()?;
+        let deployment_manager = AgentDeploymentManager::new(cfg.deployment.clone());
+
+        Ok(Self { deployment_manager })
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // TODO: Update watch_system to take in the private key path
-    watch_system().await
+    // Initialize agent state with deployment manager
+    let agent_state = Arc::new(Mutex::new(AgentState::new()?));
+    watch_system(agent_state).await
 }
 
 /// Reads a symlink and returns its target as a `PathBuf`.
@@ -84,34 +102,12 @@ fn deriver_drv_with_test_fallback(path: &OsStr) -> Result<String> {
                     }
                 }
             }
-            // NOTE: Do we want to return a more obvious name to say its not real?
             // Last resort: construct a fake .drv path for testing
             Ok(format!("{}.drv", path_str))
         }
     }
 }
 
-/// Posts the current Nix system derivation ID to a configured server.
-///
-/// This function:
-/// 1. Loads the client and server configuration from the config file.
-/// 2. Reads and decodes the Ed25519 private key from the configured path.
-/// 3. Constructs a payload using the system hostname and derivation ID.
-/// 4. Signs the payload using the private key.
-/// 5. Sends the payload to the server with signature headers.
-///
-/// The server is expected to:
-/// - Verify the signature using the public key listed in its authorized keys
-/// - Accept a POST at `/ingest` with headers `X-Signature` and `X-Key-ID`
-///
-/// # Arguments
-///
-/// * `current_system` - A reference to the `OsStr` path pointing to the derivation in /nix/store
-///
-/// # Errors
-///
-/// Returns an error if configuration cannot be loaded, the key cannot be read,
-/// signing fails, or the HTTP request fails.
 /// Creates and signs a system state payload
 fn create_signed_payload(
     current_system: &OsStr,
@@ -180,7 +176,92 @@ pub fn post_system_state_change(current_system: &OsStr, context: &str) -> Result
     Ok(())
 }
 
-/// Posts heartbeat to the server
+/// Posts heartbeat to the server and handles deployment responses
+pub async fn post_system_heartbeat_with_deployment(
+    current_system: &OsStr,
+    context: &str,
+    agent_state: Arc<Mutex<AgentState>>,
+) -> Result<()> {
+    let cfg = CrystalForgeConfig::load()?;
+    let client_cfg = &cfg.client;
+
+    let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
+    let hostname = hostname::get()?.to_string_lossy().into_owned();
+
+    // Send to heartbeat endpoint
+    let client = reqwest::Client::new();
+    let (scheme, port_suffix) = match client_cfg.server_port {
+        443 => ("https", "".to_string()),
+        80 => ("http", "".to_string()),
+        port => ("http", format!(":{}", port)),
+    };
+
+    let url = format!(
+        "{}://{}{}/agent/heartbeat",
+        scheme, client_cfg.server_host, port_suffix
+    );
+
+    println!("Posting heartbeat to: {}", url);
+    let res = client
+        .post(url)
+        .header("X-Signature", signature_b64)
+        .header("X-Key-ID", hostname)
+        .body(payload_json)
+        .send()
+        .await
+        .context("failed to send heartbeat POST")?;
+
+    if !res.status().is_success() {
+        anyhow::bail!("server responded with {}", res.status());
+    }
+
+    // Parse the response for deployment instructions
+    let log_response: LogResponse = res
+        .json()
+        .await
+        .context("failed to parse LogResponse from server")?;
+
+    // Process deployment with our deployment manager
+    let mut state = agent_state.lock().await;
+    let deployment_result = state
+        .deployment_manager
+        .process_heartbeat_response(log_response)
+        .await?;
+
+    match deployment_result {
+        DeploymentResult::SuccessFromCache { ref cache_url } => {
+            println!(
+                "✅ Deployment completed successfully from cache: {}",
+                cache_url
+            );
+            // Drop the lock before calling post_system_state_change
+            drop(state);
+            post_system_state_change(current_system, "cf_deployment")?;
+        }
+        DeploymentResult::SuccessLocalBuild => {
+            println!("✅ Deployment completed successfully with local build");
+            // Drop the lock before calling post_system_state_change
+            drop(state);
+            post_system_state_change(current_system, "cf_deployment")?;
+        }
+        DeploymentResult::Failed {
+            ref error,
+            ref desired_target,
+        } => {
+            eprintln!("❌ Deployment failed for {}: {}", desired_target, error);
+        }
+        DeploymentResult::NoDeploymentNeeded => {
+            println!("ℹ️ No deployment needed");
+        }
+        DeploymentResult::AlreadyOnTarget => {
+            println!("ℹ️ Already on target configuration");
+        }
+    }
+
+    Ok(())
+}
+
+/// Legacy heartbeat function for backwards compatibility
 pub fn post_system_heartbeat(current_system: &OsStr, context: &str) -> Result<()> {
     let cfg = CrystalForgeConfig::load()?;
     let client_cfg = &cfg.client;
@@ -188,12 +269,12 @@ pub fn post_system_heartbeat(current_system: &OsStr, context: &str) -> Result<()
     let (payload, payload_json, signature_b64) = create_signed_payload(current_system, context)?;
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
-    // Send to heartbeat endpoint - USE SAME URL LOGIC AS STATE ENDPOINT
+    // Send to heartbeat endpoint
     let client = Client::new();
     let (scheme, port_suffix) = match client_cfg.server_port {
-        443 => ("https", "".to_string()),       // Omit :443 for HTTPS
-        80 => ("http", "".to_string()),         // Omit :80 for HTTP
-        port => ("http", format!(":{}", port)), // Include port for non-standard
+        443 => ("https", "".to_string()),
+        80 => ("http", "".to_string()),
+        port => ("http", format!(":{}", port)),
     };
 
     let url = format!(
@@ -243,6 +324,32 @@ where
     Ok(())
 }
 
+/// Async version that can handle deployment
+async fn report_current_system_derivation_async<F>(
+    name: &OsStr,
+    context: &str,
+    readlink_fn: F,
+    agent_state: Arc<Mutex<AgentState>>,
+) -> Result<()>
+where
+    F: Fn(&str) -> Result<PathBuf>,
+{
+    if name != OsStr::new("current-system") {
+        return Ok(());
+    }
+
+    let current_system = readlink_fn("/run/current-system")?;
+    println!(
+        "[{}] Current System: {}",
+        context,
+        current_system.to_string_lossy()
+    );
+
+    // Use the new heartbeat function that handles deployments
+    post_system_heartbeat_with_deployment(current_system.as_os_str(), context, agent_state).await?;
+    Ok(())
+}
+
 /// Runs a loop that watches for inotify events and handles "current-system" changes using
 /// provided readlink and insertion callbacks. Designed for testing and flexibility.
 async fn watch_for_system_changes<F, R>(
@@ -272,34 +379,42 @@ where
     }
 }
 
-async fn run_periodic_heartbeat_loop() -> Result<()> {
+async fn run_periodic_heartbeat_loop_with_deployment(
+    agent_state: Arc<Mutex<AgentState>>,
+) -> Result<()> {
     sleep(Duration::from_secs(600)).await;
-    info!("💓 Starting heartbeat loop (every 10m)...");
+    info!("💓 Starting heartbeat loop with deployment support (every 10m)...");
     loop {
-        if let Err(e) = report_current_system_derivation(
+        if let Err(e) = report_current_system_derivation_async(
             OsStr::new("current-system"),
             "heartbeat",
             readlink_path,
-            post_system_heartbeat,
-        ) {
+            agent_state.clone(),
+        )
+        .await
+        {
             error!("❌ Heartbeat failed: {e}");
         }
         sleep(Duration::from_secs(600)).await;
     }
 }
 
-// TODO: Update watch_system to take in the private key path
 /// Initializes an inotify watcher on `/run` for "current-system" and records updates
 /// to the system state in the database.
-pub async fn watch_system() -> Result<()> {
+pub async fn watch_system(agent_state: Arc<Mutex<AgentState>>) -> Result<()> {
     let mut inotify = Inotify::init(InitFlags::empty())?;
     inotify.add_watch(
         "/run",
         AddWatchFlags::IN_CREATE | AddWatchFlags::IN_MOVED_TO,
     )?;
 
-    tokio::spawn(run_periodic_heartbeat_loop());
-    // TODO: add watch for home-manager too
+    // Spawn the heartbeat loop with deployment support
+    tokio::spawn(run_periodic_heartbeat_loop_with_deployment(
+        agent_state.clone(),
+    ));
+
+    // For now, use the old watch loop for file system changes
+    // TODO: Update this to use deployment-aware version too
     watch_for_system_changes(&mut inotify, readlink_path, post_system_state_change).await
 }
 
@@ -334,7 +449,7 @@ mod tests {
     #[test]
     fn test_handle_event_ignores_other_files() {
         let readlink_mock = |_path: &str| panic!("should not be called");
-        let insert_mock = |_os: &OsStr, _ctx: &str| panic!("should not be called"); // ← now takes 2 args
+        let insert_mock = |_os: &OsStr, _ctx: &str| panic!("should not be called");
 
         let result = report_current_system_derivation(
             OsStr::new("other-file"),

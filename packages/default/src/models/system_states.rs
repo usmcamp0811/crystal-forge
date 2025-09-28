@@ -13,6 +13,43 @@ use crate::models::network_interfaces::{
     get_gateway_ip, get_network_interfaces, get_primary_ip, get_primary_mac, get_selinux_status,
 };
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ChangeReason {
+    #[serde(rename = "startup")]
+    Startup,
+    #[serde(rename = "config_change")]
+    ConfigChange,
+    #[serde(rename = "state_delta")]
+    StateDelta,
+    #[serde(rename = "cf_deployment")]
+    CfDeployment,
+}
+
+impl std::fmt::Display for ChangeReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChangeReason::Startup => write!(f, "startup"),
+            ChangeReason::ConfigChange => write!(f, "config_change"),
+            ChangeReason::StateDelta => write!(f, "state_delta"),
+            ChangeReason::CfDeployment => write!(f, "cf_deployment"),
+        }
+    }
+}
+
+impl std::str::FromStr for ChangeReason {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "startup" => Ok(ChangeReason::Startup),
+            "config_change" => Ok(ChangeReason::ConfigChange),
+            "state_delta" => Ok(ChangeReason::StateDelta),
+            "cf_deployment" => Ok(ChangeReason::CfDeployment),
+            _ => Err(anyhow::anyhow!("Invalid change reason: {}", s)),
+        }
+    }
+}
+
 // This is the previous SystemState structure (now V1)
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct SystemStateV1 {
@@ -51,7 +88,7 @@ pub struct SystemState {
     // ───── Identification ─────
     pub id: Option<i32>,
     pub hostname: String,
-    pub change_reason: String,
+    pub change_reason: String, // Will be converted to/from ChangeReason enum
     pub timestamp: Option<DateTime<Utc>>,
 
     // ───── System Info ─────
@@ -87,6 +124,10 @@ pub struct SystemState {
     pub agent_version: Option<String>,
     pub agent_build_hash: Option<String>,
     pub nixos_version: Option<String>,
+
+    // ───── Agent Compatibility ─────
+    pub agent_compatible: Option<bool>,
+    pub partial_data: Option<bool>,
 }
 
 impl SystemState {
@@ -140,7 +181,26 @@ impl SystemState {
             agent_version: v1.agent_version,
             agent_build_hash: v1.agent_build_hash,
             nixos_version: v1.nixos_version,
+
+            // ───── Agent Compatibility (defaults for V1) ─────
+            agent_compatible: Some(true),
+            partial_data: Some(false),
         }
+    }
+
+    /// Get the change reason as an enum
+    pub fn get_change_reason(&self) -> Result<ChangeReason> {
+        self.change_reason.parse()
+    }
+
+    /// Set the change reason from an enum
+    pub fn set_change_reason(&mut self, reason: ChangeReason) {
+        self.change_reason = reason.to_string();
+    }
+
+    /// Check if this system state represents a deployment
+    pub fn is_deployment(&self) -> bool {
+        matches!(self.get_change_reason(), Ok(ChangeReason::CfDeployment))
     }
 
     /// Create a SystemState from command line arguments (for testing)
@@ -201,6 +261,10 @@ impl SystemState {
             agent_version: Some("0.1.0-test".to_string()),
             agent_build_hash: Some("test-build".to_string()),
             nixos_version: Some("25.11".to_string()),
+
+            // Agent compatibility
+            agent_compatible: Some(true),
+            partial_data: Some(false),
         })
     }
 
@@ -304,6 +368,8 @@ impl SystemState {
             agent_version,
             agent_build_hash,
             nixos_version,
+            agent_compatible: Some(true), // Default to compatible
+            partial_data: Some(false),    // Default to complete data
         })
     }
 }

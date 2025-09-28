@@ -40,6 +40,10 @@ in
       };
 
       server = {
+        nix.settings = {
+          experimental-features = ["nix-command" "flakes"];
+          # use-registries = false;
+        };
         imports = [inputs.self.nixosModules.crystal-forge];
 
         networking.useDHCP = true;
@@ -48,10 +52,19 @@ in
         virtualisation.writableStore = true;
         virtualisation.memorySize = 6144; # Increased from 4GB to 6GB
         virtualisation.cores = 4;
-        virtualisation.diskSize = 8192; # Set explicit disk size to 8GB
-        virtualisation.additionalPaths = [
-          systemBuildClosure
-          inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
+        virtualisation.diskSize = 16384;
+        virtualisation.additionalPaths =
+          [
+            systemBuildClosure
+            inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
+            # Add any flake inputs that might be referenced
+            inputs.nixpkgs.outPath
+          ]
+          ++ lib.crystal-forge.prefetchedPaths;
+        systemd.tmpfiles.rules = [
+          "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
+          "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
+          "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
         ];
 
         services.postgresql = {
@@ -122,6 +135,7 @@ in
           # Build configuration - DISABLED for server-only dry-run tests
           build = {
             enable = false;
+            offline = true;
           };
 
           # Test flake configuration

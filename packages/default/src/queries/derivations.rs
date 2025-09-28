@@ -1,6 +1,8 @@
 use crate::models::commits::Commit;
+use crate::models::config::BuildConfig;  // Add this line
 use anyhow::anyhow;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
+use anyhow::bail;
 use anyhow::Result;
 use sqlx::PgPool;
 use tracing::{debug, error, info, warn};
@@ -101,7 +103,8 @@ pub async fn insert_derivation(
             build_elapsed_seconds,
             build_current_target,
             build_last_activity_seconds,
-            build_last_heartbeat
+            build_last_heartbeat,
+            cf_agent_enabled
         "#,
         commit_id,
         derivation_type,
@@ -155,7 +158,8 @@ pub async fn insert_derivation_with_target(
             build_elapsed_seconds,
             build_current_target,
             build_last_activity_seconds,
-            build_last_heartbeat
+            build_last_heartbeat,
+            cf_agent_enabled
         "#,
         commit_id,
         derivation_type,
@@ -223,7 +227,8 @@ pub async fn insert_package_derivation(
             build_elapsed_seconds,
             build_current_target,
             build_last_activity_seconds,
-            build_last_heartbeat
+            build_last_heartbeat,
+            cf_agent_enabled
         "#,
         None::<i32>, // commit_id is NULL for standalone packages
         "package",
@@ -281,7 +286,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     path,
@@ -319,7 +325,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     path,
@@ -360,7 +367,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     path,
@@ -396,7 +404,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     path,
@@ -436,7 +445,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     err,
@@ -472,7 +482,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     err,
@@ -510,7 +521,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     target_id
@@ -545,7 +557,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     target_id
@@ -577,7 +590,8 @@ pub async fn update_derivation_status(
                         build_elapsed_seconds,
                         build_current_target,
                         build_last_activity_seconds,
-                        build_last_heartbeat
+                        build_last_heartbeat,
+                        cf_agent_enabled
                     "#,
                     status_id,
                     target_id
@@ -703,7 +717,8 @@ pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Deriv
             build_elapsed_seconds,
             build_current_target,
             build_last_activity_seconds,
-            build_last_heartbeat
+            build_last_heartbeat,
+            cf_agent_enabled
         FROM derivations
         WHERE id = $1
         "#,
@@ -739,7 +754,8 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
             build_elapsed_seconds,
             build_current_target,
             build_last_activity_seconds,
-            build_last_heartbeat
+            build_last_heartbeat,
+            cf_agent_enabled
         FROM derivations
         WHERE status_id = $1
         AND attempt_count < 5
@@ -781,6 +797,7 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
                 d.build_current_target,
                 d.build_last_activity_seconds,
                 d.build_last_heartbeat,
+                d.cf_agent_enabled,
                 -- Find the related NixOS system for packages, or use self for NixOS systems
                 CASE 
                     WHEN d.derivation_type = 'package' THEN 
@@ -823,7 +840,8 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             build_elapsed_seconds,
             build_current_target,
             build_last_activity_seconds,
-            build_last_heartbeat
+            build_last_heartbeat,
+            cf_agent_enabled
         FROM nixos_system_groups
         ORDER BY 
             nixos_group_id,          -- Group related packages and systems together
@@ -938,7 +956,8 @@ pub async fn handle_derivation_failure(
                 build_elapsed_seconds,
                 build_current_target,
                 build_last_activity_seconds,
-                build_last_heartbeat
+                build_last_heartbeat,
+                cf_agent_enabled
             "#,
             status.as_id(),
             new_attempt_count,
@@ -975,7 +994,8 @@ pub async fn handle_derivation_failure(
                 build_elapsed_seconds,
                 build_current_target,
                 build_last_activity_seconds,
-                build_last_heartbeat
+                build_last_heartbeat,
+                cf_agent_enabled
             "#,
             status.as_id(),
             new_attempt_count,
@@ -1187,7 +1207,8 @@ pub async fn discover_and_insert_packages(
                     build_elapsed_seconds,
                     build_current_target,
                     build_last_activity_seconds,
-                    build_last_heartbeat
+                    build_last_heartbeat,
+                    cf_agent_enabled
                 "#,
                 None::<i32>,                           // commit_id is NULL for discovered packages
                 "package",                             // derivation_type = "package"
@@ -1306,6 +1327,413 @@ pub async fn clear_derivation_build_status(
             build_last_heartbeat = NULL
         WHERE id = $1
         "#,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+    
+    Ok(())
+}
+
+pub async fn get_latest_successful_derivation_for_flake(
+    pool: &PgPool, 
+    flake_id: i32
+) -> Result<Option<Derivation>> {
+    let derivation = sqlx::query_as::<_, Derivation>(
+        r#"
+        SELECT 
+            d.id,
+            d.commit_id,
+            d.derivation_type,
+            d.derivation_name,
+            d.derivation_path,
+            d.scheduled_at,
+            d.completed_at,
+            d.started_at,
+            d.attempt_count,
+            d.evaluation_duration_ms,
+            d.error_message,
+            d.pname,
+            d.version,
+            d.status_id,
+            d.derivation_target,
+            d.build_elapsed_seconds,
+            d.build_current_target,
+            d.build_last_activity_seconds,
+            d.build_last_heartbeat,
+            d.cf_agent_enabled
+        FROM derivations d
+        INNER JOIN commits c ON d.commit_id = c.id
+        INNER JOIN derivation_statuses ds ON d.status_id = ds.id
+        WHERE c.flake_id = $1
+        AND ds.name = 'cache-pushed'
+        AND ds.is_success = true
+        AND d.derivation_type = 'nixos'
+        ORDER BY d.completed_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(derivation)
+}
+
+
+/// Discover and queue all transitive dependencies for NixOS systems
+pub async fn discover_and_queue_all_transitive_dependencies(pool: &PgPool, build_config: &BuildConfig) -> Result<()> {
+    // Get all NixOS systems that have completed dry-run but haven't had dependencies discovered
+    let nixos_systems = sqlx::query_as!(
+        Derivation,
+        r#"
+        SELECT
+            id, commit_id, derivation_type as "derivation_type: DerivationType",
+            derivation_name, derivation_path, derivation_target, scheduled_at,
+            completed_at, started_at, attempt_count, evaluation_duration_ms,
+            error_message, pname, version, status_id, build_elapsed_seconds,
+            build_current_target, build_last_activity_seconds, build_last_heartbeat,
+            cf_agent_enabled
+        FROM derivations 
+        WHERE derivation_type = 'nixos' 
+        AND status_id = $1
+        AND NOT EXISTS (
+            SELECT 1 FROM derivation_dependencies dd WHERE dd.derivation_id = derivations.id
+        )
+        "#,
+        EvaluationStatus::DryRunComplete.as_id()
+    )
+    .fetch_all(pool)
+    .await?;
+
+    for nixos_system in nixos_systems {
+        info!("Discovering dependencies for NixOS system: {}", nixos_system.derivation_name);
+        
+        if let Err(e) = discover_all_transitive_dependencies_for_system(pool, &nixos_system, build_config).await {
+            error!("Failed to discover dependencies for {}: {}", nixos_system.derivation_name, e);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Discover all transitive dependencies for a single NixOS system using nix-store --query
+async fn discover_all_transitive_dependencies_for_system(
+    pool: &PgPool,
+    nixos_system: &Derivation,
+    build_config: &BuildConfig
+) -> Result<()> {
+    let drv_path = nixos_system.derivation_path.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("NixOS system missing derivation_path"))?;
+
+    // Use nix-store --query --requisites to get ALL transitive dependencies
+    let mut cmd = tokio::process::Command::new("nix-store");
+    cmd.args(["--query", "--requisites", drv_path]);
+    build_config.apply_to_command(&mut cmd);
+
+    let output = cmd.output().await?;
+    if !output.status.success() {
+        bail!("nix-store query failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let stdout_str = String::from_utf8_lossy(&output.stdout);
+    let all_deps: Vec<&str> = stdout_str
+        .lines()
+        .filter(|line| line.ends_with(".drv"))
+        .filter(|line| *line != drv_path) // Exclude self
+        .collect();
+
+    info!("Found {} transitive dependencies for {}", all_deps.len(), nixos_system.derivation_name);
+
+    // Insert all dependencies as individual derivations
+    discover_and_insert_packages(pool, nixos_system.id, &all_deps).await?;
+
+    Ok(())
+}
+
+/// Get derivations ready for build with proper dependency ordering
+pub async fn get_derivations_ready_for_build_with_dependencies(pool: &PgPool) -> Result<Vec<Derivation>> {
+    let rows = sqlx::query_as!(
+        Derivation,
+        r#"
+        WITH RECURSIVE dependency_tree AS (
+            -- Base case: Find all NixOS derivations ready for building
+            SELECT 
+                d.id,
+                d.id as nixos_root_id,
+                0 as dependency_depth,
+                d.derivation_name as nixos_system_name
+            FROM derivations d
+            WHERE d.derivation_type = 'nixos' 
+            AND d.status_id = $1  -- dry-run-complete
+            
+            UNION ALL
+            
+            -- Recursive case: Find all dependencies of NixOS systems
+            SELECT 
+                dep_deriv.id,
+                dt.nixos_root_id,
+                dt.dependency_depth + 1,
+                dt.nixos_system_name
+            FROM dependency_tree dt
+            JOIN derivation_dependencies dd ON dt.id = dd.derivation_id
+            JOIN derivations dep_deriv ON dd.depends_on_id = dep_deriv.id
+            WHERE dt.dependency_depth < 10  -- Prevent infinite recursion
+        ),
+        buildable_derivations AS (
+            -- Get all derivations in the dependency tree that are ready to build
+            SELECT DISTINCT
+                d.id,
+                d.commit_id,
+                d.derivation_type,
+                d.derivation_name,
+                d.derivation_path,
+                d.derivation_target,
+                d.scheduled_at,
+                d.completed_at,
+                d.started_at,
+                d.attempt_count,
+                d.evaluation_duration_ms,
+                d.error_message,
+                d.pname,
+                d.version,
+                d.status_id,
+                d.build_elapsed_seconds,
+                d.build_current_target,
+                d.build_last_activity_seconds,
+                d.build_last_heartbeat,
+                d.cf_agent_enabled,
+                dt.nixos_root_id,
+                dt.dependency_depth,
+                dt.nixos_system_name,
+                -- Count how many dependencies this derivation has that aren't built yet
+                (SELECT COUNT(*) 
+                 FROM derivation_dependencies dd2 
+                 JOIN derivations unbuilt ON dd2.depends_on_id = unbuilt.id
+                 WHERE dd2.derivation_id = d.id 
+                 AND unbuilt.status_id NOT IN ($2, $3)  -- not build-complete or cache-pushed
+                ) as unbuilt_dependency_count
+            FROM dependency_tree dt
+            JOIN derivations d ON dt.id = d.id
+            WHERE d.status_id IN ($1, $4)  -- dry-run-complete or build-pending
+        )
+        SELECT
+            id,
+            commit_id,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
+            derivation_path,
+            derivation_target,
+            scheduled_at,
+            completed_at,
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            pname,
+            version,
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat,
+            cf_agent_enabled
+        FROM buildable_derivations
+        WHERE unbuilt_dependency_count = 0  -- Only build when all deps are ready
+        ORDER BY 
+            nixos_root_id,              -- Group by NixOS system
+            dependency_depth DESC,      -- Build deepest dependencies first
+            derivation_type,            -- Packages before NixOS systems
+            scheduled_at ASC            -- Oldest first within same depth
+        "#,
+        EvaluationStatus::DryRunComplete.as_id(),  // $1
+        EvaluationStatus::BuildComplete.as_id(),   // $2  
+        14_i32,  // cache-pushed status                // $3
+        EvaluationStatus::BuildPending.as_id()     // $4
+    )
+    .fetch_all(pool)
+    .await?;
+    
+    Ok(rows)
+}
+
+/// Get next buildable derivations for a specific NixOS system
+pub async fn get_next_buildable_for_nixos_system(
+    pool: &PgPool, 
+    nixos_system_name: &str
+) -> Result<Vec<Derivation>> {
+    let rows = sqlx::query_as!(
+        Derivation,
+        r#"
+        WITH RECURSIVE system_dependencies AS (
+            -- Start with the specific NixOS system
+            SELECT 
+                d.id,
+                0 as depth
+            FROM derivations d
+            WHERE d.derivation_name = $1
+            AND d.derivation_type = 'nixos'
+            AND d.status_id = $2  -- dry-run-complete
+            
+            UNION ALL
+            
+            -- Find all transitive dependencies
+            SELECT 
+                dep.id,
+                sd.depth + 1
+            FROM system_dependencies sd
+            JOIN derivation_dependencies dd ON sd.id = dd.derivation_id
+            JOIN derivations dep ON dd.depends_on_id = dep.id
+            WHERE sd.depth < 10  -- Prevent infinite recursion
+        ),
+        ready_to_build AS (
+            SELECT 
+                d.id,
+                d.commit_id,
+                d.derivation_type,
+                d.derivation_name,
+                d.derivation_path,
+                d.derivation_target,
+                d.scheduled_at,
+                d.completed_at,
+                d.started_at,
+                d.attempt_count,
+                d.evaluation_duration_ms,
+                d.error_message,
+                d.pname,
+                d.version,
+                d.status_id,
+                d.build_elapsed_seconds,
+                d.build_current_target,
+                d.build_last_activity_seconds,
+                d.build_last_heartbeat,
+                d.cf_agent_enabled,
+                sd.depth
+            FROM system_dependencies sd
+            JOIN derivations d ON sd.id = d.id
+            WHERE d.status_id IN ($2, $3)  -- dry-run-complete or build-pending
+            -- Only include derivations where ALL dependencies are already built
+            AND NOT EXISTS (
+                SELECT 1 
+                FROM derivation_dependencies dd_check
+                JOIN derivations dep_check ON dd_check.depends_on_id = dep_check.id
+                WHERE dd_check.derivation_id = d.id
+                AND dep_check.status_id NOT IN ($4, $5)  -- not build-complete or cache-pushed
+            )
+        )
+        SELECT
+            id,
+            commit_id,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
+            derivation_path,
+            derivation_target,
+            scheduled_at,
+            completed_at,
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            pname,
+            version,
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat,
+            cf_agent_enabled
+        FROM ready_to_build
+        ORDER BY 
+            depth DESC,          -- Build deepest dependencies first
+            derivation_type,     -- Packages before NixOS systems  
+            scheduled_at ASC     -- Oldest first
+        "#,
+        nixos_system_name,
+        EvaluationStatus::DryRunComplete.as_id(),  // $2
+        EvaluationStatus::BuildPending.as_id(),    // $3
+        EvaluationStatus::BuildComplete.as_id(),   // $4
+        14_i32  // cache-pushed status             // $5
+    )
+    .fetch_all(pool)
+    .await?;
+    
+    Ok(rows)
+}
+
+/// Check if a derivation has all its dependencies built
+pub async fn has_all_dependencies_built(
+    pool: &PgPool,
+    derivation_id: i32
+) -> Result<bool> {
+    let result = sqlx::query!(
+        r#"
+        SELECT COUNT(*) as unbuilt_count
+        FROM derivation_dependencies dd
+        JOIN derivations dep ON dd.depends_on_id = dep.id
+        WHERE dd.derivation_id = $1
+        AND dep.status_id NOT IN ($2, $3)  -- not build-complete or cache-pushed
+        "#,
+        derivation_id,
+        EvaluationStatus::BuildComplete.as_id(),
+        14_i32  // cache-pushed status
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    Ok(result.unbuilt_count == Some(0))
+}
+
+/// Get all NixOS systems that are ready to start their dependency builds
+pub async fn get_nixos_systems_ready_for_dependency_builds(pool: &PgPool) -> Result<Vec<String>> {
+    let systems = sqlx::query!(
+        r#"
+        SELECT DISTINCT d.derivation_name
+        FROM derivations d
+        WHERE d.derivation_type = 'nixos'
+        AND d.status_id = $1  -- dry-run-complete
+        ORDER BY d.derivation_name
+        "#,
+        EvaluationStatus::DryRunComplete.as_id()
+    )
+    .fetch_all(pool)
+    .await?;
+    
+    Ok(systems.into_iter().map(|s| s.derivation_name).collect())
+}
+
+/// Mark that dependency builds have started for a NixOS system
+pub async fn mark_nixos_dependency_builds_started(
+    pool: &PgPool,
+    nixos_system_name: &str
+) -> Result<()> {
+    // You might want to add a field to track this state, or use a separate table
+    // For now, we can use the existing status system
+    sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1
+        WHERE derivation_name = $2 
+        AND derivation_type = 'nixos'
+        AND status_id = $3
+        "#,
+        EvaluationStatus::BuildPending.as_id(),  // Move to build-pending while deps build
+        nixos_system_name,
+        EvaluationStatus::DryRunComplete.as_id()
+    )
+    .execute(pool)
+    .await?;
+    
+    Ok(())
+}
+
+pub async fn mark_derivation_cache_pushed(pool: &PgPool, derivation_id: i32) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1
+        WHERE id = $2
+        "#,
+        14_i32, // cache-pushed status
         derivation_id
     )
     .execute(pool)
