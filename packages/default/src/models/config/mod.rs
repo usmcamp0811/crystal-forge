@@ -3,6 +3,7 @@ mod auth;
 mod build;
 mod cache;
 mod database;
+mod deployment;
 mod environment;
 mod flakes;
 mod server;
@@ -14,6 +15,7 @@ pub use auth::*;
 pub use build::*;
 pub use cache::*;
 pub use database::*;
+pub use deployment::*;
 pub use environment::*;
 pub use flakes::*;
 pub use server::*;
@@ -38,7 +40,7 @@ use tokio_postgres::NoTls;
 use tracing::{debug, info};
 
 mod duration_serde {
-    use serde::{Deserialize, Deserializer};
+    use serde::{Deserialize, Deserializer, Serializer};
     use std::time::Duration;
 
     pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -47,6 +49,12 @@ mod duration_serde {
     {
         let secs = u64::deserialize(deserializer)?;
         Ok(Duration::from_secs(secs))
+    }
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
     }
 }
 
@@ -73,8 +81,8 @@ pub struct CrystalForgeConfig {
     pub cache: CacheConfig,
     #[serde(default)]
     pub auth: AuthConfig,
-    #[serde(with = "duration_serde")]
-    pub deployment_poll_interval: Duration,
+    #[serde(default)]
+    pub deployment: DeploymentConfig,
 }
 
 impl Default for CrystalForgeConfig {
@@ -90,7 +98,7 @@ impl Default for CrystalForgeConfig {
             build: BuildConfig::default(),
             cache: CacheConfig::default(),
             auth: AuthConfig::default(),
-            deployment_poll_interval: Duration::from_secs(15 * 60),
+            deployment: DeploymentConfig::default(),
         }
     }
 }

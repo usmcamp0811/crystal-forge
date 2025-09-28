@@ -23,7 +23,7 @@ impl DeploymentPolicyManager {
     /// Main deployment policy management loop
     /// Only processes systems with auto_latest policy - manual/pinned policies don't need automatic updates
     pub async fn run(&self) -> Result<()> {
-        let interval = self.config.deployment_poll_interval;
+        let interval = self.config.deployment.deployment_poll_interval;
         info!(
             "🚀 Starting deployment policy manager (poll interval: {:?})",
             interval
