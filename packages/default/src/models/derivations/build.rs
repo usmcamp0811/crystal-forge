@@ -177,9 +177,23 @@ impl Derivation {
     ) -> Result<EvaluationResult> {
         info!("🔍 Evaluating derivation paths for: {}", flake_target);
 
-        let main_drv = eval_main_drv_path(flake_target, build_config).await?;
-        let deps = list_immediate_input_drvs(&main_drv, build_config).await?;
-        let cf_agent_enabled = is_cf_agent_enabled(flake_target, build_config).await?;
+        let mut cmd = Command::new("nix");
+        cmd.args(["build", "--dry-run", flake_target]);
+        build_config.apply_to_command(&mut cmd);
+
+        let output = cmd.output().await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!(
+                "nix build --dry-run failed for target '{}': {}",
+                flake_target,
+                stderr.trim()
+            );
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
 
         info!("🔍 main drv: {main_drv}");
         info!("🔍 {} immediate input drvs", deps.len());
@@ -187,7 +201,6 @@ impl Derivation {
         Ok(EvaluationResult {
             main_derivation_path: main_drv,
             dependency_derivation_paths: deps,
-            cf_agent_enabled: cf_agent_enabled,
         })
     }
 
@@ -599,4 +612,3 @@ async fn list_immediate_input_drvs(
 
     Ok(deps)
 }
-
