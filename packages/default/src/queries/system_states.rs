@@ -83,7 +83,6 @@ pub async fn insert_system_state(
             state.agent_version.as_deref().unwrap_or("unknown")
         );
     }
-
     Ok(())
 }
 pub async fn get_last_system_state_by_hostname(
@@ -120,7 +119,7 @@ pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::agent_request::try_deserialize_system_state;
+    use crate::handlers::agent_request::deserialize_system_state_versioned;
     use crate::models::system_states::{SystemState, SystemStateV1};
     use anyhow::Result;
     use chrono::Utc;
@@ -158,6 +157,8 @@ mod tests {
             agent_version: Some("1.0.0".to_string()),
             agent_build_hash: Some("abc123".to_string()),
             nixos_version: Some("23.05".to_string()),
+            agent_compatible: Some(true),
+            partial_data: Some(false),
         };
 
         let json = serde_json::to_vec(&current_state).unwrap();
@@ -182,6 +183,8 @@ mod tests {
             derivation: "test".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
         };
 
         let mock_request = VerifiedAgentRequest {
@@ -191,7 +194,7 @@ mod tests {
             body: json.into(),
         };
 
-        let (parsed, compatible) = try_deserialize_system_state(&mock_request).unwrap();
+        let (parsed, compatible) = deserialize_system_state_versioned(&mock_request).unwrap();
 
         assert!(compatible, "Current version should be compatible");
         assert_eq!(parsed.hostname, "test-host");
@@ -255,6 +258,8 @@ mod tests {
             derivation: "test".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            desired_target: None,
+            deployment_policy: "manual".to_string(),
         };
 
         let mock_request = VerifiedAgentRequest {
@@ -264,7 +269,7 @@ mod tests {
             body: json.into(),
         };
 
-        let (parsed, compatible) = try_deserialize_system_state(&mock_request).unwrap();
+        let (parsed, compatible) = deserialize_system_state_versioned(&mock_request).unwrap();
 
         assert_eq!(parsed.hostname, "test-host-v1");
     }

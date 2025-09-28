@@ -89,7 +89,7 @@ impl FromRef<CFState> for PgPool {
     }
 }
 
-pub fn try_deserialize_system_state(
+pub fn deserialize_system_state_versioned(
     agent_request: &VerifiedAgentRequest,
 ) -> Result<(SystemState, bool)> {
     let body = &agent_request.body;

@@ -3,6 +3,7 @@ mod auth;
 mod build;
 mod cache;
 mod database;
+pub mod deployment;
 mod environment;
 mod flakes;
 mod server;
@@ -14,6 +15,7 @@ pub use auth::*;
 pub use build::*;
 pub use cache::*;
 pub use database::*;
+pub use deployment::*;
 pub use environment::*;
 pub use flakes::*;
 pub use server::*;
@@ -36,6 +38,25 @@ use std::env;
 use std::time::Duration;
 use tokio_postgres::NoTls;
 use tracing::{debug, info};
+
+mod duration_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let secs = u64::deserialize(deserializer)?;
+        Ok(Duration::from_secs(secs))
+    }
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_u64(duration.as_secs())
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
@@ -60,6 +81,8 @@ pub struct CrystalForgeConfig {
     pub cache: CacheConfig,
     #[serde(default)]
     pub auth: AuthConfig,
+    #[serde(default)]
+    pub deployment: DeploymentConfig,
 }
 
 impl Default for CrystalForgeConfig {
@@ -75,6 +98,7 @@ impl Default for CrystalForgeConfig {
             build: BuildConfig::default(),
             cache: CacheConfig::default(),
             auth: AuthConfig::default(),
+            deployment: DeploymentConfig::default(),
         }
     }
 }
@@ -233,7 +257,7 @@ impl CrystalForgeConfig {
                             .id
                     }
                 };
-                Some(id) // wrap in Some() to match Option<i32>
+                Some(id)
             } else {
                 None
             };
@@ -245,8 +269,11 @@ impl CrystalForgeConfig {
                 true,
                 config.public_key.clone(),
                 flake_id,
+                config.desired_target.clone(),
+                config.deployment_policy.clone(),
             )
             .await?;
+            insert_system(pool, &system).await;
         }
 
         Ok(())

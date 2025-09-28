@@ -1,5 +1,6 @@
 use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
+use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::cache_push::{
     create_cache_push_job, get_derivations_needing_cache_push, get_pending_cache_push_jobs,
     mark_cache_push_completed, mark_cache_push_failed, mark_cache_push_in_progress,
@@ -14,12 +15,143 @@ use crate::queries::derivations::{
     EvaluationStatus, get_derivations_ready_for_build, mark_target_build_in_progress,
     mark_target_failed, update_derivation_status,
 };
+use crate::queries::derivations::{
+    discover_and_queue_all_transitive_dependencies,
+    get_derivations_ready_for_build_with_dependencies, handle_derivation_failure,
+    has_all_dependencies_built, mark_target_build_complete,
+};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
+use anyhow::bail;
 use sqlx::PgPool;
 use tokio::fs;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
+
+/// Alternative simpler approach: Build dependencies in dependency order globally
+async fn build_derivations_simple_dependency_order(
+    pool: &PgPool,
+    build_config: &BuildConfig,
+) -> Result<()> {
+    // This approach builds all ready dependencies regardless of which NixOS system they belong to
+
+    let derivations = get_derivations_ready_for_build_with_dependencies(pool).await?;
+
+    if derivations.is_empty() {
+        info!("🔍 No derivations ready for building");
+        return Ok(());
+    }
+
+    info!(
+        "🏗️ Found {} derivations ready for building",
+        derivations.len()
+    );
+
+    for mut derivation in derivations {
+        // Double-check that all dependencies are built
+        if !has_all_dependencies_built(pool, derivation.id).await? {
+            debug!(
+                "⏭️ Skipping {} - dependencies not ready",
+                derivation.derivation_name
+            );
+            continue;
+        }
+
+        info!(
+            "🔨 Building: {} (type: {:?})",
+            derivation.derivation_name, derivation.derivation_type
+        );
+
+        mark_target_build_in_progress(pool, derivation.id).await?;
+
+        match derivation
+            .evaluate_and_build(pool, true, build_config)
+            .await
+        {
+            Ok(store_path) => {
+                info!("✅ Built {}: {}", derivation.derivation_name, store_path);
+                mark_target_build_complete(pool, derivation.id).await?;
+            }
+            Err(e) => {
+                error!("❌ Build failed for {}: {}", derivation.derivation_name, e);
+                handle_derivation_failure(pool, &derivation, "build", &e).await?;
+            }
+        }
+
+        // Limit to building one derivation per cycle to allow other systems to progress
+        break;
+    }
+
+    Ok(())
+}
+
+/// New build strategy: discover all dependencies first, then build them individually
+async fn build_derivations_with_dependency_discovery(
+    pool: &PgPool,
+    build_config: &BuildConfig,
+) -> Result<()> {
+    // Step 1: Discover all transitive dependencies for NixOS systems that haven't been analyzed yet
+    discover_and_queue_all_transitive_dependencies(pool, build_config).await?;
+
+    // Step 2: Build individual derivations that are ready (dependencies satisfied)
+    let ready_derivations = get_derivations_ready_for_build_with_dependencies(pool).await?;
+
+    if ready_derivations.is_empty() {
+        info!("No derivations ready for building");
+        return Ok(());
+    }
+
+    info!(
+        "Found {} derivations ready for building",
+        ready_derivations.len()
+    );
+
+    // Step 3: Build derivations one at a time to avoid resource conflicts
+    for mut derivation in ready_derivations
+        .into_iter()
+        .take(build_config.max_concurrent_derivations.unwrap_or(1) as usize)
+    {
+        mark_target_build_in_progress(pool, derivation.id).await?;
+
+        // Build individual derivation using nix-store --realise directly
+        match build_single_derivation(pool, &mut derivation, build_config).await {
+            Ok(store_path) => {
+                info!("Built {}: {}", derivation.derivation_name, store_path);
+                mark_target_build_complete(pool, derivation.id).await?;
+            }
+            Err(e) => {
+                error!("Build failed for {}: {}", derivation.derivation_name, e);
+                handle_derivation_failure(pool, &derivation, "build", &e).await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a single derivation directly using nix-store --realise
+async fn build_single_derivation(
+    pool: &PgPool,
+    derivation: &mut Derivation,
+    build_config: &BuildConfig,
+) -> Result<String> {
+    let drv_path = derivation
+        .derivation_path
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Derivation missing derivation_path"))?;
+
+    if derivation.derivation_type == DerivationType::Package {
+        // For packages, build the .drv directly
+        derivation
+            .build_derivation_from_path(pool, drv_path, build_config)
+            .await
+    } else {
+        // For NixOS systems, use the full evaluate_and_build process
+        derivation
+            .evaluate_and_build(pool, true, build_config)
+            .await
+    }
+}
 
 /// Runs the periodic build loop
 pub async fn run_build_loop(pool: PgPool) {
@@ -128,50 +260,7 @@ pub async fn run_cache_push_loop(pool: PgPool) {
 
 /// Process derivations that need building
 async fn build_derivations(pool: &PgPool, build_config: &BuildConfig) -> Result<()> {
-    // Get derivations ready for building (those with dry-run-complete status)
-    match get_derivations_ready_for_build(pool).await {
-        Ok(derivations) => {
-            if derivations.is_empty() {
-                info!("🔍 No derivations need building");
-                return Ok(());
-            }
-            for derivation in &derivations {
-                info!(
-                    "🏗️ Starting build for derivation: {}",
-                    derivation.derivation_name
-                );
-                mark_target_build_in_progress(pool, derivation.id).await?;
-
-                // Build the derivation
-                match derivation
-                    .evaluate_and_build(pool, true, build_config)
-                    .await
-                {
-                    Ok(store_path) => {
-                        info!(
-                            "✅ Build completed for {}: {}",
-                            derivation.derivation_name, store_path
-                        );
-
-                        // Mark as build complete
-                        use crate::queries::derivations::mark_target_build_complete;
-                        mark_target_build_complete(pool, derivation.id).await?;
-                    }
-                    Err(e) => {
-                        error!("❌ Build failed for {}: {}", derivation.derivation_name, e);
-                        if let Err(save_err) =
-                            mark_target_failed(pool, derivation.id, "build", &e.to_string()).await
-                        {
-                            error!("❌ Failed to mark build as failed: {save_err}");
-                        }
-                        continue;
-                    }
-                };
-            }
-        }
-        Err(e) => error!("❌ Failed to get derivations ready for build: {e}"),
-    }
-    Ok(())
+    build_derivations_with_dependency_discovery(pool, build_config).await
 }
 
 /// Process derivations that need CVE scanning

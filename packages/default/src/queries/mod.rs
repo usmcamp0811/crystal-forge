@@ -2,6 +2,7 @@ pub mod agent_heartbeat;
 pub mod cache_push;
 pub mod commits;
 pub mod cve_scans;
+pub mod deployment;
 pub mod derivations;
 pub mod environments;
 pub mod flakes;

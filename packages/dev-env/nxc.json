@@ -1,0 +1,4 @@
+{
+  "composition": "composition.nix",
+  "default_flavour": "vm"
+}

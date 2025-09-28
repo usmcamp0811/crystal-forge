@@ -91,13 +91,13 @@ with lib.crystal-forge; let
       #   risk_profile = "LOW";
       #   compliance_level = "NONE";
       # }
-      # {
-      #   name = "mockenv";
-      #   description = "An environment full of agents created from shell scripts for testing purposes";
-      #   is_active = true;
-      #   risk_profile = "LOW";
-      #   compliance_level = "NONE";
-      # }
+      {
+        name = "mockenv";
+        description = "An environment full of agents created from shell scripts for testing purposes";
+        is_active = true;
+        risk_profile = "LOW";
+        compliance_level = "NONE";
+      }
     ];
     systems = [
       # {
@@ -106,12 +106,12 @@ with lib.crystal-forge; let
       #   environment = "devshell";
       #   flake_name = "dotfiles";
       # }
-      # {
-      #   hostname = "test.gray";
-      #   public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
-      #   environment = "mockenv";
-      #   flake_name = "dotfiles";
-      # }
+      {
+        hostname = "test.gray";
+        public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
+        environment = "mockenv";
+        flake_name = "dotfiles";
+      }
       # {
       #   hostname = "test.lucas";
       #   public_key = pkgs.crystal-forge.testAgents.test-lucas.publicKey;
@@ -120,16 +120,16 @@ with lib.crystal-forge; let
       # }
     ];
     flakes = {
-      flake_polling_interval = "1m";
-      commit_evaluation_interval = "1m";
-      build_processing_interval = "1m";
+      flake_polling_interval = "10m";
+      commit_evaluation_interval = "10m";
+      build_processing_interval = "10m";
       watched = [
-        # {
-        #   name = "dotfiles";
-        #   repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
-        #   auto_poll = true;
-        #   branch = "nixos";
-        # }
+        {
+          name = "dotfiles";
+          repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+          auto_poll = false;
+          initial_commit_depth = 10;
+        }
       ];
     };
   };
