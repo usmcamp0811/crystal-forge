@@ -43,6 +43,19 @@
         private_key = toString cfg.client.private_key;
       };
     }
+    // lib.optionalAttrs (cfg.deployment.cache_url != null || cfg.deployment.max_deployment_age_minutes != 30 || !cfg.deployment.dry_run_first || cfg.deployment.fallback_to_local_build || cfg.deployment.deployment_timeout_minutes != 60 || cfg.deployment.deployment_poll_interval != "15m") {
+      deployment =
+        {
+          max_deployment_age_minutes = cfg.deployment.max_deployment_age_minutes;
+          dry_run_first = cfg.deployment.dry_run_first;
+          fallback_to_local_build = cfg.deployment.fallback_to_local_build;
+          deployment_timeout_minutes = cfg.deployment.deployment_timeout_minutes;
+          deployment_poll_interval = cfg.deployment.deployment_poll_interval;
+        }
+        // lib.optionalAttrs (cfg.deployment.cache_url != null) {
+          cache_url = cfg.deployment.cache_url;
+        };
+    }
     // lib.optionalAttrs (cfg.systems != []) {
       # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
       # We’ll strip them globally via stripNulls below.
@@ -565,7 +578,38 @@ in {
         description = "Delay between retry attempts in seconds";
       };
     };
-
+    deployment = {
+      max_deployment_age_minutes = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 30;
+        description = "Maximum age in minutes for deployments to be considered valid";
+      };
+      dry_run_first = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Perform a dry run before actual deployment";
+      };
+      fallback_to_local_build = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Fallback to local build if remote build fails";
+      };
+      deployment_timeout_minutes = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 60;
+        description = "Timeout for deployment operations in minutes";
+      };
+      cache_url = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Cache URL for deployment artifacts";
+      };
+      deployment_poll_interval = lib.mkOption {
+        type = lib.types.str;
+        default = "15m";
+        description = "Interval between deployment polling checks";
+      };
+    };
     systems = lib.mkOption {
       type = lib.types.listOf (lib.types.submodule {
         options = {
