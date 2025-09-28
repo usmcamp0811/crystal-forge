@@ -724,6 +724,7 @@ in {
       "d /var/lib/crystal-forge/.config/nix 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
+      "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
     ];
 
     systemd.slices.crystal-forge-builds = lib.mkIf cfg.build.enable {
