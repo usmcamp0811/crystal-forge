@@ -83,7 +83,7 @@ impl AgentDeploymentManager {
     ) -> Result<DeploymentResult> {
         debug!("Processing heartbeat response");
 
-        let Some(desired_target) = response.desired_target.to_string() else {
+        let Some(desired_target) = response.desired_target else {
             debug!("No desired target in heartbeat response");
             return Ok(DeploymentResult::NoDeploymentNeeded);
         };
