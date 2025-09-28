@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT d.derivation_name\n        FROM derivations d\n        WHERE d.derivation_type = 'nixos'\n        AND d.status_id = $1  -- dry-run-complete\n        ORDER BY d.derivation_name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "derivation_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c1d5c9060f7f47bd75b4ad97ee81b1a0816e6fab25873d7360afba6e19ff5c53"
+}
