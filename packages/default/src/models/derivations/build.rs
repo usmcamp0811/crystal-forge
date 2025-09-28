@@ -1,6 +1,7 @@
 use super::Derivation;
 use super::utils::*;
 use crate::models::config::BuildConfig;
+use crate::models::derivations::parse_derivation_paths;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -194,6 +195,7 @@ impl Derivation {
 
         let stderr = String::from_utf8_lossy(&output.stderr);
         let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
+        let cf_agent_enabled = is_cf_agent_enabled(flake_target, build_config).await?;
 
         info!("🔍 main drv: {main_drv}");
         info!("🔍 {} immediate input drvs", deps.len());
@@ -201,6 +203,7 @@ impl Derivation {
         Ok(EvaluationResult {
             main_derivation_path: main_drv,
             dependency_derivation_paths: deps,
+            cf_agent_enabled: cf_agent_enabled,
         })
     }
 
