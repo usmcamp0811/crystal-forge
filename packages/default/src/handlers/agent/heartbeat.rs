@@ -25,8 +25,8 @@ use sqlx::PgPool;
 use tracing::{debug, info};
 
 #[derive(Serialize)]
-struct LogResponse {
-    desired_target: Option<String>,
+pub struct LogResponse {
+    pub desired_target: Option<String>,
 }
 /// Handles the `/current-system` POST route.
 /// Verifies the body signature using headers, parses the payload, and

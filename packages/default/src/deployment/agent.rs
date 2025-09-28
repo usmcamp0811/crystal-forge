@@ -83,7 +83,7 @@ impl AgentDeploymentManager {
     ) -> Result<DeploymentResult> {
         debug!("Processing heartbeat response");
 
-        let Some(desired_target) = response.desired_target else {
+        let Some(desired_target) = response.desired_target.to_string() else {
             debug!("No desired target in heartbeat response");
             return Ok(DeploymentResult::NoDeploymentNeeded);
         };
@@ -102,14 +102,14 @@ impl AgentDeploymentManager {
         match self.execute_deployment(&desired_target).await {
             Ok(result) => {
                 info!("Deployment completed successfully");
-                self.current_target = Some(desired_target);
+                self.current_target = Some(desired_target.to_string());
                 Ok(result)
             }
             Err(e) => {
                 error!("Deployment failed: {:#}", e);
                 Ok(DeploymentResult::Failed {
                     error: e.to_string(),
-                    desired_target,
+                    desired_target: desired_target.to_string(),
                 })
             }
         }

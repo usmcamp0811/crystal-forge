@@ -3,7 +3,7 @@ mod auth;
 mod build;
 mod cache;
 mod database;
-mod deployment;
+pub mod deployment;
 mod environment;
 mod flakes;
 mod server;

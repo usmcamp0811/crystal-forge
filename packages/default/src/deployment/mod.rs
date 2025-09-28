@@ -7,7 +7,8 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use tokio::time::{Duration, Instant, sleep};
 use tracing::{debug, error, info, warn};
-
+pub mod agent;
+pub use agent::*;
 /// Manages automatic deployment policies for systems
 /// Only handles auto_latest policy - manual and pinned policies are set by admin intervention
 pub struct DeploymentPolicyManager {
