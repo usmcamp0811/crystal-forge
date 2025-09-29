@@ -507,73 +507,48 @@ pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig)
         return Ok(true); // Assume enabled in tests
     }
 
-    let cf_enabled_systemd_cmd = || {
-        let mut cmd = build_config.systemd_scoped_cmd_base();
-        cmd.args([
-            "nix",
-            "eval",
-            "--json",
-            &format!("{}.config.services.crystal-forge.enable", flake_target),
-        ]);
-        cmd
-    };
-    let cf_enabled_output = Derivation::execute_with_systemd_fallback(
-        build_config,
-        cf_enabled_systemd_cmd,
-        &[
-            "nix",
-            "eval",
-            "--json",
-            &format!("{}.config.services.crystal-forge.enable", flake_target),
-        ],
-        "check if Crystal Forge module is enabled",
-    )
-    .await?;
+    // Try a more robust evaluation approach
+    // Instead of evaluating the config directly, use nix-instantiate which is more forgiving
+    let mut cmd = Command::new("nix-instantiate");
+    cmd.args([
+        "--eval", 
+        "--json", 
+        "--expr",
+        &format!(
+            "let flake = builtins.getFlake \"{}\"; in {{ cf_enabled = flake.nixosConfigurations.{}.config.services.crystal-forge.enable or false; cf_client_enabled = flake.nixosConfigurations.{}.config.services.crystal-forge.client.enable or false; }}",
+            flake_target.split('#').next().unwrap_or(flake_target),
+            flake_target.split('.').nth(1).unwrap_or("unknown"),
+            flake_target.split('.').nth(1).unwrap_or("unknown")
+        )
+    ]);
+    build_config.apply_to_command(&mut cmd);
 
-    let cf_client_enabled_systemd_cmd = || {
-        let mut cmd = build_config.systemd_scoped_cmd_base();
-        cmd.args([
-            "nix",
-            "eval",
-            "--json",
-            &format!(
-                "{}.config.services.crystal-forge.client.enable",
-                flake_target
-            ),
-        ]);
-        cmd
-    };
-    let cf_client_enabled_output = Derivation::execute_with_systemd_fallback(
-        build_config,
-        cf_client_enabled_systemd_cmd,
-        &[
-            "nix",
-            "eval",
-            "--json",
-            &format!(
-                "{}.config.services.crystal-forge.client.enable",
-                flake_target
-            ),
-        ],
-        "check if Crystal Forge client is enabled",
-    )
-    .await?;
-
-    if !cf_enabled_output.status.success() {
-        bail!(
-            "nix eval failed: {}",
-            String::from_utf8_lossy(&cf_enabled_output.stderr).trim()
-        );
+    match cmd.output().await {
+        Ok(output) if output.status.success() => {
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(json) => {
+                    let cf_enabled = json
+                        .get("cf_enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let cf_client_enabled = json
+                        .get("cf_client_enabled")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    Ok(cf_enabled && cf_client_enabled)
+                }
+                Err(_) => {
+                    warn!("Failed to parse CF agent status JSON, defaulting to false");
+                    Ok(false)
+                }
+            }
+        }
+        _ => {
+            warn!("Failed to evaluate CF agent status, defaulting to false");
+            Ok(false)
+        }
     }
-    if !cf_client_enabled_output.status.success() {
-        bail!(
-            "nix eval failed: {}",
-            String::from_utf8_lossy(&cf_client_enabled_output.stderr).trim()
-        );
-    }
-    let cf_enabled = serde_json::from_slice::<bool>(&cf_enabled_output.stdout).unwrap_or(false);
-    let cf_client_enabled = serde_json::from_slice::<bool>(&cf_client_enabled_output.stdout)?;
-    Ok(cf_enabled && cf_client_enabled)
 }
 
 async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
