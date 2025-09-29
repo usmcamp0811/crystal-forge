@@ -104,13 +104,15 @@ impl Derivation {
     ) -> Result<String> {
         let eval_result = Self::dry_run_derivation_path(flake_target, build_config).await?;
 
-        self.cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
-            Ok(enabled) => Some(enabled),
+        let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
+            Ok(enabled) => enabled,
             Err(e) => {
                 warn!("Could not determine Crystal Forge agent status: {}", e);
-                Some(false)
+                false
             }
         };
+
+        self.cf_agent_enabled = Some(cf_agent_enabled);
 
         // Insert dependencies into database
         if !eval_result.dependency_derivation_paths.is_empty() {
@@ -126,7 +128,7 @@ impl Derivation {
             .await?;
         }
 
-        // 🔧 ADD THIS: Update the derivation_path in the database
+        // Update status and derivation_path
         crate::queries::derivations::update_derivation_status(
             pool,
             self.id,
@@ -135,6 +137,10 @@ impl Derivation {
             None,
         )
         .await?;
+
+        // Update cf_agent_enabled
+        crate::queries::derivations::update_cf_agent_enabled(pool, self.id, cf_agent_enabled)
+            .await?;
 
         Ok(eval_result.main_derivation_path)
     }

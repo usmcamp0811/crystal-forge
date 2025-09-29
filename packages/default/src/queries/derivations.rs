@@ -1741,3 +1741,24 @@ pub async fn mark_derivation_cache_pushed(pool: &PgPool, derivation_id: i32) -> 
     
     Ok(())
 }
+
+/// Update the cf_agent_enabled field for a derivation
+pub async fn update_cf_agent_enabled(
+    pool: &PgPool,
+    derivation_id: i32,
+    cf_agent_enabled: bool,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET cf_agent_enabled = $1
+        WHERE id = $2
+        "#,
+        cf_agent_enabled,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+    
+    Ok(())
+}
