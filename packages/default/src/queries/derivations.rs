@@ -1416,7 +1416,7 @@ pub async fn discover_and_queue_all_transitive_dependencies(
             completed_at, started_at, attempt_count, evaluation_duration_ms,
             error_message, pname, version, status_id, build_elapsed_seconds,
             build_current_target, build_last_activity_seconds, build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled, store_path
         FROM derivations 
         WHERE derivation_type = 'nixos' 
         AND status_id = $1

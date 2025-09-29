@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        derivation_path = $2\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled\n                    ",
+  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -102,12 +102,15 @@
         "ordinal": 19,
         "name": "cf_agent_enabled",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 20,
+        "name": "store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Int4",
-        "Text",
         "Int4"
       ]
     },
@@ -131,8 +134,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "c25d695941f39fab7c16492ca434e79a913f7600a6935e53e8e1f3519c644022"
+  "hash": "3823134477356818614ee9ddaa74d5ffb40b0414c8f784c569898899c1b4d5ec"
 }

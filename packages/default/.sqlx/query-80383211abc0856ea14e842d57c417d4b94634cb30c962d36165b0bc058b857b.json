@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            UPDATE derivations SET \n                status_id = $1,\n                attempt_count = $2,\n                completed_at = NOW(),\n                evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,\n                error_message = $3\n            WHERE id = $4\n            RETURNING\n                id,\n                commit_id,\n                derivation_type as \"derivation_type: DerivationType\",\n                derivation_name,\n                derivation_path,\n                derivation_target,\n                scheduled_at,\n                completed_at,\n                started_at,\n                attempt_count,\n                evaluation_duration_ms,\n                error_message,\n                pname,\n                version,\n                status_id,\n                build_elapsed_seconds,\n                build_current_target,\n                build_last_activity_seconds,\n                build_last_heartbeat,\n                cf_agent_enabled\n            ",
+  "query": "\n        INSERT INTO derivations (\n            commit_id,\n            derivation_type, \n            derivation_name,\n            pname,\n            version,\n            status_id,\n            attempt_count\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, 0)\n        ON CONFLICT (derivation_path) DO UPDATE SET\n            derivation_name = EXCLUDED.derivation_name,\n            pname = EXCLUDED.pname,\n            version = EXCLUDED.version\n        RETURNING \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        ",
   "describe": {
     "columns": [
       {
@@ -102,13 +102,20 @@
         "ordinal": 19,
         "name": "cf_agent_enabled",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 20,
+        "name": "store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
         "Int4",
-        "Int4",
         "Text",
+        "Text",
+        "Varchar",
+        "Varchar",
         "Int4"
       ]
     },
@@ -132,8 +139,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "3753cf974a346528c7da957faea71c96007d9a27d1d9d4b80e37ac61e117be35"
+  "hash": "80383211abc0856ea14e842d57c417d4b94634cb30c962d36165b0bc058b857b"
 }
