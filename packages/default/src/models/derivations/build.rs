@@ -177,13 +177,10 @@ impl Derivation {
         build_config: &BuildConfig,
     ) -> Result<EvaluationResult> {
         info!("🔍 Evaluating derivation paths for: {}", flake_target);
-
         let mut cmd = Command::new("nix");
         cmd.args(["build", "--dry-run", flake_target]);
         build_config.apply_to_command(&mut cmd);
-
         let output = cmd.output().await?;
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
@@ -192,14 +189,18 @@ impl Derivation {
                 stderr.trim()
             );
         }
-
         let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Add this debug line to see what we're actually getting
+        debug!(
+            "nix build --dry-run stderr for {}: '{}'",
+            flake_target, stderr
+        );
+
         let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
         let cf_agent_enabled = is_cf_agent_enabled(flake_target, build_config).await?;
-
         info!("🔍 main drv: {main_drv}");
         info!("🔍 {} immediate input drvs", deps.len());
-
         Ok(EvaluationResult {
             main_derivation_path: main_drv,
             dependency_derivation_paths: deps,
