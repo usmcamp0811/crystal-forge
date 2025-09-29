@@ -104,7 +104,8 @@ pub async fn insert_derivation(
             build_current_target,
             build_last_activity_seconds,
             build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled,
+            store_path
         "#,
         commit_id,
         derivation_type,
@@ -159,7 +160,8 @@ pub async fn insert_derivation_with_target(
             build_current_target,
             build_last_activity_seconds,
             build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled,
+            store_path
         "#,
         commit_id,
         derivation_type,
@@ -228,7 +230,8 @@ pub async fn insert_package_derivation(
             build_current_target,
             build_last_activity_seconds,
             build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled,
+            store_path
         "#,
         None::<i32>, // commit_id is NULL for standalone packages
         "package",
@@ -287,7 +290,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     path,
@@ -326,7 +330,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     path,
@@ -368,7 +373,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     path,
@@ -405,7 +411,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     path,
@@ -446,7 +453,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     err,
@@ -483,7 +491,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     err,
@@ -522,7 +531,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     target_id
@@ -558,7 +568,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     target_id
@@ -591,7 +602,8 @@ pub async fn update_derivation_status(
                         build_current_target,
                         build_last_activity_seconds,
                         build_last_heartbeat,
-                        cf_agent_enabled
+                        cf_agent_enabled,
+                        store_path
                     "#,
                     status_id,
                     target_id
@@ -718,7 +730,8 @@ pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Deriv
             build_current_target,
             build_last_activity_seconds,
             build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled,
+            store_path
         FROM derivations
         WHERE id = $1
         "#,
@@ -755,7 +768,8 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
             build_current_target,
             build_last_activity_seconds,
             build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled,
+            store_path
         FROM derivations
         WHERE status_id = $1
         AND attempt_count < 5
@@ -797,6 +811,7 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
                 d.build_last_activity_seconds,
                 d.build_last_heartbeat,
                 d.cf_agent_enabled,
+                d.store_path,
                 -- Find the related NixOS system for packages, or use self for NixOS systems
                 CASE 
                     WHEN d.derivation_type = 'package' THEN 
@@ -840,7 +855,8 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             build_current_target,
             build_last_activity_seconds,
             build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled,
+            store_path
         FROM nixos_system_groups
         ORDER BY 
             nixos_group_id,          -- Group related packages and systems together
@@ -956,7 +972,8 @@ pub async fn handle_derivation_failure(
                 build_current_target,
                 build_last_activity_seconds,
                 build_last_heartbeat,
-                cf_agent_enabled
+                cf_agent_enabled,
+                store_path
             "#,
             status.as_id(),
             new_attempt_count,
@@ -994,7 +1011,8 @@ pub async fn handle_derivation_failure(
                 build_current_target,
                 build_last_activity_seconds,
                 build_last_heartbeat,
-                cf_agent_enabled
+                cf_agent_enabled,
+                store_path
             "#,
             status.as_id(),
             new_attempt_count,
@@ -1213,7 +1231,8 @@ pub async fn discover_and_insert_packages(
                     build_current_target,
                     build_last_activity_seconds,
                     build_last_heartbeat,
-                    cf_agent_enabled
+                    cf_agent_enabled,
+                    store_path
                 "#,
                 None::<i32>,     // commit_id is NULL for discovered packages
                 "package",       // derivation_type = "package"
@@ -1362,7 +1381,8 @@ pub async fn get_latest_successful_derivation_for_flake(
             d.build_current_target,
             d.build_last_activity_seconds,
             d.build_last_heartbeat,
-            d.cf_agent_enabled
+            d.cf_agent_enabled,
+            d.store_path
         FROM derivations d
         INNER JOIN commits c ON d.commit_id = c.id
         INNER JOIN derivation_statuses ds ON d.status_id = ds.id
@@ -1525,6 +1545,7 @@ pub async fn get_derivations_ready_for_build_with_dependencies(
                 d.build_last_activity_seconds,
                 d.build_last_heartbeat,
                 d.cf_agent_enabled,
+                d.store_path,
                 dt.nixos_root_id,
                 dt.dependency_depth,
                 dt.nixos_system_name,
@@ -1559,7 +1580,8 @@ pub async fn get_derivations_ready_for_build_with_dependencies(
             build_current_target,
             build_last_activity_seconds,
             build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled,
+            store_path
         FROM buildable_derivations
         WHERE unbuilt_dependency_count = 0  -- Only build when all deps are ready
         ORDER BY 
@@ -1630,6 +1652,7 @@ pub async fn get_next_buildable_for_nixos_system(
                 d.build_last_activity_seconds,
                 d.build_last_heartbeat,
                 d.cf_agent_enabled,
+                d.store_path,
                 sd.depth
             FROM system_dependencies sd
             JOIN derivations d ON sd.id = d.id
@@ -1663,7 +1686,8 @@ pub async fn get_next_buildable_for_nixos_system(
             build_current_target,
             build_last_activity_seconds,
             build_last_heartbeat,
-            cf_agent_enabled
+            cf_agent_enabled,
+            store_path
         FROM ready_to_build
         ORDER BY 
             depth DESC,          -- Build deepest dependencies first
