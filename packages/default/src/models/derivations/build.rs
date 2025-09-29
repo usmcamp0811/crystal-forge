@@ -201,20 +201,22 @@ impl Derivation {
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // Add this debug line to see what we're actually getting
         debug!(
             "nix build --dry-run stderr for {}: '{}'",
             flake_target, stderr
         );
 
+        // Use the working parse_derivation_paths function
         let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
         let cf_agent_enabled = is_cf_agent_enabled(flake_target, build_config).await?;
+
         info!("🔍 main drv: {main_drv}");
         info!("🔍 {} immediate input drvs", deps.len());
+
         Ok(EvaluationResult {
             main_derivation_path: main_drv,
             dependency_derivation_paths: deps,
-            cf_agent_enabled: cf_agent_enabled,
+            cf_agent_enabled,
         })
     }
 
