@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations \n        SET cf_agent_enabled = $1\n        WHERE id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Bool",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c2385bab64bfcbefbf12f1c6a08eac48991083819da8d5ea85714c7b2565bdc8"
+}

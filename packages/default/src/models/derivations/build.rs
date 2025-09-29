@@ -104,13 +104,15 @@ impl Derivation {
     ) -> Result<String> {
         let eval_result = Self::dry_run_derivation_path(flake_target, build_config).await?;
 
-        self.cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
-            Ok(enabled) => Some(enabled),
+        let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
+            Ok(enabled) => enabled,
             Err(e) => {
                 warn!("Could not determine Crystal Forge agent status: {}", e);
-                Some(false) // Default to false if we can't determine
+                false
             }
         };
+
+        self.cf_agent_enabled = Some(cf_agent_enabled);
 
         // Insert dependencies into database
         if !eval_result.dependency_derivation_paths.is_empty() {
@@ -125,6 +127,20 @@ impl Derivation {
             )
             .await?;
         }
+
+        // Update status and derivation_path
+        crate::queries::derivations::update_derivation_status(
+            pool,
+            self.id,
+            crate::queries::derivations::EvaluationStatus::DryRunComplete,
+            Some(&eval_result.main_derivation_path),
+            None,
+        )
+        .await?;
+
+        // Update cf_agent_enabled
+        crate::queries::derivations::update_cf_agent_enabled(pool, self.id, cf_agent_enabled)
+            .await?;
 
         Ok(eval_result.main_derivation_path)
     }
@@ -177,13 +193,10 @@ impl Derivation {
         build_config: &BuildConfig,
     ) -> Result<EvaluationResult> {
         info!("🔍 Evaluating derivation paths for: {}", flake_target);
-
         let mut cmd = Command::new("nix");
         cmd.args(["build", "--dry-run", flake_target]);
         build_config.apply_to_command(&mut cmd);
-
         let output = cmd.output().await?;
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
@@ -192,10 +205,24 @@ impl Derivation {
                 stderr.trim()
             );
         }
-
         let stderr = String::from_utf8_lossy(&output.stderr);
+
+        debug!(
+            "nix build --dry-run stderr for {}: '{}'",
+            flake_target, stderr
+        );
+
+        // Use the working parse_derivation_paths function
         let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
-        let cf_agent_enabled = is_cf_agent_enabled(flake_target, build_config).await?;
+
+        // Handle CF agent check gracefully - don't let it fail the whole evaluation
+        let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                warn!("Could not determine Crystal Forge agent status: {}", e);
+                false // Default to false if we can't determine
+            }
+        };
 
         info!("🔍 main drv: {main_drv}");
         info!("🔍 {} immediate input drvs", deps.len());
@@ -203,7 +230,7 @@ impl Derivation {
         Ok(EvaluationResult {
             main_derivation_path: main_drv,
             dependency_derivation_paths: deps,
-            cf_agent_enabled: cf_agent_enabled,
+            cf_agent_enabled,
         })
     }
 
@@ -481,78 +508,62 @@ impl Derivation {
 
 /// Check if this derivation has Crystal Forge agent enabled
 pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig) -> Result<bool> {
-    // This is so we dont try and reach the interwebs during testing in Nix VM tests
+    // Test environment check
     if std::env::var("CF_TEST_ENVIRONMENT").is_ok() || flake_target.contains("cf-test-sys") {
-        return Ok(true); // Assume enabled in tests
+        return Ok(true);
     }
 
-    let cf_enabled_systemd_cmd = || {
-        let mut cmd = build_config.systemd_scoped_cmd_base();
-        cmd.args([
-            "nix",
-            "eval",
-            "--json",
-            &format!("{}.config.services.crystal-forge.enable", flake_target),
-        ]);
-        cmd
-    };
-    let cf_enabled_output = Derivation::execute_with_systemd_fallback(
-        build_config,
-        cf_enabled_systemd_cmd,
-        &[
-            "nix",
-            "eval",
-            "--json",
-            &format!("{}.config.services.crystal-forge.enable", flake_target),
-        ],
-        "check if Crystal Forge module is enabled",
-    )
-    .await?;
+    // Extract the system name from the flake target
+    let system_name = flake_target
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('.').nth(1))
+        .unwrap_or("unknown");
 
-    let cf_client_enabled_systemd_cmd = || {
-        let mut cmd = build_config.systemd_scoped_cmd_base();
-        cmd.args([
-            "nix",
-            "eval",
-            "--json",
-            &format!(
-                "{}.config.services.crystal-forge.client.enable",
-                flake_target
-            ),
-        ]);
-        cmd
-    };
-    let cf_client_enabled_output = Derivation::execute_with_systemd_fallback(
-        build_config,
-        cf_client_enabled_systemd_cmd,
-        &[
-            "nix",
-            "eval",
-            "--json",
-            &format!(
-                "{}.config.services.crystal-forge.client.enable",
-                flake_target
-            ),
-        ],
-        "check if Crystal Forge client is enabled",
-    )
-    .await?;
+    // Extract the flake URL (before the #)
+    let flake_url = flake_target.split('#').next().unwrap_or(flake_target);
 
-    if !cf_enabled_output.status.success() {
-        bail!(
-            "nix eval failed: {}",
-            String::from_utf8_lossy(&cf_enabled_output.stderr).trim()
-        );
+    // Use a simpler evaluation that's less likely to fail
+    let eval_expr = format!(
+        "let flake = builtins.getFlake \"{}\"; cfg = flake.nixosConfigurations.{}.config.services.crystal-forge or {{}}; in {{ enable = cfg.enable or false; client_enable = cfg.client.enable or false; }}",
+        flake_url, system_name
+    );
+
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--expr", &eval_expr]);
+    build_config.apply_to_command(&mut cmd);
+
+    match cmd.output().await {
+        Ok(output) if output.status.success() => {
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(json) => {
+                    let cf_enabled = json
+                        .get("enable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let cf_client_enabled = json
+                        .get("client_enable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    Ok(cf_enabled && cf_client_enabled)
+                }
+                Err(e) => {
+                    warn!("Failed to parse CF agent status JSON: {}", e);
+                    Ok(false)
+                }
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("CF agent evaluation failed: {}", stderr);
+            Ok(false)
+        }
+        Err(e) => {
+            warn!("Failed to run CF agent evaluation: {}", e);
+            Ok(false)
+        }
     }
-    if !cf_client_enabled_output.status.success() {
-        bail!(
-            "nix eval failed: {}",
-            String::from_utf8_lossy(&cf_client_enabled_output.stderr).trim()
-        );
-    }
-    let cf_enabled = serde_json::from_slice::<bool>(&cf_enabled_output.stdout).unwrap_or(false);
-    let cf_client_enabled = serde_json::from_slice::<bool>(&cf_client_enabled_output.stdout)?;
-    Ok(cf_enabled && cf_client_enabled)
 }
 
 async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
