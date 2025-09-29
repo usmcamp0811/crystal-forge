@@ -502,25 +502,29 @@ impl Derivation {
 
 /// Check if this derivation has Crystal Forge agent enabled
 pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig) -> Result<bool> {
-    // This is so we dont try and reach the interwebs during testing in Nix VM tests
+    // Test environment check
     if std::env::var("CF_TEST_ENVIRONMENT").is_ok() || flake_target.contains("cf-test-sys") {
-        return Ok(true); // Assume enabled in tests
+        return Ok(true);
     }
 
-    // Try a more robust evaluation approach
-    // Instead of evaluating the config directly, use nix-instantiate which is more forgiving
-    let mut cmd = Command::new("nix-instantiate");
-    cmd.args([
-        "--eval", 
-        "--json", 
-        "--expr",
-        &format!(
-            "let flake = builtins.getFlake \"{}\"; in {{ cf_enabled = flake.nixosConfigurations.{}.config.services.crystal-forge.enable or false; cf_client_enabled = flake.nixosConfigurations.{}.config.services.crystal-forge.client.enable or false; }}",
-            flake_target.split('#').next().unwrap_or(flake_target),
-            flake_target.split('.').nth(1).unwrap_or("unknown"),
-            flake_target.split('.').nth(1).unwrap_or("unknown")
-        )
-    ]);
+    // Extract the system name from the flake target
+    let system_name = flake_target
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('.').nth(1))
+        .unwrap_or("unknown");
+
+    // Extract the flake URL (before the #)
+    let flake_url = flake_target.split('#').next().unwrap_or(flake_target);
+
+    // Use a simpler evaluation that's less likely to fail
+    let eval_expr = format!(
+        "let flake = builtins.getFlake \"{}\"; cfg = flake.nixosConfigurations.{}.config.services.crystal-forge or {{}}; in {{ enable = cfg.enable or false; client_enable = cfg.client.enable or false; }}",
+        flake_url, system_name
+    );
+
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--expr", &eval_expr]);
     build_config.apply_to_command(&mut cmd);
 
     match cmd.output().await {
@@ -529,23 +533,28 @@ pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig)
             match serde_json::from_str::<serde_json::Value>(&json_str) {
                 Ok(json) => {
                     let cf_enabled = json
-                        .get("cf_enabled")
+                        .get("enable")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     let cf_client_enabled = json
-                        .get("cf_client_enabled")
+                        .get("client_enable")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
                     Ok(cf_enabled && cf_client_enabled)
                 }
-                Err(_) => {
-                    warn!("Failed to parse CF agent status JSON, defaulting to false");
+                Err(e) => {
+                    warn!("Failed to parse CF agent status JSON: {}", e);
                     Ok(false)
                 }
             }
         }
-        _ => {
-            warn!("Failed to evaluate CF agent status, defaulting to false");
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("CF agent evaluation failed: {}", stderr);
+            Ok(false)
+        }
+        Err(e) => {
+            warn!("Failed to run CF agent evaluation: {}", e);
             Ok(false)
         }
     }
