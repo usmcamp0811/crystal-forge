@@ -208,7 +208,15 @@ impl Derivation {
 
         // Use the working parse_derivation_paths function
         let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
-        let cf_agent_enabled = is_cf_agent_enabled(flake_target, build_config).await?;
+
+        // Handle CF agent check gracefully - don't let it fail the whole evaluation
+        let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
+            Ok(enabled) => enabled,
+            Err(e) => {
+                warn!("Could not determine Crystal Forge agent status: {}", e);
+                false // Default to false if we can't determine
+            }
+        };
 
         info!("🔍 main drv: {main_drv}");
         info!("🔍 {} immediate input drvs", deps.len());
