@@ -108,7 +108,7 @@ impl Derivation {
             Ok(enabled) => Some(enabled),
             Err(e) => {
                 warn!("Could not determine Crystal Forge agent status: {}", e);
-                Some(false) // Default to false if we can't determine
+                Some(false)
             }
         };
 
@@ -125,6 +125,16 @@ impl Derivation {
             )
             .await?;
         }
+
+        // 🔧 ADD THIS: Update the derivation_path in the database
+        crate::queries::derivations::update_derivation_status(
+            pool,
+            self.id,
+            crate::queries::derivations::EvaluationStatus::DryRunComplete,
+            Some(&eval_result.main_derivation_path),
+            None,
+        )
+        .await?;
 
         Ok(eval_result.main_derivation_path)
     }
