@@ -36,7 +36,8 @@ pub async fn get_targets_needing_cve_scan(
             d.build_current_target,
             d.build_last_activity_seconds,
             d.build_last_heartbeat,
-            d.cf_agent_enabled
+            d.cf_agent_enabled,
+            d.store_path
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
         WHERE ds.name IN ('build-complete', 'complete')

@@ -48,7 +48,7 @@ pub async fn get_derivations_needing_cache_push(
             d.cf_agent_enabled
         FROM derivations d
         WHERE d.status_id = (SELECT id FROM derivation_statuses WHERE name = 'build-complete')
-          AND d.derivation_path IS NOT NULL
+          AND d.store_path IS NOT NULL
           -- no active job already done or running
           AND NOT EXISTS (
             SELECT 1
