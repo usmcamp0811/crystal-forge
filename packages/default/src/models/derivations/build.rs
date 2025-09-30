@@ -208,8 +208,14 @@ impl Derivation {
                 stderr.trim()
             );
         }
+        // Debug: log both stdout and stderr
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
+        debug!(
+            "nix build --dry-run stdout for {}: '{}'",
+            flake_target, stdout
+        );
         debug!(
             "nix build --dry-run stderr for {}: '{}'",
             flake_target, stderr
