@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, commit_id, derivation_type as \"derivation_type: DerivationType\",\n            derivation_name, derivation_path, derivation_target, scheduled_at,\n            completed_at, started_at, attempt_count, evaluation_duration_ms,\n            error_message, pname, version, status_id, build_elapsed_seconds,\n            build_current_target, build_last_activity_seconds, build_last_heartbeat,\n            cf_agent_enabled\n        FROM derivations \n        WHERE derivation_type = 'nixos' \n        AND status_id = $1\n        AND NOT EXISTS (\n            SELECT 1 FROM derivation_dependencies dd WHERE dd.derivation_id = derivations.id\n        )\n        ",
+  "query": "\n                    UPDATE derivations SET \n                        status_id = $1,\n                        started_at = NOW(),\n                        derivation_path = $2,\n                        store_path = $4\n                    WHERE id = $3\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled,\n                        store_path\n                    ",
   "describe": {
     "columns": [
       {
@@ -102,11 +102,19 @@
         "ordinal": 19,
         "name": "cf_agent_enabled",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 20,
+        "name": "store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Int4"
+        "Int4",
+        "Text",
+        "Int4",
+        "Text"
       ]
     },
     "nullable": [
@@ -129,8 +137,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "c167ee96d12aca695affddb0f98f2ffda82e9f0ec676e22e1aa5d664f7b2a172"
+  "hash": "5b695913ce721cc4cdea30186b96cbce9441499c541187a6dd8d1cb18c86967b"
 }

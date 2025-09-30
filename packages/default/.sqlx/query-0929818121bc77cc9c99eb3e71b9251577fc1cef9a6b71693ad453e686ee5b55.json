@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                    UPDATE derivations SET status_id = $1\n                    WHERE id = $2\n                    RETURNING\n                        id,\n                        commit_id,\n                        derivation_type as \"derivation_type: DerivationType\",\n                        derivation_name,\n                        derivation_path,\n                        derivation_target,\n                        scheduled_at,\n                        completed_at,\n                        started_at,\n                        attempt_count,\n                        evaluation_duration_ms,\n                        error_message,\n                        pname,\n                        version,\n                        status_id,\n                        build_elapsed_seconds,\n                        build_current_target,\n                        build_last_activity_seconds,\n                        build_last_heartbeat,\n                        cf_agent_enabled\n                    ",
+  "query": "\n        INSERT INTO derivations (\n            commit_id, \n            derivation_type, \n            derivation_name, \n            status_id,\n            attempt_count\n        )\n        VALUES ($1, $2, $3, $4, 0)\n        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) \n        DO UPDATE SET\n            status_id = CASE \n                WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.status_id  -- Keep terminal states\n                ELSE EXCLUDED.status_id  -- Reset non-terminal states to pending\n            END\n        RETURNING \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        ",
   "describe": {
     "columns": [
       {
@@ -102,11 +102,18 @@
         "ordinal": 19,
         "name": "cf_agent_enabled",
         "type_info": "Bool"
+      },
+      {
+        "ordinal": 20,
+        "name": "store_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
         "Int4",
+        "Text",
+        "Text",
         "Int4"
       ]
     },
@@ -130,8 +137,9 @@
       true,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "709daa49d8d068188aa6da7b7e45b86af015747640be13c6416624506d9a7231"
+  "hash": "0929818121bc77cc9c99eb3e71b9251577fc1cef9a6b71693ad453e686ee5b55"
 }
