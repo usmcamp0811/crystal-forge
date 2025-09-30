@@ -359,7 +359,7 @@ async fn process_cache_pushes(
     match get_derivations_needing_cache_push(pool, Some(10)).await {
         Ok(derivations) => {
             for derivation in derivations {
-                if let Some(store_path) = &derivation.derivation_path {
+                if let Some(store_path) = &derivation.store_path {
                     // Check if we should push this target
                     if !cache_config.should_push(&derivation.derivation_name) {
                         info!(
