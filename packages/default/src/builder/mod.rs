@@ -12,8 +12,8 @@ use crate::queries::cve_scans::{
     save_scan_results,
 };
 use crate::queries::derivations::{
-    EvaluationStatus, get_derivations_ready_for_build, mark_target_build_in_progress,
-    mark_target_failed, update_derivation_status,
+    EvaluationStatus, claim_next_derivation, get_derivations_ready_for_build,
+    mark_target_build_in_progress, mark_target_failed, update_derivation_status,
 };
 use crate::queries::derivations::{
     discover_and_queue_all_transitive_dependencies,
@@ -159,28 +159,80 @@ pub async fn run_build_loop(pool: PgPool) {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
         CrystalForgeConfig::default()
     });
-
     let build_config = cfg.get_build_config();
+    let num_workers = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
 
-    info!(
-        "🔍 Starting Build loop (every {}s)...",
-        build_config.poll_interval.as_secs()
-    );
-
+    info!("Starting {} continuous build workers...", num_workers);
     debug!(
-        "🔧 Build config: cores={}, max_jobs={}, substitutes={}, poll_interval={}s",
-        build_config.cores,
-        build_config.max_jobs,
-        build_config.use_substitutes,
-        build_config.poll_interval.as_secs()
+        "Build config: cores={}, max_jobs={}, substitutes={}",
+        build_config.cores, build_config.max_jobs, build_config.use_substitutes,
     );
+
+    // Spawn worker pool
+    let mut handles = Vec::new();
+    for worker_id in 0..num_workers {
+        let pool = pool.clone();
+        let build_config = build_config.clone();
+
+        let handle = tokio::spawn(async move {
+            build_worker(worker_id, pool, build_config).await;
+        });
+        handles.push(handle);
+    }
+
+    // Wait for all workers (they run forever)
+    for handle in handles {
+        let _ = handle.await;
+    }
+}
+
+async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig) {
+    info!("Worker {} started", worker_id);
 
     loop {
-        if let Err(e) = build_derivations(&pool, &build_config).await {
-            error!("❌ Error in build cycle: {e}");
-        }
+        // Claim next work item
+        match claim_next_derivation(&pool).await {
+            Ok(Some(mut derivation)) => {
+                info!(
+                    "Worker {} claimed: {}",
+                    worker_id, derivation.derivation_name
+                );
 
-        sleep(build_config.poll_interval).await;
+                match build_single_derivation(&pool, &mut derivation, &build_config).await {
+                    Ok(store_path) => {
+                        info!(
+                            "Worker {} built {}: {}",
+                            worker_id, derivation.derivation_name, store_path
+                        );
+                        if let Err(e) =
+                            mark_target_build_complete(&pool, derivation.id, &store_path).await
+                        {
+                            error!("Worker {} failed to mark complete: {}", worker_id, e);
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            "Worker {} build failed for {}: {}",
+                            worker_id, derivation.derivation_name, e
+                        );
+                        if let Err(e2) =
+                            handle_derivation_failure(&pool, &derivation, "build", &e).await
+                        {
+                            error!("Worker {} failed to handle failure: {}", worker_id, e2);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {
+                // No work available, sleep briefly
+                debug!("Worker {} idle, no work available", worker_id);
+                sleep(std::time::Duration::from_secs(5)).await;
+            }
+            Err(e) => {
+                error!("Worker {} error claiming work: {}", worker_id, e);
+                sleep(std::time::Duration::from_secs(10)).await;
+            }
+        }
     }
 }
 

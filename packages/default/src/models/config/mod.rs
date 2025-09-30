@@ -151,7 +151,7 @@ impl CrystalForgeConfig {
         let cfg = Self::load()?;
         let db_url = cfg.database.to_url();
         PgPoolOptions::new()
-            .max_connections(5)
+            .max_connections(20)
             .min_connections(1) // Keep minimum connections alive
             .acquire_timeout(Duration::from_secs(30)) // Timeout acquiring connections
             .idle_timeout(Some(Duration::from_secs(600))) // Close idle connections after 10min
