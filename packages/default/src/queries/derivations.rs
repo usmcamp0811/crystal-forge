@@ -253,12 +253,190 @@ pub async fn update_derivation_status(
     status: EvaluationStatus,
     derivation_path: Option<&str>,
     error_message: Option<&str>,
+    store_path: Option<&str>,
 ) -> Result<Derivation> {
     let status_id = status.as_id();
 
-    // Use a simpler approach with separate queries for different cases
-    let updated = match (derivation_path, error_message) {
-        (Some(path), Some(err)) => {
+    // Match in the SAME order as function args: (derivation_path, error_message, store_path)
+    let updated = match (derivation_path, error_message, store_path) {
+        // path + error + store
+        (Some(path), Some(err), Some(nix_store)) => {
+            if status.is_terminal() {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET 
+                        status_id = $1,
+                        completed_at = NOW(),
+                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+                        derivation_path = $2,
+                        error_message = $3,
+                        store_path = $5
+                    WHERE id = $4
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    path,
+                    err,
+                    target_id,
+                    nix_store
+                )
+                .fetch_one(pool)
+                .await?
+            } else {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET 
+                        status_id = $1,
+                        started_at = NOW(),
+                        derivation_path = $2,
+                        error_message = $3,
+                        store_path = $5
+                    WHERE id = $4
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    path,
+                    err,
+                    target_id,
+                    nix_store
+                )
+                .fetch_one(pool)
+                .await?
+            }
+        }
+
+        // path + store (no error)
+        (Some(path), None, Some(nix_store)) => {
+            if status.is_terminal() {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET 
+                        status_id = $1,
+                        completed_at = NOW(),
+                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+                        derivation_path = $2, 
+                        store_path = $4
+                    WHERE id = $3
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    path,
+                    target_id,
+                    nix_store
+                )
+                .fetch_one(pool)
+                .await?
+            } else {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET 
+                        status_id = $1,
+                        started_at = NOW(),
+                        derivation_path = $2,
+                        store_path = $4
+                    WHERE id = $3
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    path,
+                    target_id,
+                    nix_store
+                )
+                .fetch_one(pool)
+                .await?
+            }
+        }
+
+        // path + error (no store)
+        (Some(path), Some(err), None) => {
             if status.is_terminal() {
                 sqlx::query_as!(
                     Derivation,
@@ -313,7 +491,7 @@ pub async fn update_derivation_status(
                     RETURNING
                         id,
                         commit_id,
-                        derivation_type as "derivation_type: DerivationType",
+                        derivivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
                         derivation_target,
@@ -342,87 +520,9 @@ pub async fn update_derivation_status(
                 .await?
             }
         }
-        (Some(path), None) => {
-            if status.is_terminal() {
-                sqlx::query_as!(
-                    Derivation,
-                    r#"
-                    UPDATE derivations SET 
-                        status_id = $1,
-                        completed_at = NOW(),
-                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
-                        derivation_path = $2
-                    WHERE id = $3
-                    RETURNING
-                        id,
-                        commit_id,
-                        derivation_type as "derivation_type: DerivationType",
-                        derivation_name,
-                        derivation_path,
-                        derivation_target,
-                        scheduled_at,
-                        completed_at,
-                        started_at,
-                        attempt_count,
-                        evaluation_duration_ms,
-                        error_message,
-                        pname,
-                        version,
-                        status_id,
-                        build_elapsed_seconds,
-                        build_current_target,
-                        build_last_activity_seconds,
-                        build_last_heartbeat,
-                        cf_agent_enabled,
-                        store_path
-                    "#,
-                    status_id,
-                    path,
-                    target_id
-                )
-                .fetch_one(pool)
-                .await?
-            } else {
-                sqlx::query_as!(
-                    Derivation,
-                    r#"
-                    UPDATE derivations SET 
-                        status_id = $1,
-                        started_at = NOW(),
-                        derivation_path = $2
-                    WHERE id = $3
-                    RETURNING
-                        id,
-                        commit_id,
-                        derivation_type as "derivation_type: DerivationType",
-                        derivation_name,
-                        derivation_path,
-                        derivation_target,
-                        scheduled_at,
-                        completed_at,
-                        started_at,
-                        attempt_count,
-                        evaluation_duration_ms,
-                        error_message,
-                        pname,
-                        version,
-                        status_id,
-                        build_elapsed_seconds,
-                        build_current_target,
-                        build_last_activity_seconds,
-                        build_last_heartbeat,
-                        cf_agent_enabled,
-                        store_path
-                    "#,
-                    status_id,
-                    path,
-                    target_id
-                )
-                .fetch_one(pool)
-                .await?
-            }
-        }
-        (None, Some(err)) => {
+
+        // error only (no path, no store)
+        (None, Some(err), None) => {
             if status.is_terminal() {
                 sqlx::query_as!(
                     Derivation,
@@ -502,7 +602,128 @@ pub async fn update_derivation_status(
                 .await?
             }
         }
-        (None, None) => {
+
+        // store only (no path, no error)
+        (None, None, Some(nix_store)) => {
+            if status.is_terminal() {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET
+                        status_id = $1,
+                        completed_at = NOW(),
+                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+                        store_path = $3
+                    WHERE id = $2
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    target_id,
+                    nix_store
+                )
+                .fetch_one(pool)
+                .await?
+            } else if status.is_in_progress() {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET
+                        status_id = $1,
+                        started_at = NOW(),
+                        store_path = $3
+                    WHERE id = $2
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    target_id,
+                    nix_store
+                )
+                .fetch_one(pool)
+                .await?
+            } else {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET
+                        status_id = $1,
+                        store_path = $3
+                    WHERE id = $2
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    target_id,
+                    nix_store
+                )
+                .fetch_one(pool)
+                .await?
+            }
+        }
+
+        // nothing special provided
+        (None, None, None) => {
             if status.is_in_progress() {
                 sqlx::query_as!(
                     Derivation,
@@ -628,6 +849,7 @@ pub async fn mark_derivation_dry_run_in_progress(
         EvaluationStatus::DryRunInProgress,
         None,
         None,
+        None,
     )
     .await
 }
@@ -643,6 +865,7 @@ pub async fn mark_derivation_dry_run_complete(
         EvaluationStatus::DryRunComplete,
         Some(derivation_path),
         None,
+        None,
     )
     .await
 }
@@ -657,6 +880,7 @@ pub async fn mark_derivation_build_in_progress(
         EvaluationStatus::BuildInProgress,
         None,
         None,
+        None,
     )
     .await
 }
@@ -664,6 +888,7 @@ pub async fn mark_derivation_build_in_progress(
 pub async fn mark_derivation_build_complete(
     pool: &PgPool,
     derivation_id: i32,
+    store_path: &str,
 ) -> Result<Derivation> {
     update_derivation_status(
         pool,
@@ -671,6 +896,7 @@ pub async fn mark_derivation_build_complete(
         EvaluationStatus::BuildComplete,
         None,
         None,
+        store_path,
     )
     .await
 }
@@ -687,7 +913,7 @@ pub async fn mark_derivation_failed(
         _ => return Err(anyhow::anyhow!("Invalid phase: {}", phase)),
     };
 
-    update_derivation_status(pool, derivation_id, status, None, Some(error_message)).await
+    update_derivation_status(pool, derivation_id, status, None, Some(error_message), None).await
 }
 
 // Keeping the original function but updating it to use the new status
@@ -695,6 +921,7 @@ pub async fn update_derivation_path(
     pool: &PgPool,
     target: &Derivation,
     path: &str,
+    store_path: &str,
 ) -> Result<Derivation> {
     update_derivation_status(
         pool,
@@ -702,6 +929,7 @@ pub async fn update_derivation_path(
         EvaluationStatus::DryRunComplete,
         Some(path),
         None,
+        store_path,
     )
     .await
 }
