@@ -193,11 +193,9 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
                     let build_config = cfg.get_build_config();
 
                     match target.evaluate_and_build(&pool, false, &build_config).await {
-                        Ok(derivation_path) => {
-                            match update_derivation_path(&pool, &target, &derivation_path).await {
-                                Ok(updated) => info!("✅ Updated: {}", updated.derivation_name),
-                                Err(e) => error!("❌ Failed to update path: {e}"),
-                            }
+                        Ok(_derivation_path) => {
+                            // The evaluate_and_build already updated the status, path, and store_path
+                            info!("✅ Completed dry-run for: {}", target.derivation_name);
                         }
                         Err(e) => {
                             if let Err(handle_err) =

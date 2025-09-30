@@ -435,6 +435,88 @@ pub async fn update_derivation_status(
             }
         }
 
+        // path only (no error, no store)
+        (Some(path), None, None) => {
+            if status.is_terminal() {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET 
+                        status_id = $1,
+                        completed_at = NOW(),
+                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+                        derivation_path = $2
+                    WHERE id = $3
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    path,
+                    target_id
+                )
+                .fetch_one(pool)
+                .await?
+            } else {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET 
+                        status_id = $1,
+                        started_at = NOW(),
+                        derivation_path = $2
+                    WHERE id = $3
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    path,
+                    target_id
+                )
+                .fetch_one(pool)
+                .await?
+            }
+        }
+
         // path + error (no store)
         (Some(path), Some(err), None) => {
             if status.is_terminal() {
@@ -491,7 +573,7 @@ pub async fn update_derivation_status(
                     RETURNING
                         id,
                         commit_id,
-                        derivivation_type as "derivation_type: DerivationType",
+                        derivation_type as "derivation_type: DerivationType",
                         derivation_name,
                         derivation_path,
                         derivation_target,
@@ -515,6 +597,92 @@ pub async fn update_derivation_status(
                     path,
                     err,
                     target_id
+                )
+                .fetch_one(pool)
+                .await?
+            }
+        }
+
+        // error + store (no path)
+        (None, Some(err), Some(nix_store)) => {
+            if status.is_terminal() {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET 
+                        status_id = $1,
+                        completed_at = NOW(),
+                        evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+                        error_message = $2,
+                        store_path = $4
+                    WHERE id = $3
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    err,
+                    target_id,
+                    nix_store
+                )
+                .fetch_one(pool)
+                .await?
+            } else {
+                sqlx::query_as!(
+                    Derivation,
+                    r#"
+                    UPDATE derivations SET 
+                        status_id = $1,
+                        started_at = NOW(),
+                        error_message = $2,
+                        store_path = $4
+                    WHERE id = $3
+                    RETURNING
+                        id,
+                        commit_id,
+                        derivation_type as "derivation_type: DerivationType",
+                        derivation_name,
+                        derivation_path,
+                        derivation_target,
+                        scheduled_at,
+                        completed_at,
+                        started_at,
+                        attempt_count,
+                        evaluation_duration_ms,
+                        error_message,
+                        pname,
+                        version,
+                        status_id,
+                        build_elapsed_seconds,
+                        build_current_target,
+                        build_last_activity_seconds,
+                        build_last_heartbeat,
+                        cf_agent_enabled,
+                        store_path
+                    "#,
+                    status_id,
+                    err,
+                    target_id,
+                    nix_store
                 )
                 .fetch_one(pool)
                 .await?
@@ -896,7 +1064,7 @@ pub async fn mark_derivation_build_complete(
         EvaluationStatus::BuildComplete,
         None,
         None,
-        store_path,
+        Some(store_path),
     )
     .await
 }
@@ -929,7 +1097,7 @@ pub async fn update_derivation_path(
         EvaluationStatus::DryRunComplete,
         Some(path),
         None,
-        store_path,
+        Some(store_path),
     )
     .await
 }
@@ -1363,8 +1531,12 @@ pub async fn mark_target_build_in_progress(pool: &PgPool, target_id: i32) -> Res
     mark_derivation_build_in_progress(pool, target_id).await
 }
 
-pub async fn mark_target_build_complete(pool: &PgPool, target_id: i32) -> Result<Derivation> {
-    mark_derivation_build_complete(pool, target_id).await
+pub async fn mark_target_build_complete(
+    pool: &PgPool,
+    target_id: i32,
+    store_path: &str,
+) -> Result<Derivation> {
+    mark_derivation_build_complete(pool, target_id, store_path).await
 }
 
 pub async fn mark_target_failed(

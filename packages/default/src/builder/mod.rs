@@ -34,19 +34,15 @@ async fn build_derivations_simple_dependency_order(
     build_config: &BuildConfig,
 ) -> Result<()> {
     // This approach builds all ready dependencies regardless of which NixOS system they belong to
-
     let derivations = get_derivations_ready_for_build_with_dependencies(pool).await?;
-
     if derivations.is_empty() {
         info!("🔍 No derivations ready for building");
         return Ok(());
     }
-
     info!(
         "🏗️ Found {} derivations ready for building",
         derivations.len()
     );
-
     for mut derivation in derivations {
         // Double-check that all dependencies are built
         if !has_all_dependencies_built(pool, derivation.id).await? {
@@ -56,32 +52,27 @@ async fn build_derivations_simple_dependency_order(
             );
             continue;
         }
-
         info!(
             "🔨 Building: {} (type: {:?})",
             derivation.derivation_name, derivation.derivation_type
         );
-
         mark_target_build_in_progress(pool, derivation.id).await?;
-
         match derivation
             .evaluate_and_build(pool, true, build_config)
             .await
         {
             Ok(store_path) => {
                 info!("✅ Built {}: {}", derivation.derivation_name, store_path);
-                mark_target_build_complete(pool, derivation.id).await?;
+                mark_target_build_complete(pool, derivation.id, &store_path).await?;
             }
             Err(e) => {
                 error!("❌ Build failed for {}: {}", derivation.derivation_name, e);
                 handle_derivation_failure(pool, &derivation, "build", &e).await?;
             }
         }
-
         // Limit to building one derivation per cycle to allow other systems to progress
         break;
     }
-
     Ok(())
 }
 
@@ -117,7 +108,7 @@ async fn build_derivations_with_dependency_discovery(
         match build_single_derivation(pool, &mut derivation, build_config).await {
             Ok(store_path) => {
                 info!("Built {}: {}", derivation.derivation_name, store_path);
-                mark_target_build_complete(pool, derivation.id).await?;
+                mark_target_build_complete(pool, derivation.id, &store_path).await?;
             }
             Err(e) => {
                 error!("Build failed for {}: {}", derivation.derivation_name, e);

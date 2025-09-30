@@ -2,6 +2,7 @@ use super::Derivation;
 use super::utils::*;
 use crate::models::config::BuildConfig;
 use crate::models::derivations::parse_derivation_paths;
+use crate::models::derivations::resolve_drv_to_store_path_static;
 use anyhow::{Context, Result, anyhow, bail};
 use serde_json::Value;
 use sqlx::PgPool;
@@ -217,6 +218,9 @@ impl Derivation {
         // Use the working parse_derivation_paths function
         let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
 
+        // Get the store path by querying what the derivation would produce
+        let store_path = resolve_drv_to_store_path_static(&main_drv).await?;
+
         // Handle CF agent check gracefully - don't let it fail the whole evaluation
         let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
             Ok(enabled) => enabled,
@@ -227,6 +231,7 @@ impl Derivation {
         };
 
         info!("🔍 main drv: {main_drv}");
+        info!("🔍 store path: {store_path}");
         info!("🔍 {} immediate input drvs", deps.len());
 
         Ok(EvaluationResult {
