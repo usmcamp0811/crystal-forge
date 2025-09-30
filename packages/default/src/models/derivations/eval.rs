@@ -92,6 +92,35 @@ pub async fn list_immediate_input_drvs(
     Ok(deps)
 }
 
+/// Resolve a .drv path to its output store path(s) - static version
+pub async fn resolve_drv_to_store_path_static(drv_path: &str) -> Result<String> {
+    if !drv_path.ends_with(".drv") {
+        // Already a store path, return as-is
+        return Ok(drv_path.to_string());
+    }
+
+    let output = Command::new("nix-store")
+        .args(["--query", "--outputs", drv_path])
+        .output()
+        .await
+        .context("Failed to execute nix-store --query --outputs")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("nix-store --query --outputs failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let store_paths: Vec<&str> = stdout.trim().lines().collect();
+
+    if store_paths.is_empty() {
+        anyhow::bail!("No output paths found for derivation: {}", drv_path);
+    }
+
+    // Return the first output path (typically there's only one)
+    Ok(store_paths[0].to_string())
+}
+
 /// Parse derivation paths from nix build stderr output (legacy function, prefer eval_main_drv_path)
 pub fn parse_derivation_paths(stderr: &str, flake_target: &str) -> Result<(String, Vec<String>)> {
     let mut derivation_paths = Vec::new();

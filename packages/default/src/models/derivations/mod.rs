@@ -43,6 +43,7 @@ pub struct Derivation {
     pub build_last_heartbeat: Option<DateTime<Utc>>,
     #[serde(default)]
     pub cf_agent_enabled: Option<bool>,
+    pub store_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
