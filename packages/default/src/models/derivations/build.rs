@@ -18,6 +18,7 @@ pub struct EvaluationResult {
     pub main_derivation_path: String,
     pub dependency_derivation_paths: Vec<String>,
     pub cf_agent_enabled: bool,
+    pub store_path: String,
 }
 
 impl Derivation {
@@ -135,6 +136,7 @@ impl Derivation {
             crate::queries::derivations::EvaluationStatus::DryRunComplete,
             Some(&eval_result.main_derivation_path),
             None,
+            Some(&eval_result.store_path),
         )
         .await?;
 
@@ -231,6 +233,7 @@ impl Derivation {
             main_derivation_path: main_drv,
             dependency_derivation_paths: deps,
             cf_agent_enabled,
+            store_path,
         })
     }
 

@@ -341,6 +341,7 @@ async fn scan_derivations(
                             EvaluationStatus::DryRunComplete,
                             derivation.derivation_path.as_deref(),
                             Some("Missing Nix Store Path"),
+                            derivation.store_path.as_deref(),
                         )
                         .await?;
                     }
