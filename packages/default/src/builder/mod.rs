@@ -81,40 +81,49 @@ async fn build_derivations_with_dependency_discovery(
     pool: &PgPool,
     build_config: &BuildConfig,
 ) -> Result<()> {
-    // Step 1: Discover all transitive dependencies for NixOS systems that haven't been analyzed yet
-    discover_and_queue_all_transitive_dependencies(pool, build_config).await?;
-
-    // Step 2: Build individual derivations that are ready (dependencies satisfied)
-    let ready_derivations = get_derivations_ready_for_build_with_dependencies(pool).await?;
+    // Get ordered list of what to build (already prioritized by the query)
+    let ready_derivations = get_derivations_ready_for_build(pool).await?;
 
     if ready_derivations.is_empty() {
         info!("No derivations ready for building");
         return Ok(());
     }
 
-    info!(
-        "Found {} derivations ready for building",
-        ready_derivations.len()
-    );
+    let max_concurrent = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
+    let to_build: Vec<_> = ready_derivations.into_iter().take(max_concurrent).collect();
 
-    // Step 3: Build derivations one at a time to avoid resource conflicts
-    for mut derivation in ready_derivations
-        .into_iter()
-        .take(build_config.max_concurrent_derivations.unwrap_or(1) as usize)
-    {
-        mark_target_build_in_progress(pool, derivation.id).await?;
+    info!("Building {} derivations concurrently", to_build.len());
 
-        // Build individual derivation using nix-store --realise directly
-        match build_single_derivation(pool, &mut derivation, build_config).await {
-            Ok(store_path) => {
-                info!("Built {}: {}", derivation.derivation_name, store_path);
-                mark_target_build_complete(pool, derivation.id, &store_path).await?;
+    // Build them all concurrently
+    let mut tasks = Vec::new();
+    for mut derivation in to_build {
+        let pool = pool.clone();
+        let build_config = build_config.clone();
+
+        tasks.push(tokio::spawn(async move {
+            mark_target_build_in_progress(&pool, derivation.id)
+                .await
+                .ok();
+
+            match build_single_derivation(&pool, &mut derivation, &build_config).await {
+                Ok(store_path) => {
+                    info!("Built {}: {}", derivation.derivation_name, store_path);
+                    mark_target_build_complete(&pool, derivation.id, &store_path)
+                        .await
+                        .ok();
+                }
+                Err(e) => {
+                    error!("Build failed for {}: {}", derivation.derivation_name, e);
+                    handle_derivation_failure(&pool, &derivation, "build", &e)
+                        .await
+                        .ok();
+                }
             }
-            Err(e) => {
-                error!("Build failed for {}: {}", derivation.derivation_name, e);
-                handle_derivation_failure(pool, &derivation, "build", &e).await?;
-            }
-        }
+        }));
+    }
+
+    for task in tasks {
+        let _ = task.await;
     }
 
     Ok(())

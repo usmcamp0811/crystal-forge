@@ -1184,9 +1184,31 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
     let rows = sqlx::query_as!(
         Derivation,
         r#"
-        WITH nixos_system_groups AS (
-            -- Get NixOS systems and their associated packages
+        WITH latest_commits AS (
+            -- Get the most recent commit per hostname
             SELECT 
+                d.derivation_name as hostname,
+                MAX(c.commit_timestamp) as latest_commit_time,
+                MAX(c.id) as latest_commit_id
+            FROM derivations d
+            INNER JOIN commits c ON d.commit_id = c.id
+            WHERE d.derivation_type = 'nixos'
+            GROUP BY d.derivation_name
+        ),
+        latest_nixos_derivations AS (
+            -- Get the actual latest NixOS derivation ID for each hostname
+            SELECT 
+                d.id as nixos_deriv_id,
+                d.derivation_name as hostname,
+                c.commit_timestamp
+            FROM derivations d
+            INNER JOIN commits c ON d.commit_id = c.id
+            INNER JOIN latest_commits lc ON d.derivation_name = lc.hostname 
+                AND c.commit_timestamp = lc.latest_commit_time
+            WHERE d.derivation_type = 'nixos'
+        ),
+        prioritized_derivations AS (
+            SELECT
                 d.id,
                 d.commit_id,
                 d.derivation_type,
@@ -1208,28 +1230,33 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
                 d.build_last_heartbeat,
                 d.cf_agent_enabled,
                 d.store_path,
-                -- Find the related NixOS system for packages, or use self for NixOS systems
+                -- System grouping: packages get their parent system's name
                 CASE 
-                    WHEN d.derivation_type = 'package' THEN 
-                        COALESCE(
-                            (SELECT MIN(nixos_dep.id) 
-                             FROM derivation_dependencies dd 
-                             JOIN derivations nixos_dep ON dd.derivation_id = nixos_dep.id 
-                             WHERE dd.depends_on_id = d.id 
-                               AND nixos_dep.derivation_type = 'nixos'
-                             LIMIT 1),
-                            999999 -- Orphaned packages get highest group number
-                        )
-                    ELSE d.id -- NixOS systems group by themselves
-                END as nixos_group_id,
-                -- Priority: packages first (0), then NixOS systems (1)
+                    WHEN d.derivation_type = 'package' THEN
+                        COALESCE(lnd.hostname, 'zzz_orphan')
+                    ELSE 
+                        d.derivation_name
+                END as system_group,
+                -- Type priority within system: packages before nixos
                 CASE 
                     WHEN d.derivation_type = 'package' THEN 0
                     WHEN d.derivation_type = 'nixos' THEN 1
                     ELSE 2
                 END as type_priority
             FROM derivations d
-            WHERE d.status_id in ( $1, $2 )
+            LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
+            LEFT JOIN latest_nixos_derivations lnd ON dd.derivation_id = lnd.nixos_deriv_id
+            WHERE d.status_id IN ($1, $2)
+              AND (
+                  -- Include packages that are dependencies of latest NixOS configs
+                  (d.derivation_type = 'package' AND lnd.hostname IS NOT NULL)
+                  OR
+                  -- Include NixOS configs that are the latest for their hostname
+                  (d.derivation_type = 'nixos' AND EXISTS (
+                      SELECT 1 FROM latest_nixos_derivations lnd2 
+                      WHERE lnd2.nixos_deriv_id = d.id
+                  ))
+              )
         )
         SELECT
             id,
@@ -1253,18 +1280,17 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             build_last_heartbeat,
             cf_agent_enabled,
             store_path
-        FROM nixos_system_groups
+        FROM prioritized_derivations
         ORDER BY 
-            nixos_group_id,          -- Group related packages and systems together
-            type_priority,           -- Within each group: packages first, then NixOS
-            completed_at ASC         -- Within same type: oldest first
+            system_group ASC,      -- Group by system (alphabetical)
+            type_priority ASC,     -- Packages before NixOS within each system
+            id ASC                 -- Stable ordering within type
         "#,
         EvaluationStatus::DryRunComplete.as_id(),
         EvaluationStatus::BuildPending.as_id()
     )
     .fetch_all(pool)
     .await?;
-
     Ok(rows)
 }
 
