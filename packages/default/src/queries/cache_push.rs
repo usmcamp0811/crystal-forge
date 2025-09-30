@@ -45,7 +45,8 @@ pub async fn get_derivations_needing_cache_push(
             d.build_current_target,
             d.build_last_activity_seconds,
             d.build_last_heartbeat,
-            d.cf_agent_enabled
+            d.cf_agent_enabled,
+            d.store_path
         FROM derivations d
         WHERE d.status_id = (SELECT id FROM derivation_statuses WHERE name = 'build-complete')
           AND d.store_path IS NOT NULL
