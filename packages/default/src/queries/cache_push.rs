@@ -60,7 +60,7 @@ pub async fn get_derivations_needing_cache_push_for_dest(
               COUNT(*) AS job_count
             FROM cache_push_jobs j
             WHERE j.derivation_id = d.id
-              AND j.destination = $3       -- 👈 key: per-destination summary
+              AND j.cache_destination = $3       -- 👈 key: per-destination summary
         ) j ON TRUE
         WHERE
             d.status_id = $2               -- BuildComplete only
