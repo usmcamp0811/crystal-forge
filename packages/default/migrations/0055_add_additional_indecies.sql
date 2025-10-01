@@ -1,0 +1,15 @@
+-- For cache push queries
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_cache_push_jobs_derivation_status 
+ON cache_push_jobs(derivation_id, status);
+
+-- For CVE scan queries  
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_cve_scans_derivation_status
+ON cve_scans(derivation_id, status);
+
+-- For derivation status lookups
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_derivations_status_path
+ON derivations(status_id, derivation_path) WHERE derivation_path IS NOT NULL;
+
+-- For derivation type + status queries
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_derivations_type_status
+ON derivations(derivation_type, status_id);
