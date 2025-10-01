@@ -1,3 +1,4 @@
+use crate::queries::derivations::EvaluationStatus;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
@@ -20,12 +21,16 @@ pub struct CachePushJob {
 }
 
 /// Get derivations that need cache pushing (build-complete status)
-pub async fn get_derivations_needing_cache_push(
+pub async fn get_derivations_needing_cache_push_for_dest(
     pool: &PgPool,
+    destination: &str,
     limit: Option<i32>,
+    max_attempts: i32, // e.g., 5
 ) -> Result<Vec<crate::models::derivations::Derivation>> {
+    use crate::queries::derivations::EvaluationStatus;
+
     let sql = r#"
-        SELECT 
+        SELECT
             d.id,
             d.commit_id,
             d.derivation_type,
@@ -48,35 +53,32 @@ pub async fn get_derivations_needing_cache_push(
             d.cf_agent_enabled,
             d.store_path
         FROM derivations d
-        WHERE d.status_id = (SELECT id FROM derivation_statuses WHERE name = 'build-complete')
-          AND d.store_path IS NOT NULL
-          -- no active job already done or running
-          AND NOT EXISTS (
-            SELECT 1
+        LEFT JOIN LATERAL (
+            SELECT
+              BOOL_OR(j.status IN ('completed','in_progress')) AS has_active_or_done,
+              COALESCE(MAX(j.attempts) FILTER (WHERE j.status = 'failed'), 0) AS max_failed_attempts,
+              COUNT(*) AS job_count
             FROM cache_push_jobs j
             WHERE j.derivation_id = d.id
-              AND j.status IN ('completed','in_progress')
-          )
-          -- either no job yet, or only failed ones with attempts left
-          AND (
-            NOT EXISTS (SELECT 1 FROM cache_push_jobs j2 WHERE j2.derivation_id = d.id)
-            OR EXISTS (
-              SELECT 1 FROM cache_push_jobs j3
-              WHERE j3.derivation_id = d.id
-                AND j3.status = 'failed'
-                AND j3.attempts < 5
-            )
-          )
+              AND j.destination = $3       -- 👈 key: per-destination summary
+        ) j ON TRUE
+        WHERE
+            d.status_id = $2               -- BuildComplete only
+            AND d.store_path IS NOT NULL
+            AND COALESCE(j.has_active_or_done, FALSE) = FALSE
+            AND (COALESCE(j.job_count, 0) = 0 OR j.max_failed_attempts < $4)
         ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
     "#;
 
     let derivations = sqlx::query_as(sql)
-        .bind(limit.unwrap_or(10))
+        .bind(limit.unwrap_or(10)) // $1
+        .bind(EvaluationStatus::BuildComplete.as_id()) // $2
+        .bind(destination) // $3
+        .bind(max_attempts) // $4
         .fetch_all(pool)
         .await?;
 
-    debug!("Found {} derivations needing cache push", derivations.len());
     Ok(derivations)
 }
 

@@ -131,16 +131,30 @@ pub async fn insert_derivation_with_target(
         crate::models::derivations::Derivation,
         r#"
         INSERT INTO derivations (
-            commit_id, 
-            derivation_type, 
-            derivation_name, 
+            commit_id,
+            derivation_type,
+            derivation_name,
             derivation_target,
-            status_id, 
+            status_id,
             attempt_count,
             scheduled_at
-        ) 
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
-        RETURNING 
+        )
+        VALUES ($1, $2, $3, $4, $5, 0, NOW())
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        DO UPDATE SET
+            -- keep terminal states; otherwise reset to pending
+            status_id = CASE
+                WHEN derivations.status_id IN (5, 6, 10, 12, 11, 13) THEN derivations.status_id
+                ELSE EXCLUDED.status_id
+            END,
+            -- keep/refresh target if provided
+            derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),
+            -- nudge the scheduler only for non-terminal rows
+            scheduled_at = CASE
+                WHEN derivations.status_id IN (5, 6, 10, 12, 11, 13) THEN derivations.scheduled_at
+                ELSE NOW()
+            END
+        RETURNING
             id,
             commit_id,
             derivation_type as "derivation_type: DerivationType",
@@ -168,7 +182,6 @@ pub async fn insert_derivation_with_target(
         derivation_name,
         derivation_target,
         EvaluationStatus::DryRunPending.as_id(),
-        0 // initial attempt_count
     )
     .fetch_one(pool)
     .await?;

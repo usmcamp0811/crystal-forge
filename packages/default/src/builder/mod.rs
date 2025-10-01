@@ -2,9 +2,9 @@ use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::cache_push::{
-    create_cache_push_job, get_derivations_needing_cache_push, get_pending_cache_push_jobs,
-    mark_cache_push_completed, mark_cache_push_failed, mark_cache_push_in_progress,
-    mark_derivation_cache_pushed,
+    create_cache_push_job, get_derivations_needing_cache_push_for_dest,
+    get_pending_cache_push_jobs, mark_cache_push_completed, mark_cache_push_failed,
+    mark_cache_push_in_progress, mark_derivation_cache_pushed,
 };
 use crate::queries::commits::get_commits_pending_evaluation;
 use crate::queries::cve_scans::{
@@ -411,17 +411,31 @@ async fn scan_derivations(
 }
 
 /// Process cache pushes for completed builds
-async fn process_cache_pushes(
+pub async fn process_cache_pushes(
     pool: &PgPool,
     cache_config: &CacheConfig,
     build_config: &BuildConfig,
 ) -> Result<()> {
-    // Step 1: Queue new cache push jobs for derivations that need them
-    match get_derivations_needing_cache_push(pool, Some(10)).await {
+    // Require a destination (e.g., "attic://my-cache" or "s3://bucket/prefix")
+    let Some(destination) = cache_config.push_to.as_deref() else {
+        info!(
+            "⏭️ No cache destination configured (cache_config.push_to is None); skipping cache push pass"
+        );
+        return Ok(());
+    };
+
+    // Step 1: queue jobs for this destination only
+    match get_derivations_needing_cache_push_for_dest(
+        pool,
+        destination,
+        Some(10),
+        cache_config.max_retries as i32, // attempts cap
+    )
+    .await
+    {
         Ok(derivations) => {
             for derivation in derivations {
                 if let Some(store_path) = &derivation.store_path {
-                    // Check if we should push this target
                     if !cache_config.should_push(&derivation.derivation_name) {
                         info!(
                             "⏭️ Skipping cache push for {} (filtered out)",
@@ -431,15 +445,15 @@ async fn process_cache_pushes(
                     }
 
                     info!(
-                        "📤 Queuing cache push for derivation: {}",
-                        derivation.derivation_name
+                        "📤 Queuing cache push for {} → {}",
+                        derivation.derivation_name, destination
                     );
 
                     if let Err(e) = create_cache_push_job(
                         pool,
                         derivation.id,
                         store_path,
-                        cache_config.push_to.as_deref(),
+                        Some(destination), // <-- ensure job is for this destination
                     )
                     .await
                     {
@@ -451,7 +465,7 @@ async fn process_cache_pushes(
         Err(e) => error!("❌ Failed to get derivations needing cache push: {e}"),
     }
 
-    // Step 2: Process pending cache push jobs
+    // Step 2: process pending jobs (your existing fetch can stay global or be dest-scoped)
     match get_pending_cache_push_jobs(pool, Some(5)).await {
         Ok(jobs) => {
             if jobs.is_empty() {
@@ -460,11 +474,10 @@ async fn process_cache_pushes(
             }
 
             for job in jobs {
-                // Use store_path if available, otherwise fall back to derivation_path
+                // Prefer store_path; fall back to derivation_path
                 let path_to_push = if let Some(store_path) = &job.store_path {
                     store_path.clone()
                 } else {
-                    // Fall back to using the derivation path from the derivation record
                     match crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id)
                         .await
                     {
@@ -473,10 +486,7 @@ async fn process_cache_pushes(
                                 info!("📤 Using derivation path for cache push: {}", drv_path);
                                 drv_path.clone()
                             } else {
-                                warn!(
-                                    "❌ Cache push job {} has no store path and derivation has no derivation_path",
-                                    job.id
-                                );
+                                warn!("❌ Job {}: no store path and no derivation_path", job.id);
                                 if let Err(e) = mark_cache_push_failed(
                                     pool,
                                     job.id,
@@ -484,21 +494,21 @@ async fn process_cache_pushes(
                                 )
                                 .await
                                 {
-                                    error!("❌ Failed to mark cache push job as failed: {e}");
+                                    error!("❌ Failed to mark job failed: {e}");
                                 }
                                 continue;
                             }
                         }
                         Err(e) => {
-                            error!("❌ Failed to get derivation {}: {}", job.derivation_id, e);
-                            if let Err(save_err) = mark_cache_push_failed(
+                            error!("❌ Failed to load derivation {}: {}", job.derivation_id, e);
+                            if let Err(se) = mark_cache_push_failed(
                                 pool,
                                 job.id,
                                 &format!("Failed to get derivation: {}", e),
                             )
                             .await
                             {
-                                error!("❌ Failed to mark cache push job as failed: {save_err}");
+                                error!("❌ Failed to mark job failed: {se}");
                             }
                             continue;
                         }
@@ -506,19 +516,17 @@ async fn process_cache_pushes(
                 };
 
                 info!(
-                    "📤 Processing cache push job {} for derivation {} with path: {}",
+                    "📤 Processing job {} (derivation {}): {}",
                     job.id, job.derivation_id, path_to_push
                 );
 
-                // Mark job as in progress
                 if let Err(e) = mark_cache_push_in_progress(pool, job.id).await {
-                    error!("❌ Failed to mark cache push job as in progress: {}", e);
+                    error!("❌ Failed to mark job in_progress: {}", e);
                     continue;
                 }
 
                 let start_time = std::time::Instant::now();
 
-                // Get derivation details for push_to_cache
                 match crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id)
                     .await
                 {
@@ -529,57 +537,42 @@ async fn process_cache_pushes(
                         {
                             Ok(()) => {
                                 let duration_ms = start_time.elapsed().as_millis() as i32;
-
                                 info!(
-                                    "✅ Cache push completed for derivation {}: {} (took {}ms)",
+                                    "✅ Cache push completed for {} ({}) in {}ms",
                                     derivation.derivation_name, path_to_push, duration_ms
                                 );
 
-                                // Mark job as completed
-                                if let Err(e) = mark_cache_push_completed(
-                                    pool,
-                                    job.id,
-                                    None, // TODO: get actual push size if needed
-                                    Some(duration_ms),
-                                )
-                                .await
-                                {
-                                    error!("❌ Failed to mark cache push job as completed: {}", e);
-                                }
-
-                                // Update derivation status to cache-pushed
                                 if let Err(e) =
-                                    mark_derivation_cache_pushed(pool, derivation.id).await
+                                    mark_cache_push_completed(pool, job.id, None, Some(duration_ms))
+                                        .await
                                 {
-                                    error!("❌ Failed to mark derivation as cache-pushed: {}", e);
+                                    error!("❌ Failed to mark job completed: {}", e);
                                 }
+                                // Note: no derivation-level cache-pushed status write
                             }
                             Err(e) => {
                                 error!(
-                                    "❌ Cache push failed for derivation {}: {}",
+                                    "❌ Cache push failed for {}: {}",
                                     derivation.derivation_name, e
                                 );
-
-                                if let Err(save_err) =
+                                if let Err(se) =
                                     mark_cache_push_failed(pool, job.id, &e.to_string()).await
                                 {
-                                    error!(
-                                        "❌ Failed to mark cache push job as failed: {save_err}"
-                                    );
+                                    error!("❌ Failed to mark job failed: {se}");
                                 }
                             }
                         }
                     }
                     Err(e) => {
-                        error!("❌ Failed to get derivation {}: {}", job.derivation_id, e);
-                        if let Err(save_err) = mark_cache_push_failed(
+                        error!("❌ Failed to load derivation {}: {}", job.derivation_id, e);
+                        if let Err(se) = mark_cache_push_failed(
                             pool,
                             job.id,
                             &format!("Failed to get derivation: {}", e),
                         )
                         .await
                         {
-                            error!("❌ Failed to mark cache push job as failed: {save_err}");
+                            error!("❌ Failed to mark job failed: {se}");
                         }
                     }
                 }
