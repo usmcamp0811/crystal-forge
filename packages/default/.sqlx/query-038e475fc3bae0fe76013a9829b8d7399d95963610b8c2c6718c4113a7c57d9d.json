@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH nixos_info AS (\n            SELECT \n                d.id,\n                d.derivation_name as hostname,\n                c.commit_timestamp\n            FROM derivations d\n            INNER JOIN commits c ON d.commit_id = c.id\n            WHERE d.derivation_type = 'nixos'\n              AND d.status_id IN ($1, $2)\n        ),\n        buildable_packages AS (\n            SELECT \n                d.id,\n                n.hostname,\n                n.commit_timestamp,\n                0 as type_order\n            FROM derivations d\n            INNER JOIN derivation_dependencies dd ON dd.depends_on_id = d.id\n            INNER JOIN nixos_info n ON dd.derivation_id = n.id\n            WHERE d.status_id IN ($1, $2)\n              AND d.derivation_type = 'package'\n        ),\n        buildable_nixos AS (\n            SELECT \n                n.id,\n                n.hostname,\n                n.commit_timestamp,\n                1 as type_order\n            FROM nixos_info n\n        ),\n        all_buildable AS (\n            SELECT * FROM buildable_packages\n            UNION ALL\n            SELECT * FROM buildable_nixos\n        )\n        SELECT id\n        FROM all_buildable\n        ORDER BY \n            hostname ASC,\n            commit_timestamp DESC NULLS LAST,\n            type_order ASC,\n            id ASC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "038e475fc3bae0fe76013a9829b8d7399d95963610b8c2c6718c4113a7c57d9d"
+}
