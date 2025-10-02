@@ -25,57 +25,53 @@ pub async fn get_derivations_needing_cache_push_for_dest(
     pool: &PgPool,
     destination: &str,
     limit: Option<i32>,
-    max_attempts: i32, // e.g., 5
+    max_attempts: i32,
 ) -> Result<Vec<crate::models::derivations::Derivation>> {
     use crate::queries::derivations::EvaluationStatus;
 
     let sql = r#"
         SELECT
-            d.id,
-            d.commit_id,
-            d.derivation_type,
-            d.derivation_name,
-            d.derivation_path,
-            d.derivation_target,
-            d.scheduled_at,
-            d.completed_at,
-            d.started_at,
-            d.attempt_count,
-            d.evaluation_duration_ms,
-            d.error_message,
-            d.pname,
-            d.version,
-            d.status_id,
-            d.build_elapsed_seconds,
-            d.build_current_target,
-            d.build_last_activity_seconds,
-            d.build_last_heartbeat,
-            d.cf_agent_enabled,
-            d.store_path
+            d.id, d.commit_id, d.derivation_type, d.derivation_name,
+            d.derivation_path, d.derivation_target, d.scheduled_at,
+            d.completed_at, d.started_at, d.attempt_count,
+            d.evaluation_duration_ms, d.error_message, d.pname,
+            d.version, d.status_id, d.build_elapsed_seconds,
+            d.build_current_target, d.build_last_activity_seconds,
+            d.build_last_heartbeat, d.cf_agent_enabled, d.store_path
         FROM derivations d
-        LEFT JOIN LATERAL (
-            SELECT
-              BOOL_OR(j.status IN ('completed','in_progress')) AS has_active_or_done,
-              COALESCE(MAX(j.attempts) FILTER (WHERE j.status = 'failed'), 0) AS max_failed_attempts,
-              COUNT(*) AS job_count
-            FROM cache_push_jobs j
-            WHERE j.derivation_id = d.id
-              AND j.cache_destination = $3       -- 👈 key: per-destination summary
-        ) j ON TRUE
-        WHERE
-            d.status_id = $2               -- BuildComplete only
+        WHERE d.status_id = $2
             AND d.store_path IS NOT NULL
-            AND COALESCE(j.has_active_or_done, FALSE) = FALSE
-            AND (COALESCE(j.job_count, 0) = 0 OR j.max_failed_attempts < $4)
+            -- No completed or in-progress jobs for this destination
+            AND NOT EXISTS (
+                SELECT 1 FROM cache_push_jobs j
+                WHERE j.derivation_id = d.id
+                  AND j.cache_destination = $3
+                  AND j.status IN ('completed', 'in_progress')
+            )
+            -- Either no jobs exist, or only failed jobs with attempts < max
+            AND (
+                NOT EXISTS (
+                    SELECT 1 FROM cache_push_jobs j2
+                    WHERE j2.derivation_id = d.id
+                      AND j2.cache_destination = $3
+                )
+                OR EXISTS (
+                    SELECT 1 FROM cache_push_jobs j3
+                    WHERE j3.derivation_id = d.id
+                      AND j3.cache_destination = $3
+                      AND j3.status = 'failed'
+                      AND j3.attempts < $4
+                )
+            )
         ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
     "#;
 
     let derivations = sqlx::query_as(sql)
-        .bind(limit.unwrap_or(10)) // $1
-        .bind(EvaluationStatus::BuildComplete.as_id()) // $2
-        .bind(destination) // $3
-        .bind(max_attempts) // $4
+        .bind(limit.unwrap_or(10))
+        .bind(EvaluationStatus::BuildComplete.as_id())
+        .bind(destination)
+        .bind(max_attempts)
         .fetch_all(pool)
         .await?;
 
