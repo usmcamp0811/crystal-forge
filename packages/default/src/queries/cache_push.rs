@@ -30,6 +30,16 @@ pub async fn get_derivations_needing_cache_push_for_dest(
     use crate::queries::derivations::EvaluationStatus;
 
     let sql = r#"
+        WITH job_status AS (
+            SELECT 
+                derivation_id,
+                MAX(CASE WHEN status IN ('completed', 'in_progress') THEN 1 ELSE 0 END) as has_active,
+                MAX(CASE WHEN status = 'failed' AND attempts < $4 THEN 1 ELSE 0 END) as has_retryable,
+                COUNT(*) as job_count
+            FROM cache_push_jobs
+            WHERE cache_destination = $3
+            GROUP BY derivation_id
+        )
         SELECT
             d.id, d.commit_id, d.derivation_type, d.derivation_name,
             d.derivation_path, d.derivation_target, d.scheduled_at,
@@ -39,29 +49,12 @@ pub async fn get_derivations_needing_cache_push_for_dest(
             d.build_current_target, d.build_last_activity_seconds,
             d.build_last_heartbeat, d.cf_agent_enabled, d.store_path
         FROM derivations d
+        LEFT JOIN job_status js ON js.derivation_id = d.id
         WHERE d.status_id = $2
             AND d.store_path IS NOT NULL
-            -- No completed or in-progress jobs for this destination
-            AND NOT EXISTS (
-                SELECT 1 FROM cache_push_jobs j
-                WHERE j.derivation_id = d.id
-                  AND j.cache_destination = $3
-                  AND j.status IN ('completed', 'in_progress')
-            )
-            -- Either no jobs exist, or only failed jobs with attempts < max
             AND (
-                NOT EXISTS (
-                    SELECT 1 FROM cache_push_jobs j2
-                    WHERE j2.derivation_id = d.id
-                      AND j2.cache_destination = $3
-                )
-                OR EXISTS (
-                    SELECT 1 FROM cache_push_jobs j3
-                    WHERE j3.derivation_id = d.id
-                      AND j3.cache_destination = $3
-                      AND j3.status = 'failed'
-                      AND j3.attempts < $4
-                )
+                js.derivation_id IS NULL  -- No jobs for this destination
+                OR (js.has_active = 0 AND js.has_retryable = 1)  -- Only retryable failures
             )
         ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1

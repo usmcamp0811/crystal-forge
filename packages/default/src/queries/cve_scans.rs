@@ -16,6 +16,15 @@ pub async fn get_targets_needing_cve_scan(
     let targets = sqlx::query_as!(
         Derivation,
         r#"
+        WITH scan_status AS (
+            SELECT 
+                derivation_id,
+                MAX(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as has_completed,
+                MAX(CASE WHEN status = 'failed' AND attempts < 5 THEN 1 ELSE 0 END) as has_retryable_failed,
+                COUNT(*) as scan_count
+            FROM cve_scans
+            GROUP BY derivation_id
+        )
         SELECT 
             d.id, d.commit_id, d.derivation_type as "derivation_type: DerivationType",
             d.derivation_name, d.derivation_path, d.derivation_target,
@@ -26,26 +35,14 @@ pub async fn get_targets_needing_cve_scan(
             d.cf_agent_enabled, d.store_path
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
+        LEFT JOIN scan_status ss ON ss.derivation_id = d.id
         WHERE ds.name IN ('build-complete', 'complete')
             AND d.derivation_path IS NOT NULL
-            -- No completed scans
-            AND NOT EXISTS (
-                SELECT 1 FROM cve_scans cs 
-                WHERE cs.derivation_id = d.id AND cs.status = 'completed'
-            )
-            -- Either no scans exist, or only failed scans with < 5 attempts
             AND (
-                NOT EXISTS (
-                    SELECT 1 FROM cve_scans cs2 WHERE cs2.derivation_id = d.id
-                )
-                OR EXISTS (
-                    SELECT 1 FROM cve_scans cs3 
-                    WHERE cs3.derivation_id = d.id 
-                      AND cs3.status = 'failed' 
-                      AND cs3.attempts < 5
-                )
+                ss.derivation_id IS NULL  -- No scans exist
+                OR (ss.has_completed = 0 AND ss.has_retryable_failed = 1)  -- Only retryable failures
             )
-        ORDER BY d.completed_at ASC
+        ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
         "#,
         limit
