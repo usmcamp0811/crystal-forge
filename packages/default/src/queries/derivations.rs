@@ -5,6 +5,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use sqlx::PgPool;
+use sqlx::{Executor, Postgres};
 use tracing::{debug, error, info, warn};
 
 // Status IDs from the derivation_statuses table
@@ -1705,13 +1706,16 @@ pub async fn update_derivation_path_and_metadata(
     Ok(())
 }
 
-pub async fn update_derivation_build_status(
-    pool: &PgPool,
+pub async fn update_derivation_build_status<'e, E>(
+    executor: E,
     derivation_id: i32,
     elapsed_seconds: i32,
     current_build_target: Option<&str>,
     last_activity_seconds: i32,
-) -> Result<()> {
+) -> Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query!(
         r#"
         UPDATE derivations SET
@@ -1726,7 +1730,7 @@ pub async fn update_derivation_build_status(
         last_activity_seconds,
         derivation_id
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())

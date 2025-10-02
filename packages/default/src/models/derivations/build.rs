@@ -327,6 +327,9 @@ impl Derivation {
         derivation_id: i32,
         pool: &PgPool,
     ) -> Result<String> {
+        use sqlx::Acquire;
+        use tokio::time::timeout;
+
         let start_time = Instant::now();
         let mut heartbeat = interval(Duration::from_secs(30));
         heartbeat.tick().await; // Skip first immediate tick
@@ -334,14 +337,12 @@ impl Derivation {
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
-
         let mut stdout_reader = BufReader::new(stdout).lines();
         let mut stderr_reader = BufReader::new(stderr).lines();
-
         let mut output_lines = Vec::new();
         let mut last_activity = Instant::now();
 
-        // 👉 Prime with drv basename so early heartbeats have a target label
+        // Prime with drv basename so early heartbeats have a target label
         let mut current_build_target = Some(
             Path::new(drv_path)
                 .file_name()
@@ -350,9 +351,21 @@ impl Derivation {
                 .into_owned(),
         );
 
+        // Acquire heartbeat connection once, with timeout
+        let mut hb_conn = match timeout(Duration::from_secs(2), pool.acquire()).await {
+            Ok(Ok(conn)) => Some(conn),
+            _ => {
+                warn!("⚠️ Could not acquire heartbeat DB conn quickly, proceeding without it");
+                None
+            }
+        };
+
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+
         loop {
             tokio::select! {
-                line_result = stdout_reader.next_line() => {
+                line_result = stdout_reader.next_line(), if !stdout_done => {
                     match line_result? {
                         Some(line) => {
                             last_activity = Instant::now();
@@ -361,28 +374,44 @@ impl Derivation {
                                 output_lines.push(line);
                             }
                         }
-                        None => break,
+                        None => stdout_done = true,
                     }
                 }
-                line_result = stderr_reader.next_line() => {
+                line_result = stderr_reader.next_line(), if !stderr_done => {
                     match line_result? {
                         Some(line) => {
                             last_activity = Instant::now();
                             current_build_target = Self::parse_build_status(&line, current_build_target);
                         }
-                        None => break,
+                        None => stderr_done = true,
                     }
                 }
                 _ = heartbeat.tick() => {
                     Self::log_build_progress(start_time, last_activity, &current_build_target);
-                    let _ = crate::queries::derivations::update_derivation_build_status(
-                        pool,
-                        derivation_id,
-                        start_time.elapsed().as_secs() as i32,
-                        current_build_target.as_deref(),
-                        last_activity.elapsed().as_secs() as i32
-                    ).await;
+
+                    // Best-effort heartbeat: don't block the build if DB is slow
+                    if let Some(ref mut conn) = hb_conn {
+                        if let Ok(Ok(_)) = timeout(
+                            Duration::from_secs(2),
+                            crate::queries::derivations::update_derivation_build_status(
+                                &mut **conn,
+                                derivation_id,
+                                start_time.elapsed().as_secs() as i32,
+                                current_build_target.as_deref(),
+                                last_activity.elapsed().as_secs() as i32,
+                            )
+                        ).await {
+                            // Heartbeat succeeded
+                        } else {
+                            warn!("⚠️ Heartbeat update skipped (timeout or conn lost)");
+                        }
+                    }
                 }
+            }
+
+            // Exit only when BOTH streams are done
+            if stdout_done && stderr_done {
+                break;
             }
         }
 
@@ -410,6 +439,7 @@ impl Derivation {
 
         let _ =
             crate::queries::derivations::clear_derivation_build_status(pool, derivation_id).await;
+
         Ok(output_path)
     }
 
