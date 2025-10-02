@@ -340,7 +340,15 @@ impl Derivation {
 
         let mut output_lines = Vec::new();
         let mut last_activity = Instant::now();
-        let mut current_build_target = None::<String>;
+
+        // 👉 Prime with drv basename so early heartbeats have a target label
+        let mut current_build_target = Some(
+            Path::new(drv_path)
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        );
 
         loop {
             tokio::select! {
@@ -356,7 +364,6 @@ impl Derivation {
                         None => break,
                     }
                 }
-
                 line_result = stderr_reader.next_line() => {
                     match line_result? {
                         Some(line) => {
@@ -366,7 +373,6 @@ impl Derivation {
                         None => break,
                     }
                 }
-
                 _ = heartbeat.tick() => {
                     Self::log_build_progress(start_time, last_activity, &current_build_target);
                     let _ = crate::queries::derivations::update_derivation_build_status(
@@ -409,12 +415,14 @@ impl Derivation {
 
     fn parse_build_status(line: &str, current: Option<String>) -> Option<String> {
         if line.contains("building '") {
+            // New target announced
             Self::extract_quoted_target(line, "building '")
         } else if line.contains("built '") {
-            if let Some(target) = Self::extract_quoted_target(line, "built '") {
-                info!("✅ Completed building: {}", target);
+            // Target finished; keep last-known so progress log isn't blank between targets
+            if let Some(t) = Self::extract_quoted_target(line, "built '") {
+                info!("✅ Completed building: {}", t);
             }
-            None
+            current
         } else if line.contains("downloading '") || line.contains("fetching ") {
             debug!("📥 {}", line);
             current
