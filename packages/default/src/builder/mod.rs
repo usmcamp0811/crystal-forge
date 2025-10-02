@@ -162,7 +162,7 @@ pub async fn run_build_loop(pool: PgPool) {
     let build_config = cfg.get_build_config();
     let num_workers = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
 
-    info!("Starting {} continuous build workers...", num_workers);
+    info!("🔍 Starting {} continuous build workers...", num_workers);
     debug!(
         "Build config: cores={}, max_jobs={}, substitutes={}",
         build_config.cores, build_config.max_jobs, build_config.use_substitutes,
