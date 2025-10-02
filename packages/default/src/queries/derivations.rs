@@ -2207,64 +2207,57 @@ pub async fn update_cf_agent_enabled(
 
 /// Atomically claim the next derivation to build
 pub async fn claim_next_derivation(pool: &PgPool) -> Result<Option<Derivation>> {
+    // First, find the next item ID without locking
     let next_id: Option<i32> = sqlx::query_scalar!(
         r#"
-        WITH nixos_info AS (
+        WITH all_nixos_commits AS (
             SELECT 
-                d.id,
+                d.id as nixos_deriv_id,
                 d.derivation_name as hostname,
                 c.commit_timestamp
             FROM derivations d
             INNER JOIN commits c ON d.commit_id = c.id
             WHERE d.derivation_type = 'nixos'
               AND d.status_id IN ($1, $2)
-        ),
-        buildable_packages AS (
-            SELECT 
-                d.id,
-                n.hostname,
-                n.commit_timestamp,
-                0 as type_order
-            FROM derivations d
-            INNER JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
-            INNER JOIN nixos_info n ON dd.derivation_id = n.id
-            WHERE d.status_id IN ($1, $2)
-              AND d.derivation_type = 'package'
-        ),
-        buildable_nixos AS (
-            SELECT 
-                n.id,
-                n.hostname,
-                n.commit_timestamp,
-                1 as type_order
-            FROM nixos_info n
-        ),
-        all_buildable AS (
-            SELECT * FROM buildable_packages
-            UNION ALL
-            SELECT * FROM buildable_nixos
         )
-        SELECT id
-        FROM all_buildable
+        SELECT d.id
+        FROM derivations d
+        LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
+        LEFT JOIN all_nixos_commits n ON dd.derivation_id = n.nixos_deriv_id
+        LEFT JOIN all_nixos_commits anc ON d.id = anc.nixos_deriv_id
+        WHERE d.status_id IN ($1, $2)
+          AND (
+              (d.derivation_type = 'package' AND n.hostname IS NOT NULL)
+              OR
+              (d.derivation_type = 'nixos' AND anc.hostname IS NOT NULL)
+          )
         ORDER BY 
-            hostname ASC,
-            commit_timestamp DESC NULLS LAST,
-            type_order ASC,
-            id ASC
+            CASE 
+                WHEN d.derivation_type = 'package' THEN COALESCE(n.hostname, 'zzz_orphan')
+                WHEN d.derivation_type = 'nixos' THEN anc.hostname
+            END ASC,
+            CASE 
+                WHEN d.derivation_type = 'package' THEN n.commit_timestamp
+                WHEN d.derivation_type = 'nixos' THEN anc.commit_timestamp
+            END DESC NULLS LAST,
+            CASE 
+                WHEN d.derivation_type = 'package' THEN 0
+                WHEN d.derivation_type = 'nixos' THEN 1
+            END ASC,
+            d.id ASC
         LIMIT 1
         "#,
         EvaluationStatus::DryRunComplete.as_id(),
         EvaluationStatus::BuildPending.as_id()
     )
     .fetch_optional(pool)
-    .await?
-    .flatten(); // <-- Add this to go from Option<Option<i32>> to Option<i32>
+    .await?;
 
     let Some(id) = next_id else {
         return Ok(None);
     };
 
-    // Rest stays the same...
+    // Now atomically claim it with FOR UPDATE SKIP LOCKED
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
