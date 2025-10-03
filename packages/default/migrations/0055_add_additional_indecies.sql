@@ -22,10 +22,10 @@ CREATE INDEX IF NOT EXISTS idx_cve_scans_derivation_pending ON cve_scans (deriva
 WHERE
     status IN ('pending', 'in_progress');
 
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_cache_push_jobs_derivation_status_attempts ON cache_push_jobs (derivation_id, status, attempts);
+-- Remove CONCURRENTLY from these two:
+CREATE INDEX IF NOT EXISTS idx_cache_push_jobs_derivation_status_attempts ON cache_push_jobs (derivation_id, status, attempts);
 
--- This helps the CVE scan picker query that was taking 194 seconds
-CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_d_ready_cve ON derivations (completed_at, id)
+CREATE INDEX IF NOT EXISTS idx_d_ready_cve ON derivations (completed_at, id)
 WHERE
     derivation_path IS NOT NULL AND status_id IN (10, 11);
 
