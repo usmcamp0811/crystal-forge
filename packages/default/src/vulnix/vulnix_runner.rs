@@ -60,12 +60,34 @@ impl VulnixRunner {
         derivation_id: i32,
         vulnix_version: Option<String>,
     ) -> Result<VulnixScanOutput> {
-        // Get the derivation and extract derivation path
-        let derivation =
-            crate::queries::derivations::get_derivation_by_id(pool, derivation_id).await?;
-        let derivation_path = derivation
-            .derivation_path
-            .ok_or_else(|| anyhow!("Derivation {} has no derivation path", derivation_id))?;
+        // Fetch derivation path in a separate scope so connection is released
+        let derivation_path = {
+            let derivation =
+                crate::queries::derivations::get_derivation_by_id(pool, derivation_id).await?;
+            derivation
+                .derivation_path
+                .ok_or_else(|| anyhow!("Derivation {} has no derivation path", derivation_id))?
+        }; // Connection released here when `derivation` goes out of scope
+
+        // Now scan without holding any DB connection
+        if !tokio::fs::try_exists(&derivation_path)
+            .await
+            .unwrap_or(false)
+        {
+            return Err(anyhow!(
+                "Derivation path does not exist on filesystem: {}",
+                derivation_path
+            ));
+        }
+
+        info!(
+            "🔍 Scanning derivation {} with derivation path: {}",
+            derivation_id, derivation_path
+        );
+
+        // Build and execute vulnix command (no DB connection held)
+        let mut cmd = AsyncCommand::new("vulnix");
+        cmd.arg("--json").arg(derivation_path);
 
         // Check if the derivation path actually exists on the filesystem
         if !tokio::fs::try_exists(&derivation_path)
