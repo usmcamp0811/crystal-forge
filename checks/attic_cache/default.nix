@@ -134,6 +134,7 @@ in
           # Attic cache configuration - token will be set by testScript
           cache = {
             cache_type = "Attic";
+            push_to = "http://atticCache:8080";
             push_after_build = true;
             attic_cache_name = "cf-test";
             max_retries = 2;
@@ -215,14 +216,14 @@ in
         {ATTIC} cache create local:cf-test || true
 
       # Environment for Crystal Forge
-      cat > /etc/attic-env <<EOF
+      cat > /var/lib/crystal-forge/.config/crystal-forge-attic.env <<EOF
       ATTIC_SERVER_URL=http://atticCache:8080
       ATTIC_TOKEN={token}
       ATTIC_REMOTE_NAME=local
       HOME=/var/lib/crystal-forge
       XDG_CONFIG_HOME=/var/lib/crystal-forge/.config
       EOF
-      chmod 644 /etc/attic-env
+      chmod 644 /var/lib/crystal-forge/.config/crystal-forge-attic.env
       """)
 
       # Start Crystal Forge builder
