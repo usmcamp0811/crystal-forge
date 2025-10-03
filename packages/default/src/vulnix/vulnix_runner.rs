@@ -60,34 +60,28 @@ impl VulnixRunner {
         derivation_id: i32,
         vulnix_version: Option<String>,
     ) -> Result<VulnixScanOutput> {
-        // Fetch derivation path in a separate scope so connection is released
-        let derivation_path = {
+        // Fetch store path in a separate scope so connection is released
+        let scan_target = {
             let derivation =
                 crate::queries::derivations::get_derivation_by_id(pool, derivation_id).await?;
             derivation
-                .derivation_path
-                .ok_or_else(|| anyhow!("Derivation {} has no derivation path", derivation_id))?
+                .store_path
+                .ok_or_else(|| anyhow!("Derivation {} has no store_path", derivation_id))?
         }; // Connection released here when `derivation` goes out of scope
 
-        // Now scan without holding any DB connection
-        if !tokio::fs::try_exists(&derivation_path)
-            .await
-            .unwrap_or(false)
-        {
-            return Err(anyhow!(
-                "Derivation path does not exist on filesystem: {}",
-                derivation_path
-            ));
+        // Only scan if the path exists
+        if !tokio::fs::try_exists(&scan_target).await.unwrap_or(false) {
+            return Err(anyhow!("Store path does not exist: {}", scan_target));
         }
 
         info!(
-            "🔍 Scanning derivation {} with derivation path: {}",
-            derivation_id, derivation_path
+            "🔍 Scanning derivation {} with store path: {}",
+            derivation_id, scan_target
         );
 
-        // Build and execute vulnix command (no DB connection held)
+        // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
-        cmd.arg("--json").arg(derivation_path);
+        cmd.arg("--json").arg(&scan_target);
 
         if self.config.enable_whitelist {
             cmd.arg("--whitelist").arg("/etc/vulnix-whitelist.toml");
