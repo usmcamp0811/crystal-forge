@@ -123,11 +123,9 @@ in
             enable = true;
             offline = false;
             systemd_properties = [
-              "EnvironmentFile=-/etc/attic-env"
-              "Environment=HOME=/var/lib/crystal-forge"
-              "Environment=XDG_CONFIG_HOME=/var/lib/crystal-forge/.config"
-              "Environment=NIX_LOG=trace"
-              "Environment=NIX_SHOW_STATS=1"
+              "Environment=ATTIC_SERVER_URL=http://atticCache:8080/cf-test"
+              "Environment=ATTIC_REMOTE_NAME=cf-test"
+              # Add ATTIC_TOKEN if you have it statically, or let vault handle it
             ];
           };
 
@@ -209,17 +207,17 @@ in
 
       # Setup attic client
       sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
-        {ATTIC} login local http://atticCache:8080 {token}
+        {ATTIC} login cf-test http://atticCache:8080 {token}
 
       # Create cache
       sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
-        {ATTIC} cache create local:cf-test || true
+        {ATTIC} cache create cf-test:cf-test || true
 
       # Environment for Crystal Forge
       cat > /var/lib/crystal-forge/.config/crystal-forge-attic.env <<EOF
       ATTIC_SERVER_URL=http://atticCache:8080
       ATTIC_TOKEN={token}
-      ATTIC_REMOTE_NAME=local
+      ATTIC_REMOTE_NAME=cf-test
       HOME=/var/lib/crystal-forge
       XDG_CONFIG_HOME=/var/lib/crystal-forge/.config
       EOF
@@ -253,7 +251,7 @@ in
       if exit_code != 0:
           print("=== Test Failure Debug Info ===")
           cfServer.succeed("journalctl -u crystal-forge-builder.service --no-pager -n 50 || true")
-          cfServer.succeed("cat /etc/attic-env || true")
+          cfServer.succeed("cat /var/lib/crystal-forge/.config/crystal-forge-attic.env || true")
           raise SystemExit(exit_code)
 
       print("All tests passed!")
