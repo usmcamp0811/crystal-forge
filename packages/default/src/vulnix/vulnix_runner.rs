@@ -89,26 +89,6 @@ impl VulnixRunner {
         let mut cmd = AsyncCommand::new("vulnix");
         cmd.arg("--json").arg(derivation_path);
 
-        // Check if the derivation path actually exists on the filesystem
-        if !tokio::fs::try_exists(&derivation_path)
-            .await
-            .unwrap_or(false)
-        {
-            return Err(anyhow!(
-                "Derivation path does not exist on filesystem: {}",
-                derivation_path
-            ));
-        }
-
-        info!(
-            "🔍 Scanning derivation {} with derivation path: {}",
-            derivation_id, derivation_path
-        );
-
-        // Build vulnix command
-        let mut cmd = AsyncCommand::new("vulnix");
-        cmd.arg("--json").arg(derivation_path);
-
         if self.config.enable_whitelist {
             cmd.arg("--whitelist").arg("/etc/vulnix-whitelist.toml");
         }
