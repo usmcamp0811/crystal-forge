@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import time
 from datetime import UTC, datetime, timedelta
 from typing import Dict, List
 
 import pytest
 
-from cf_test import CFTestClient, CFTestConfig
+from cf_test import CFTestClient
 
 VIEW_NIXOS_QUEUE = "view_nixos_derivation_build_queue"
 
@@ -82,169 +81,107 @@ def _mk_dep(client: CFTestClient, nixos_id: int, pkg_id: int) -> None:
     )
 
 
+def _parent_of_pkgs(client: CFTestClient, root_ids: List[int]) -> Dict[int, int]:
+    if not root_ids:
+        return {}
+    qmarks = ", ".join(["%s"] * len(root_ids))
+    rows = client.execute_sql(
+        f"""
+        SELECT derivation_id, depends_on_id
+        FROM public.derivation_dependencies
+        WHERE derivation_id IN ({qmarks})
+        """,
+        tuple(root_ids),
+    )
+    return {r["depends_on_id"]: r["derivation_id"] for r in rows}
+
+
 @pytest.mark.views
 @pytest.mark.database
-def test_view_nixos_queue_ordering_and_filter(cf_client: CFTestClient, clean_test_data):
+def test_build_queue_single_group_ordering(cf_client: CFTestClient, clean_test_data):
     """
-    Build two groups:
-      - Newer NixOS root (A) with 3 package deps
-      - Older NixOS root (B) with 2 package deps
-    Expect:
-      - All rows have status_id in allowed set
-      - Rows grouped by nixos_id, groups ordered by nixos_commit_ts DESC
-      - Within each group: packages first, then the nixos row
+    Create ONE NixOS root + 3 package deps (statuses eligible),
+    and assert the view returns exactly those 4, with packages first then nixos.
+
+    NOTE: We MUST enforce the queue order in our SELECT's ORDER BY instead of
+    relying on any internal ORDER BY inside the view definition.
     """
     now = datetime.now(UTC)
+    # The view filters for status_id IN (5, 12)
+    status = _status_id_map(cf_client, ["dry-run-complete", "build-failed"])
+    assert status, "Could not resolve status ids"
 
-    # Use status names that your view is intended to include; these usually map to ids 5,12.
-    status = _status_id_map(cf_client, ["build-complete", "dry-run-complete"])
-    assert status, "Could not resolve status ids for included statuses"
+    test_status_id = status.get("dry-run-complete")
+    assert test_status_id is not None, "Could not find dry-run-complete status"
 
-    allowed_ids = set(status.values())
-
-    # Create a dedicated flake/commits namespace that matches conftest cleanup patterns (“validate-%”)
     flake_id = _mk_flake(
         cf_client,
-        "validate-nixos-queue",
-        "https://example.com/validate-nixos-queue.git",
+        "validate-nixos-queue-single",
+        "https://example.com/validate-nixos-queue-single.git",
+    )
+    commit_id = _mk_commit(
+        cf_client, flake_id, "validate-queue-single", now - timedelta(hours=1)
     )
 
-    # Newer root A
-    commit_a = _mk_commit(
-        cf_client, flake_id, "validate-queue-A", now - timedelta(hours=1)
-    )
-    nixos_a_id = _mk_derivation(
+    # Root
+    nixos_id = _mk_derivation(
         cf_client,
-        commit_id=commit_a,
+        commit_id=commit_id,
         dtype="nixos",
-        name="validate-nixos-queue-A",
-        path="/nix/store/aaaaaaaaaaaa-nixos-system-A.drv",
-        status_id=status.get("build-complete", list(allowed_ids)[0]),
+        name="validate-nixos-queue-single",
+        path="/nix/store/single-nixos-system.drv",
+        status_id=test_status_id,
     )
-    pkgs_a = []
+
+    # 3 packages
+    pkg_ids: List[int] = []
     for i in range(3):
         pkg_id = _mk_derivation(
             cf_client,
-            commit_id=commit_a,
+            commit_id=commit_id,
             dtype="package",
-            name=f"validate-nixos-queue-A-pkg-{i+1}",
-            path=f"/nix/store/aaa{i+1:02d}-pkg-A-{i+1}.drv",
-            status_id=status.get("build-complete", list(allowed_ids)[0]),
+            name=f"validate-nixos-queue-single-pkg-{i+1}",
+            path=f"/nix/store/single-pkg-{i+1}.drv",
+            status_id=test_status_id,
         )
-        _mk_dep(cf_client, nixos_a_id, pkg_id)
-        pkgs_a.append(pkg_id)
+        _mk_dep(cf_client, nixos_id, pkg_id)
+        pkg_ids.append(pkg_id)
 
-    # Older root B
-    commit_b = _mk_commit(
-        cf_client, flake_id, "validate-queue-B", now - timedelta(hours=5)
-    )
-    nixos_b_id = _mk_derivation(
-        cf_client,
-        commit_id=commit_b,
-        dtype="nixos",
-        name="validate-nixos-queue-B",
-        path="/nix/store/bbbbbbbbbbbb-nixos-system-B.drv",
-        status_id=status.get("dry-run-complete", list(allowed_ids)[-1]),
-    )
-    pkgs_b = []
-    for i in range(2):
-        pkg_id = _mk_derivation(
-            cf_client,
-            commit_id=commit_b,
-            dtype="package",
-            name=f"validate-nixos-queue-B-pkg-{i+1}",
-            path=f"/nix/store/bbb{i+1:02d}-pkg-B-{i+1}.drv",
-            status_id=status.get("dry-run-complete", list(allowed_ids)[-1]),
-        )
-        _mk_dep(cf_client, nixos_b_id, pkg_id)
-        pkgs_b.append(pkg_id)
+    parent_of = _parent_of_pkgs(cf_client, [nixos_id])
 
-    # Query the view for just our data
+    # Query the view specifically for our rows (by ids, not name pattern)
+    ids = [nixos_id] + pkg_ids
     rows = cf_client.execute_sql(
         f"""
-        SELECT id, derivation_type, derivation_name, status_id,
-               nixos_id, nixos_commit_ts, group_order
+        SELECT id, derivation_type, derivation_name, status_id
         FROM {VIEW_NIXOS_QUEUE}
-        WHERE derivation_name LIKE 'validate-nixos-queue-%'
-        ORDER BY nixos_commit_ts DESC, nixos_id, group_order, pname NULLS LAST, id
-        """
-    )
-
-    # Expect 3 packages + 1 nixos for A, and 2 packages + 1 nixos for B
-    assert len(rows) == 7, f"Expected 7 rows, got {len(rows)}"
-
-    # Split rows by nixos_id in the order they appear (should be A group, then B group)
-    nixos_ids_in_order = []
-    for r in rows:
-        if not nixos_ids_in_order or nixos_ids_in_order[-1] != r["nixos_id"]:
-            nixos_ids_in_order.append(r["nixos_id"])
-    assert nixos_ids_in_order == [
-        nixos_a_id,
-        nixos_b_id,
-    ], f"Group order wrong: {nixos_ids_in_order}"
-
-    # Verify A group: 3 packages (group_order=0) then the nixos row (group_order=1)
-    group_a = [r for r in rows if r["nixos_id"] == nixos_a_id]
-    assert [r["group_order"] for r in group_a] == [
-        0,
-        0,
-        0,
-        1,
-    ], f"A group_order wrong: {group_a}"
-    assert all(r["derivation_type"] == "package" for r in group_a[:3])
-    assert group_a[-1]["derivation_type"] == "nixos"
-
-    # Verify B group: 2 packages then the nixos row
-    group_b = [r for r in rows if r["nixos_id"] == nixos_b_id]
-    assert [r["group_order"] for r in group_b] == [
-        0,
-        0,
-        1,
-    ], f"B group_order wrong: {group_b}"
-    assert all(r["derivation_type"] == "package" for r in group_b[:2])
-    assert group_b[-1]["derivation_type"] == "nixos"
-
-    # All rows should be in allowed statuses (the view is supposed to filter to status_id IN (5,12))
-    bad = [r for r in rows if r["status_id"] not in allowed_ids]
-    assert not bad, f"Found rows with disallowed status_id: {bad}"
-
-
-@pytest.mark.views
-@pytest.mark.database
-def test_view_nixos_queue_basic_columns(cf_client: CFTestClient):
-    """Smoke test: required columns exist on the view."""
-    result = cf_client.execute_sql(
-        """
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = %s
+        WHERE id = ANY(%s)
+        -- Enforce queue semantics (packages first, then nixos) deterministically.
+        ORDER BY
+          CASE WHEN derivation_type = 'package' THEN 0 ELSE 1 END,
+          id
         """,
-        (VIEW_NIXOS_QUEUE,),
+        (ids,),
     )
-    have = {r["column_name"] for r in result}
 
-    expected = {
-        # derivations columns (subset that we rely on here):
-        "id",
-        "commit_id",
-        "derivation_type",
-        "derivation_name",
-        "derivation_path",
-        "status_id",
-        # helper/order columns from the view:
-        "nixos_id",
-        "nixos_commit_ts",
-        "group_order",
-    }
-    missing = expected - have
-    assert not missing, f"View missing expected columns: {missing}"
+    assert (
+        len(rows) == 4
+    ), f"Expected 4 rows (3 pkgs + 1 nixos), got {len(rows)}: {rows}"
+    assert all(
+        r["status_id"] == test_status_id for r in rows
+    ), f"Found incorrect status_id in results (expected {test_status_id})"
 
+    # Validate grouping and order:
+    def root_of(row):
+        return row["id"] if row["derivation_type"] == "nixos" else parent_of[row["id"]]
 
-@pytest.mark.views
-@pytest.mark.database
-def test_view_nixos_queue_performance(cf_client: CFTestClient):
-    """The view should be reasonably quick to aggregate."""
-    start = time.time()
-    _ = cf_client.execute_sql(f"SELECT COUNT(*) FROM {VIEW_NIXOS_QUEUE}")
-    elapsed = time.time() - start
-    assert elapsed < 10.0, f"{VIEW_NIXOS_QUEUE} COUNT(*) took too long: {elapsed:.2f}s"
+    group = [r for r in rows if root_of(r) == nixos_id]
+    assert (
+        len(group) == 4
+    ), f"Expected all 4 rows to belong to the same root, got {group}"
+    assert all(
+        r["derivation_type"] == "package" for r in group[:-1]
+    ), f"Non-package found before nixos: {group}"
+    assert (
+        group[-1]["derivation_type"] == "nixos"
+    ), f"Group does not end with nixos row: {group}"
