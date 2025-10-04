@@ -1929,80 +1929,59 @@ pub async fn update_cf_agent_enabled(
 
 /// Atomically claim the next derivation to build
 pub async fn claim_next_derivation(pool: &PgPool) -> Result<Option<Derivation>> {
-    // First, find the next item ID without locking
-    let next_id: Option<i32> = sqlx::query_scalar!(
+    // 1) Ask the view for just the next id (non-null)
+    let next_id_row = sqlx::query_scalar!(
         r#"
-        WITH all_nixos_commits AS (
-            SELECT 
-                d.id as nixos_deriv_id,
-                d.derivation_name as hostname,
-                c.commit_timestamp
-            FROM derivations d
-            INNER JOIN commits c ON d.commit_id = c.id
-            WHERE d.derivation_type = 'nixos'
-              AND d.status_id IN ($1, $2)
-        )
-        SELECT d.id
-        FROM derivations d
-        LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
-        LEFT JOIN all_nixos_commits n ON dd.derivation_id = n.nixos_deriv_id
-        LEFT JOIN all_nixos_commits anc ON d.id = anc.nixos_deriv_id
-        WHERE d.status_id IN ($1, $2)
-          AND (
-              (d.derivation_type = 'package' AND n.hostname IS NOT NULL)
-              OR
-              (d.derivation_type = 'nixos' AND anc.hostname IS NOT NULL)
-          )
-        ORDER BY 
-            CASE 
-                WHEN d.derivation_type = 'package' THEN COALESCE(n.hostname, 'zzz_orphan')
-                WHEN d.derivation_type = 'nixos' THEN anc.hostname
-            END ASC,
-            CASE 
-                WHEN d.derivation_type = 'package' THEN n.commit_timestamp
-                WHEN d.derivation_type = 'nixos' THEN anc.commit_timestamp
-            END DESC NULLS LAST,
-            CASE 
-                WHEN d.derivation_type = 'package' THEN 0
-                WHEN d.derivation_type = 'nixos' THEN 1
-            END ASC,
-            d.id ASC
+        SELECT id
+        FROM view_nixos_derivation_build_queue
         LIMIT 1
-        "#,
-        EvaluationStatus::DryRunComplete.as_id(),
-        EvaluationStatus::BuildPending.as_id()
+        "#
     )
     .fetch_optional(pool)
     .await?;
 
-    let Some(id) = next_id else {
+    // unwrap Option<Option<i32>> → Option<i32>
+    let Some(Some(id)) = next_id_row else {
         return Ok(None);
     };
 
-    // Now atomically claim it with FOR UPDATE SKIP LOCKED
+    // 2) Atomically claim it
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
         UPDATE derivations
         SET status_id = $2, started_at = NOW()
         WHERE id = (
-            SELECT id FROM derivations 
-            WHERE id = $1 
-            AND status_id IN ($3, $4)
+            SELECT id
+            FROM derivations
+            WHERE id = $1
             FOR UPDATE SKIP LOCKED
         )
         RETURNING
-            id, commit_id, derivation_type as "derivation_type: DerivationType",
-            derivation_name, derivation_path, derivation_target, scheduled_at,
-            completed_at, started_at, attempt_count, evaluation_duration_ms,
-            error_message, pname, version, status_id, build_elapsed_seconds,
-            build_current_target, build_last_activity_seconds, build_last_heartbeat,
-            cf_agent_enabled, store_path
+            id,
+            commit_id,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
+            derivation_path,
+            derivation_target,
+            scheduled_at,
+            completed_at,
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            pname,
+            version,
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat,
+            cf_agent_enabled,
+            store_path
         "#,
         id,
         EvaluationStatus::BuildInProgress.as_id(),
-        EvaluationStatus::DryRunComplete.as_id(),
-        EvaluationStatus::BuildPending.as_id()
     )
     .fetch_optional(pool)
     .await?;
