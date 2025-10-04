@@ -273,9 +273,9 @@ async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig)
                     let mut statuses = get_build_status().write().await; // Use helper function
                     if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
                         status.current_task =
-                            Some(derivation.derivation_path.clone().unwrap_or_else(|| {
+                            derivation.derivation_path.clone().unwrap_or_else(|| {
                                 format!("{} <unknown derivation path>", derivation.derivation_name)
-                            }));
+                            });
                         status.started_at = Some(std::time::Instant::now());
                     }
                 }
