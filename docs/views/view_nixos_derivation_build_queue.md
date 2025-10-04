@@ -2,9 +2,38 @@
 
 ## Overview
 
-`view_nixos_derivation_build_queue` provides the **ordered build queue** of NixOS and package derivations currently eligible for building. It serves as the **primary scheduling view** for the Crystal Forge builder loop, determining what derivations should be built next based on commit recency and dependency relationships.
+`view_nixos_derivation_build_queue` exposes the **ordered build queue** for NixOS system and package derivations that are currently eligible for building.
+Because NixOS system derivations can include large transitive dependencies—such as Firefox or Chrome—that must be built from source, these builds are scheduled separately to ensure sufficient compute resources. The process first builds all required package derivations for a given system configuration, and only then proceeds to build the system itself.
 
-This view is also designed for **Grafana dashboards**, providing operators and Site Administrators (SA) with a real-time visualization of the upcoming build queue—showing which NixOS systems and dependent packages are queued for evaluation or build next.
+This view serves as the **primary scheduling source** for the Crystal Forge builder loop, determining build order based on commit recency and dependency relationships.
+It is also optimized for **Grafana dashboards**, enabling operators and Site Administrators (SAs) to monitor the real-time build queue—showing which NixOS systems and dependent packages are next in line for evaluation and build.
+
+## Example Output
+
+Given two NixOS systems with their package dependencies:
+
+```
+Commit A (2024-01-15 14:30:00):
+  - server-alpha (nixos, dry-run-complete)
+    - firefox-120.0 (package, dry-run-complete)
+    - chromium-119.0 (package, dry-run-complete)
+
+Commit B (2024-01-15 10:00:00):
+  - server-beta (nixos, dry-run-complete)
+    - nginx-1.24 (package, dry-run-complete)
+```
+
+The view returns (ordered by newest commit first, packages before their NixOS system):
+
+| id  | derivation_name | derivation_type | nixos_id | nixos_commit_ts     | group_order |
+| --- | --------------- | --------------- | -------- | ------------------- | ----------- |
+| 102 | firefox-120.0   | package         | 101      | 2024-01-15 14:30:00 | 0           |
+| 103 | chromium-119.0  | package         | 101      | 2024-01-15 14:30:00 | 0           |
+| 101 | server-alpha    | nixos           | 101      | 2024-01-15 14:30:00 | 1           |
+| 202 | nginx-1.24      | package         | 201      | 2024-01-15 10:00:00 | 0           |
+| 201 | server-beta     | nixos           | 201      | 2024-01-15 10:00:00 | 1           |
+
+The builder processes rows top-to-bottom: packages are built first (group_order=0), then their NixOS system (group_order=1), starting with the newest commit.
 
 ## Purpose
 
@@ -16,7 +45,7 @@ This view is also designed for **Grafana dashboards**, providing operators and S
 
 The view joins derivations, commits, and dependency relationships to produce a structured queue of upcoming builds:
 
-1. Filters derivations to `status_id IN (5, 12)` — typically “ready to build” or “evaluation complete”.
+1. Filters derivations to `status_id IN (5, 12)` — typically "dry-run-complete" or "build-failed" when `attempt_count` < 5.
 2. Identifies all **NixOS root derivations** and their **dependent packages**.
 3. Orders results by:
 
