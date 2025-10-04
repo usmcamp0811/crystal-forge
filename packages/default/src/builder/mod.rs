@@ -16,8 +16,7 @@ use crate::queries::derivations::{
     mark_target_build_in_progress, mark_target_failed, update_derivation_status,
 };
 use crate::queries::derivations::{
-    discover_and_queue_all_transitive_dependencies,
-    get_derivations_ready_for_build_with_dependencies, handle_derivation_failure,
+    discover_and_queue_all_transitive_dependencies, handle_derivation_failure,
     has_all_dependencies_built, mark_target_build_complete,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
@@ -121,53 +120,6 @@ pub async fn log_builder_worker_status() {
             }
         }
     }
-}
-/// Alternative simpler approach: Build dependencies in dependency order globally
-async fn build_derivations_simple_dependency_order(
-    pool: &PgPool,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    // This approach builds all ready dependencies regardless of which NixOS system they belong to
-    let derivations = get_derivations_ready_for_build_with_dependencies(pool).await?;
-    if derivations.is_empty() {
-        info!("🔍 No derivations ready for building");
-        return Ok(());
-    }
-    info!(
-        "🏗️ Found {} derivations ready for building",
-        derivations.len()
-    );
-    for mut derivation in derivations {
-        // Double-check that all dependencies are built
-        if !has_all_dependencies_built(pool, derivation.id).await? {
-            debug!(
-                "⏭️ Skipping {} - dependencies not ready",
-                derivation.derivation_name
-            );
-            continue;
-        }
-        info!(
-            "🔨 Building: {} (type: {:?})",
-            derivation.derivation_name, derivation.derivation_type
-        );
-        mark_target_build_in_progress(pool, derivation.id).await?;
-        match derivation
-            .evaluate_and_build(pool, true, build_config)
-            .await
-        {
-            Ok(store_path) => {
-                info!("✅ Built {}: {}", derivation.derivation_name, store_path);
-                mark_target_build_complete(pool, derivation.id, &store_path).await?;
-            }
-            Err(e) => {
-                error!("❌ Build failed for {}: {}", derivation.derivation_name, e);
-                handle_derivation_failure(pool, &derivation, "build", &e).await?;
-            }
-        }
-        // Limit to building one derivation per cycle to allow other systems to progress
-        break;
-    }
-    Ok(())
 }
 
 /// New build strategy: discover all dependencies first, then build them individually
