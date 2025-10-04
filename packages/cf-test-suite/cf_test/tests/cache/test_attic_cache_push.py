@@ -182,7 +182,9 @@ exit 1
 
         # Show environment file
         try:
-            env_content = cfServer.succeed("cat /etc/attic-env || true")
+            env_content = cfServer.succeed(
+                "cat /var/lib/crystal-forge/.config/crystal-forge-attic.env || true"
+            )
             cfServer.log("---- Attic environment ----\n" + env_content)
         except Exception:
             pass
@@ -319,7 +321,9 @@ def test_attic_cache_configuration(cfServer, cf_client):
 
     # Check environment variables are available to the service
     try:
-        env_file = cfServer.succeed("cat /etc/attic-env")
+        env_file = cfServer.succeed(
+            "cat /var/lib/crystal-forge/.config/crystal-forge-attic.env"
+        )
         assert "ATTIC_TOKEN=" in env_file, "ATTIC_TOKEN not in environment file"
         assert (
             "ATTIC_SERVER_URL=" in env_file

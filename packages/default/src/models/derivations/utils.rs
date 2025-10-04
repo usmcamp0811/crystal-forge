@@ -70,10 +70,10 @@ pub fn debug_attic_environment() {
     let config_path = "/var/lib/crystal-forge/.config/attic/config.toml";
     if std::path::Path::new(config_path).exists() {
         debug!("Attic config file exists at {}", config_path);
-        match std::fs::read_to_string(config_path) {
-            Ok(contents) => debug!("Config file contents: {}", contents),
-            Err(e) => debug!("Cannot read config file: {}", e),
-        }
+        // match std::fs::read_to_string(config_path) {
+        //     Ok(contents) => debug!("Config file contents: {}", contents),
+        //     Err(e) => debug!("Cannot read config file: {}", e),
+        // }
     } else {
         debug!("Attic config file does not exist at {}", config_path);
     }
