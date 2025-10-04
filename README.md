@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="cf-logo-transparent.png" alt="Crystal Forge" width="300"/>
+  <img src="cf-bg.png" alt="Crystal Forge" width="300"/>
 </p>
 
 <p align="center">
