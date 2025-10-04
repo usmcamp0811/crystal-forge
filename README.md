@@ -199,12 +199,6 @@ nix build .#checks.x86_64-linux.s3-cache    # S3 cache tests
 nix build .#checks.x86_64-linux.attic-cache # Attic cache tests
 ```
 
-### Utilities
-
-- `sqlx-refresh` - Reset database and prepare SQLx
-- `sqlx-prepare` - Run `cargo sqlx prepare` without reset
-- `simulate-push` - Test webhook functionality
-
 ## System Requirements
 
 - **Server/Builder**: Linux with Nix, PostgreSQL 12+
