@@ -1890,6 +1890,174 @@ async fn discover_all_transitive_dependencies_for_system(
     Ok(())
 }
 
+/// Get next buildable derivations for a specific NixOS system
+pub async fn get_next_buildable_for_nixos_system(
+    pool: &PgPool,
+    nixos_system_name: &str,
+) -> Result<Vec<Derivation>> {
+    let rows = sqlx::query_as!(
+        Derivation,
+        r#"
+        WITH RECURSIVE system_dependencies AS (
+            -- Start with the specific NixOS system
+            SELECT 
+                d.id,
+                0 as depth
+            FROM derivations d
+            WHERE d.derivation_name = $1
+            AND d.derivation_type = 'nixos'
+            AND d.status_id = $2  -- dry-run-complete
+            
+            UNION ALL
+            
+            -- Find all transitive dependencies
+            SELECT 
+                dep.id,
+                sd.depth + 1
+            FROM system_dependencies sd
+            JOIN derivation_dependencies dd ON sd.id = dd.derivation_id
+            JOIN derivations dep ON dd.depends_on_id = dep.id
+            WHERE sd.depth < 10  -- Prevent infinite recursion
+        ),
+        ready_to_build AS (
+            SELECT 
+                d.id,
+                d.commit_id,
+                d.derivation_type,
+                d.derivation_name,
+                d.derivation_path,
+                d.derivation_target,
+                d.scheduled_at,
+                d.completed_at,
+                d.started_at,
+                d.attempt_count,
+                d.evaluation_duration_ms,
+                d.error_message,
+                d.pname,
+                d.version,
+                d.status_id,
+                d.build_elapsed_seconds,
+                d.build_current_target,
+                d.build_last_activity_seconds,
+                d.build_last_heartbeat,
+                d.cf_agent_enabled,
+                d.store_path,
+                sd.depth
+            FROM system_dependencies sd
+            JOIN derivations d ON sd.id = d.id
+            WHERE d.status_id IN ($2, $3)  -- dry-run-complete or build-pending
+            -- Only include derivations where ALL dependencies are already built
+            AND NOT EXISTS (
+                SELECT 1 
+                FROM derivation_dependencies dd_check
+                JOIN derivations dep_check ON dd_check.depends_on_id = dep_check.id
+                WHERE dd_check.derivation_id = d.id
+                AND dep_check.status_id NOT IN ($4, $5)  -- not build-complete or cache-pushed
+            )
+        )
+        SELECT
+            id,
+            commit_id,
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name,
+            derivation_path,
+            derivation_target,
+            scheduled_at,
+            completed_at,
+            started_at,
+            attempt_count,
+            evaluation_duration_ms,
+            error_message,
+            pname,
+            version,
+            status_id,
+            build_elapsed_seconds,
+            build_current_target,
+            build_last_activity_seconds,
+            build_last_heartbeat,
+            cf_agent_enabled,
+            store_path
+        FROM ready_to_build
+        ORDER BY 
+            depth DESC,          -- Build deepest dependencies first
+            derivation_type,     -- Packages before NixOS systems  
+            scheduled_at ASC     -- Oldest first
+        "#,
+        nixos_system_name,
+        EvaluationStatus::DryRunComplete.as_id(), // $2
+        EvaluationStatus::BuildPending.as_id(),   // $3
+        EvaluationStatus::BuildComplete.as_id(),  // $4
+        14_i32                                    // cache-pushed status             // $5
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+/// Check if a derivation has all its dependencies built
+pub async fn has_all_dependencies_built(pool: &PgPool, derivation_id: i32) -> Result<bool> {
+    let result = sqlx::query!(
+        r#"
+        SELECT COUNT(*) as unbuilt_count
+        FROM derivation_dependencies dd
+        JOIN derivations dep ON dd.depends_on_id = dep.id
+        WHERE dd.derivation_id = $1
+        AND dep.status_id NOT IN ($2, $3)  -- not build-complete or cache-pushed
+        "#,
+        derivation_id,
+        EvaluationStatus::BuildComplete.as_id(),
+        14_i32 // cache-pushed status
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(result.unbuilt_count == Some(0))
+}
+
+/// Get all NixOS systems that are ready to start their dependency builds
+pub async fn get_nixos_systems_ready_for_dependency_builds(pool: &PgPool) -> Result<Vec<String>> {
+    let systems = sqlx::query!(
+        r#"
+        SELECT DISTINCT d.derivation_name
+        FROM derivations d
+        WHERE d.derivation_type = 'nixos'
+        AND d.status_id = $1  -- dry-run-complete
+        ORDER BY d.derivation_name
+        "#,
+        EvaluationStatus::DryRunComplete.as_id()
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(systems.into_iter().map(|s| s.derivation_name).collect())
+}
+
+/// Mark that dependency builds have started for a NixOS system
+pub async fn mark_nixos_dependency_builds_started(
+    pool: &PgPool,
+    nixos_system_name: &str,
+) -> Result<()> {
+    // You might want to add a field to track this state, or use a separate table
+    // For now, we can use the existing status system
+    sqlx::query!(
+        r#"
+        UPDATE derivations 
+        SET status_id = $1
+        WHERE derivation_name = $2 
+        AND derivation_type = 'nixos'
+        AND status_id = $3
+        "#,
+        EvaluationStatus::BuildPending.as_id(), // Move to build-pending while deps build
+        nixos_system_name,
+        EvaluationStatus::DryRunComplete.as_id()
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn mark_derivation_cache_pushed(pool: &PgPool, derivation_id: i32) -> Result<()> {
     sqlx::query!(
         r#"
