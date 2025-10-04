@@ -1,249 +1,247 @@
 # Crystal Forge
 
-Crystal Forge is a lightweight monitoring and compliance system for NixOS machines—designed to be a self-hosted alternative to tools like Microsoft Intune, but purpose-built for reproducibility-focused environments.
+<p align="center">
+  <img src="crystal-forge-logo-with-text.png" alt="Crystal Forge" width="300"/>
+</p>
 
-Crystal Forge builds secure, verifiable software ecosystems by embedding compliance, integrity, and trust into the entire lifecycle—from development to deployment. We empower organizations to evolve DevSecOps into a system of continuous assurance, where every component is provable, auditable, aligned with policy, and mapped directly to required security frameworks.
-
-> 📋 **Beta Release**: This is the first official release (v0.1.0) with core monitoring functionality. While stable for basic use cases, advanced features are still in development.
-
----
-
-## ✨ Goals
-
-- Declarative and reproducible system state tracking
-- Strong cryptographic identity and verification of agents
-- Simple, reliable communication between clients and server
-- Store system metadata and fingerprints for compliance/auditability
-- Efficient monitoring with intelligent change detection
+<p align="center">
+  <strong>Compliance and build coordination for NixOS in regulated environments</strong>
+</p>
 
 ---
 
-## 🧱 Architecture
+## What is Crystal Forge?
 
-- **`agent`**: runs on NixOS systems, monitors configuration changes, sends signed system fingerprints
-- **`server`**: receives and verifies agent reports, evaluates NixOS configurations, stores in PostgreSQL
-- **`evaluation engine`**: builds and tracks NixOS system derivations from Git commits
-- **`heartbeat system`**: efficient monitoring distinguishing between liveness signals and actual changes
+Crystal Forge is a self-hosted monitoring, compliance, and deployment system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—designed for organizations that need auditability and control.
 
----
+**Current Status**: Active development. Core monitoring, build coordination, and deployment enforcement are functional. Advanced features are in progress.
 
-## 📦 Features (v0.1.0)
+## Key Features
 
-### Core Monitoring
+### System Monitoring & Compliance
 
-- [x] Comprehensive system fingerprint collection (hardware, software, network, security)
-- [x] Ed25519 signature-based agent authentication
-- [x] Intelligent heartbeat vs. state change detection
-- [x] Real-time system configuration monitoring via inotify
+- **Cryptographic verification**: Ed25519 signatures on all agent communications
+- **System fingerprinting**: Hardware, software, network, and security status tracking
+- **Configuration drift detection**: Compare running systems against evaluated configurations
+- **Intelligent heartbeats**: Distinguish between liveness signals and actual state changes
+
+### Build Coordination
+
+- **Automatic NixOS evaluation**: Track derivations from Git commits
+- **Concurrent build processing**: Parallel derivation evaluation and building
+- **Binary cache integration**: Push to S3, Attic, or standard Nix caches
+- **CVE scanning**: Automated vulnerability assessment with vulnix
+- **Resource isolation**: SystemD-scoped builds with memory and CPU limits
+
+### Deployment Management
+
+- **Deployment policies**: Manual, auto_latest, or pinned deployment strategies
+- **Fleet tracking**: Monitor which systems are running which configurations
+- **Flake integration**: Native support for NixOS flakes and Git repositories
+- **Deployment enforcement**: Server-directed system updates with cryptographic verification
 
 ### Infrastructure
 
-- [x] PostgreSQL backend with optimized schema
-- [x] Database migrations and auto-initialization
-- [x] Dual endpoint architecture (`/agent/heartbeat`, `/agent/state`)
-- [x] Git webhook integration for configuration updates
+- **PostgreSQL backend**: Optimized schema with migration support
+- **Horizontal scaling**: Multiple servers/builders can share database
+- **Web dashboards**: Grafana integration for compliance monitoring (in progress)
+- **Git webhook integration**: Automatic evaluation on configuration updates
 
-### NixOS Integration
+## Architecture
 
-- [x] Automatic NixOS configuration evaluation
-- [x] Derivation path tracking and comparison
-- [x] Background processing with concurrent evaluation
-- [x] System drift detection (current vs. latest configurations)
-
-### Coming Soon
-
-- [ ] Web dashboard for system monitoring
-- [ ] Advanced compliance reporting
-- [ ] Rule-based policy enforcement
-- [ ] Remote system management capabilities
-
----
-
-## 🛠️ Running
-
-Crystal Forge supports configuration via a `config.toml` file **or** via structured environment variables.
-A first-party NixOS module is provided to make setup seamless and reproducible.
-
----
-
-### 🔧 Option 1: `config.toml`
-
-You can configure Crystal Forge using a simple TOML file:
-
-```toml
-[database]
-host = "localhost"
-user = "crystal_forge"
-password = "password"
-name = "crystal_forge"
-
-[server]
-host = "0.0.0.0"
-port = 3000
-
-[client]
-server_host = "localhost"
-server_port = 3000
-private_key = "/var/lib/crystal_forge/host.key"
-
-# System configurations to track
-[[systems]]
-hostname = "server1"
-flake_url = "git+https://github.com/yourorg/nixos-configs"
-derivation = "/nix/store/...-nixos-system-server1"
+```
+┌─────────────┐         ┌─────────────┐         ┌─────────────┐
+│   Agent     │────────>│   Server    │<────────│   Builder   │
+│ (NixOS)     │  HTTPS  │  (API/DB)   │   DB    │ (Eval/Build)│
+└─────────────┘         └─────────────┘         └─────────────┘
+                              │
+                              │
+                        ┌─────▼─────┐
+                        │ PostgreSQL│
+                        └───────────┘
 ```
 
-Optionally set `CONFIG_PATH=/path/to/config.toml` to override the default location.
+- **Agent**: Runs on each NixOS system, monitors configuration, sends signed reports
+- **Server**: Receives agent reports, coordinates work, provides API
+- **Builder**: Evaluates flakes, builds derivations, runs CVE scans
+- **Database**: Shared state for coordination and compliance tracking
 
----
+## Quick Start
 
-### 🌱 Option 2: Environment Variables
-
-Crystal Forge can be configured entirely via environment variables, using a nested key format with double underscores:
-
-#### Server
-
-```bash
-CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
-CRYSTAL_FORGE__SERVER__PORT=3000
-CRYSTAL_FORGE__DATABASE__HOST=localhost
-CRYSTAL_FORGE__DATABASE__USER=crystal_forge
-CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
-CRYSTAL_FORGE__DATABASE__PASSWORD=password
-```
-
-#### Agent
-
-```bash
-CRYSTAL_FORGE__CLIENT__SERVER_HOST=localhost
-CRYSTAL_FORGE__CLIENT__SERVER_PORT=3000
-CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal_forge/host.key
-```
-
----
-
-### 🧊 Option 3: NixOS Module
+### NixOS Module Configuration
 
 ```nix
 {
   services.crystal-forge = {
     enable = true;
 
+    # Database configuration
     database = {
       host = "localhost";
       user = "crystal_forge";
       name = "crystal_forge";
-      passwordFile = "/run/secrets/crystal_forge_db_password";
+      passwordFile = "/run/secrets/db_password";
     };
 
+    # Server component (coordination & API)
     server = {
       enable = true;
       host = "0.0.0.0";
       port = 3000;
     };
 
-    client = {
+    # Builder component (evaluation & builds)
+    build = {
       enable = true;
-      server_host = "localhost";
-      server_port = 3000;
-      private_key = "/var/lib/crystal_forge/host.key";
+      cores = 12;
+      max_jobs = 6;
+      max_concurrent_derivations = 8;
+      systemd_memory_max = "32G";
+      systemd_cpu_quota = 800;  # 8 cores
     };
 
-    # Systems to monitor
+    # Agent component (system monitoring)
+    client = {
+      enable = true;
+      server_host = "crystal-forge.example.com";
+      server_port = 3000;
+      private_key = "/var/lib/crystal-forge/host.key";
+    };
+
+    # Flakes to monitor
+    flakes.watched = [
+      {
+        name = "infrastructure";
+        repo_url = "git+ssh://git@gitlab.com/company/nixos-configs";
+        auto_poll = true;
+        initial_commit_depth = 10;
+      }
+    ];
+
+    # Systems to track
     systems = [
       {
         hostname = "server1";
-        flake_url = "git+https://github.com/yourorg/nixos-configs";
-        derivation = "/nix/store/...-nixos-system-server1";
+        public_key = "base64-encoded-ed25519-pubkey";
+        environment = "production";
+        flake_name = "infrastructure";
+        deployment_policy = "manual";  # or "auto_latest" or "pinned"
       }
     ];
+
+    # Binary cache configuration
+    cache = {
+      cache_type = "S3";  # or "Attic" or "Nix"
+      push_after_build = true;
+      push_to = "s3://my-bucket?region=us-east-1";
+      parallel_uploads = 4;
+    };
   };
 }
 ```
 
-The module will automatically generate the correct environment variables, systemd services, and config paths based on your input.
+### Environment-Based Configuration
 
-## 🔍 Monitoring Features
+Crystal Forge can also be configured via environment variables:
 
-### System Fingerprinting
+```bash
+# Server
+CRYSTAL_FORGE__SERVER__HOST=0.0.0.0
+CRYSTAL_FORGE__SERVER__PORT=3000
+CRYSTAL_FORGE__DATABASE__HOST=localhost
+CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
 
-Crystal Forge collects comprehensive system information including:
+# Agent
+CRYSTAL_FORGE__CLIENT__SERVER_HOST=crystal-forge.example.com
+CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal-forge/host.key
+```
 
-- Hardware identifiers (serial numbers, UUIDs, MAC addresses)
-- System specifications (CPU, memory, network interfaces)
-- Security status (TPM, Secure Boot, SELinux, FIPS mode)
-- Software versions (NixOS, kernel, agent)
+## Development
 
-### Change Detection
-
-- **Heartbeats**: Periodic liveness signals without state changes
-- **State Changes**: Full system reports when configuration actually changes
-- **Drift Detection**: Compare running systems against evaluated configurations
-
-### Performance
-
-- Optimized database storage reducing redundant data
-- Concurrent configuration evaluation
-- Background processing for minimal system impact
-
-## 🧑‍💻 Development
-
-Crystal Forge includes a full development environment using Nix. To get started:
-
-### 🚀 Quickstart
+### Dev Environment
 
 ```bash
 nix develop
 ```
 
-Then, in one terminal:
+This provides a complete development environment with:
+
+- PostgreSQL database
+- Ed25519 keypair generation
+- Crystal Forge binaries
+- Testing infrastructure
+
+### Running Components
 
 ```bash
+# Start database and server
 process-compose up
-```
 
-This will start the PostgreSQL database and the Crystal Forge server with environment variables preloaded.
-
-In another terminal:
-
-```bash
+# In another terminal, run agent
 run-agent
-```
 
-This launches the agent and sends reports to the local server.
-
-### 🔁 Live Development
-
-To run the server or agent from source instead of the latest build:
-
-```bash
+# Run in development mode (live code changes)
 run-server --dev
 run-agent --dev
 ```
 
-This ensures you're running against your latest code changes.
+### Testing
 
-### 🛠 Utilities
+Crystal Forge includes comprehensive NixOS VM-based integration tests:
 
-From inside the dev shell:
+```bash
+# Run all tests
+nix flake check
 
-- `sqlx-refresh` — Resets the database and prepares SQLx.
-- `sqlx-prepare` — Runs `cargo sqlx prepare` without resetting.
-- `simulate-push` — Test webhook functionality
+# Specific test suites
+nix build .#checks.x86_64-linux.database    # Database tests
+nix build .#checks.x86_64-linux.server      # Server tests
+nix build .#checks.x86_64-linux.builder     # Builder tests
+nix build .#checks.x86_64-linux.s3-cache    # S3 cache tests
+nix build .#checks.x86_64-linux.attic-cache # Attic cache tests
+```
 
-The dev shell auto-generates an Ed25519 keypair if missing and sets all required `CRYSTAL_FORGE__*` env vars.
+### Utilities
 
----
+- `sqlx-refresh` - Reset database and prepare SQLx
+- `sqlx-prepare` - Run `cargo sqlx prepare` without reset
+- `simulate-push` - Test webhook functionality
 
-## 📊 System Requirements
+## System Requirements
 
-- **Server**: PostgreSQL 12+, Linux/macOS
+- **Server/Builder**: Linux with Nix, PostgreSQL 12+
 - **Agent**: NixOS systems only
-- **Network**: HTTPS recommended for production deployments
+- **Network**: HTTPS recommended for production
 
-## 🔐 Security
+## Roadmap
 
-- Ed25519 cryptographic signatures for all agent communications
+See [ROADMAP.md](ROADMAP.md) for development plans:
+
+1. **Stabilization** - Fix deployment tracking bugs, improve testing
+2. **Deployment Policies** - Advanced conditional deployment rules
+3. **CVE Dashboard** - Grafana dashboards for vulnerability tracking
+4. **STIG Modules** - Automated DISA STIG compliance for NixOS
+5. **Tvix Integration** - Native Rust Nix evaluation
+
+## Contributing
+
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+Crystal Forge is open source and will remain free for personal and homelab use. Commercial support and features for organizations will be offered in the future to sustain long-term development.
+
+## Security
+
+- Ed25519 cryptographic signatures for agent authentication
+- Hardware-based system fingerprinting
 - No sensitive data transmitted without verification
-- Hardware-based system fingerprinting for identity assurance
-- Configurable authentication keys per system
+- SystemD resource isolation for build operations
+
+## License
+
+See [LICENSE](LICENSE) for details.
+
+## Project Links
+
+- **Repository**: [GitLab](https://gitlab.com/crystal-forge/crystal-forge)
+- **Issues**: [Issue Tracker](https://gitlab.com/crystal-forge/crystal-forge/-/issues)
+- **Documentation**: [docs/](docs/)
