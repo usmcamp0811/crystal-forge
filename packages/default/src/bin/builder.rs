@@ -1,6 +1,7 @@
 use crystal_forge::builder::{
-    log_builder_worker_status, run_build_loop, run_cache_push_loop, run_cve_scan_loop,
+    , run_build_loop, run_cache_push_loop, run_cve_scan_loop,
 };
+use crystal_forge::log::log_builder_worker_status;
 use crystal_forge::models::config::{CachePushJob, CrystalForgeConfig};
 use crystal_forge::server::memory_monitor_task;
 use tokio::signal;
