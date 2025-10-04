@@ -4,142 +4,161 @@ lineNumbers: true
 layout: cover
 color: dark
 class: text-right
-neversink_string: "Nix: Taming the Wild West of Codebases"
+neversink_string: "Crystal Forge: Compliance-Native Infrastructure for NixOS"
 colorSchema: light
 routerMode: hash
 title: Nix
 ---
 
-# Toward Compliant Mattermost Deployment
+## Crystal Forge: Compliance-Native Infrastructure for NixOS
 
-## Nix-Based Automation for RMF and 800-53 Controls
+### I. The Problem Space
 
----
-layout: two-cols
----
+**Slide 1: "The Compliance Burden"**
 
-## Deployment Targets
+- What keeps CTOs up at night
+- Are all systems patched? Are we sure?
+- Who's running what configuration?
 
-Mattermost can be securely deployed using one of two primary approaches, each with its own implications for compliance, automation, and runtime hardening:
+**Slide 2: "The Current Approach"**
 
-### 1. **Kubernetes-Based Deployment**
+- Sysadmins: keeping systems running
+- Security teams: tracking deployed software
+- Compliance officers: proving we did it right
+- All working in silos, manually
 
-- Uses the official [Mattermost Helm chart](https://github.com/mattermost/mattermost-helm)
-- Ideal for cloud-native environments with GitOps workflows
-- Compliant deployment requires a hardened `values.yaml`:
+**Slide 3: "Why Traditional Tools Fall Short"**
 
-  - Secure auth settings
-  - TLS configuration via ingress
-  - Secrets management (e.g., Vault CSI)
-  - Logging and resource constraints
-
-### 2. **Bare Metal / Virtual Machine Deployment**
-
-- Deployed as a systemd service or containerized app
-- Suited for air-gapped or traditional environments
-- Requires a hardened `config.json` and secure system settings:
-
-  - TLS via NGINX/Traefik
-  - Centralized log forwarding
-  - File permissions, backup routines, patch management
-
-In both cases:
-
-- You must define a **blessed configuration** that complies with applicable RMF controls
-- Configuration must be immutable, version-controlled, and continuously auditable
+- Ansible/Chef/Puppet: stateful, imperative
+- Half-deployed playbooks
+- No guaranteed end state
+- Systems can drift without detection
 
 ---
 
-## High-Level Compliance Requirements
+### II. The Nix Foundation
 
-1. **Scan the Binary & Dependencies**
+**Slide 4: "Nix Changes the Game"**
 
-   - SBOM with `syft`
-   - Vulnerability scan with `grype` or `trivy`
+- Deterministic, functional system configuration
+- One path = one exact configuration
+- `readlink /run/current-system`
 
-2. **Harden Configuration**
+**Slide 5: "A Single Source of Truth"**
 
-   - Enforce secure auth, logging, encryption, rate limits
-   - Disable insecure defaults
-
-3. **Configure Monitoring**
-
-   - Centralized logging, health checks, alerting
-   - Patching and CVE tracking
+- Derivation paths are cryptographic identities
+- If you know the path, you know everything
+- No ambiguity, no guessing
 
 ---
 
-## Solution: Nix-Based Secure Deployment Module
+### III. Crystal Forge Solution
 
-Create a NixOS module that:
+**Slide 6: "What If We Made This Simple?"**
 
-- Defines **compliant defaults**
-- Supports `mode = "kubernetes" | "baremetal"`
-- Renders either `values.yaml` or `config.json`
-- Handles secrets and TLS
+- Track the flake that defines your fleet
+- Log every system output to a database
+- Compare actual vs. expected: one lookup
 
----
+**Slide 7: "Who Benefits"**
 
-## Example Interface
-
-```nix
-services.secureMattermost = {
-  enable = true;
-  mode = "kubernetes";
-  domain = "chat.example.com";
-  auth.provider = "oidc";
-  allowGuestUsers = false;
-};
-```
+- CTOs: answer "are we patched?" instantly
+- Sysadmins: easier fleet management
+- Security: complete visibility
+- Compliance: audit-ready evidence
 
 ---
 
-## Policy Enforcement with Justifications
+### IV. Architecture & Components
 
-Use **assertions with conditional justifications**:
+**Slide 8: "How It Works"**
 
-```nix
-assert cfg.allowGuestUsers == false || cfg.justification.allowGuestUsers != null;
-```
+- Agent: monitors `/run/current-system` + fingerprints
+- Server: coordinates, verifies, instructs
+- Builder: evaluates flakes, builds derivations
 
-```nix
-options.services.secureMattermost.allowGuestUsers = mkOption {
-  type = types.bool;
-  default = false;
-};
+**Slide 9: "Agent Lifecycle"**
 
-options.services.secureMattermost.justification.allowGuestUsers = mkOption {
-  type = types.nullOr types.str;
-  default = null;
-};
-```
+- Periodic heartbeats to server
+- Cryptographically signed reports
+- Receives deployment instructions
+- Self-updating capability
 
----
+**Slide 10: "Build Coordination"**
 
-## Enforcement Outcomes
-
-| Setting | Justification      | Result  |
-| ------- | ------------------ | ------- |
-| `true`  | `null`             | ❌ Fail |
-| `false` | `null`             | ✅ Pass |
-| `true`  | "Scoped exception" | ⚠️ Pass |
+- Builder workers (one or many)
+- Evaluate derivations
+- Push to cache (S3/Attic/Nix)
+- Coordinate via shared database
 
 ---
 
-## Bonus Features
+### V. Key Advantages
 
-- Vault integration for secrets
-- TLS via Traefik/Nginx
-- SBOM & vulnerability scan output
-- Compliance summary document generation
+**Slide 11: "Beyond Configuration Management"**
+
+- Not just Ansible-in-Nix
+- Purely functional deployments
+- No half-deployed states
+- Drift detection built in
+
+**Slide 12: "Immutable by Design"**
+
+- Systems can't change without notification
+- Configuration changes are events
+- Audit trail is automatic
+- Exception tracking (STIG waivers, etc.)
 
 ---
 
-## Summary
+### VI. Compliance & Reporting
 
-✅ Compliant-by-default config
-✅ Justifications for deviations
-✅ Nix module emits `values.yaml` or `config.json`
-✅ Monitoring, patching, and ATO prep baked in
+**Slide 13: "Built for Audits"**
 
-This is how you make secure, compliant deployments **easy**.
+- RMF compliance made easier
+- STIG exception management
+- Framework-agnostic approach
+- Evidence generation, not evidence gathering
+
+**Slide 14: "Reporting (Coming Soon)"**
+
+- Industry-standard formats
+- Integration with existing cyber tools
+- Automated report generation
+- Human-readable + machine-parseable
+
+---
+
+### VII. What Crystal Forge Is Not
+
+**Slide 15: "Scope & Boundaries"**
+
+- Not active monitoring (use existing tools)
+- Solves configuration compliance
+- Not runtime security (that's separate)
+- Complements, doesn't replace security stack
+
+---
+
+### VIII. Closing
+
+**Slide 16: "The Vision"**
+
+- Deterministic infrastructure meets compliance
+- Make the right thing easy
+- Reduce cognitive load on teams
+- Open source foundation for regulated NixOS
+
+**Slide 17: "Get Involved"**
+
+- Project status & roadmap
+- How to contribute
+- Where to find us
+
+---
+
+**Flow Notes:**
+
+This outline moves from **problem → foundation → solution → implementation → benefits → boundaries**. It avoids getting too technical too early, focuses on pain points your audience understands, and shows how Nix's properties make Crystal Forge possible (rather than just being another tool).
+
+The "What Crystal Forge Is Not" slide is critical—it sets realistic expectations and positions CF as part of a larger security strategy, not a silver bullet.
