@@ -17,7 +17,7 @@ use crate::queries::derivations::{
 };
 use crate::queries::derivations::{
     discover_and_queue_all_transitive_dependencies, handle_derivation_failure,
-    has_all_dependencies_built, mark_target_build_complete,
+    mark_target_build_complete,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
