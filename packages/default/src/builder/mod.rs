@@ -457,6 +457,7 @@ async fn scan_derivations(
     vulnix_runner: &VulnixRunner,
     vulnix_version: Option<String>,
 ) -> Result<()> {
+    // Get derivations that need CVE scanning (those with build-complete status)
     // Update status: looking for work
     {
         let mut status = get_cve_status().write().await; // Use helper function
@@ -471,6 +472,7 @@ async fn scan_derivations(
     match get_targets_needing_cve_scan(pool, Some(1)).await {
         Ok(derivations) => {
             if derivations.is_empty() {
+                info!("🔍 No derivations need CVE scanning");
                 // Update status: idle
                 {
                     let mut status = get_cve_status().write().await;
@@ -498,9 +500,81 @@ async fn scan_derivations(
                 });
             }
 
-            // ... rest of your scanning logic
+            // Check if the derivation path exists
+            if let Some(ref path) = derivation.derivation_path {
+                match fs::try_exists(path).await {
+                    Ok(true) => {
+                        info!(
+                            "🔍 Starting CVE scan for derivation: {}",
+                            derivation.derivation_name
+                        );
+
+                        // Create a new scan record before starting
+                        let scan_id =
+                            create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone())
+                                .await?;
+
+                        // Mark scan as in progress
+                        mark_scan_in_progress(pool, scan_id).await?;
+
+                        let start_time = std::time::Instant::now();
+
+                        // Run CVE scan using the vulnix runner
+                        match vulnix_runner
+                            .scan_derivation(&pool, derivation.id, vulnix_version)
+                            .await
+                        {
+                            Ok(vulnix_entries) => {
+                                let scan_duration_ms =
+                                    Some(start_time.elapsed().as_millis() as i32);
+                                let stats =
+                                    crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(
+                                        &vulnix_entries,
+                                    );
+
+                                // Save the detailed scan results to database
+                                save_scan_results(pool, scan_id, &vulnix_entries, scan_duration_ms)
+                                    .await?;
+
+                                info!(
+                                    "✅ CVE scan completed for {}: {}",
+                                    derivation.derivation_name, stats
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "❌ CVE scan failed for {}: {}",
+                                    derivation.derivation_name, e
+                                );
+                                if let Err(save_err) =
+                                    mark_cve_scan_failed(pool, derivation, &e.to_string()).await
+                                {
+                                    error!("❌ Failed to mark CVE scan as failed: {save_err}");
+                                }
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        warn!("❌ Derivation path does not exist: {}", path);
+                        update_derivation_status(
+                            &pool,
+                            derivation.id,
+                            EvaluationStatus::DryRunComplete,
+                            derivation.derivation_path.as_deref(),
+                            Some("Missing Nix Store Path"),
+                            derivation.store_path.as_deref(),
+                        )
+                        .await?;
+                    }
+                    Err(e) => {
+                        error!("❌ Error checking derivation path {}: {}", path, e);
+                    }
+                }
+            } else {
+                warn!("❌ No derivation path set for derivation");
+            }
         }
-        Err(e) => error!("Failed to get derivations needing CVE scan: {e}"),
+        Err(e) => error!("❌ Failed to get derivations needing CVE scan: {e}"),
     }
     Ok(())
 }
