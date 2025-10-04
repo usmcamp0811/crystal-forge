@@ -1,4 +1,5 @@
 use crate::flake::eval::list_nixos_configurations_from_commit;
+use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::cache_push::{
