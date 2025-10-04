@@ -190,7 +190,7 @@ def test_builder_logs_show_startup(cf_client, cfServer):
 
     # Wait for builder startup message
     cf_client.wait_for_service_log(
-        cfServer, "crystal-forge-builder.service", "Starting Build loop", timeout=60
+        cfServer, "crystal-forge-builder.service", "🔍 Starting", timeout=60
     )
 
 

@@ -5,6 +5,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use anyhow::bail;
 use sqlx::PgPool;
+use sqlx::{Executor, Postgres};
 use tracing::{debug, error, info, warn};
 
 // Status IDs from the derivation_statuses table
@@ -131,16 +132,30 @@ pub async fn insert_derivation_with_target(
         crate::models::derivations::Derivation,
         r#"
         INSERT INTO derivations (
-            commit_id, 
-            derivation_type, 
-            derivation_name, 
+            commit_id,
+            derivation_type,
+            derivation_name,
             derivation_target,
-            status_id, 
+            status_id,
             attempt_count,
             scheduled_at
-        ) 
-        VALUES ($1, $2, $3, $4, $5, $6, NOW())
-        RETURNING 
+        )
+        VALUES ($1, $2, $3, $4, $5, 0, NOW())
+        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        DO UPDATE SET
+            -- keep terminal states; otherwise reset to pending
+            status_id = CASE
+                WHEN derivations.status_id IN (5, 6, 10, 12, 11, 13) THEN derivations.status_id
+                ELSE EXCLUDED.status_id
+            END,
+            -- keep/refresh target if provided
+            derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),
+            -- nudge the scheduler only for non-terminal rows
+            scheduled_at = CASE
+                WHEN derivations.status_id IN (5, 6, 10, 12, 11, 13) THEN derivations.scheduled_at
+                ELSE NOW()
+            END
+        RETURNING
             id,
             commit_id,
             derivation_type as "derivation_type: DerivationType",
@@ -168,7 +183,6 @@ pub async fn insert_derivation_with_target(
         derivation_name,
         derivation_target,
         EvaluationStatus::DryRunPending.as_id(),
-        0 // initial attempt_count
     )
     .fetch_one(pool)
     .await?;
@@ -1184,87 +1198,69 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
     let rows = sqlx::query_as!(
         Derivation,
         r#"
-        WITH nixos_system_groups AS (
-            -- Get NixOS systems and their associated packages
+        WITH all_nixos_commits AS (
             SELECT 
-                d.id,
-                d.commit_id,
-                d.derivation_type,
-                d.derivation_name,
-                d.derivation_path,
-                d.derivation_target,
-                d.scheduled_at,
-                d.completed_at,
-                d.started_at,
-                d.attempt_count,
-                d.evaluation_duration_ms,
-                d.error_message,
-                d.pname,
-                d.version,
-                d.status_id,
-                d.build_elapsed_seconds,
-                d.build_current_target,
-                d.build_last_activity_seconds,
-                d.build_last_heartbeat,
-                d.cf_agent_enabled,
-                d.store_path,
-                -- Find the related NixOS system for packages, or use self for NixOS systems
-                CASE 
-                    WHEN d.derivation_type = 'package' THEN 
-                        COALESCE(
-                            (SELECT MIN(nixos_dep.id) 
-                             FROM derivation_dependencies dd 
-                             JOIN derivations nixos_dep ON dd.derivation_id = nixos_dep.id 
-                             WHERE dd.depends_on_id = d.id 
-                               AND nixos_dep.derivation_type = 'nixos'
-                             LIMIT 1),
-                            999999 -- Orphaned packages get highest group number
-                        )
-                    ELSE d.id -- NixOS systems group by themselves
-                END as nixos_group_id,
-                -- Priority: packages first (0), then NixOS systems (1)
-                CASE 
-                    WHEN d.derivation_type = 'package' THEN 0
-                    WHEN d.derivation_type = 'nixos' THEN 1
-                    ELSE 2
-                END as type_priority
+                d.id as nixos_deriv_id,
+                d.derivation_name as hostname,
+                c.commit_timestamp,
+                c.id as commit_id
             FROM derivations d
-            WHERE d.status_id in ( $1, $2 )
+            INNER JOIN commits c ON d.commit_id = c.id
+            WHERE d.derivation_type = 'nixos'
+              AND d.status_id IN ($1, $2)
         )
         SELECT
-            id,
-            commit_id,
-            derivation_type as "derivation_type: DerivationType",
-            derivation_name,
-            derivation_path,
-            derivation_target,
-            scheduled_at,
-            completed_at,
-            started_at,
-            attempt_count,
-            evaluation_duration_ms,
-            error_message,
-            pname,
-            version,
-            status_id,
-            build_elapsed_seconds,
-            build_current_target,
-            build_last_activity_seconds,
-            build_last_heartbeat,
-            cf_agent_enabled,
-            store_path
-        FROM nixos_system_groups
+            d.id,
+            d.commit_id,
+            d.derivation_type as "derivation_type: DerivationType",
+            d.derivation_name,
+            d.derivation_path,
+            d.derivation_target,
+            d.scheduled_at,
+            d.completed_at,
+            d.started_at,
+            d.attempt_count,
+            d.evaluation_duration_ms,
+            d.error_message,
+            d.pname,
+            d.version,
+            d.status_id,
+            d.build_elapsed_seconds,
+            d.build_current_target,
+            d.build_last_activity_seconds,
+            d.build_last_heartbeat,
+            d.cf_agent_enabled,
+            d.store_path
+        FROM derivations d
+        LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
+        LEFT JOIN all_nixos_commits n ON dd.derivation_id = n.nixos_deriv_id
+        LEFT JOIN all_nixos_commits anc ON d.id = anc.nixos_deriv_id
+        WHERE d.status_id IN ($1, $2)
+          AND (
+              (d.derivation_type = 'package' AND n.hostname IS NOT NULL)
+              OR
+              (d.derivation_type = 'nixos' AND anc.hostname IS NOT NULL)
+          )
         ORDER BY 
-            nixos_group_id,          -- Group related packages and systems together
-            type_priority,           -- Within each group: packages first, then NixOS
-            completed_at ASC         -- Within same type: oldest first
+            CASE 
+                WHEN d.derivation_type = 'package' THEN COALESCE(n.hostname, 'zzz_orphan')
+                WHEN d.derivation_type = 'nixos' THEN anc.hostname
+            END ASC,
+            CASE 
+                WHEN d.derivation_type = 'package' THEN n.commit_timestamp
+                WHEN d.derivation_type = 'nixos' THEN anc.commit_timestamp
+            END DESC NULLS LAST,
+            CASE 
+                WHEN d.derivation_type = 'package' THEN 0
+                WHEN d.derivation_type = 'nixos' THEN 1
+            END ASC,
+            d.id ASC
         "#,
         EvaluationStatus::DryRunComplete.as_id(),
         EvaluationStatus::BuildPending.as_id()
     )
     .fetch_all(pool)
     .await?;
-
     Ok(rows)
 }
 
@@ -1710,13 +1706,16 @@ pub async fn update_derivation_path_and_metadata(
     Ok(())
 }
 
-pub async fn update_derivation_build_status(
-    pool: &PgPool,
+pub async fn update_derivation_build_status<'e, E>(
+    executor: E,
     derivation_id: i32,
     elapsed_seconds: i32,
     current_build_target: Option<&str>,
     last_activity_seconds: i32,
-) -> Result<()> {
+) -> Result<()>
+where
+    E: Executor<'e, Database = Postgres>,
+{
     sqlx::query!(
         r#"
         UPDATE derivations SET
@@ -1731,7 +1730,7 @@ pub async fn update_derivation_build_status(
         last_activity_seconds,
         derivation_id
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     Ok(())
@@ -2204,4 +2203,87 @@ pub async fn update_cf_agent_enabled(
     .await?;
 
     Ok(())
+}
+
+/// Atomically claim the next derivation to build
+pub async fn claim_next_derivation(pool: &PgPool) -> Result<Option<Derivation>> {
+    // First, find the next item ID without locking
+    let next_id: Option<i32> = sqlx::query_scalar!(
+        r#"
+        WITH all_nixos_commits AS (
+            SELECT 
+                d.id as nixos_deriv_id,
+                d.derivation_name as hostname,
+                c.commit_timestamp
+            FROM derivations d
+            INNER JOIN commits c ON d.commit_id = c.id
+            WHERE d.derivation_type = 'nixos'
+              AND d.status_id IN ($1, $2)
+        )
+        SELECT d.id
+        FROM derivations d
+        LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
+        LEFT JOIN all_nixos_commits n ON dd.derivation_id = n.nixos_deriv_id
+        LEFT JOIN all_nixos_commits anc ON d.id = anc.nixos_deriv_id
+        WHERE d.status_id IN ($1, $2)
+          AND (
+              (d.derivation_type = 'package' AND n.hostname IS NOT NULL)
+              OR
+              (d.derivation_type = 'nixos' AND anc.hostname IS NOT NULL)
+          )
+        ORDER BY 
+            CASE 
+                WHEN d.derivation_type = 'package' THEN COALESCE(n.hostname, 'zzz_orphan')
+                WHEN d.derivation_type = 'nixos' THEN anc.hostname
+            END ASC,
+            CASE 
+                WHEN d.derivation_type = 'package' THEN n.commit_timestamp
+                WHEN d.derivation_type = 'nixos' THEN anc.commit_timestamp
+            END DESC NULLS LAST,
+            CASE 
+                WHEN d.derivation_type = 'package' THEN 0
+                WHEN d.derivation_type = 'nixos' THEN 1
+            END ASC,
+            d.id ASC
+        LIMIT 1
+        "#,
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::BuildPending.as_id()
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(id) = next_id else {
+        return Ok(None);
+    };
+
+    // Now atomically claim it with FOR UPDATE SKIP LOCKED
+    let derivation = sqlx::query_as!(
+        Derivation,
+        r#"
+        UPDATE derivations
+        SET status_id = $2, started_at = NOW()
+        WHERE id = (
+            SELECT id FROM derivations 
+            WHERE id = $1 
+            AND status_id IN ($3, $4)
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING
+            id, commit_id, derivation_type as "derivation_type: DerivationType",
+            derivation_name, derivation_path, derivation_target, scheduled_at,
+            completed_at, started_at, attempt_count, evaluation_duration_ms,
+            error_message, pname, version, status_id, build_elapsed_seconds,
+            build_current_target, build_last_activity_seconds, build_last_heartbeat,
+            cf_agent_enabled, store_path
+        "#,
+        id,
+        EvaluationStatus::BuildInProgress.as_id(),
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::BuildPending.as_id()
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(derivation)
 }

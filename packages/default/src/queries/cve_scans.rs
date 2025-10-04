@@ -17,53 +17,29 @@ pub async fn get_targets_needing_cve_scan(
         Derivation,
         r#"
         SELECT 
-            d.id,
-            d.commit_id,
-            d.derivation_type as "derivation_type: DerivationType",
-            d.derivation_name,
-            d.derivation_path,
-            d.derivation_target,
-            d.scheduled_at,
-            d.completed_at,
-            d.started_at,
-            d.attempt_count,
-            d.evaluation_duration_ms,
-            d.error_message,
-            d.pname,
-            d.version,
-            d.status_id,
-            d.build_elapsed_seconds,
-            d.build_current_target,
-            d.build_last_activity_seconds,
-            d.build_last_heartbeat,
-            d.cf_agent_enabled,
-            d.store_path
+            d.id, d.commit_id, d.derivation_type as "derivation_type: DerivationType",
+            d.derivation_name, d.derivation_path, d.derivation_target,
+            d.scheduled_at, d.completed_at, d.started_at, d.attempt_count,
+            d.evaluation_duration_ms, d.error_message, d.pname, d.version,
+            d.status_id, d.build_elapsed_seconds, d.build_current_target,
+            d.build_last_activity_seconds, d.build_last_heartbeat,
+            d.cf_agent_enabled, d.store_path
         FROM derivations d
         JOIN derivation_statuses ds ON d.status_id = ds.id
         WHERE ds.name IN ('build-complete', 'complete')
-            AND d.derivation_path IS NOT NULL
+            AND d.store_path IS NOT NULL
             AND NOT EXISTS (
-                SELECT 1 
-                FROM cve_scans cs 
-                WHERE cs.derivation_id = d.id 
-                    AND cs.status = 'completed'
+                SELECT 1 FROM cve_scans cs
+                WHERE cs.derivation_id = d.id
+                AND cs.status = 'completed'
             )
-            AND (
-                -- Either no scan exists, or only failed scans with < 5 attempts
-                NOT EXISTS (
-                    SELECT 1 
-                    FROM cve_scans cs2 
-                    WHERE cs2.derivation_id = d.id
-                )
-                OR EXISTS (
-                    SELECT 1 
-                    FROM cve_scans cs3 
-                    WHERE cs3.derivation_id = d.id 
-                        AND cs3.status = 'failed' 
-                        AND cs3.attempts < 5
-                )
+            AND NOT EXISTS (
+                SELECT 1 FROM cve_scans cs
+                WHERE cs.derivation_id = d.id
+                AND cs.status = 'failed'
+                AND cs.attempts >= 5
             )
-        ORDER BY d.completed_at ASC
+        ORDER BY d.completed_at ASC NULLS LAST
         LIMIT $1
         "#,
         limit

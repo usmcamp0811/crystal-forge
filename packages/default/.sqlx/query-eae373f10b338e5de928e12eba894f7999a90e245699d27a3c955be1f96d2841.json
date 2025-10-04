@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH all_nixos_commits AS (\n            SELECT \n                d.id as nixos_deriv_id,\n                d.derivation_name as hostname,\n                c.commit_timestamp\n            FROM derivations d\n            INNER JOIN commits c ON d.commit_id = c.id\n            WHERE d.derivation_type = 'nixos'\n              AND d.status_id IN ($1, $2)\n        )\n        SELECT d.id\n        FROM derivations d\n        LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id\n        LEFT JOIN all_nixos_commits n ON dd.derivation_id = n.nixos_deriv_id\n        LEFT JOIN all_nixos_commits anc ON d.id = anc.nixos_deriv_id\n        WHERE d.status_id IN ($1, $2)\n          AND (\n              (d.derivation_type = 'package' AND n.hostname IS NOT NULL)\n              OR\n              (d.derivation_type = 'nixos' AND anc.hostname IS NOT NULL)\n          )\n        ORDER BY \n            CASE \n                WHEN d.derivation_type = 'package' THEN COALESCE(n.hostname, 'zzz_orphan')\n                WHEN d.derivation_type = 'nixos' THEN anc.hostname\n            END ASC,\n            CASE \n                WHEN d.derivation_type = 'package' THEN n.commit_timestamp\n                WHEN d.derivation_type = 'nixos' THEN anc.commit_timestamp\n            END DESC NULLS LAST,\n            CASE \n                WHEN d.derivation_type = 'package' THEN 0\n                WHEN d.derivation_type = 'nixos' THEN 1\n            END ASC,\n            d.id ASC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "eae373f10b338e5de928e12eba894f7999a90e245699d27a3c955be1f96d2841"
+}

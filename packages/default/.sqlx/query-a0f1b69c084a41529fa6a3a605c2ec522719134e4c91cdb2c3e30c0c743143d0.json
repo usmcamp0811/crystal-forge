@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO derivations (\n            commit_id, \n            derivation_type, \n            derivation_name, \n            derivation_target,\n            status_id, \n            attempt_count,\n            scheduled_at\n        ) \n        VALUES ($1, $2, $3, $4, $5, $6, NOW())\n        RETURNING \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        ",
+  "query": "\n        SELECT \n            d.id, d.commit_id, d.derivation_type as \"derivation_type: DerivationType\",\n            d.derivation_name, d.derivation_path, d.derivation_target,\n            d.scheduled_at, d.completed_at, d.started_at, d.attempt_count,\n            d.evaluation_duration_ms, d.error_message, d.pname, d.version,\n            d.status_id, d.build_elapsed_seconds, d.build_current_target,\n            d.build_last_activity_seconds, d.build_last_heartbeat,\n            d.cf_agent_enabled, d.store_path\n        FROM derivations d\n        JOIN derivation_statuses ds ON d.status_id = ds.id\n        WHERE ds.name IN ('build-complete', 'complete')\n            AND d.store_path IS NOT NULL\n            AND NOT EXISTS (\n                SELECT 1 FROM cve_scans cs\n                WHERE cs.derivation_id = d.id\n                AND cs.status = 'completed'\n            )\n            AND NOT EXISTS (\n                SELECT 1 FROM cve_scans cs\n                WHERE cs.derivation_id = d.id\n                AND cs.status = 'failed'\n                AND cs.attempts >= 5\n            )\n        ORDER BY d.completed_at ASC NULLS LAST\n        LIMIT $1\n        ",
   "describe": {
     "columns": [
       {
@@ -111,12 +111,7 @@
     ],
     "parameters": {
       "Left": [
-        "Int4",
-        "Text",
-        "Text",
-        "Text",
-        "Int4",
-        "Int4"
+        "Int8"
       ]
     },
     "nullable": [
@@ -143,5 +138,5 @@
       true
     ]
   },
-  "hash": "076df71374aae40e811e740fa37d89364010c5606bba155e82e6254a29aa965f"
+  "hash": "a0f1b69c084a41529fa6a3a605c2ec522719134e4c91cdb2c3e30c0c743143d0"
 }
