@@ -1,7 +1,13 @@
 ---
-title: Secure Mattermost Deployment with Nix
-theme: ./themes/slidev-theme-mokkapps
+theme: ./themes/slidev-theme-neversink
+lineNumbers: true
+layout: cover
 color: dark
+class: text-right
+neversink_string: "Nix: Taming the Wild West of Codebases"
+colorSchema: light
+routerMode: hash
+title: Nix
 ---
 
 # Toward Compliant Mattermost Deployment
