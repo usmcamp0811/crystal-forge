@@ -3,6 +3,10 @@
 </p>
 
 <p align="center">
+  <img src="crystal-forge-logo-with-text.png" alt="Crystal Forge" width="300"/>
+</p>
+
+<p align="center">
   <strong>Compliance and build coordination for NixOS in regulated environments</strong>
 </p>
 
@@ -198,6 +202,12 @@ nix build .#checks.x86_64-linux.builder     # Builder tests
 nix build .#checks.x86_64-linux.s3-cache    # S3 cache tests
 nix build .#checks.x86_64-linux.attic-cache # Attic cache tests
 ```
+
+### Utilities
+
+- `sqlx-refresh` - Reset database and prepare SQLx
+- `sqlx-prepare` - Run `cargo sqlx prepare` without reset
+- `simulate-push` - Test webhook functionality
 
 ## System Requirements
 
