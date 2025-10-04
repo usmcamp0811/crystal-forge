@@ -72,6 +72,8 @@ SELECT
     *
 FROM
     nixos_rows) AS u
+WHERE
+    u.attempt_count <= 5
 ORDER BY
     u.nixos_commit_ts DESC,
     u.nixos_id,
