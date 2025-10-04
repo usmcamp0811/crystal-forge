@@ -85,6 +85,6 @@ Start with investigation of Tvix maturity, build a proof of concept, then migrat
 Beyond the core roadmap, potential directions include:
 
 - Custom web frontend to replace Grafana
+- TUI and/or CLI for management operations
 - Multi-tenancy for service providers
 - Additional compliance frameworks (NIST 800-53, SOC2, ISO 27001)
-- Remote management capabilities (pull-based deployments, fleet orchestration)
