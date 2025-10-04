@@ -69,7 +69,21 @@ Expand this to cover:
 
 Build compliance verification into the evaluation process and track STIG status in Crystal Forge. Create dashboards showing which systems meet which controls. Require justifications for disabled controls.
 
-### 5. Tvix/Rvix Integration
+### 5. Standardized Reporting & Attestation
+
+Build automated compliance reporting and attestation generation to streamline security audits and accreditation processes:
+
+- **Report templates**: Pre-built templates for common frameworks (DISA, NIST, ISO)
+- **Evidence collection**: Automatic gathering of system state, CVE scans, STIG compliance data
+- **Attestation generation**: Signed attestation documents proving system compliance
+- **Audit packages**: Bundle all required documentation for auditors in standard formats
+- **Continuous compliance**: Real-time compliance posture tracking with historical evidence
+- **Export formats**: PDF, CSV, JSON for different audit requirements
+- **Control mapping**: Automatic mapping of system state to security control requirements
+
+The goal: make it trivial to generate all required documentation for passing security audits or accreditations with a single command.
+
+### 6. Tvix/Rvix Integration
 
 Replace system calls to Nix CLI with native Rust evaluation using Tvix. This means:
 
@@ -88,3 +102,4 @@ Beyond the core roadmap, potential directions include:
 - TUI and/or CLI for management operations
 - Multi-tenancy for service providers
 - Additional compliance frameworks (NIST 800-53, SOC2, ISO 27001)
+- Remote management capabilities (pull-based deployments, fleet orchestration)
