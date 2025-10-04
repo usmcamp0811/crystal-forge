@@ -1,5 +1,3 @@
-# Crystal Forge
-
 <p align="center">
   <img src="cf-bg.png" alt="Crystal Forge" width="300"/>
 </p>
