@@ -94,7 +94,8 @@ in
 
         services.crystal-forge = {
           enable = true;
-          "local-database" = true;
+          env-file = "/etc/attic-env";
+          local-database = true;
           log_level = "debug";
           client = {
             enable = true;
@@ -214,14 +215,14 @@ in
         {ATTIC} cache create cf-test:cf-test || true
 
       # Environment for Crystal Forge
-      cat > /var/lib/crystal-forge/.config/crystal-forge-attic.env <<EOF
+      cat > /etc/attic-env <<EOF
       ATTIC_SERVER_URL=http://atticCache:8080
       ATTIC_TOKEN={token}
       ATTIC_REMOTE_NAME=cf-test
       HOME=/var/lib/crystal-forge
       XDG_CONFIG_HOME=/var/lib/crystal-forge/.config
       EOF
-      chmod 644 /var/lib/crystal-forge/.config/crystal-forge-attic.env
+      chmod 644 /etc/attic-env
       """)
 
       # Start Crystal Forge builder
@@ -251,7 +252,7 @@ in
       if exit_code != 0:
           print("=== Test Failure Debug Info ===")
           cfServer.succeed("journalctl -u crystal-forge-builder.service --no-pager -n 50 || true")
-          cfServer.succeed("cat /var/lib/crystal-forge/.config/crystal-forge-attic.env || true")
+          cfServer.succeed("cat /etc/attic-env || true")
           raise SystemExit(exit_code)
 
       print("All tests passed!")
