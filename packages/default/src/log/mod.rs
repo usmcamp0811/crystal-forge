@@ -1,5 +1,24 @@
+use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::models::derivations::{Derivation, DerivationType};
+use crate::queries::cache_push::{
+    create_cache_push_job, get_derivations_needing_cache_push_for_dest,
+    get_pending_cache_push_jobs, mark_cache_push_completed, mark_cache_push_failed,
+    mark_cache_push_in_progress, mark_derivation_cache_pushed,
+};
+use crate::queries::commits::get_commits_pending_evaluation;
+use crate::queries::cve_scans::{
+    create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
+    save_scan_results,
+};
+use crate::queries::derivations::{
+    EvaluationStatus, claim_next_derivation, get_derivations_ready_for_build,
+    mark_target_build_in_progress, mark_target_failed, update_derivation_status,
+};
+use crate::queries::derivations::{
+    discover_and_queue_all_transitive_dependencies, handle_derivation_failure,
+    mark_target_build_complete,
+};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use anyhow::bail;
@@ -12,34 +31,34 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Clone)]
-pub struct WorkerStatus {
-    pub worker_id: usize,
-    pub current_task: Option<String>,
-    pub started_at: Option<std::time::Instant>,
-    pub state: WorkerState,
+struct WorkerStatus {
+    worker_id: usize,
+    current_task: Option<String>,
+    started_at: Option<std::time::Instant>,
+    state: WorkerState,
 }
 
 #[derive(Debug, Clone)]
-pub enum WorkerState {
+enum WorkerState {
     Idle,
     Working,
     Sleeping,
 }
 
 // Global status tracker using OnceLock
-pub static BUILD_WORKER_STATUS: OnceLock<Arc<RwLock<Vec<WorkerStatus>>>> = OnceLock::new();
-pub static CVE_SCAN_STATUS: OnceLock<Arc<RwLock<Option<WorkerStatus>>>> = OnceLock::new();
-pub static CACHE_PUSH_STATUS: OnceLock<Arc<RwLock<Option<WorkerStatus>>>> = OnceLock::new();
+static BUILD_WORKER_STATUS: OnceLock<Arc<RwLock<Vec<WorkerStatus>>>> = OnceLock::new();
+static CVE_SCAN_STATUS: OnceLock<Arc<RwLock<Option<WorkerStatus>>>> = OnceLock::new();
+static CACHE_PUSH_STATUS: OnceLock<Arc<RwLock<Option<WorkerStatus>>>> = OnceLock::new();
 
-pub fn get_build_status() -> &'static Arc<RwLock<Vec<WorkerStatus>>> {
+fn get_build_status() -> &'static Arc<RwLock<Vec<WorkerStatus>>> {
     BUILD_WORKER_STATUS.get_or_init(|| Arc::new(RwLock::new(Vec::new())))
 }
 
-pub fn get_cve_status() -> &'static Arc<RwLock<Option<WorkerStatus>>> {
+fn get_cve_status() -> &'static Arc<RwLock<Option<WorkerStatus>>> {
     CVE_SCAN_STATUS.get_or_init(|| Arc::new(RwLock::new(None)))
 }
 
-pub fn get_cache_status() -> &'static Arc<RwLock<Option<WorkerStatus>>> {
+fn get_cache_status() -> &'static Arc<RwLock<Option<WorkerStatus>>> {
     CACHE_PUSH_STATUS.get_or_init(|| Arc::new(RwLock::new(None)))
 }
 
