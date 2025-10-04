@@ -1,4 +1,6 @@
 use crate::flake::commits::sync_all_watched_flakes_commits;
+
+use crate::builder::log_builder_worker_status;
 use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
@@ -259,6 +261,7 @@ async fn log_memory_usage(pool: &PgPool) {
         pool_size - idle_count
     );
 
+    log_builder_worker_status().await;
     // Task/thread count
     if let Ok(contents) = tokio::fs::read_to_string("/proc/self/stat").await {
         if let Some(num_threads) = contents.split_whitespace().nth(19) {

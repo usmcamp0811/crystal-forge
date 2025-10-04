@@ -94,7 +94,8 @@ in
 
         services.crystal-forge = {
           enable = true;
-          "local-database" = true;
+          env-file = "/etc/attic-env";
+          local-database = true;
           log_level = "debug";
           client = {
             enable = true;
@@ -123,17 +124,16 @@ in
             enable = true;
             offline = false;
             systemd_properties = [
-              "EnvironmentFile=-/etc/attic-env"
-              "Environment=HOME=/var/lib/crystal-forge"
-              "Environment=XDG_CONFIG_HOME=/var/lib/crystal-forge/.config"
-              "Environment=NIX_LOG=trace"
-              "Environment=NIX_SHOW_STATS=1"
+              "Environment=ATTIC_SERVER_URL=http://atticCache:8080/cf-test"
+              "Environment=ATTIC_REMOTE_NAME=cf-test"
+              # Add ATTIC_TOKEN if you have it statically, or let vault handle it
             ];
           };
 
           # Attic cache configuration - token will be set by testScript
           cache = {
             cache_type = "Attic";
+            push_to = "http://atticCache:8080";
             push_after_build = true;
             attic_cache_name = "cf-test";
             max_retries = 2;
@@ -208,17 +208,17 @@ in
 
       # Setup attic client
       sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
-        {ATTIC} login local http://atticCache:8080 {token}
+        {ATTIC} login cf-test http://atticCache:8080 {token}
 
       # Create cache
       sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
-        {ATTIC} cache create local:cf-test || true
+        {ATTIC} cache create cf-test:cf-test || true
 
       # Environment for Crystal Forge
       cat > /etc/attic-env <<EOF
       ATTIC_SERVER_URL=http://atticCache:8080
       ATTIC_TOKEN={token}
-      ATTIC_REMOTE_NAME=local
+      ATTIC_REMOTE_NAME=cf-test
       HOME=/var/lib/crystal-forge
       XDG_CONFIG_HOME=/var/lib/crystal-forge/.config
       EOF

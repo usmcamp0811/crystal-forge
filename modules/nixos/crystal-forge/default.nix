@@ -184,9 +184,9 @@
     ''}
 
     ${lib.optionalString (cfg.cache.cache_type == "Attic") ''
-      if [ -f "/etc/attic-env" ]; then
-        echo "Loading Attic token from /etc/attic-env..."
-        source /etc/attic-env
+      if [ -f "${cfg.env-file}" ]; then
+        echo "Loading Attic token from ${cfg.env-file}..."
+        source ${cfg.env-file}
         if [ -n "$ATTIC_TOKEN" ]; then
           echo "Injecting dynamic ATTIC_TOKEN into config..."
           if grep -q "attic_token" "${generatedConfigPath}"; then
@@ -196,10 +196,10 @@
           fi
           echo "✅ Attic token injected successfully"
         else
-          echo "⚠️  ATTIC_TOKEN not found in /etc/attic-env"
+          echo "⚠️  ATTIC_TOKEN not found in ${cfg.env-file}"
         fi
       else
-        echo "⚠️  /etc/attic-env not found - using static attic_token from config"
+        echo "⚠️  ${cfg.env-file} not found - using static attic_token from config"
       fi
     ''}
 
@@ -725,6 +725,11 @@ in {
         description = "Path to Ed25519 private key file";
       };
     };
+    env-file = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/crystal-forge/.config/crystal-forge-attic.env";
+      description = "Path to env file";
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -943,10 +948,10 @@ in {
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
 
         # Source the attic environment if it exists
-        if [ -f /etc/attic-env ]; then
-          echo "Loading Attic environment variables from /etc/attic-env"
+        if [ -f ${cfg.env-file} ]; then
+          echo "Loading Attic environment variables from ${cfg.env-file}"
           set -a
-          source /etc/attic-env
+          source ${cfg.env-file}
           set +a
 
           # Verify the environment was loaded
@@ -985,7 +990,7 @@ in {
 
           # Make sure we load the environment file
           EnvironmentFile = [
-            "-/etc/attic-env"
+            "-${cfg.env-file}"
             "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
           ];
 
