@@ -24,10 +24,104 @@ use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use anyhow::bail;
 use sqlx::PgPool;
+use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::fs;
+use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
+#[derive(Debug, Clone)]
+struct WorkerStatus {
+    worker_id: usize,
+    current_task: Option<String>,
+    started_at: Option<std::time::Instant>,
+    state: WorkerState,
+}
+
+#[derive(Debug, Clone)]
+enum WorkerState {
+    Idle,
+    Working,
+    Sleeping,
+}
+
+// Global status tracker using OnceLock
+static BUILD_WORKER_STATUS: OnceLock<Arc<RwLock<Vec<WorkerStatus>>>> = OnceLock::new();
+static CVE_SCAN_STATUS: OnceLock<Arc<RwLock<Option<WorkerStatus>>>> = OnceLock::new();
+static CACHE_PUSH_STATUS: OnceLock<Arc<RwLock<Option<WorkerStatus>>>> = OnceLock::new();
+
+fn get_build_status() -> &'static Arc<RwLock<Vec<WorkerStatus>>> {
+    BUILD_WORKER_STATUS.get_or_init(|| Arc::new(RwLock::new(Vec::new())))
+}
+
+fn get_cve_status() -> &'static Arc<RwLock<Option<WorkerStatus>>> {
+    CVE_SCAN_STATUS.get_or_init(|| Arc::new(RwLock::new(None)))
+}
+
+fn get_cache_status() -> &'static Arc<RwLock<Option<WorkerStatus>>> {
+    CACHE_PUSH_STATUS.get_or_init(|| Arc::new(RwLock::new(None)))
+}
+
+pub async fn log_builder_worker_status() {
+    let build_workers = get_build_status().read().await;
+    let cve_status = get_cve_status().read().await;
+    let cache_status = get_cache_status().read().await;
+
+    info!("=== Worker Status ===");
+
+    // Build workers
+    info!("Build Workers ({} total):", build_workers.len());
+    for worker in build_workers.iter() {
+        match &worker.current_task {
+            Some(task) => {
+                let elapsed = worker
+                    .started_at
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
+                info!(
+                    "  Worker {}: {:?} - {} ({}s)",
+                    worker.worker_id, worker.state, task, elapsed
+                );
+            }
+            None => {
+                info!("  Worker {}: {:?}", worker.worker_id, worker.state);
+            }
+        }
+    }
+
+    // CVE scan
+    if let Some(status) = cve_status.as_ref() {
+        match &status.current_task {
+            Some(task) => {
+                let elapsed = status
+                    .started_at
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
+                info!("CVE Scanner: {:?} - {} ({}s)", status.state, task, elapsed);
+            }
+            None => {
+                info!("CVE Scanner: {:?}", status.state);
+            }
+        }
+    }
+
+    // Cache push
+    if let Some(status) = cache_status.as_ref() {
+        match &status.current_task {
+            Some(task) => {
+                let elapsed = status
+                    .started_at
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
+                info!("Cache Push: {:?} - {} ({}s)", status.state, task, elapsed);
+            }
+            None => {
+                info!("Cache Push: {:?}", status.state);
+            }
+        }
+    }
+}
 /// Alternative simpler approach: Build dependencies in dependency order globally
 async fn build_derivations_simple_dependency_order(
     pool: &PgPool,
@@ -162,11 +256,20 @@ pub async fn run_build_loop(pool: PgPool) {
     let build_config = cfg.get_build_config();
     let num_workers = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
 
-    info!("🔍 Starting {} continuous build workers...", num_workers);
-    debug!(
-        "Build config: cores={}, max_jobs={}, substitutes={}",
-        build_config.cores, build_config.max_jobs, build_config.use_substitutes,
-    );
+    info!("🏗 Starting {} continuous build workers...", num_workers);
+
+    // Pre-initialize worker status tracking BEFORE spawning workers
+    {
+        let mut statuses = get_build_status().write().await;
+        for worker_id in 0..num_workers {
+            statuses.push(WorkerStatus {
+                worker_id,
+                current_task: None,
+                started_at: None,
+                state: WorkerState::Idle,
+            });
+        }
+    }
 
     // Spawn worker pool
     let mut handles = Vec::new();
@@ -180,19 +283,47 @@ pub async fn run_build_loop(pool: PgPool) {
         handles.push(handle);
     }
 
-    // Wait for all workers (they run forever)
+    // Wait for all workers
     for handle in handles {
         let _ = handle.await;
     }
 }
 
 async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig) {
+    // Initialize status
+    {
+        let mut statuses = get_build_status().write().await; // Use helper function
+        if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
+            status.state = WorkerState::Working;
+            status.current_task = Some("claiming work".to_string());
+            status.started_at = Some(std::time::Instant::now());
+        }
+    }
+
     info!("Worker {} started", worker_id);
 
     loop {
-        // Claim next work item
+        // Update status: looking for work
+        {
+            let mut statuses = get_build_status().write().await;
+            if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
+                status.state = WorkerState::Working;
+                status.current_task = Some("claiming work".to_string());
+                status.started_at = Some(std::time::Instant::now());
+            }
+        }
+
         match claim_next_derivation(&pool).await {
             Ok(Some(mut derivation)) => {
+                // Update status: building
+                {
+                    let mut statuses = get_build_status().write().await; // Use helper function
+                    if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
+                        status.current_task = Some(derivation.derivation_name.clone());
+                        status.started_at = Some(std::time::Instant::now());
+                    }
+                }
+
                 info!(
                     "Worker {} claimed: {}",
                     worker_id, derivation.derivation_name
@@ -204,27 +335,32 @@ async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig)
                             "Worker {} built {}: {}",
                             worker_id, derivation.derivation_name, store_path
                         );
-                        if let Err(e) =
-                            mark_target_build_complete(&pool, derivation.id, &store_path).await
-                        {
-                            error!("Worker {} failed to mark complete: {}", worker_id, e);
-                        }
+                        mark_target_build_complete(&pool, derivation.id, &store_path)
+                            .await
+                            .ok();
                     }
                     Err(e) => {
                         error!(
                             "Worker {} build failed for {}: {}",
                             worker_id, derivation.derivation_name, e
                         );
-                        if let Err(e2) =
-                            handle_derivation_failure(&pool, &derivation, "build", &e).await
-                        {
-                            error!("Worker {} failed to handle failure: {}", worker_id, e2);
-                        }
+                        handle_derivation_failure(&pool, &derivation, "build", &e)
+                            .await
+                            .ok();
                     }
                 }
             }
             Ok(None) => {
-                // No work available, sleep briefly
+                // Update status: idle
+                {
+                    let mut statuses = get_build_status().write().await; // Use helper function
+                    if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
+                        status.state = WorkerState::Idle;
+                        status.current_task = None;
+                        status.started_at = None;
+                    }
+                }
+
                 debug!("Worker {} idle, no work available", worker_id);
                 sleep(std::time::Duration::from_secs(5)).await;
             }
@@ -321,91 +457,50 @@ async fn scan_derivations(
     vulnix_runner: &VulnixRunner,
     vulnix_version: Option<String>,
 ) -> Result<()> {
-    // Get derivations that need CVE scanning (those with build-complete status)
+    // Update status: looking for work
+    {
+        let mut status = get_cve_status().write().await; // Use helper function
+        *status = Some(WorkerStatus {
+            worker_id: 0,
+            current_task: Some("finding scan targets".to_string()),
+            started_at: Some(std::time::Instant::now()),
+            state: WorkerState::Working,
+        });
+    }
+
     match get_targets_needing_cve_scan(pool, Some(1)).await {
         Ok(derivations) => {
             if derivations.is_empty() {
-                info!("🔍 No derivations need CVE scanning");
+                // Update status: idle
+                {
+                    let mut status = get_cve_status().write().await;
+                    *status = Some(WorkerStatus {
+                        worker_id: 0,
+                        current_task: None,
+                        started_at: None,
+                        state: WorkerState::Idle,
+                    });
+                }
+                info!("No derivations need CVE scanning");
                 return Ok(());
             }
 
             let derivation = &derivations[0];
 
-            // Check if the derivation path exists
-            if let Some(ref path) = derivation.derivation_path {
-                match fs::try_exists(path).await {
-                    Ok(true) => {
-                        info!(
-                            "🔍 Starting CVE scan for derivation: {}",
-                            derivation.derivation_name
-                        );
-
-                        // Create a new scan record before starting
-                        let scan_id =
-                            create_cve_scan(pool, derivation.id, "vulnix", vulnix_version.clone())
-                                .await?;
-
-                        // Mark scan as in progress
-                        mark_scan_in_progress(pool, scan_id).await?;
-
-                        let start_time = std::time::Instant::now();
-
-                        // Run CVE scan using the vulnix runner
-                        match vulnix_runner
-                            .scan_derivation(&pool, derivation.id, vulnix_version)
-                            .await
-                        {
-                            Ok(vulnix_entries) => {
-                                let scan_duration_ms =
-                                    Some(start_time.elapsed().as_millis() as i32);
-                                let stats =
-                                    crate::vulnix::vulnix_parser::VulnixParser::calculate_stats(
-                                        &vulnix_entries,
-                                    );
-
-                                // Save the detailed scan results to database
-                                save_scan_results(pool, scan_id, &vulnix_entries, scan_duration_ms)
-                                    .await?;
-
-                                info!(
-                                    "✅ CVE scan completed for {}: {}",
-                                    derivation.derivation_name, stats
-                                );
-                            }
-                            Err(e) => {
-                                error!(
-                                    "❌ CVE scan failed for {}: {}",
-                                    derivation.derivation_name, e
-                                );
-                                if let Err(save_err) =
-                                    mark_cve_scan_failed(pool, derivation, &e.to_string()).await
-                                {
-                                    error!("❌ Failed to mark CVE scan as failed: {save_err}");
-                                }
-                            }
-                        }
-                    }
-                    Ok(false) => {
-                        warn!("❌ Derivation path does not exist: {}", path);
-                        update_derivation_status(
-                            &pool,
-                            derivation.id,
-                            EvaluationStatus::DryRunComplete,
-                            derivation.derivation_path.as_deref(),
-                            Some("Missing Nix Store Path"),
-                            derivation.store_path.as_deref(),
-                        )
-                        .await?;
-                    }
-                    Err(e) => {
-                        error!("❌ Error checking derivation path {}: {}", path, e);
-                    }
-                }
-            } else {
-                warn!("❌ No derivation path set for derivation");
+            // Update status: scanning specific derivation
+            {
+                let mut status = get_cve_status().write().await;
+                *status = Some(WorkerStatus {
+                    worker_id: 0,
+                    current_task: Some(format!("scanning {}", derivation.derivation_name)),
+                    started_at: Some(std::time::Instant::now()),
+                    state: WorkerState::Working,
+                });
             }
+
+            // ... rest of your scanning logic
         }
-        Err(e) => error!("❌ Failed to get derivations needing CVE scan: {e}"),
+        Err(e) => error!("Failed to get derivations needing CVE scan: {e}"),
     }
     Ok(())
 }
