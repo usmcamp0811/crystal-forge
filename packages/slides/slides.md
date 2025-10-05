@@ -167,36 +167,21 @@ src: ./slides/08-cf-who-benefits.md
 src: ./slides/09-cf-how-it-works.md
 ---
 
-**Slide 8: "How It Works"**
+---
+src: ./slides/10-cf-agent-lifecycle.md
+---
 
-- Agent: monitors `/run/current-system` + fingerprints
-- Server: coordinates, verifies, instructs
-- Builder: evaluates flakes, builds derivations
+---
+src: ./slides/11-cf-build-coordination.md
+---
 
-**Slide 9: "Agent Lifecycle"**
-
-- Periodic heartbeats to server
-- Cryptographically signed reports
-- Receives deployment instructions
-- Self-updating capability
-
-**Slide 10: "Build Coordination"**
-
-- Builder workers (one or many)
-- Evaluate derivations
-- Push to cache (S3/Attic/Nix)
-- Coordinate via shared database
+---
+src: ./slides/12-cf-beyond-config-mgmt.md
+---
 
 ---
 
 ### V. Key Advantages
-
-**Slide 11: "Beyond Configuration Management"**
-
-- Not just Ansible-in-Nix
-- Purely functional deployments
-- No half-deployed states
-- Drift detection built in
 
 **Slide 12: "Immutable by Design"**
 
