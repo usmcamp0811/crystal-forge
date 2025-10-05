@@ -119,6 +119,8 @@ body {
 src: ./slides/01-intro.md
 ---
 
+### I. The Problem Space
+
 ---
 src: ./slides/02-compliance-burden.md
 ---
@@ -131,26 +133,15 @@ src: ./slides/03-current-approach.md
 src: ./slides/04-traditional-tools.md
 ---
 
-## Crystal Forge: Compliance-Native Infrastructure for NixOS
-
-### I. The Problem Space
-
-**Slide 3: "Why Traditional Tools Fall Short"**
-
-- Ansible/Chef/Puppet: stateful, imperative
-- Half-deployed playbooks
-- No guaranteed end state
-- Systems can drift without detection
-
----
-
 ### II. The Nix Foundation
 
-**Slide 4: "Nix Changes the Game"**
+---
+src: ./slides/05-nix-changes-the-game.md
+---
 
-- Deterministic, functional system configuration
-- One path = one exact configuration
-- `readlink /run/current-system`
+---
+src: ./slides/06-nix-single-source.md
+---
 
 **Slide 5: "A Single Source of Truth"**
 
