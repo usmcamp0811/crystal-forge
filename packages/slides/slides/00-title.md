@@ -15,7 +15,6 @@ title: Nix
 .bluf-box {
   @apply text-sm bg-blue-100 text-blue-800 border-l-4 border-blue-500 p-3 my-4 rounded;
 }
-
 </style>
 
 #
