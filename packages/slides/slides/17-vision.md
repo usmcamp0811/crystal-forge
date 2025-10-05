@@ -31,7 +31,7 @@ class: text-left
 
 <div class="mt-6 text-sm text-[#a8a8cc] leading-relaxed">
 Crystal Forge’s goal is to make <b>Nix as ubiquitous in secure environments</b>  
-as RedHat — bringing deterministic, auditable infrastructure  
+as Red Hat once was — bringing deterministic, auditable infrastructure  
 to every level of deployment.
 </div>
 

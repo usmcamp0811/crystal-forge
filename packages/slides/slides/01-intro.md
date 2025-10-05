@@ -35,7 +35,6 @@ Because NixOS systems have a single deterministic path that identifies their exa
   <li>Generate audit-ready compliance reports</li>
 </ul>
 
-
 </div>
 
 :: right ::
@@ -86,3 +85,4 @@ h1::after {
 @keyframes fadeRight { to { opacity: 1; transform: none; } }
 
 </style>
+
