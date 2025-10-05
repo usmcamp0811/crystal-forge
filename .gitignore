@@ -157,3 +157,4 @@ packages/default/.nixos-test-history
 data
 *.pub
 *.key
+packages/slides/themes/slidev-theme-neversink
