@@ -155,11 +155,9 @@ src: ./slides/06-nix-single-source.md
 src: ./slides/07-cf-what-if-we-made-this-simple.md
 ---
 
-**Slide 6: "What If We Made This Simple?"**
-
-- Track the flake that defines your fleet
-- Log every system output to a database
-- Compare actual vs. expected: one lookup
+---
+src: ./slides/08-cf-who-benefits.md
+---
 
 **Slide 7: "Who Benefits"**
 
