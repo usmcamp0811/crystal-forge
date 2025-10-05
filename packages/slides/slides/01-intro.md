@@ -40,5 +40,5 @@ Because NixOS systems have a single deterministic path that identifies their exa
 :: right ::
 
 <div class="flex justify-center items-center h-full">
-  <img src="/crystal-forge-logo-only.png" class="max-w-[250px]" />
+  <img src="/assets/cf-bg.png" class="max-w-[250px]" />
 </div>
