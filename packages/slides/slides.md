@@ -7,25 +7,133 @@ class: text-right
 neversink_string: "Crystal Forge: Compliance-Native Infrastructure for NixOS"
 colorSchema: light
 routerMode: hash
-title: Nix
+title: Crystal Forge
+---
+
+<!-- Load fonts -->
+<link href="https://fonts.googleapis.com/css2?family=Cinzel+Decorative:wght@700&family=Titillium+Web:wght@300;600&display=swap" rel="stylesheet">
+
+<style>
+.slidev-layout.cover {
+  background: radial-gradient(circle at center, #0b0d11 0%, #141821 100%);
+  color: #f0f0f0;
+}
+
+/* Title Block */
+h1 {
+  font-family: 'Cinzel Decorative', serif;
+  font-weight: 700;
+  font-size: 3rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 1rem;
+  white-space: nowrap;
+  text-shadow: 0 0 12px rgba(255, 255, 255, 0.3);
+  margin-bottom: 0.75rem;
+  margin-left: auto;
+  margin-right: auto;
+  position: relative;
+}
+
+h1 img {
+  width: 115px;
+  height: 115px;
+  filter: drop-shadow(0 0 12px rgba(160, 130, 255, 0.5));
+  vertical-align: middle;
+}
+
+/* Underline with crystal-like glow */
+h1::after {
+  content: "";
+  display: block;
+  height: 3px;
+  width: 80%;
+  margin: 0.6rem auto 0 auto;
+  border-radius: 2px;
+  background: linear-gradient(
+    90deg,
+    rgba(150, 120, 255, 0.6),
+    rgba(200, 180, 255, 0.9),
+    rgba(150, 120, 255, 0.6)
+  );
+  box-shadow: 0 0 8px rgba(160, 130, 255, 0.4);
+}
+
+/* Subtitle and text animation */
+.fade-in {
+  opacity: 0;
+  animation: fadeIn 1.5s ease forwards;
+}
+@keyframes fadeIn {
+  to { opacity: 1; }
+}
+
+/* Subtitle spacing + body font */
+body {
+  font-family: 'Titillium Web', sans-serif;
+}
+
+.tagline {
+  font-style: italic;
+  opacity: 0.7;
+  margin-top: 0.5rem;
+}
+
+.subtitle {
+  margin-top: 1.5rem;
+  font-size: 1rem;
+}
+
+.footer {
+  margin-top: 1.25rem;
+  opacity: 0.6;
+  font-size: 0.8rem;
+}
+</style>
+
+#
+
+<div style="text-align:center;">
+  <h1>
+    <img src="/assets/cf.png" alt="Crystal Forge Logo" />
+    Crystal Forge
+  </h1>
+
+  <div class="tagline fade-in">
+    "Forging Trust Through Reproducibility"
+  </div>
+
+  <div class="footer fade-in">
+    Created by Matt Camp • 2025
+  </div>
+</div>
+
+<img
+  referrerpolicy="no-referrer-when-downgrade"
+  src="https://matomo.aicampground.com/matomo.php?idsite=5&amp;rec=1"
+  style="border:0"
+  alt=""
+/>
+
+---
+src: ./slides/01-intro.md
+---
+
+---
+src: ./slides/02-compliance-burden.md
+---
+
+---
+src: ./slides/03-current-approach.md
+---
+
+---
+src: ./slides/04-traditional-tools.md
 ---
 
 ## Crystal Forge: Compliance-Native Infrastructure for NixOS
 
 ### I. The Problem Space
-
-**Slide 1: "The Compliance Burden"**
-
-- What keeps CTOs up at night
-- Are all systems patched? Are we sure?
-- Who's running what configuration?
-
-**Slide 2: "The Current Approach"**
-
-- Sysadmins: keeping systems running
-- Security teams: tracking deployed software
-- Compliance officers: proving we did it right
-- All working in silos, manually
 
 **Slide 3: "Why Traditional Tools Fall Short"**
 
@@ -154,11 +262,3 @@ title: Nix
 - Project status & roadmap
 - How to contribute
 - Where to find us
-
----
-
-**Flow Notes:**
-
-This outline moves from **problem → foundation → solution → implementation → benefits → boundaries**. It avoids getting too technical too early, focuses on pain points your audience understands, and shows how Nix's properties make Crystal Forge possible (rather than just being another tool).
-
-The "What Crystal Forge Is Not" slide is critical—it sets realistic expectations and positions CF as part of a larger security strategy, not a silver bullet.
