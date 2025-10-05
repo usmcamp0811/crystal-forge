@@ -175,20 +175,15 @@ src: ./slides/10-cf-agent-lifecycle.md
 src: ./slides/11-cf-build-coordination.md
 ---
 
+### V. Key Advantages
+
 ---
 src: ./slides/12-cf-beyond-config-mgmt.md
 ---
 
 ---
-
-### V. Key Advantages
-
-**Slide 12: "Immutable by Design"**
-
-- Systems can't change without notification
-- Configuration changes are events
-- Audit trail is automatic
-- Exception tracking (STIG waivers, etc.)
+src: ./slides/13-cf-immutable-by-desding.md
+---
 
 ---
 
