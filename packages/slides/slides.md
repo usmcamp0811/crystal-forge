@@ -159,16 +159,13 @@ src: ./slides/07-cf-what-if-we-made-this-simple.md
 src: ./slides/08-cf-who-benefits.md
 ---
 
-**Slide 7: "Who Benefits"**
-
-- CTOs: answer "are we patched?" instantly
-- Sysadmins: easier fleet management
-- Security: complete visibility
-- Compliance: audit-ready evidence
-
 ---
 
 ### IV. Architecture & Components
+
+---
+src: ./slides/09-cf-how-it-works.md
+---
 
 **Slide 8: "How It Works"**
 
