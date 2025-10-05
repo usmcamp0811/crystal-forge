@@ -42,5 +42,4 @@ the challenge is the same — maintaining confidence that your fleet matches you
 @keyframes fadeLeft {
   to { opacity: 1; transform: none; }
 }
-
 </style>
