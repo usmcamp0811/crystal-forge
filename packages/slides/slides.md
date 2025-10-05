@@ -119,7 +119,9 @@ body {
 src: ./slides/01-intro.md
 ---
 
-### I. The Problem Space
+---
+# I. The Problem Space
+---
 
 ---
 src: ./slides/02-compliance-burden.md
@@ -133,7 +135,9 @@ src: ./slides/03-current-approach.md
 src: ./slides/04-traditional-tools.md
 ---
 
+---
 ### II. The Nix Foundation
+---
 
 ---
 src: ./slides/05-nix-changes-the-game.md
@@ -143,15 +147,13 @@ src: ./slides/05-nix-changes-the-game.md
 src: ./slides/06-nix-single-source.md
 ---
 
-**Slide 5: "A Single Source of Truth"**
-
-- Derivation paths are cryptographic identities
-- If you know the path, you know everything
-- No ambiguity, no guessing
-
+---
+### III. Crystal Forge Solution
 ---
 
-### III. Crystal Forge Solution
+---
+src: ./slides/07-cf-what-if-we-made-this-simple.md
+---
 
 **Slide 6: "What If We Made This Simple?"**
 
