@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE derivations\n        SET status_id = $2, started_at = NOW()\n        WHERE id = (\n            SELECT id FROM derivations \n            WHERE id = $1 \n            AND status_id IN ($3, $4)\n            FOR UPDATE SKIP LOCKED\n        )\n        RETURNING\n            id, commit_id, derivation_type as \"derivation_type: DerivationType\",\n            derivation_name, derivation_path, derivation_target, scheduled_at,\n            completed_at, started_at, attempt_count, evaluation_duration_ms,\n            error_message, pname, version, status_id, build_elapsed_seconds,\n            build_current_target, build_last_activity_seconds, build_last_heartbeat,\n            cf_agent_enabled, store_path\n        ",
+  "query": "\n        UPDATE derivations\n        SET status_id = $2, started_at = NOW()\n        WHERE id = (\n            SELECT id\n            FROM derivations\n            WHERE id = $1\n            FOR UPDATE SKIP LOCKED\n        )\n        RETURNING\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        ",
   "describe": {
     "columns": [
       {
@@ -112,8 +112,6 @@
     "parameters": {
       "Left": [
         "Int4",
-        "Int4",
-        "Int4",
         "Int4"
       ]
     },
@@ -141,5 +139,5 @@
       true
     ]
   },
-  "hash": "5494e344f2c813be94a3167a891d0c7c25aed136664fbd3e07ddbfab31c58649"
+  "hash": "5678bccdf236544b86717b4708c879a62eff62e7f59ffab1646684e25c12d73a"
 }
