@@ -12,6 +12,7 @@ with lib.crystal-forge; let
     markdown = ./slides.md;
     slides = [./slides];
     assets = [./assets];
+    customCss = ./style.css;
     meta = {title = "A Nix Powered DevSecOps Revolution";};
   };
 in
