@@ -306,7 +306,7 @@ class: text-center
 </div>
 
 <div class="mt-24">
-  <div class="section-title">A Nix Foundation</div>
+  <div class="section-title">A Foundation built on Nix</div>
   <div class="section-sub">Determinism • Purity • Reproducibility • Hash-Based Identity</div>
 </div>
 
@@ -406,7 +406,7 @@ class: text-center
 </div>
 
 <div class="mt-24">
-  <div class="section-title">Crystal Forge Solution</div>
+  <div class="section-title">The Crystal Forge Solution</div>
   <div class="section-sub">Functional Infrastructure • Verifiable Compliance • Immutable Systems</div>
 </div>
 
