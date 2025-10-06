@@ -1,6 +1,6 @@
 use crate::flake::commits::sync_all_watched_flakes_commits;
 
-use crate::builder::log_builder_worker_status;
+use crate::log::log_builder_worker_status;
 use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
