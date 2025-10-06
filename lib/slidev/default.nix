@@ -13,6 +13,7 @@
     assets ? [],
     urlBase ? "/",
     extraNodePackages ? [],
+    customCss ? null,
     meta ? {},
   }: let
     cfg = {
@@ -135,6 +136,12 @@
           extraNodePackages)}
 
         cp ${markdown} ./slides.md
+        mkdir -p ./styles
+        ${
+          if customCss != null
+          then "cp ${customCss} ./styles/index.css"
+          else ""
+        }
         slidev build --base "${urlBase}"
 
         runHook postBuild
