@@ -1,0 +1,373 @@
+.light {
+  background-color: rgb(20, 22, 23) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+head {
+  color: rgb(249, 247, 244) !important;
+}
+
+.darkreader {
+  color: rgb(249, 247, 244) !important;
+}
+
+meta {
+  color: rgb(249, 247, 244) !important;
+}
+
+link {
+  color: rgb(221, 234, 255) !important;
+}
+
+title {
+  color: rgb(249, 247, 244) !important;
+}
+
+script {
+  color: rgb(249, 247, 244) !important;
+}
+
+style {
+  color: rgb(249, 247, 244) !important;
+}
+
+body {
+  background-color: rgba(20, 22, 23, 0.6) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+div {
+  color: rgb(249, 247, 244) !important;
+}
+
+.grid {
+  color: rgb(249, 247, 244) !important;
+}
+
+.slidev-slide-container {
+  background-color: rgb(0, 0, 0) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.slidev-slide-content {
+  background-color: rgba(20, 22, 23, 0.1) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.slidev-nav-go-forward {
+  color: rgb(249, 247, 244) !important;
+}
+
+.slidev-page {
+  color: rgb(249, 247, 244) !important;
+}
+
+.absolute {
+  color: rgb(249, 247, 244) !important;
+}
+
+.pl-3 {
+  background-color: rgba(27, 29, 30, 0.6) !important;
+  color: rgba(223, 219, 212, 0.5) !important;
+}
+
+.slidev-icon {
+  color: rgba(223, 219, 212, 0.5) !important;
+}
+
+path {
+  color: rgba(223, 219, 212, 0.5) !important;
+  fill: rgba(223, 219, 212, 0.5) !important;
+}
+
+.fw-bold {
+  color: rgba(223, 219, 212, 0.5) !important;
+}
+
+.text-left {
+  color: rgb(249, 247, 244) !important;
+}
+
+.flex {
+  color: rgb(249, 247, 244) !important;
+}
+
+.w-full {
+  color: rgb(249, 247, 244) !important;
+}
+
+.slidev-layout {
+  color: rgb(249, 247, 244) !important;
+}
+
+h1 {
+  color: rgb(242, 239, 235) !important;
+}
+
+.text-base {
+  color: rgb(249, 247, 244) !important;
+}
+
+.text-xl {
+  color: rgba(194, 162, 255, 0.5) !important;
+}
+
+b {
+  color: rgb(249, 247, 244) !important;
+}
+
+.list-disc {
+  color: rgb(249, 247, 244) !important;
+}
+
+li {
+  color: rgb(249, 247, 244) !important;
+}
+
+.mt-6 {
+  color: rgba(172, 188, 214, 0.5) !important;
+}
+
+.max-w-[400px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.col-left {
+  color: rgb(249, 247, 244) !important;
+}
+
+p {
+  color: rgb(249, 247, 244) !important;
+}
+
+.mt-4 {
+  color: rgba(172, 188, 214, 0.5) !important;
+}
+
+.col-right {
+  color: rgb(249, 247, 244) !important;
+}
+
+.w-[110px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.h-[2px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.max-w-[360px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.text-xs {
+  color: rgb(249, 247, 244) !important;
+}
+
+.my-auto {
+  color: rgb(249, 247, 244) !important;
+}
+
+.section-watermark {
+  color: rgb(221, 234, 255) !important;
+}
+
+img {
+  color: rgb(221, 234, 255) !important;
+}
+
+.mt-24 {
+  color: rgb(221, 234, 255) !important;
+}
+
+.section-title {
+  color: rgb(221, 234, 255) !important;
+}
+
+.section-sub {
+  color: rgb(201, 221, 255) !important;
+}
+
+code {
+  background-color: rgb(27, 29, 31) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+br {
+  color: rgb(249, 247, 244) !important;
+}
+
+.max-w-[420px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.w-[60px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.text-lg {
+  color: rgba(194, 162, 255, 0.5) !important;
+}
+
+.text-sm {
+  color: rgba(223, 219, 211, 0.5) !important;
+}
+
+.bg-fullpage {
+  color: rgb(249, 247, 244) !important;
+}
+
+h3 {
+  color: rgb(249, 247, 244) !important;
+}
+
+span {
+  color: rgb(249, 247, 244) !important;
+}
+
+.text-[0.7rem] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.max-w-[350px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.bg-[#141821] {
+  background-color: rgba(11, 15, 22, 0.6) !important;
+  color: rgba(194, 162, 255, 0.5) !important;
+}
+
+.text-[0.65rem] {
+  color: rgba(179, 170, 158, 0.5) !important;
+}
+
+ul {
+  color: rgb(249, 247, 244) !important;
+}
+
+strong {
+  color: rgb(249, 247, 244) !important;
+}
+
+.text-[#999] {
+  color: rgba(179, 170, 158, 0.5) !important;
+}
+
+.mt-3 {
+  color: rgba(172, 188, 214, 0.5) !important;
+}
+
+i {
+  color: rgba(172, 188, 214, 0.5) !important;
+}
+
+.ns-scope-card {
+  background-color: rgb(11, 15, 22) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.ns-scope-title {
+  color: rgb(194, 162, 255) !important;
+}
+
+.ns-scope-list {
+  color: rgb(249, 247, 244) !important;
+}
+
+.ns-scope-sep {
+  color: rgb(249, 247, 244) !important;
+}
+
+.max-w-[230px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.max-w-[220px] {
+  color: rgb(249, 247, 244) !important;
+}
+
+.w-5 {
+  color: rgb(249, 247, 244) !important;
+}
+
+.text-[#a8a8cc] {
+  color: rgba(172, 188, 214, 0.5) !important;
+}
+
+.text-[#cbb6ff] {
+  color: rgba(194, 162, 255, 0.5) !important;
+}
+
+.slidev-icon-btn {
+  color: rgb(249, 247, 244) !important;
+}
+
+.sr-only {
+  color: rgb(249, 247, 244) !important;
+}
+
+.i-carbon:maximize {
+  background-color: rgb(249, 247, 244) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.i-carbon:arrow-left {
+  background-color: rgb(249, 247, 244) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.i-carbon:arrow-right {
+  background-color: rgb(249, 247, 244) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.i-carbon:apps {
+  background-color: rgb(249, 247, 244) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.w-1px {
+  background-color: rgb(249, 247, 244) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.i-carbon:pen {
+  background-color: rgb(249, 247, 244) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.i-carbon:user-speaker {
+  background-color: rgb(249, 247, 244) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+button {
+  color: rgb(249, 247, 244) !important;
+}
+
+.i-carbon:settings-adjust {
+  background-color: rgb(249, 247, 244) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.h-40px {
+  color: rgb(249, 247, 244) !important;
+}
+
+.opacity-50 {
+  color: rgb(249, 247, 244) !important;
+}
+
+.fixed {
+  color: rgb(249, 247, 244) !important;
+}
+
+.bg-main {
+  background-color: rgba(20, 22, 23, 0.6) !important;
+  color: rgb(249, 247, 244) !important;
+}
+
+.outline-none {
+  color: rgb(249, 247, 244) !important;
+}
