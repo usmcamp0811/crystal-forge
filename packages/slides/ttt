@@ -1,0 +1,41 @@
+ok i want to make a slide deck for crystal forge.. before i embark on this endeavor i want to make an outline and work on the the flow 
+
+here is my thoughts turn them into an outline and slide titles.. i will use this outline and titles to make the slides later 
+
+so we are talking about Crystal Forge 
+
+Nix gives us a way to deteriminstically functionally all the the things talk about how we make software and configure machines. 
+
+A large portion of the Cyber world spends there time trying to make sure they know what software is deployed to systems, how its configured and sys admins are trying to keep it all running. CTOs have the worry of were all our systems patched? are we sure? 
+
+This is where Crystal Forge comes into play its goal is to make this a lot simpler. 
+
+Nix gives us a single path address to know what configuration a system is running readlink /run/current-system 
+
+if I know that value I can check it against a database of known configs..
+
+if i know the flake that the system is suppose to run i can monitor that flake and log all the system outputs in a database 
+
+then it become trivial to do a lookup and assertion
+
+we answer the CTO's question if everything is deployed and updated 
+while at the same time we are making the sys admins job easier to keep all systems deployed 
+we make it easier for cyber to be informed about all the systems under their control 
+
+we also make it easier to perform security audits to meet RMF requriments or other compliance frameworks because we have a place to 
+put all the exceptions for things like stig exceptions 
+
+archetecturily we have a server and then all systems get an agent whcih monitors the /run/current-system among all the things needed 
+to finger print the system. the agents run heaertbeat checks to the server periodically  and can get instructions to update 
+themselves from the server. 
+
+there is a builder that can be deployed on the same node as the server or multiple workers spun up.. they build derivaitons and optionally push to a cache s3/attic/nix 
+
+
+CF is solving some of the same problems as Ansible, but in a deterministic purely functional way and we are able to avoid many of the problems 
+with playbooks like half deployed playbooks. the use of nix also means the systems can't be modified without being notified 
+still need active monitoring type things because this solves the configuration compliance question 
+
+we want to be able to eventually have the ability to easily generate reports from our systems in familiar fomrats that work with a wide range of 
+industr standard cyber tools 
+
