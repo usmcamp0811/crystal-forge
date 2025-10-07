@@ -26,7 +26,7 @@ impl Default for DeploymentConfig {
             fallback_to_local_build: false,
             deployment_timeout_minutes: 60,
             cache_url: None,
-            deployment_poll_interval: Duration::from_secs(15 * 60),
+            deployment_poll_interval: Duration::from_secs(60),
         }
     }
 }
