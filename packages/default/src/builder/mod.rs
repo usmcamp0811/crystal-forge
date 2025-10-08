@@ -2,6 +2,7 @@ use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::models::derivations::{Derivation, DerivationType};
+use crate::queries::build_reservations;
 use crate::queries::cache_push::{
     create_cache_push_job, get_derivations_needing_cache_push_for_dest,
     get_pending_cache_push_jobs, mark_cache_push_completed, mark_cache_push_failed,
@@ -30,6 +31,7 @@ use tokio::fs;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
+use uuid::Uuid;
 
 /// New build strategy: discover all dependencies first, then build them individually
 async fn build_derivations_with_dependency_discovery(
@@ -108,7 +110,7 @@ async fn build_single_derivation(
     }
 }
 
-/// Runs the periodic build loop
+/// Runs the continuous build loop with multiple workers
 pub async fn run_build_loop(pool: PgPool) {
     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
@@ -118,6 +120,12 @@ pub async fn run_build_loop(pool: PgPool) {
     let num_workers = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
 
     info!("🏗 Starting {} continuous build workers...", num_workers);
+
+    // Get hostname for worker IDs
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "unknown".to_string());
 
     // Pre-initialize worker status tracking BEFORE spawning workers
     {
@@ -132,14 +140,21 @@ pub async fn run_build_loop(pool: PgPool) {
         }
     }
 
+    // Spawn stale reservation cleanup task
+    let cleanup_pool = pool.clone();
+    tokio::spawn(async move {
+        run_reservation_cleanup_loop(cleanup_pool).await;
+    });
+
     // Spawn worker pool
     let mut handles = Vec::new();
     for worker_id in 0..num_workers {
         let pool = pool.clone();
         let build_config = build_config.clone();
+        let worker_uuid = format!("{}-worker-{}", hostname, worker_id);
 
         let handle = tokio::spawn(async move {
-            build_worker(worker_id, pool, build_config).await;
+            build_worker(worker_id, worker_uuid, pool, build_config).await;
         });
         handles.push(handle);
     }
@@ -150,10 +165,15 @@ pub async fn run_build_loop(pool: PgPool) {
     }
 }
 
-async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig) {
+async fn build_worker(
+    worker_id: usize,
+    worker_uuid: String,
+    pool: PgPool,
+    build_config: BuildConfig,
+) {
     // Initialize status
     {
-        let mut statuses = get_build_status().write().await; // Use helper function
+        let mut statuses = get_build_status().write().await;
         if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
             status.state = WorkerState::Working;
             status.current_task = Some("claiming work".to_string());
@@ -161,7 +181,14 @@ async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig)
         }
     }
 
-    info!("Worker {} started", worker_id);
+    info!("Worker {} ({}) started", worker_id, worker_uuid);
+
+    // Spawn heartbeat task for this worker
+    let heartbeat_pool = pool.clone();
+    let heartbeat_uuid = worker_uuid.clone();
+    tokio::spawn(async move {
+        worker_heartbeat_loop(heartbeat_uuid, heartbeat_pool).await;
+    });
 
     loop {
         // Update status: looking for work
@@ -174,11 +201,14 @@ async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig)
             }
         }
 
-        match claim_next_derivation(&pool).await {
+        // Get wait_for_cache_push setting from config
+        let wait_for_cache = build_config.wait_for_cache_push.unwrap_or(false);
+
+        match build_reservations::claim_next_derivation(&pool, &worker_uuid, wait_for_cache).await {
             Ok(Some(mut derivation)) => {
                 // Update status: building
                 {
-                    let mut statuses = get_build_status().write().await; // Use helper function
+                    let mut statuses = get_build_status().write().await;
                     if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
                         status.current_task =
                             Some(derivation.derivation_path.clone().unwrap_or_else(|| {
@@ -189,8 +219,8 @@ async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig)
                 }
 
                 info!(
-                    "Worker {} claimed: {}",
-                    worker_id, derivation.derivation_name
+                    "Worker {} claimed: {} (type: {:?})",
+                    worker_id, derivation.derivation_name, derivation.derivation_type
                 );
 
                 match build_single_derivation(&pool, &mut derivation, &build_config).await {
@@ -199,25 +229,39 @@ async fn build_worker(worker_id: usize, pool: PgPool, build_config: BuildConfig)
                             "Worker {} built {}: {}",
                             worker_id, derivation.derivation_name, store_path
                         );
-                        mark_target_build_complete(&pool, derivation.id, &store_path)
-                            .await
-                            .ok();
+
+                        // Mark complete and delete reservation in transaction
+                        if let Err(e) = mark_build_complete_and_release(
+                            &pool,
+                            &worker_uuid,
+                            derivation.id,
+                            &store_path,
+                        )
+                        .await
+                        {
+                            error!("Failed to mark build complete: {}", e);
+                        }
                     }
                     Err(e) => {
                         error!(
                             "Worker {} build failed for {}: {}",
                             worker_id, derivation.derivation_name, e
                         );
-                        handle_derivation_failure(&pool, &derivation, "build", &e)
-                            .await
-                            .ok();
+
+                        // Mark failed and delete reservation
+                        if let Err(e2) =
+                            mark_build_failed_and_release(&pool, &worker_uuid, &derivation, &e)
+                                .await
+                        {
+                            error!("Failed to mark build failed: {}", e2);
+                        }
                     }
                 }
             }
             Ok(None) => {
                 // Update status: idle
                 {
-                    let mut statuses = get_build_status().write().await; // Use helper function
+                    let mut statuses = get_build_status().write().await;
                     if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
                         status.state = WorkerState::Idle;
                         status.current_task = None;
@@ -614,5 +658,66 @@ pub async fn process_cache_pushes(
         Err(e) => error!("❌ Failed to get pending cache push jobs: {e}"),
     }
 
+    Ok(())
+}
+
+/// Cleanup loop for stale reservations
+async fn run_reservation_cleanup_loop(pool: PgPool) {
+    info!("🧹 Starting reservation cleanup loop...");
+
+    loop {
+        tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
+        match build_reservations::cleanup_stale_reservations(&pool, 300).await {
+            Ok(reclaimed) if !reclaimed.is_empty() => {
+                warn!(
+                    "🧹 Reclaimed {} stale reservations: {:?}",
+                    reclaimed.len(),
+                    reclaimed
+                );
+            }
+            Err(e) => {
+                error!("❌ Error cleaning up stale reservations: {}", e);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Mark build complete and release reservation
+async fn mark_build_complete_and_release(
+    pool: &PgPool,
+    worker_uuid: &str,
+    derivation_id: i32,
+    store_path: &str,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    // Delete reservation
+    build_reservations::delete_reservation(&mut tx, worker_uuid, derivation_id).await?;
+
+    // Mark complete
+    mark_target_build_complete(&mut tx, derivation_id, store_path).await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Mark build failed and release reservation
+async fn mark_build_failed_and_release(
+    pool: &PgPool,
+    worker_uuid: &str,
+    derivation: &Derivation,
+    error: &anyhow::Error,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+
+    // Delete reservation
+    build_reservations::delete_reservation(&mut tx, worker_uuid, derivation.id).await?;
+
+    // Mark failed
+    handle_derivation_failure(&mut tx, derivation, "build", error).await?;
+
+    tx.commit().await?;
     Ok(())
 }
