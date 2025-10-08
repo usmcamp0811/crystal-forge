@@ -42,8 +42,7 @@ WITH system_progress AS (
         COUNT(DISTINCT p.id) AS total_packages,
         COUNT(DISTINCT p.id) FILTER (WHERE p.status_id = 6 -- BuildComplete
 ) AS completed_packages,
-        COUNT(DISTINCT p.id) FILTER (WHERE p.status_id = 14 -- CachePushed
-) AS cached_packages,
+        COUNT(DISTINCT cpj.id) FILTER (WHERE cpj.status = 'completed') AS cached_packages,
         COUNT(DISTINCT br.id) AS active_workers
     FROM (
         SELECT
@@ -59,6 +58,8 @@ WITH system_progress AS (
         LEFT JOIN derivation_dependencies dd ON dd.derivation_id = r.nixos_id
         LEFT JOIN derivations p ON p.id = dd.depends_on_id
             AND p.derivation_type = 'package'
+        LEFT JOIN cache_push_jobs cpj ON cpj.derivation_id = p.id
+            AND cpj.status = 'completed'
         LEFT JOIN build_reservations br ON br.nixos_derivation_id = r.nixos_id
     GROUP BY
         r.nixos_id,
@@ -156,7 +157,7 @@ WITH system_progress AS (
         COUNT(DISTINCT p.id) AS total_packages,
         COUNT(DISTINCT p.id) FILTER (WHERE p.status_id = 6) AS completed_packages,
         COUNT(DISTINCT p.id) FILTER (WHERE p.status_id = 8) AS building_packages,
-        COUNT(DISTINCT p.id) FILTER (WHERE p.status_id = 14) AS cached_packages,
+        COUNT(DISTINCT cpj.id) FILTER (WHERE cpj.status = 'completed') AS cached_packages,
         COUNT(DISTINCT br.id) AS active_workers,
         ARRAY_AGG(DISTINCT br.worker_id) FILTER (WHERE br.worker_id IS NOT NULL) AS worker_ids,
         MIN(br.reserved_at) AS earliest_reservation,
@@ -167,6 +168,7 @@ WITH system_progress AS (
         LEFT JOIN derivation_dependencies dd ON dd.derivation_id = d.id
         LEFT JOIN derivations p ON p.id = dd.depends_on_id
             AND p.derivation_type = 'package'
+        LEFT JOIN cache_push_jobs cpj ON cpj.derivation_id = p.id
         LEFT JOIN build_reservations br ON br.nixos_derivation_id = d.id
     WHERE
         d.derivation_type = 'nixos'
