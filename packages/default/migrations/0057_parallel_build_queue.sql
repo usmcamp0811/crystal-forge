@@ -78,6 +78,7 @@ package_candidates AS (
         sp.nixos_commit_ts,
         sp.total_packages,
         sp.completed_packages,
+        sp.cached_packages,
         sp.active_workers,
         'package' AS build_type,
         ROW_NUMBER() OVER (ORDER BY sp.nixos_commit_ts DESC,
@@ -97,6 +98,8 @@ package_candidates AS (
 ),
 system_candidates AS (
     -- NixOS systems that can be built (all packages complete)
+    -- Note: The Rust code will check wait_for_cache_push config to decide
+    -- whether to require cached_packages = total_packages or just completed_packages = total_packages
     SELECT
         d.id,
         d.derivation_name,
@@ -109,6 +112,7 @@ system_candidates AS (
         sp.nixos_commit_ts,
         sp.total_packages,
         sp.completed_packages,
+        sp.cached_packages,
         sp.active_workers,
         'system' AS build_type,
         ROW_NUMBER() OVER (ORDER BY sp.nixos_commit_ts DESC,
@@ -123,7 +127,9 @@ system_candidates AS (
         AND d.status_id IN (5, 12)
         AND d.attempt_count <= 5
         AND br.id IS NULL
-        AND sp.total_packages = sp.completed_packages -- All deps complete
+        AND sp.total_packages = sp.completed_packages -- All deps built
+        -- Additional cache check will be done in Rust based on config:
+        -- If wait_for_cache_push enabled: also check sp.cached_packages = sp.total_packages
 )
 SELECT
     *
@@ -150,6 +156,7 @@ WITH system_progress AS (
         COUNT(DISTINCT p.id) AS total_packages,
         COUNT(DISTINCT p.id) FILTER (WHERE p.status_id = 6) AS completed_packages,
         COUNT(DISTINCT p.id) FILTER (WHERE p.status_id = 8) AS building_packages,
+        COUNT(DISTINCT p.id) FILTER (WHERE p.status_id = 14) AS cached_packages,
         COUNT(DISTINCT br.id) AS active_workers,
         ARRAY_AGG(DISTINCT br.worker_id) FILTER (WHERE br.worker_id IS NOT NULL) AS worker_ids,
         MIN(br.reserved_at) AS earliest_reservation,
@@ -179,6 +186,7 @@ SELECT
     completed_packages,
     building_packages,
     (total_packages - completed_packages - building_packages) AS pending_packages,
+    cached_packages,
     active_workers,
     worker_ids,
     earliest_reservation,
@@ -190,6 +198,12 @@ SELECT
     ELSE
         'pending'
     END AS status,
+    CASE WHEN completed_packages = total_packages
+        AND cached_packages < total_packages THEN
+        'waiting_for_cache_push'
+    ELSE
+        NULL
+    END AS cache_status,
     CASE WHEN latest_heartbeat IS NOT NULL
         AND latest_heartbeat < NOW() - INTERVAL '5 minutes' THEN
         TRUE

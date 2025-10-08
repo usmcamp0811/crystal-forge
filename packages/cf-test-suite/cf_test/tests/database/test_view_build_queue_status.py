@@ -371,8 +371,8 @@ def test_view_build_queue_status_aggregation_summary(cf_client: CFTestClient):
             COUNT(*) FILTER (WHERE status = 'pending') as pending_systems,
             COUNT(*) FILTER (WHERE status = 'building') as building_systems,
             COUNT(*) FILTER (WHERE status = 'ready_for_system_build') as ready_systems,
-            SUM(active_workers) as total_workers,
-            SUM(pending_packages + building_packages) as total_work_remaining,
+            COALESCE(SUM(active_workers), 0) as total_workers,
+            COALESCE(SUM(pending_packages + building_packages), 0) as total_work_remaining,
             COUNT(*) FILTER (WHERE has_stale_workers) as systems_with_stale_workers
         FROM {VIEW}
         """
