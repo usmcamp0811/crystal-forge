@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM build_reservations\n        WHERE worker_id = $1 AND derivation_id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "226348b4cb5560442e238990f112ad632006bc93b3017c1bd4b9c2034e9127ce"
+}
