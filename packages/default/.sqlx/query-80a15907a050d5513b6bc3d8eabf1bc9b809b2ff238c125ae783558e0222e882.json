@@ -1,21 +1,21 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            id,\n            derivation_name,\n            derivation_type,\n            derivation_path,\n            pname,\n            version,\n            status_id,\n            nixos_id,\n            nixos_commit_ts,\n            total_packages,\n            completed_packages,\n            cached_packages,\n            active_workers,\n            build_type,\n            queue_position\n        FROM view_buildable_derivations\n        WHERE \n            CASE \n                WHEN build_type = 'system' AND $1 = true THEN \n                    cached_packages = total_packages\n                ELSE true\n            END\n        ORDER BY queue_position\n        LIMIT 1\n        ",
+  "query": "\n        SELECT \n            id as \"id!\",\n            derivation_name as \"derivation_name!\",\n            derivation_type as \"derivation_type!\",\n            derivation_path,\n            pname,\n            version,\n            status_id as \"status_id!\",\n            nixos_id,\n            nixos_commit_ts,\n            total_packages,\n            completed_packages,\n            cached_packages,\n            active_workers,\n            build_type as \"build_type!\",\n            queue_position\n        FROM view_buildable_derivations\n        WHERE \n            CASE \n                WHEN build_type = 'system' AND $1 = true THEN \n                    cached_packages = total_packages\n                ELSE true\n            END\n        ORDER BY queue_position\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
         "ordinal": 0,
-        "name": "id",
+        "name": "id!",
         "type_info": "Int4"
       },
       {
         "ordinal": 1,
-        "name": "derivation_name",
+        "name": "derivation_name!",
         "type_info": "Text"
       },
       {
         "ordinal": 2,
-        "name": "derivation_type",
+        "name": "derivation_type!",
         "type_info": "Text"
       },
       {
@@ -35,7 +35,7 @@
       },
       {
         "ordinal": 6,
-        "name": "status_id",
+        "name": "status_id!",
         "type_info": "Int4"
       },
       {
@@ -70,7 +70,7 @@
       },
       {
         "ordinal": 13,
-        "name": "build_type",
+        "name": "build_type!",
         "type_info": "Text"
       },
       {
@@ -102,5 +102,5 @@
       true
     ]
   },
-  "hash": "50e51c00205ebaf3081ffec10e1d15ce7bd5c1c8e0d3ac890554e678fed22d85"
+  "hash": "80a15907a050d5513b6bc3d8eabf1bc9b809b2ff238c125ae783558e0222e882"
 }

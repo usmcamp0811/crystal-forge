@@ -14,8 +14,8 @@ use crate::queries::cve_scans::{
     save_scan_results,
 };
 use crate::queries::derivations::{
-    EvaluationStatus, claim_next_derivation, get_derivations_ready_for_build,
-    mark_target_build_in_progress, mark_target_failed, update_derivation_status,
+    EvaluationStatus, get_derivations_ready_for_build, mark_target_build_in_progress,
+    mark_target_failed, update_derivation_status,
 };
 use crate::queries::derivations::{
     discover_and_queue_all_transitive_dependencies, handle_derivation_failure,
@@ -694,10 +694,10 @@ async fn mark_build_complete_and_release(
     let mut tx = pool.begin().await?;
 
     // Delete reservation
-    build_reservations::delete_reservation(&mut tx, worker_uuid, derivation_id).await?;
+    build_reservations::delete_reservation(&mut *tx, worker_uuid, derivation_id).await?;
 
     // Mark complete
-    mark_target_build_complete(&mut tx, derivation_id, store_path).await?;
+    mark_target_build_complete(&mut *tx, derivation_id, store_path).await?;
 
     tx.commit().await?;
     Ok(())
@@ -713,10 +713,10 @@ async fn mark_build_failed_and_release(
     let mut tx = pool.begin().await?;
 
     // Delete reservation
-    build_reservations::delete_reservation(&mut tx, worker_uuid, derivation.id).await?;
+    build_reservations::delete_reservation(&mut *tx, worker_uuid, derivation.id).await?;
 
     // Mark failed
-    handle_derivation_failure(&mut tx, derivation, "build", error).await?;
+    handle_derivation_failure(&mut *tx, derivation, "build", error).await?;
 
     tx.commit().await?;
     Ok(())

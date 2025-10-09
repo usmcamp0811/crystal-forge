@@ -2,6 +2,7 @@ use crate::models::derivations::Derivation;
 use crate::queries::derivations::EvaluationStatus;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
 use tracing::{debug, error, info, warn};
 
@@ -185,20 +186,20 @@ pub async fn get_next_buildable_derivation(
         BuildableDerivation,
         r#"
         SELECT 
-            id,
-            derivation_name,
-            derivation_type,
+            id as "id!",
+            derivation_name as "derivation_name!",
+            derivation_type as "derivation_type!",
             derivation_path,
             pname,
             version,
-            status_id,
+            status_id as "status_id!",
             nixos_id,
             nixos_commit_ts,
             total_packages,
             completed_packages,
             cached_packages,
             active_workers,
-            build_type,
+            build_type as "build_type!",
             queue_position
         FROM view_buildable_derivations
         WHERE 
@@ -231,20 +232,20 @@ pub async fn claim_next_derivation(
         BuildableDerivation,
         r#"
         SELECT 
-            id,
-            derivation_name,
-            derivation_type,
+            id as "id!",
+            derivation_name as "derivation_name!",
+            derivation_type as "derivation_type!",
             derivation_path,
             pname,
             version,
-            status_id,
+            status_id as "status_id!",
             nixos_id,
             nixos_commit_ts,
             total_packages,
             completed_packages,
             cached_packages,
             active_workers,
-            build_type,
+            build_type as "build_type!",
             queue_position
         FROM view_buildable_derivations
         WHERE 
@@ -269,7 +270,7 @@ pub async fn claim_next_derivation(
 
     // Create reservation
     let nixos_id = if buildable.build_type == "package" {
-        Some(buildable.nixos_id)
+        buildable.nixos_id // Already an Option<i32>, don't wrap it again
     } else {
         None
     };
@@ -349,22 +350,22 @@ pub async fn get_queue_status(pool: &PgPool) -> Result<Vec<QueueStatus>> {
         QueueStatus,
         r#"
         SELECT 
-            nixos_id,
-            system_name,
-            commit_timestamp,
-            git_commit_hash,
-            total_packages,
-            completed_packages,
-            building_packages,
-            pending_packages,
-            cached_packages,
-            active_workers,
+            nixos_id as "nixos_id!",
+            system_name as "system_name!",
+            commit_timestamp as "commit_timestamp!",
+            git_commit_hash as "git_commit_hash!",
+            total_packages as "total_packages!",
+            completed_packages as "completed_packages!",
+            building_packages as "building_packages!",
+            pending_packages as "pending_packages!",
+            cached_packages as "cached_packages!",
+            active_workers as "active_workers!",
             worker_ids,
             earliest_reservation,
             latest_heartbeat,
-            status,
+            status as "status!",
             cache_status,
-            has_stale_workers
+            has_stale_workers as "has_stale_workers!"
         FROM view_build_queue_status
         ORDER BY commit_timestamp DESC
         "#
@@ -384,22 +385,22 @@ pub async fn get_queue_status_for_system(
         QueueStatus,
         r#"
         SELECT 
-            nixos_id,
-            system_name,
-            commit_timestamp,
-            git_commit_hash,
-            total_packages,
-            completed_packages,
-            building_packages,
-            pending_packages,
-            cached_packages,
-            active_workers,
+            nixos_id as "nixos_id!",
+            system_name as "system_name!",
+            commit_timestamp as "commit_timestamp!",
+            git_commit_hash as "git_commit_hash!",
+            total_packages as "total_packages!",
+            completed_packages as "completed_packages!",
+            building_packages as "building_packages!",
+            pending_packages as "pending_packages!",
+            cached_packages as "cached_packages!",
+            active_workers as "active_workers!",
             worker_ids,
             earliest_reservation,
             latest_heartbeat,
-            status,
+            status as "status!",
             cache_status,
-            has_stale_workers
+            has_stale_workers as "has_stale_workers!"
         FROM view_build_queue_status
         WHERE nixos_id = $1
         "#,
