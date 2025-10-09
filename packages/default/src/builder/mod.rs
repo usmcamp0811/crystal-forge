@@ -721,3 +721,25 @@ async fn mark_build_failed_and_release(
     tx.commit().await?;
     Ok(())
 }
+
+/// Worker heartbeat loop - updates reservation heartbeat every 30 seconds
+async fn worker_heartbeat_loop(worker_uuid: String, pool: PgPool) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+
+    loop {
+        interval.tick().await;
+
+        match build_reservations::update_heartbeat(&pool, &worker_uuid).await {
+            Ok(count) if count > 0 => {
+                debug!(
+                    "Worker {} heartbeat updated ({} reservations)",
+                    worker_uuid, count
+                );
+            }
+            Err(e) => {
+                error!("Worker {} heartbeat failed: {}", worker_uuid, e);
+            }
+            _ => {}
+        }
+    }
+}

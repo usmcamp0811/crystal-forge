@@ -17,7 +17,7 @@ pub struct BuildReservation {
 }
 
 /// Represents a row from view_buildable_derivations
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct BuildableDerivation {
     pub id: i32,
     pub derivation_name: String,
@@ -26,14 +26,14 @@ pub struct BuildableDerivation {
     pub pname: Option<String>,
     pub version: Option<String>,
     pub status_id: i32,
-    pub nixos_id: i32,
-    pub nixos_commit_ts: DateTime<Utc>,
-    pub total_packages: i64,
-    pub completed_packages: i64,
-    pub cached_packages: i64,
-    pub active_workers: i64,
+    pub nixos_id: Option<i32>,
+    pub nixos_commit_ts: Option<DateTime<Utc>>,
+    pub total_packages: Option<i64>,
+    pub completed_packages: Option<i64>,
+    pub cached_packages: Option<i64>,
+    pub active_workers: Option<i64>,
     pub build_type: String,
-    pub queue_position: i64,
+    pub queue_position: Option<i64>,
 }
 
 /// Represents a row from view_build_queue_status
@@ -86,7 +86,14 @@ pub async fn create_reservation(
 }
 
 /// Delete a build reservation
-pub async fn delete_reservation(pool: &PgPool, worker_id: &str, derivation_id: i32) -> Result<()> {
+pub async fn delete_reservation<'e, E>(
+    executor: E,
+    worker_id: &str,
+    derivation_id: i32,
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
     sqlx::query!(
         r#"
         DELETE FROM build_reservations
@@ -95,7 +102,7 @@ pub async fn delete_reservation(pool: &PgPool, worker_id: &str, derivation_id: i
         worker_id,
         derivation_id
     )
-    .execute(pool)
+    .execute(executor)
     .await?;
 
     debug!(
@@ -140,7 +147,7 @@ pub async fn cleanup_stale_reservations(
 
     let derivation_ids: Vec<i32> = reclaimed
         .into_iter()
-        .filter_map(|r| r.derivation_id)
+        .map(|r| r.derivation_id) // Remove filter_map, it's not Option
         .collect();
 
     if !derivation_ids.is_empty() {
@@ -150,7 +157,7 @@ pub async fn cleanup_stale_reservations(
             derivation_ids
         );
 
-        // Reset derivations back to scheduled
+        // Reset derivations back to dry-run-complete (not Scheduled)
         for derivation_id in &derivation_ids {
             let _ = sqlx::query!(
                 r#"
@@ -158,7 +165,7 @@ pub async fn cleanup_stale_reservations(
                 SET status_id = $1, started_at = NULL
                 WHERE id = $2
                 "#,
-                EvaluationStatus::Scheduled.as_id(),
+                EvaluationStatus::DryRunComplete.as_id(), // Use DryRunComplete
                 derivation_id
             )
             .execute(pool)
