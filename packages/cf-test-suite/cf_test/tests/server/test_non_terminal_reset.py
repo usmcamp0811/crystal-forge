@@ -222,7 +222,6 @@ def test_derivation_reset_background_loop(cf_client, server):
     )
 
     # Make the derivation look "stuck" by giving it an old started_at time
-    # Use attempt_count = 3 (< 5) so it can be reset, not made terminal
     cf_client.execute_sql(
         """
         UPDATE derivations 
