@@ -271,7 +271,7 @@ pub async fn save_scan_results(
             "#,
             None::<i32>, // commit_id is NULL for packages
             "package",
-            entry.derivation, // Use derivation path as name to ensure uniqueness
+            entry.name,       // Use derivation path as name to ensure uniqueness
             entry.derivation, // This is the derivation path from vulnix
             None::<String>,   // derivation_target is NULL for packages discovered during scanning
             entry.pname,
