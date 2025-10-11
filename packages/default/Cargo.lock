@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "crystal-forge"
-version = "0.1.45"
+version = "0.1.46"
 dependencies = [
  "anyhow",
  "axum 0.7.9",

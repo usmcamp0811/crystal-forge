@@ -1,5 +1,6 @@
 use crate::flake::commits::sync_all_watched_flakes_commits;
 
+use crate::deployment::spawn_deployment_policy_manager;
 use crate::log::log_builder_worker_status;
 use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
@@ -28,9 +29,10 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     let flake_pool = pool.clone();
     let commit_pool = pool.clone();
     let target_pool = pool.clone();
+    let deployment_pool = pool.clone();
 
     // Get the flake config with a fallback
-    let flake_config = cfg.flakes;
+    let flake_config = cfg.flakes.clone();
 
     tokio::spawn(run_flake_polling_loop(flake_pool, flake_config.clone()));
     tokio::spawn(run_commit_evaluation_loop(
@@ -40,6 +42,11 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     tokio::spawn(run_derivation_evaluation_loop(
         target_pool,
         flake_config.build_processing_interval,
+    ));
+
+    tokio::spawn(spawn_deployment_policy_manager(
+        cfg,
+        deployment_pool,
     ));
 }
 

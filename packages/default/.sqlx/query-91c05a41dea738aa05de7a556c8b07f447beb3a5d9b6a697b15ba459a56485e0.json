@@ -1,0 +1,110 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            nixos_id as \"nixos_id!\",\n            system_name as \"system_name!\",\n            commit_timestamp as \"commit_timestamp!\",\n            git_commit_hash as \"git_commit_hash!\",\n            total_packages as \"total_packages!\",\n            completed_packages as \"completed_packages!\",\n            building_packages as \"building_packages!\",\n            pending_packages as \"pending_packages!\",\n            cached_packages as \"cached_packages!\",\n            active_workers as \"active_workers!\",\n            worker_ids,\n            earliest_reservation,\n            latest_heartbeat,\n            status as \"status!\",\n            cache_status,\n            has_stale_workers as \"has_stale_workers!\"\n        FROM view_build_queue_status\n        ORDER BY commit_timestamp DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "nixos_id!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "system_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "commit_timestamp!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "git_commit_hash!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "total_packages!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "completed_packages!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "building_packages!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 7,
+        "name": "pending_packages!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "cached_packages!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "active_workers!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "worker_ids",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 11,
+        "name": "earliest_reservation",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "latest_heartbeat",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 13,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 14,
+        "name": "cache_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 15,
+        "name": "has_stale_workers!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "91c05a41dea738aa05de7a556c8b07f447beb3a5d9b6a697b15ba459a56485e0"
+}
