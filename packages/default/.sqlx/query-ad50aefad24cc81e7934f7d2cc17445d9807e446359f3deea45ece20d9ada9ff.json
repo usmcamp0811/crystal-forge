@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE build_reservations\n        SET heartbeat_at = NOW()\n        WHERE worker_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ad50aefad24cc81e7934f7d2cc17445d9807e446359f3deea45ece20d9ada9ff"
+}

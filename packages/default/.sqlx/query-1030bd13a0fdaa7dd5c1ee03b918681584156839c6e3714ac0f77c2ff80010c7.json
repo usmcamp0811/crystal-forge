@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET status_id = $1, completed_at = NOW(), store_path = $2\n        WHERE id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1030bd13a0fdaa7dd5c1ee03b918681584156839c6e3714ac0f77c2ff80010c7"
+}
