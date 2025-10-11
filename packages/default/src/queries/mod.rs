@@ -1,4 +1,5 @@
 pub mod agent_heartbeat;
+pub mod build_reservations;
 pub mod cache_push;
 pub mod commits;
 pub mod cve_scans;

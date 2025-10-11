@@ -1302,132 +1302,32 @@ pub async fn increment_derivation_attempt_count(
 }
 
 /// Handle derivation failure with proper attempt count logic
-pub async fn handle_derivation_failure(
-    pool: &PgPool,
+pub async fn handle_derivation_failure<'e, E>(
+    executor: E,
     derivation: &Derivation,
-    phase: &str, // "dry-run" or "build"
+    phase: &str,
     error: &anyhow::Error,
-) -> Result<Derivation> {
-    // First increment the attempt count
-    let new_attempt_count = derivation.attempt_count + 1;
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET status_id = $1, 
+            error_message = $2,
+            attempt_count = attempt_count + 1,
+            completed_at = NOW()
+        WHERE id = $3
+        "#,
+        EvaluationStatus::BuildFailed.as_id(),
+        format!("{}: {}", phase, error),
+        derivation.id
+    )
+    .execute(executor)
+    .await?;
 
-    // Determine if this should be terminal based on attempt count
-    let (status, is_terminal_failure) = match phase {
-        "dry-run" => {
-            if new_attempt_count >= 5 {
-                (EvaluationStatus::DryRunFailed, true)
-            } else {
-                // For <5 attempts, we could use a different status like "DryRunFailed"
-                // but the reset logic will pick it up and retry it
-                (EvaluationStatus::DryRunFailed, false)
-            }
-        }
-        "build" => {
-            if new_attempt_count >= 5 {
-                (EvaluationStatus::BuildFailed, true)
-            } else {
-                (EvaluationStatus::BuildFailed, false)
-            }
-        }
-        _ => return Err(anyhow::anyhow!("Invalid phase: {}", phase)),
-    };
-
-    // Update with both attempt count and status in a single transaction
-    let updated = if is_terminal_failure {
-        sqlx::query_as!(
-            Derivation,
-            r#"
-            UPDATE derivations SET 
-                status_id = $1,
-                attempt_count = $2,
-                completed_at = NOW(),
-                evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
-                error_message = $3
-            WHERE id = $4
-            RETURNING
-                id,
-                commit_id,
-                derivation_type as "derivation_type: DerivationType",
-                derivation_name,
-                derivation_path,
-                derivation_target,
-                scheduled_at,
-                completed_at,
-                started_at,
-                attempt_count,
-                evaluation_duration_ms,
-                error_message,
-                pname,
-                version,
-                status_id,
-                build_elapsed_seconds,
-                build_current_target,
-                build_last_activity_seconds,
-                build_last_heartbeat,
-                cf_agent_enabled,
-                store_path
-            "#,
-            status.as_id(),
-            new_attempt_count,
-            error.to_string(),
-            derivation.id
-        )
-        .fetch_one(pool)
-        .await?
-    } else {
-        sqlx::query_as!(
-            Derivation,
-            r#"
-            UPDATE derivations SET 
-                status_id = $1,
-                attempt_count = $2,
-                error_message = $3
-            WHERE id = $4
-            RETURNING
-                id,
-                commit_id,
-                derivation_type as "derivation_type: DerivationType",
-                derivation_name,
-                derivation_path,
-                derivation_target,
-                scheduled_at,
-                completed_at,
-                started_at,
-                attempt_count,
-                evaluation_duration_ms,
-                error_message,
-                pname,
-                version,
-                status_id,
-                build_elapsed_seconds,
-                build_current_target,
-                build_last_activity_seconds,
-                build_last_heartbeat,
-                cf_agent_enabled,
-                store_path
-            "#,
-            status.as_id(),
-            new_attempt_count,
-            error.to_string(),
-            derivation.id
-        )
-        .fetch_one(pool)
-        .await?
-    };
-
-    if is_terminal_failure {
-        error!(
-            "❌ Derivation {} terminally failed after {} attempts: {}",
-            updated.derivation_name, new_attempt_count, error
-        );
-    } else {
-        warn!(
-            "⚠️ Derivation {} failed (attempt {}): {}",
-            updated.derivation_name, new_attempt_count, error
-        );
-    }
-
-    Ok(updated)
+    Ok(())
 }
 
 pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
@@ -1527,12 +1427,28 @@ pub async fn mark_target_build_in_progress(pool: &PgPool, target_id: i32) -> Res
     mark_derivation_build_in_progress(pool, target_id).await
 }
 
-pub async fn mark_target_build_complete(
-    pool: &PgPool,
-    target_id: i32,
+pub async fn mark_target_build_complete<'e, E>(
+    executor: E,
+    derivation_id: i32,
     store_path: &str,
-) -> Result<Derivation> {
-    mark_derivation_build_complete(pool, target_id, store_path).await
+) -> Result<()>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+{
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET status_id = $1, completed_at = NOW(), store_path = $2
+        WHERE id = $3
+        "#,
+        EvaluationStatus::BuildComplete.as_id(),
+        store_path,
+        derivation_id
+    )
+    .execute(executor)
+    .await?;
+
+    Ok(())
 }
 
 pub async fn mark_target_failed(
@@ -1925,66 +1841,4 @@ pub async fn update_cf_agent_enabled(
     .await?;
 
     Ok(())
-}
-
-/// Atomically claim the next derivation to build
-pub async fn claim_next_derivation(pool: &PgPool) -> Result<Option<Derivation>> {
-    // 1) Ask the view for just the next id (non-null)
-    let next_id_row = sqlx::query_scalar!(
-        r#"
-        SELECT id
-        FROM view_nixos_derivation_build_queue
-        LIMIT 1
-        "#
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    // unwrap Option<Option<i32>> → Option<i32>
-    let Some(Some(id)) = next_id_row else {
-        return Ok(None);
-    };
-
-    // 2) Atomically claim it
-    let derivation = sqlx::query_as!(
-        Derivation,
-        r#"
-        UPDATE derivations
-        SET status_id = $2, started_at = NOW()
-        WHERE id = (
-            SELECT id
-            FROM derivations
-            WHERE id = $1
-            FOR UPDATE SKIP LOCKED
-        )
-        RETURNING
-            id,
-            commit_id,
-            derivation_type as "derivation_type: DerivationType",
-            derivation_name,
-            derivation_path,
-            derivation_target,
-            scheduled_at,
-            completed_at,
-            started_at,
-            attempt_count,
-            evaluation_duration_ms,
-            error_message,
-            pname,
-            version,
-            status_id,
-            build_elapsed_seconds,
-            build_current_target,
-            build_last_activity_seconds,
-            build_last_heartbeat,
-            cf_agent_enabled,
-            store_path
-        "#,
-        id,
-        EvaluationStatus::BuildInProgress.as_id(),
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(derivation)
 }

@@ -226,7 +226,7 @@ def test_derivation_reset_background_loop(cf_client, server):
         """
         UPDATE derivations 
         SET started_at = NOW() - INTERVAL '2 hours',
-            attempt_count = 5, derivation_path = NULL
+            attempt_count = 3, derivation_path = NULL
         WHERE id = %s
         """,
         (scenario["derivation_id"],),

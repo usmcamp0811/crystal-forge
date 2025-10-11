@@ -38,6 +38,7 @@ pub struct BuildConfig {
     pub systemd_properties: Vec<String>,
 
     pub max_concurrent_derivations: Option<u32>,
+    pub wait_for_cache_push: Option<bool>,
 }
 
 impl Default for BuildConfig {
@@ -59,6 +60,7 @@ impl Default for BuildConfig {
             systemd_timeout_stop_sec: Some(600), // 10 minutes
             use_systemd_scope: true,
             systemd_properties: Vec::new(),
+            wait_for_cache_push: Some(false),
         }
     }
 }

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET status_id = $1, \n            error_message = $2,\n            attempt_count = attempt_count + 1,\n            completed_at = NOW()\n        WHERE id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6707bbc2b349761e9fb05a933ec1c074c3f086501ca83c2f96bff02bb2c28fc1"
+}
