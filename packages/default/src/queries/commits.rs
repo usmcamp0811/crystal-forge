@@ -2,20 +2,28 @@ use crate::models::commits::Commit;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 
-pub async fn insert_commit(pool: &PgPool, commit_hash: &str, repo_url: &str) -> Result<()> {
+pub async fn insert_commit(
+    pool: &PgPool,
+    commit_hash: &str,
+    repo_url: &str,
+    commit_timestamp: chrono::DateTime<chrono::Utc>,
+) -> Result<()> {
     let flake_id: (i32,) = sqlx::query_as("SELECT id FROM flakes WHERE repo_url = $1")
         .bind(repo_url)
         .fetch_optional(pool)
         .await?
         .context("No flake entry found")?;
+
     sqlx::query(
         "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
-         VALUES ($1, $2, now()) ON CONFLICT DO NOTHING",
+         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
     )
     .bind(flake_id.0)
     .bind(commit_hash)
+    .bind(commit_timestamp)
     .execute(pool)
     .await?;
+
     Ok(())
 }
 

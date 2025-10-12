@@ -39,8 +39,10 @@ pub async fn webhook_handler(State(pool): State<PgPool>, Json(payload): Json<Val
     info!("🔗 Repo: {repo_url} @ {commit_hash}");
 
     let pool = pool.clone();
+    let time_now = chrono::offset::Utc::now();
     tokio::spawn(async move {
-        if let Err(e) = crate::queries::commits::insert_commit(&pool, &commit_hash, &repo_url).await
+        if let Err(e) =
+            crate::queries::commits::insert_commit(&pool, &commit_hash, &repo_url, time_now).await
         {
             error!("❌ Failed to insert commit: {e}");
         } else {
