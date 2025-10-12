@@ -1,7 +1,7 @@
 use crate::models::config::CrystalForgeConfig;
 use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
-use crate::queries::derivations::get_latest_successful_derivation_for_flake;
+use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -116,7 +116,7 @@ impl DeploymentPolicyManager {
             get_latest_deployable_targets_for_flake_hosts(&self.pool, flake_id, &hostnames).await?;
         let latest_by_host: HashMap<_, _> = per_host
             .into_iter()
-            .map(|h| (h.hostname, h.derivation_target))
+            .filter_map(|h| h.derivation_target.map(|t| (h.hostname, t)))
             .collect();
 
         let mut updated_count = 0;

@@ -1637,7 +1637,7 @@ pub async fn clear_derivation_build_status(pool: &PgPool, derivation_id: i32) ->
 pub struct HostLatestTarget {
     pub hostname: String,
     pub derivation_id: i32,
-    pub derivation_target: String,
+    pub derivation_target: Option<String>,
     pub last_cache_completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -1694,13 +1694,11 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
 
     let out = rows
         .into_iter()
-        .filter_map(|r| {
-            Some(HostLatestTarget {
-                hostname: r.hostname?,
-                derivation_id: r.derivation_id?,
-                derivation_target: r.derivation_target?,
-                last_cache_completed_at: r.last_cache_completed_at.map(|ts| ts.into()),
-            })
+        .map(|r| HostLatestTarget {
+            hostname: r.hostname,
+            derivation_id: r.derivation_id,
+            derivation_target: r.derivation_target, // Option<String>
+            last_cache_completed_at: r.last_cache_completed_at, // Option<DateTime<Utc>>
         })
         .collect();
 
