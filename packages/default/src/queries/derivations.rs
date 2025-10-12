@@ -12,19 +12,14 @@ use tracing::{debug, error, info, warn};
 // These should match the IDs you inserted in your migration
 #[derive(Debug, Clone)]
 pub enum EvaluationStatus {
-    Pending = 1,
-    Queued = 2,
     DryRunPending = 3,
     DryRunInProgress = 4,
     DryRunComplete = 5,
     DryRunFailed = 6,
     BuildPending = 7,
     BuildInProgress = 8,
-    InProgress = 9,
     BuildComplete = 10,
-    Complete = 11,
     BuildFailed = 12,
-    Failed = 13,
 }
 
 impl EvaluationStatus {
@@ -39,21 +34,18 @@ impl EvaluationStatus {
                 | EvaluationStatus::DryRunFailed
                 | EvaluationStatus::BuildComplete
                 | EvaluationStatus::BuildFailed
-                | EvaluationStatus::Complete
-                | EvaluationStatus::Failed
         )
     }
 
     pub fn is_in_progress(&self) -> bool {
         matches!(
             self,
-            EvaluationStatus::DryRunInProgress
-                | EvaluationStatus::BuildInProgress
-                | EvaluationStatus::InProgress
+            EvaluationStatus::DryRunInProgress | EvaluationStatus::BuildInProgress
         )
     }
 }
 
+/// Inserts or updates a derivation entry, assigning the correct status via enum IDs.
 pub async fn insert_derivation(
     pool: &PgPool,
     commit: Option<&Commit>,
@@ -82,8 +74,8 @@ pub async fn insert_derivation(
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) 
         DO UPDATE SET
             status_id = CASE 
-                WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.status_id  -- Keep terminal states
-                ELSE EXCLUDED.status_id  -- Reset non-terminal states to pending
+                WHEN derivations.status_id IN ($5, $6) THEN derivations.status_id  -- Keep terminal states
+                ELSE EXCLUDED.status_id  -- Reset non-terminal states to pending-ish
             END
         RETURNING 
             id,
@@ -111,7 +103,9 @@ pub async fn insert_derivation(
         commit_id,
         derivation_type,
         target_name,
-        EvaluationStatus::DryRunPending.as_id()
+        EvaluationStatus::DryRunPending.as_id(),
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::BuildComplete.as_id(),
     )
     .fetch_one(pool)
     .await?;
@@ -143,16 +137,16 @@ pub async fn insert_derivation_with_target(
         VALUES ($1, $2, $3, $4, $5, 0, NOW())
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
         DO UPDATE SET
-            -- keep terminal states; otherwise reset to pending
+            -- keep terminal states; otherwise reset
             status_id = CASE
-                WHEN derivations.status_id IN (5, 6, 10, 12, 11, 13) THEN derivations.status_id
+                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.status_id
                 ELSE EXCLUDED.status_id
             END,
             -- keep/refresh target if provided
             derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),
             -- nudge the scheduler only for non-terminal rows
             scheduled_at = CASE
-                WHEN derivations.status_id IN (5, 6, 10, 12, 11, 13) THEN derivations.scheduled_at
+                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.scheduled_at
                 ELSE NOW()
             END
         RETURNING
@@ -178,11 +172,17 @@ pub async fn insert_derivation_with_target(
             cf_agent_enabled,
             store_path
         "#,
+        // $1..$5
         commit_id,
         derivation_type,
         derivation_name,
         derivation_target,
         EvaluationStatus::DryRunPending.as_id(),
+        // $6..$9  (terminal statuses)
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::DryRunFailed.as_id(),
+        EvaluationStatus::BuildComplete.as_id(),
+        EvaluationStatus::BuildFailed.as_id(),
     )
     .fetch_one(pool)
     .await?;
@@ -252,7 +252,9 @@ pub async fn insert_package_derivation(
         package_name,
         pname,
         version,
-        EvaluationStatus::Complete.as_id() // Packages found during scanning are already "complete"
+        // Previously: EvaluationStatus::Complete
+        // Use DryRunComplete to reflect “discovered/ready after dry-run”
+        EvaluationStatus::DryRunComplete.as_id()
     )
     .fetch_one(pool)
     .await?;
@@ -1306,7 +1308,7 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         AND attempt_count >= 5
         AND status_id != $1  -- Only update if not already in terminal failed state
         "#,
-        EvaluationStatus::DryRunFailed.as_id() // $1 = 6
+        EvaluationStatus::DryRunFailed.as_id() // 6
     )
     .execute(pool)
     .await?;
@@ -1319,24 +1321,23 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         AND attempt_count >= 5
         AND status_id != $1  -- Only update if not already in terminal failed state
         "#,
-        EvaluationStatus::BuildFailed.as_id() // $1 = 12
+        EvaluationStatus::BuildFailed.as_id() // 12
     )
     .execute(pool)
     .await?;
 
     // Then, reset derivations that should be retried (attempts < 5)
-    // Reset ALL non-terminal derivations with < 5 attempts to pending states
     let reset_dry_run_result = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NULL 
         AND attempt_count < 5
-        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
+        AND status_id NOT IN ($2, $3) -- success states that should never be reset
         "#,
-        EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
+        EvaluationStatus::DryRunPending.as_id(),  // 3
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+        EvaluationStatus::BuildComplete.as_id()   // 10
     )
     .execute(pool)
     .await?;
@@ -1347,11 +1348,11 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NOT NULL 
         AND attempt_count < 5
-        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
+        AND status_id NOT IN ($2, $3) -- success states that should never be reset
         "#,
-        EvaluationStatus::BuildPending.as_id(),   // $1 = 7
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
+        EvaluationStatus::BuildPending.as_id(),   // 7
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+        EvaluationStatus::BuildComplete.as_id()   // 10
     )
     .execute(pool)
     .await?;
@@ -1452,15 +1453,11 @@ pub async fn discover_and_insert_packages(
             let derivation_name = package_info
                 .pname
                 .as_ref()
-                .map(|name| {
-                    // Include version in the name if available for better identification
-                    match &package_info.version {
-                        Some(version) => format!("{}-{}", name, version),
-                        None => name.clone(),
-                    }
+                .map(|name| match &package_info.version {
+                    Some(version) => format!("{}-{}", name, version),
+                    None => name.clone(),
                 })
                 .unwrap_or_else(|| {
-                    // Extract a reasonable name from the derivation path if parsing fails
                     drv_path
                         .split('/')
                         .last()
@@ -1514,8 +1511,8 @@ pub async fn discover_and_insert_packages(
                 "#,
                 None::<i32>,     // commit_id is NULL for discovered packages
                 "package",       // derivation_type = "package"
-                derivation_name, // derivation_name (uses parsed package name)
-                drv_path,        // derivation_path (the actual .drv path)
+                derivation_name, // derivation_name
+                drv_path,        // derivation_path
                 package_info.pname.as_deref(), // pname
                 package_info.version.as_deref(), // version
                 EvaluationStatus::DryRunComplete.as_id()
