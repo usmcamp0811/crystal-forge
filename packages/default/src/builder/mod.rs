@@ -1,4 +1,3 @@
-use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
 use crate::models::derivations::{Derivation, DerivationType};
@@ -6,85 +5,22 @@ use crate::queries::build_reservations;
 use crate::queries::cache_push::{
     create_cache_push_job, get_derivations_needing_cache_push_for_dest,
     get_pending_cache_push_jobs, mark_cache_push_completed, mark_cache_push_failed,
-    mark_cache_push_in_progress, mark_derivation_cache_pushed,
+    mark_cache_push_in_progress,
 };
-use crate::queries::commits::get_commits_pending_evaluation;
 use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
     save_scan_results,
 };
 use crate::queries::derivations::{
-    EvaluationStatus, get_derivations_ready_for_build, mark_target_build_in_progress,
-    mark_target_failed, update_derivation_status,
-};
-use crate::queries::derivations::{
-    discover_and_queue_all_transitive_dependencies, handle_derivation_failure,
-    mark_target_build_complete,
+    EvaluationStatus, handle_derivation_failure, mark_target_build_complete,
+    update_derivation_status,
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
-use anyhow::bail;
 use sqlx::PgPool;
-use std::sync::Arc;
-use std::sync::OnceLock;
 use tokio::fs;
-use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
-
-/// New build strategy: discover all dependencies first, then build them individually
-async fn build_derivations_with_dependency_discovery(
-    pool: &PgPool,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    // Get ordered list of what to build (already prioritized by the query)
-    let ready_derivations = get_derivations_ready_for_build(pool).await?;
-
-    if ready_derivations.is_empty() {
-        info!("No derivations ready for building");
-        return Ok(());
-    }
-
-    let max_concurrent = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
-    let to_build: Vec<_> = ready_derivations.into_iter().take(max_concurrent).collect();
-
-    info!("Building {} derivations concurrently", to_build.len());
-
-    // Build them all concurrently
-    let mut tasks = Vec::new();
-    for mut derivation in to_build {
-        let pool = pool.clone();
-        let build_config = build_config.clone();
-
-        tasks.push(tokio::spawn(async move {
-            mark_target_build_in_progress(&pool, derivation.id)
-                .await
-                .ok();
-
-            match build_single_derivation(&pool, &mut derivation, &build_config).await {
-                Ok(store_path) => {
-                    info!("Built {}: {}", derivation.derivation_name, store_path);
-                    mark_target_build_complete(&pool, derivation.id, &store_path)
-                        .await
-                        .ok();
-                }
-                Err(e) => {
-                    error!("Build failed for {}: {}", derivation.derivation_name, e);
-                    handle_derivation_failure(&pool, &derivation, "build", &e)
-                        .await
-                        .ok();
-                }
-            }
-        }));
-    }
-
-    for task in tasks {
-        let _ = task.await;
-    }
-
-    Ok(())
-}
 
 /// Build a single derivation directly using nix-store --realise
 async fn build_single_derivation(
@@ -352,11 +288,6 @@ pub async fn run_cache_push_loop(pool: PgPool) {
 
         sleep(cache_config.poll_interval).await;
     }
-}
-
-/// Process derivations that need building
-async fn build_derivations(pool: &PgPool, build_config: &BuildConfig) -> Result<()> {
-    build_derivations_with_dependency_discovery(pool, build_config).await
 }
 
 /// Process derivations that need CVE scanning
