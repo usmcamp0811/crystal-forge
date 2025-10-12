@@ -189,26 +189,7 @@ impl Derivation {
             Err(e) => Err(e),
         }
     }
-    fn parse_input_drvs_from_json(json_str: &str) -> Result<Vec<String>> {
-        let parsed: serde_json::Value = serde_json::from_str(json_str)?;
 
-        let mut deps = Vec::new();
-
-        // nix derivation show returns a map of derivation paths to their info
-        if let Some(obj) = parsed.as_object() {
-            for (_drv_path, drv_info) in obj {
-                if let Some(input_drvs) = drv_info.get("inputDrvs") {
-                    if let Some(inputs) = input_drvs.as_object() {
-                        for (input_drv, _outputs) in inputs {
-                            deps.push(input_drv.to_string());
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(deps)
-    }
     /// Phase 1: Evaluate and discover all derivation paths (dry-run only)
     pub async fn dry_run_derivation_path(
         flake_target: &str,
@@ -702,6 +683,27 @@ async fn list_immediate_input_drvs(
         .and_then(|x| x.as_object())
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_else(Vec::new);
+
+    Ok(deps)
+}
+
+fn parse_input_drvs_from_json(json_str: &str) -> Result<Vec<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(json_str)?;
+
+    let mut deps = Vec::new();
+
+    // nix derivation show returns a map of derivation paths to their info
+    if let Some(obj) = parsed.as_object() {
+        for (_drv_path, drv_info) in obj {
+            if let Some(input_drvs) = drv_info.get("inputDrvs") {
+                if let Some(inputs) = input_drvs.as_object() {
+                    for (input_drv, _outputs) in inputs {
+                        deps.push(input_drv.to_string());
+                    }
+                }
+            }
+        }
+    }
 
     Ok(deps)
 }
