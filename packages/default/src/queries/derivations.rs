@@ -1639,7 +1639,14 @@ pub async fn get_latest_successful_derivation_for_flake(
 ) -> Result<Option<Derivation>> {
     let derivation = sqlx::query_as::<_, Derivation>(
         r#"
-        SELECT 
+        WITH latest_commit AS (
+          SELECT id
+          FROM commits
+          WHERE flake_id = $1
+          ORDER BY commit_timestamp DESC
+          LIMIT 1
+        )
+        SELECT
             d.id,
             d.commit_id,
             d.derivation_type,
@@ -1662,15 +1669,21 @@ pub async fn get_latest_successful_derivation_for_flake(
             d.cf_agent_enabled,
             d.store_path
         FROM derivations d
-        INNER JOIN commits c ON d.commit_id = c.id
-        INNER JOIN derivation_statuses ds ON d.status_id = ds.id
-        WHERE c.flake_id = $1
-        AND ds.name = 'cache-pushed'
-        AND ds.is_success = true
-        AND d.derivation_type = 'nixos'
-        ORDER BY d.completed_at DESC
+        JOIN latest_commit lc
+          ON d.commit_id = lc.id
+        -- Get the most recent *completed* cache push for this derivation, using an index-friendly pattern
+        JOIN LATERAL (
+          SELECT MAX(cpj.completed_at) AS last_cache_completed_at
+          FROM cache_push_jobs cpj
+          WHERE cpj.derivation_id = d.id
+            AND cpj.status = 'completed'
+        ) cd ON cd.last_cache_completed_at IS NOT NULL
+        WHERE d.derivation_type = 'nixos'
+        ORDER BY cd.last_cache_completed_at DESC NULLS LAST,
+                 d.completed_at DESC NULLS LAST,
+                 d.id DESC
         LIMIT 1
-        "#,
+        "#
     )
     .bind(flake_id)
     .fetch_optional(pool)
