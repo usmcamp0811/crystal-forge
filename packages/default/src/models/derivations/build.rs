@@ -189,56 +189,83 @@ impl Derivation {
             Err(e) => Err(e),
         }
     }
+    fn parse_input_drvs_from_json(json_str: &str) -> Result<Vec<String>> {
+        let parsed: serde_json::Value = serde_json::from_str(json_str)?;
 
+        let mut deps = Vec::new();
+
+        // nix derivation show returns a map of derivation paths to their info
+        if let Some(obj) = parsed.as_object() {
+            for (_drv_path, drv_info) in obj {
+                if let Some(input_drvs) = drv_info.get("inputDrvs") {
+                    if let Some(inputs) = input_drvs.as_object() {
+                        for (input_drv, _outputs) in inputs {
+                            deps.push(input_drv.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(deps)
+    }
     /// Phase 1: Evaluate and discover all derivation paths (dry-run only)
     pub async fn dry_run_derivation_path(
         flake_target: &str,
         build_config: &BuildConfig,
     ) -> Result<EvaluationResult> {
         info!("🔍 Evaluating derivation paths for: {}", flake_target);
+
+        // Step 1: Get the main derivation path using nix path-info
         let mut cmd = Command::new("nix");
-        cmd.args(["build", "--dry-run", flake_target]);
+        cmd.args(["path-info", "--derivation", flake_target]);
         build_config.apply_to_command(&mut cmd);
+
         let output = cmd.output().await?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             bail!(
-                "nix build --dry-run failed for target '{}': {}",
+                "nix path-info --derivation failed for target '{}': {}",
                 flake_target,
                 stderr.trim()
             );
         }
-        // Debug: log both stdout and stderr
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
 
-        debug!(
-            "nix build --dry-run stdout for {}: '{}'",
-            flake_target, stdout
-        );
-        debug!(
-            "nix build --dry-run stderr for {}: '{}'",
-            flake_target, stderr
-        );
+        let main_drv = String::from_utf8_lossy(&output.stdout).trim().to_string();
 
-        // Use the working parse_derivation_paths function
-        let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
+        if main_drv.is_empty() {
+            bail!("Got empty derivation path for {}", flake_target);
+        }
 
-        // Get the store path by querying what the derivation would produce
+        info!("🔍 main drv: {}", main_drv);
+
+        // Step 2: Get dependencies using nix derivation show
+        let mut deps_cmd = Command::new("nix");
+        deps_cmd.args(["derivation", "show", &main_drv]);
+        build_config.apply_to_command(&mut deps_cmd);
+
+        let deps_output = deps_cmd.output().await?;
+        let deps = if deps_output.status.success() {
+            parse_input_drvs_from_json(&String::from_utf8_lossy(&deps_output.stdout))?
+        } else {
+            warn!("Could not parse dependencies, continuing without them");
+            Vec::new()
+        };
+
+        // Step 3: Get the store path
         let store_path = resolve_drv_to_store_path_static(&main_drv).await?;
 
-        // Handle CF agent check gracefully - don't let it fail the whole evaluation
+        info!("🔍 store path: {}", store_path);
+        info!("🔍 {} immediate input drvs", deps.len());
+
+        // Step 4: Check CF agent
         let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
             Ok(enabled) => enabled,
             Err(e) => {
                 warn!("Could not determine Crystal Forge agent status: {}", e);
-                false // Default to false if we can't determine
+                false
             }
         };
-
-        info!("🔍 main drv: {main_drv}");
-        info!("🔍 store path: {store_path}");
-        info!("🔍 {} immediate input drvs", deps.len());
 
         Ok(EvaluationResult {
             main_derivation_path: main_drv,
