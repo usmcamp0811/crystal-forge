@@ -1633,11 +1633,24 @@ pub async fn clear_derivation_build_status(pool: &PgPool, derivation_id: i32) ->
     Ok(())
 }
 
-pub async fn get_latest_successful_derivation_for_flake(
+#[derive(Debug, Clone)]
+pub struct HostLatestTarget {
+    pub hostname: String,
+    pub derivation_id: i32,
+    pub derivation_target: String,
+    pub last_cache_completed_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+pub async fn get_latest_deployable_targets_for_flake_hosts(
     pool: &PgPool,
     flake_id: i32,
-) -> Result<Option<Derivation>> {
-    let derivation = sqlx::query_as::<_, Derivation>(
+    hostnames: &[String],
+) -> Result<Vec<HostLatestTarget>> {
+    if hostnames.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let rows = sqlx::query!(
         r#"
         WITH latest_commit AS (
           SELECT id
@@ -1645,51 +1658,53 @@ pub async fn get_latest_successful_derivation_for_flake(
           WHERE flake_id = $1
           ORDER BY commit_timestamp DESC
           LIMIT 1
+        ),
+        per_host AS (
+          SELECT
+            d.derivation_name                         AS hostname,
+            d.id                                       AS derivation_id,
+            d.derivation_target                        AS derivation_target,
+            MAX(cpj.completed_at)                      AS last_cache_completed_at,
+            ROW_NUMBER() OVER (
+              PARTITION BY d.derivation_name
+              ORDER BY MAX(cpj.completed_at) DESC NULLS LAST,
+                       MAX(d.completed_at) DESC NULLS LAST,
+                       MAX(d.id) DESC
+            ) AS rn
+          FROM derivations d
+          JOIN latest_commit lc
+            ON d.commit_id = lc.id
+          JOIN cache_push_jobs cpj
+            ON cpj.derivation_id = d.id
+           AND cpj.status = 'completed'
+          WHERE d.derivation_type = 'nixos'
+            AND d.derivation_target IS NOT NULL
+            AND d.derivation_name = ANY($2::text[])
+          GROUP BY d.derivation_name, d.id, d.derivation_target
         )
-        SELECT
-            d.id,
-            d.commit_id,
-            d.derivation_type,
-            d.derivation_name,
-            d.derivation_path,
-            d.scheduled_at,
-            d.completed_at,
-            d.started_at,
-            d.attempt_count,
-            d.evaluation_duration_ms,
-            d.error_message,
-            d.pname,
-            d.version,
-            d.status_id,
-            d.derivation_target,
-            d.build_elapsed_seconds,
-            d.build_current_target,
-            d.build_last_activity_seconds,
-            d.build_last_heartbeat,
-            d.cf_agent_enabled,
-            d.store_path
-        FROM derivations d
-        JOIN latest_commit lc
-          ON d.commit_id = lc.id
-        -- Get the most recent *completed* cache push for this derivation, using an index-friendly pattern
-        JOIN LATERAL (
-          SELECT MAX(cpj.completed_at) AS last_cache_completed_at
-          FROM cache_push_jobs cpj
-          WHERE cpj.derivation_id = d.id
-            AND cpj.status = 'completed'
-        ) cd ON cd.last_cache_completed_at IS NOT NULL
-        WHERE d.derivation_type = 'nixos'
-        ORDER BY cd.last_cache_completed_at DESC NULLS LAST,
-                 d.completed_at DESC NULLS LAST,
-                 d.id DESC
-        LIMIT 1
-        "#
+        SELECT hostname, derivation_id, derivation_target, last_cache_completed_at
+        FROM per_host
+        WHERE rn = 1
+        "#,
+        flake_id,
+        hostnames
     )
-    .bind(flake_id)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await?;
 
-    Ok(derivation)
+    let out = rows
+        .into_iter()
+        .filter_map(|r| {
+            Some(HostLatestTarget {
+                hostname: r.hostname?,
+                derivation_id: r.derivation_id?,
+                derivation_target: r.derivation_target?,
+                last_cache_completed_at: r.last_cache_completed_at.map(|ts| ts.into()),
+            })
+        })
+        .collect();
+
+    Ok(out)
 }
 
 /// Discover and queue all transitive dependencies for NixOS systems

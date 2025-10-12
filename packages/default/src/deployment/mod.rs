@@ -102,65 +102,71 @@ impl DeploymentPolicyManager {
         flake_id: i32,
         systems: Vec<crate::models::systems::System>,
     ) -> Result<usize> {
-        // Get the latest successful derivation for this flake
-        let latest_derivation =
-            match get_latest_successful_derivation_for_flake(&self.pool, flake_id).await? {
-                Some(derivation) => derivation,
-                None => {
-                    debug!("No successful derivations found for flake {}", flake_id);
-                    return Ok(0);
-                }
-            };
+        use std::collections::HashMap;
 
-        // Get the flake target from the successful derivation
-        let latest_flake_target = self.get_derivation_flake_target(&latest_derivation)?;
+        if systems.is_empty() {
+            return Ok(0);
+        }
+
+        // Collect hostnames we’re responsible for
+        let hostnames: Vec<String> = systems.iter().map(|s| s.hostname.clone()).collect();
+
+        // Fetch per-host latest deployable targets for the latest commit
+        let per_host =
+            get_latest_deployable_targets_for_flake_hosts(&self.pool, flake_id, &hostnames).await?;
+        let latest_by_host: HashMap<_, _> = per_host
+            .into_iter()
+            .map(|h| (h.hostname, h.derivation_target))
+            .collect();
+
         let mut updated_count = 0;
 
         for system in systems {
-            // Skip if system already has the latest flake target as desired target
-            if system.desired_target.as_ref() == Some(&latest_flake_target) {
-                debug!("System {} already has latest target", system.hostname);
+            // Defensive: ensure auto-latest
+            match system.get_deployment_policy() {
+                Ok(DeploymentPolicy::AutoLatest) => {}
+                Ok(other) => {
+                    warn!(
+                        "System {} has {:?}; skipping auto_latest updater",
+                        system.hostname, other
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    warn!("System {} has invalid policy: {}", system.hostname, e);
+                    continue;
+                }
+            }
+
+            let Some(latest_target_for_host) = latest_by_host.get(&system.hostname) else {
+                debug!(
+                    "No deployable nixos derivation on latest commit for host {}",
+                    system.hostname
+                );
+                continue;
+            };
+
+            if system.desired_target.as_deref() == Some(latest_target_for_host.as_str()) {
+                debug!("System {} already at latest target", system.hostname);
                 continue;
             }
 
-            // Skip if deployment policy is not auto_latest (defensive check)
-            match system.get_deployment_policy() {
-                Ok(DeploymentPolicy::AutoLatest) => {}
-                Ok(policy) => {
-                    warn!(
-                        "System {} has policy {:?} but was in auto_latest query",
-                        system.hostname, policy
-                    );
-                    continue;
-                }
-                Err(e) => {
-                    warn!(
-                        "System {} has invalid deployment policy: {}",
-                        system.hostname, e
-                    );
-                    continue;
-                }
-            }
-
-            // Update the system's desired target to the latest flake target
-            match update_desired_target(&self.pool, &system.hostname, Some(&latest_flake_target))
-                .await
+            if let Err(e) =
+                update_desired_target(&self.pool, &system.hostname, Some(latest_target_for_host))
+                    .await
             {
-                Ok(()) => {
-                    info!(
-                        "📋 Updated desired target for {}: {} -> {}",
-                        system.hostname,
-                        system.desired_target.as_deref().unwrap_or("(none)"),
-                        latest_flake_target
-                    );
-                    updated_count += 1;
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to update desired target for {}: {:#}",
-                        system.hostname, e
-                    );
-                }
+                error!(
+                    "Failed to set desired_target for {} -> {}: {:#}",
+                    system.hostname, latest_target_for_host, e
+                );
+            } else {
+                info!(
+                    "📋 Updated desired target for {}: {:?} -> {}",
+                    system.hostname,
+                    system.desired_target.as_deref(),
+                    latest_target_for_host
+                );
+                updated_count += 1;
             }
         }
 
