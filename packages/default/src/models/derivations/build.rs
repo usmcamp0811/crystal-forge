@@ -685,6 +685,7 @@ fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
 /// Build flake target for agent deployment (nixos-rebuild compatible)
 pub fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
+    debug!("Making Deployment Target for {system_name} ==> {flake_ref}#{system_name}");
     format!("{flake_ref}#{system_name}")
 }
 
