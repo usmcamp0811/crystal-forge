@@ -1,9 +1,9 @@
-use crate::flake::commits::sync_all_watched_flakes_commits;
-
 use crate::deployment::spawn_deployment_policy_manager;
+use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
 use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
+use crate::models::derivations::build_agent_target;
 use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::derivations::{
     get_pending_dry_run_derivations, handle_derivation_failure, increment_derivation_attempt_count,
@@ -44,10 +44,7 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
         flake_config.build_processing_interval,
     ));
 
-    tokio::spawn(spawn_deployment_policy_manager(
-        cfg,
-        deployment_pool,
-    ));
+    tokio::spawn(spawn_deployment_policy_manager(cfg, deployment_pool));
 }
 
 /// Runs the periodic flake polling loop to check for new commits
@@ -123,7 +120,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
 
                         for derivation_name in nixos_targets {
                             // Build the complete flake target string
-                            let derivation_target = build_flake_target_string(
+                            let derivation_target = build_agent_target(
                                 &flake.repo_url,
                                 &commit.git_commit_hash,
                                 &derivation_name,
@@ -161,23 +158,6 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
         Err(e) => error!("❌ Failed to get pending commits: {e}"),
     }
     Ok(())
-}
-
-/// Helper function to build flake target string
-fn build_flake_target_string(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
-    let is_path = std::path::Path::new(repo_url).exists();
-
-    if is_path {
-        format!("{repo_url}#nixosConfigurations.{system_name}.config.system.build.toplevel")
-    } else if repo_url.starts_with("git+") {
-        format!(
-            "{repo_url}?rev={commit_hash}#nixosConfigurations.{system_name}.config.system.build.toplevel"
-        )
-    } else {
-        format!(
-            "git+{repo_url}?rev={commit_hash}#nixosConfigurations.{system_name}.config.system.build.toplevel"
-        )
-    }
 }
 
 async fn process_pending_derivations(pool: &PgPool) -> Result<()> {

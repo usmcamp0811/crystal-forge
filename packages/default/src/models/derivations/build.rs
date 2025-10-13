@@ -38,9 +38,11 @@ impl Derivation {
 
                 let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
                 let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
-                let flake_target = self
-                    .build_flake_target_string(&flake, &commit, true)
-                    .await?;
+                let flake_target = build_evaluation_target(
+                    &flake.repo_url,
+                    &commit.git_commit_hash,
+                    &self.derivation_name,
+                );
 
                 if full_build {
                     self.evaluate_and_build_nixos(pool, &flake_target, build_config)
@@ -522,48 +524,6 @@ impl Derivation {
             || error_msg.contains("Interactive authentication required")
             || error_msg.contains("systemd")
     }
-
-    /// Helper to build the flake target string
-    async fn build_flake_target_string(
-        &self,
-        flake: &crate::models::flakes::Flake,
-        commit: &crate::models::commits::Commit,
-        include_build_toplevel: bool,
-    ) -> Result<String> {
-        let system = &self.derivation_name;
-        let flake_ref = if Path::new(&flake.repo_url).exists() {
-            let abs = std::fs::canonicalize(&flake.repo_url)
-                .with_context(|| format!("canonicalize {}", flake.repo_url))?;
-            format!(
-                "git+file://{}?rev={}",
-                abs.display(),
-                commit.git_commit_hash
-            )
-        } else if flake.repo_url.starts_with("git+") {
-            if flake.repo_url.contains("?rev=") {
-                flake.repo_url.clone()
-            } else {
-                format!("{}?rev={}", flake.repo_url, commit.git_commit_hash)
-            }
-        } else {
-            let separator = if flake.repo_url.contains('?') {
-                "&"
-            } else {
-                "?"
-            };
-            format!(
-                "git+{}{separator}rev={}",
-                flake.repo_url, commit.git_commit_hash
-            )
-        };
-        if include_build_toplevel {
-            Ok(format!(
-                "{flake_ref}#nixosConfigurations.{system}.config.system.build.toplevel"
-            ))
-        } else {
-            Ok(format!("{flake_ref}#nixosConfigurations.{system}"))
-        }
-    }
 }
 
 /// Check if this derivation has Crystal Forge agent enabled
@@ -706,4 +666,30 @@ fn parse_input_drvs_from_json(json_str: &str) -> Result<Vec<String>> {
     }
 
     Ok(deps)
+}
+
+/// Build the base flake reference (git+url?rev=hash)
+fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
+    if repo_url.starts_with("git+") {
+        if repo_url.contains("?rev=") {
+            repo_url.to_string()
+        } else {
+            format!("{}?rev={}", repo_url, commit_hash)
+        }
+    } else {
+        let separator = if repo_url.contains('?') { "&" } else { "?" };
+        format!("git+{}{separator}rev={}", repo_url, commit_hash)
+    }
+}
+
+/// Build flake target for agent deployment (nixos-rebuild compatible)
+pub fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
+    let flake_ref = build_flake_reference(repo_url, commit_hash);
+    format!("{flake_ref}#nixosConfigurations.{system_name}")
+}
+
+/// Build flake target for evaluation (nix path-info compatible)
+pub fn build_evaluation_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
+    let flake_ref = build_flake_reference(repo_url, commit_hash);
+    format!("{flake_ref}#nixosConfigurations.{system_name}.config.system.build.toplevel")
 }
