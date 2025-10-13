@@ -1,5 +1,6 @@
 use crate::models::commits::Commit;
 use crate::models::config::BuildConfig; // Add this line
+use crate::models::derivations::build_agent_target;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
 use anyhow::Result;
 use anyhow::anyhow;
@@ -1641,6 +1642,7 @@ pub struct HostLatestTarget {
     pub last_cache_completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+// src/db/queries.rs
 pub async fn get_latest_deployable_targets_for_flake_hosts(
     pool: &PgPool,
     flake_id: i32,
@@ -1650,10 +1652,11 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
         return Ok(vec![]);
     }
 
+    // NOTE: pass `hostnames` as a TEXT[] (Vec<String>) to $2
     let rows = sqlx::query!(
         r#"
         WITH latest_commit AS (
-          SELECT id
+          SELECT id, flake_id, git_commit_hash
           FROM commits
           WHERE flake_id = $1
           ORDER BY commit_timestamp DESC
@@ -1661,28 +1664,44 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
         ),
         per_host AS (
           SELECT
-            d.derivation_name                         AS hostname,
-            d.id                                       AS derivation_id,
-            d.derivation_target                        AS derivation_target,
-            MAX(cpj.completed_at)                      AS last_cache_completed_at,
+            d.derivation_name AS hostname,
+            d.id              AS derivation_id,
+            d.derivation_target,
+            f.repo_url        AS repo_url,
+            lc.git_commit_hash AS commit_hash,
+            MAX(cpj.completed_at) AS last_cache_completed_at,
             ROW_NUMBER() OVER (
               PARTITION BY d.derivation_name
-              ORDER BY MAX(cpj.completed_at) DESC NULLS LAST,
-                       MAX(d.completed_at) DESC NULLS LAST,
-                       MAX(d.id) DESC
+              ORDER BY
+                MAX(cpj.completed_at) DESC NULLS LAST,
+                MAX(d.completed_at)   DESC NULLS LAST,
+                MAX(d.id)             DESC
             ) AS rn
           FROM derivations d
           JOIN latest_commit lc
             ON d.commit_id = lc.id
+          JOIN flakes f
+            ON lc.flake_id = f.id
           JOIN cache_push_jobs cpj
             ON cpj.derivation_id = d.id
            AND cpj.status = 'completed'
           WHERE d.derivation_type = 'nixos'
             AND d.derivation_target IS NOT NULL
             AND d.derivation_name = ANY($2::text[])
-          GROUP BY d.derivation_name, d.id, d.derivation_target
+          GROUP BY
+            d.derivation_name,
+            d.id,
+            d.derivation_target,
+            f.repo_url,
+            lc.git_commit_hash
         )
-        SELECT hostname, derivation_id, derivation_target, last_cache_completed_at
+        SELECT
+          hostname,
+          derivation_id,
+          derivation_target,
+          last_cache_completed_at,
+          repo_url,
+          commit_hash
         FROM per_host
         WHERE rn = 1
         "#,
@@ -1694,11 +1713,18 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
 
     let out = rows
         .into_iter()
-        .map(|r| HostLatestTarget {
-            hostname: r.hostname,
-            derivation_id: r.derivation_id,
-            derivation_target: r.derivation_target, // Option<String>
-            last_cache_completed_at: r.last_cache_completed_at, // Option<DateTime<Utc>>
+        .map(|r| {
+            let hostname = r.hostname.clone();
+            HostLatestTarget {
+                hostname: hostname,
+                derivation_id: r.derivation_id,
+                derivation_target: Some(build_agent_target(
+                    &r.repo_url,
+                    &r.commit_hash,
+                    &r.hostname,
+                )),
+                last_cache_completed_at: r.last_cache_completed_at,
+            }
         })
         .collect();
 
