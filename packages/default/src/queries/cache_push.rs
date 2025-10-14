@@ -2,7 +2,7 @@ use crate::queries::derivations::EvaluationStatus;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
-use tracing::{debug, error};
+use tracing::{debug, error, warn};
 
 #[derive(Debug, FromRow)]
 pub struct CachePushJob {
@@ -265,4 +265,31 @@ pub async fn get_pending_cache_push_jobs(
 
     debug!("Found {} pending cache push jobs", jobs.len());
     Ok(jobs)
+}
+
+pub async fn cleanup_stale_cache_push_jobs(pool: &PgPool, timeout_minutes: i32) -> Result<()> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cache_push_jobs 
+        SET 
+            status = 'failed',
+            error_message = 'Job timeout - stuck in progress',
+            completed_at = NOW()
+        WHERE status = 'in_progress'
+            AND started_at < NOW() - ($1 || ' minutes')::INTERVAL
+            AND attempts < 5
+        "#,
+    )
+    .bind(timeout_minutes)
+    .execute(pool)
+    .await?;
+
+    if result.rows_affected() > 0 {
+        warn!(
+            "🧹 Cleaned up {} stale cache push jobs",
+            result.rows_affected()
+        );
+    }
+
+    Ok(())
 }

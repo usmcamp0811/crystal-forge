@@ -3,9 +3,9 @@ use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, Vulnix
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::build_reservations;
 use crate::queries::cache_push::{
-    create_cache_push_job, get_derivations_needing_cache_push_for_dest,
-    get_pending_cache_push_jobs, mark_cache_push_completed, mark_cache_push_failed,
-    mark_cache_push_in_progress,
+    cleanup_stale_cache_push_jobs, create_cache_push_job,
+    get_derivations_needing_cache_push_for_dest, get_pending_cache_push_jobs,
+    mark_cache_push_completed, mark_cache_push_failed, mark_cache_push_in_progress,
 };
 use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
@@ -462,6 +462,8 @@ pub async fn process_cache_pushes(
         }
         Err(e) => error!("❌ Failed to get derivations needing cache push: {e}"),
     }
+
+    cleanup_stale_cache_push_jobs(pool, 10).await.ok();
 
     // Step 2: Process pending jobs
     match get_pending_cache_push_jobs(pool, Some(5)).await {
