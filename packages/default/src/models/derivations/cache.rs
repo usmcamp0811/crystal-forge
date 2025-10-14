@@ -19,6 +19,7 @@ impl Derivation {
     ) -> Result<()> {
         let mut attempts = 0;
         let max_attempts = cache_config.max_retries + 1;
+        let base_delay = cache_config.retry_delay_seconds;
 
         while attempts < max_attempts {
             match self
@@ -27,12 +28,28 @@ impl Derivation {
             {
                 Ok(()) => return Ok(()),
                 Err(e) if attempts < max_attempts - 1 => {
+                    let err_msg = e.to_string();
+
+                    // Terminal errors - don't retry
+                    if err_msg.contains("SSL connect error")
+                        || err_msg.contains("certificate verify failed")
+                        || err_msg.contains("Name or service not known")
+                        || err_msg.contains("no substituter that can build it")
+                        || err_msg.contains("don't know how to build these paths")
+                    {
+                        error!("❌ Terminal cache push error, not retrying: {}", e);
+                        return Err(e);
+                    }
+
+                    // Exponential backoff: 5s, 10s, 20s, 40s, 80s
+                    let delay_secs = base_delay * (2_u64.pow(attempts as u32));
                     warn!(
-                        "Cache push attempt {} failed: {}, retrying...",
+                        "Cache push attempt {} failed: {}, retrying in {}s...",
                         attempts + 1,
-                        e
+                        e,
+                        delay_secs
                     );
-                    sleep(Duration::from_secs(cache_config.retry_delay_seconds)).await;
+                    sleep(Duration::from_secs(delay_secs)).await;
                     attempts += 1;
                 }
                 Err(e) => return Err(e),
