@@ -165,9 +165,30 @@ impl AgentDeploymentManager {
             .output()
             .context("Failed to execute nixos-rebuild dry-run")?;
 
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Always log output for debugging
+        if !stdout.is_empty() {
+            debug!("nixos-rebuild dry-run stdout: {}", stdout);
+        }
+        if !stderr.is_empty() {
+            debug!("nixos-rebuild dry-run stderr: {}", stderr);
+        }
+
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Dry-run failed: {}", stderr);
+            error!(
+                "nixos-rebuild dry-run failed with exit code: {:?}",
+                output.status.code()
+            );
+            error!("stdout: {}", stdout);
+            error!("stderr: {}", stderr);
+            anyhow::bail!(
+                "Dry-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            );
         }
 
         debug!("Dry-run completed successfully");
@@ -194,8 +215,16 @@ impl AgentDeploymentManager {
             .context("Failed to execute nixos-rebuild switch with cache")?;
 
         if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Cache deployment failed: {}", stderr);
+            error!("Cache deployment stdout: {}", stdout);
+            error!("Cache deployment stderr: {}", stderr);
+            anyhow::bail!(
+                "Cache deployment failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            );
         }
 
         Ok(DeploymentResult::SuccessFromCache {
@@ -203,7 +232,6 @@ impl AgentDeploymentManager {
         })
     }
 
-    /// Deploy using local build
     async fn deploy_local_build(&self, target: &str) -> Result<DeploymentResult> {
         info!("Deploying with local build: {}", target);
 
@@ -213,8 +241,16 @@ impl AgentDeploymentManager {
             .context("Failed to execute nixos-rebuild switch")?;
 
         if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Local build deployment failed: {}", stderr);
+            error!("Local build deployment stdout: {}", stdout);
+            error!("Local build deployment stderr: {}", stderr);
+            anyhow::bail!(
+                "Local build deployment failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            );
         }
 
         Ok(DeploymentResult::SuccessLocalBuild)
