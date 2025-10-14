@@ -466,10 +466,6 @@ pub async fn process_cache_pushes(
     // Step 2: Process pending jobs
     match get_pending_cache_push_jobs(pool, Some(5)).await {
         Ok(jobs) => {
-            if jobs.is_empty() {
-                return Ok(());
-            }
-
             for job in jobs {
                 // Mark job as in-progress
                 if let Err(e) = mark_cache_push_in_progress(pool, job.id).await {
