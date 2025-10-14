@@ -199,18 +199,34 @@ impl AgentDeploymentManager {
     async fn deploy_from_cache(&self, target: &str, cache_url: &str) -> Result<DeploymentResult> {
         info!("Deploying from cache: {} (target: {})", cache_url, target);
 
-        let output = Command::new("nixos-rebuild")
-            .args(&[
-                "switch",
-                "--flake",
-                target,
+        let mut args = vec![
+            "switch",
+            "--flake",
+            target,
+            "--option",
+            "substituters",
+            cache_url,
+        ];
+
+        // Add signature verification if public key is configured
+        if let Some(ref public_key) = self.config.cache_public_key {
+            args.extend_from_slice(&[
                 "--option",
-                "substituters",
-                cache_url,
+                "trusted-public-keys",
+                public_key,
                 "--option",
                 "require-sigs",
                 "true",
-            ])
+            ]);
+            debug!("Using cache with signature verification");
+        } else {
+            // No public key configured, proceed without signature verification
+            warn!("No cache public key configured, skipping signature verification");
+            args.extend_from_slice(&["--option", "require-sigs", "false"]);
+        }
+
+        let output = Command::new("nixos-rebuild")
+            .args(&args)
             .output()
             .context("Failed to execute nixos-rebuild switch with cache")?;
 
