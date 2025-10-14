@@ -261,13 +261,12 @@ pub async fn run_cache_push_loop(pool: PgPool) {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
         CrystalForgeConfig::default()
     });
-
     let cache_config = cfg.get_cache_config();
     let build_config = cfg.get_build_config();
 
-    // Only start cache loop if push_after_build is enabled
-    if !cache_config.push_after_build {
-        info!("📤 Cache push disabled in configuration");
+    // Check if cache is configured, not push_after_build
+    if cache_config.push_to.is_none() {
+        info!("📤 Cache push loop disabled - no cache destination configured");
         return;
     }
 
@@ -275,17 +274,15 @@ pub async fn run_cache_push_loop(pool: PgPool) {
         "🔍 Starting Cache Push loop (every {}s)...",
         cache_config.poll_interval.as_secs()
     );
-
     debug!(
-        "🔧 Cache config: push_after_build={}, push_to={:?}",
-        cache_config.push_after_build, cache_config.push_to
+        "🔧 Cache config: push_to={:?}, cache_type={:?}",
+        cache_config.push_to, cache_config.cache_type
     );
 
     loop {
         if let Err(e) = process_cache_pushes(&pool, &cache_config, &build_config).await {
             error!("❌ Error in cache push cycle: {e}");
         }
-
         sleep(cache_config.poll_interval).await;
     }
 }
