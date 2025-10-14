@@ -13,6 +13,7 @@ pub struct DeploymentConfig {
     pub fallback_to_local_build: bool,
     pub deployment_timeout_minutes: u64,
     pub cache_url: Option<String>,
+    pub cache_public_key: Option<String>,
     #[serde(with = "duration_serde")]
     pub deployment_poll_interval: Duration,
 }
@@ -26,6 +27,7 @@ impl Default for DeploymentConfig {
             fallback_to_local_build: false,
             deployment_timeout_minutes: 60,
             cache_url: None,
+            cache_public_key: None,
             deployment_poll_interval: Duration::from_secs(60),
         }
     }
