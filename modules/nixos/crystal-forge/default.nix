@@ -54,8 +54,6 @@
         }
         // lib.optionalAttrs (cfg.deployment.cache_url != null) {
           cache_url = cfg.deployment.cache_url;
-        };
-        // lib.optionalAttrs (cfg.deployment.cache_public_key != null) {
           cache_public_key = cfg.deployment.cache_public_key;
         };
     }
@@ -527,11 +525,6 @@ in {
         default = null;
         description = "Signing key path";
       };
-      public_key = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
-        default = null;
-        description = "Public key for verifying cache signatures (used in trusted-public-keys)";
-      };
       compression = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
@@ -750,8 +743,8 @@ in {
       substituters = lib.mkIf (cfg.cache.push_to != null) [
         cfg.cache.push_to
       ];
-      trusted-public-keys = lib.mkIf (cfg.cache.public_key != null) [
-        cfg.cache.public_key
+      trusted-public-keys = lib.mkIf (cfg.deployment.public_key != null) [
+        cfg.deployment.public_key
       ];
     };
 
