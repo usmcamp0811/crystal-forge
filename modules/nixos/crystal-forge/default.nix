@@ -600,7 +600,7 @@ in {
         default = null;
         description = "Cache URL for deployment artifacts";
       };
-      cahce_public_key = lib.mkOption {
+      cache_public_key = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Cache Public Key for deployment artifacts";
@@ -743,8 +743,8 @@ in {
       substituters = lib.mkIf (cfg.cache.push_to != null) [
         cfg.cache.push_to
       ];
-      trusted-public-keys = lib.mkIf (cfg.deployment.public_key != null) [
-        cfg.deployment.public_key
+      trusted-public-keys = lib.mkIf (cfg.deployment.cache_public_key != null) [
+        cfg.deployment.cache_public_key
       ];
     };
 
