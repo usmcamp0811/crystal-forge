@@ -22,14 +22,18 @@ impl Derivation {
         let base_delay = cache_config.retry_delay_seconds;
 
         while attempts < max_attempts {
-            match self
-                .push_to_cache(store_path, cache_config, build_config)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(e) if attempts < max_attempts - 1 => {
-                    let err_msg = e.to_string();
+            // Add timeout wrapper - default 10 minutes per attempt
+            let timeout_duration = Duration::from_secs(cache_config.push_timeout_seconds);
 
+            match tokio::time::timeout(
+                timeout_duration,
+                self.push_to_cache(store_path, cache_config, build_config),
+            )
+            .await
+            {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(e)) if attempts < max_attempts - 1 => {
+                    let err_msg = e.to_string();
                     // Terminal errors - don't retry
                     if err_msg.contains("SSL connect error")
                         || err_msg.contains("certificate verify failed")
@@ -40,7 +44,6 @@ impl Derivation {
                         error!("❌ Terminal cache push error, not retrying: {}", e);
                         return Err(e);
                     }
-
                     // Exponential backoff: 5s, 10s, 20s, 40s, 80s
                     let delay_secs = base_delay * (2_u64.pow(attempts as u32));
                     warn!(
@@ -52,10 +55,28 @@ impl Derivation {
                     sleep(Duration::from_secs(delay_secs)).await;
                     attempts += 1;
                 }
-                Err(e) => return Err(e),
+                Ok(Err(e)) => return Err(e),
+                Err(_timeout) => {
+                    if attempts < max_attempts - 1 {
+                        let delay_secs = base_delay * (2_u64.pow(attempts as u32));
+                        warn!(
+                            "Cache push attempt {} timed out after {}s, retrying in {}s...",
+                            attempts + 1,
+                            timeout_duration.as_secs(),
+                            delay_secs
+                        );
+                        sleep(Duration::from_secs(delay_secs)).await;
+                        attempts += 1;
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Cache push timed out after {} attempts ({}s each)",
+                            max_attempts,
+                            timeout_duration.as_secs()
+                        ));
+                    }
+                }
             }
         }
-
         unreachable!()
     }
 

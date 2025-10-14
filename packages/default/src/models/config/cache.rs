@@ -30,6 +30,8 @@ pub struct CacheConfig {
         with = "duration_serde"
     )]
     pub poll_interval: Duration,
+    #[serde(default = "CacheConfig::default_push_timeout_seconds")]
+    pub push_timeout_seconds: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -61,6 +63,10 @@ impl CacheConfig {
 
     fn default_poll_interval() -> Duration {
         Duration::from_secs(30)
+    }
+
+    fn default_push_timeout_seconds() -> u64 {
+        600 // 10 minutes
     }
 
     /// Returns the command and arguments for cache operations
@@ -161,6 +167,7 @@ impl Default for CacheConfig {
             max_retries: 3,
             retry_delay_seconds: 5,
             poll_interval: Self::default_poll_interval(),
+            push_timeout_seconds: Self::default_push_timeout_seconds(),
         }
     }
 }
