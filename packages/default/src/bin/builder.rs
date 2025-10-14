@@ -16,8 +16,8 @@ async fn main() -> anyhow::Result<()> {
     CrystalForgeConfig::validate_db_connection().await?;
 
     info!("Starting Crystal Forge Builder...");
-
     let pool = CrystalForgeConfig::db_pool().await?;
+
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
 
@@ -40,6 +40,9 @@ async fn main() -> anyhow::Result<()> {
             result = cache_handle => {
                 error!("Cache push loop exited unexpectedly: {:?}", result);
             }
+            _ = signal::ctrl_c() => {
+                info!("Received shutdown signal");
+            }
         }
     } else {
         info!("📤 Cache push disabled in configuration");
@@ -51,6 +54,9 @@ async fn main() -> anyhow::Result<()> {
             }
             result = cve_scan_handle => {
                 error!("CVE scan loop exited unexpectedly: {:?}", result);
+            }
+            _ = signal::ctrl_c() => {
+                info!("Received shutdown signal");
             }
         }
     }

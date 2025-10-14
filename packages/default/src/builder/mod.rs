@@ -264,7 +264,6 @@ pub async fn run_cache_push_loop(pool: PgPool) {
     let cache_config = cfg.get_cache_config();
     let build_config = cfg.get_build_config();
 
-    // Check if cache is configured, not push_after_build
     if cache_config.push_to.is_none() {
         info!("📤 Cache push loop disabled - no cache destination configured");
         return;
@@ -279,10 +278,20 @@ pub async fn run_cache_push_loop(pool: PgPool) {
         cache_config.push_to, cache_config.cache_type
     );
 
+    let mut iteration = 0;
     loop {
+        iteration += 1;
+        debug!("📤 Cache push loop iteration {} starting", iteration);
+
         if let Err(e) = process_cache_pushes(&pool, &cache_config, &build_config).await {
             error!("❌ Error in cache push cycle: {e}");
         }
+
+        debug!(
+            "📤 Cache push loop iteration {} complete, sleeping for {}s",
+            iteration,
+            cache_config.poll_interval.as_secs()
+        );
         sleep(cache_config.poll_interval).await;
     }
 }
