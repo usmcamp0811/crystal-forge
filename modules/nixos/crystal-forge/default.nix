@@ -55,6 +55,9 @@
         // lib.optionalAttrs (cfg.deployment.cache_url != null) {
           cache_url = cfg.deployment.cache_url;
         };
+        // lib.optionalAttrs (cfg.deployment.cache_public_key != null) {
+          cache_public_key = cfg.deployment.cache_public_key;
+        };
     }
     // lib.optionalAttrs (cfg.systems != []) {
       # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
@@ -603,6 +606,11 @@ in {
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Cache URL for deployment artifacts";
+      };
+      cahce_public_key = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        description = "Cache Public Key for deployment artifacts";
       };
       deployment_poll_interval = lib.mkOption {
         type = lib.types.str;
