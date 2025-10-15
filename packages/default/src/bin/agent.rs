@@ -13,6 +13,7 @@ use std::{ffi::OsStr, fs, path::PathBuf, process::Command, sync::Arc};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
+use tracing_subscriber::EnvFilter;
 
 // Agent state that holds the deployment manager
 struct AgentState {
@@ -30,6 +31,9 @@ impl AgentState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::from_default_env())
+        .init();
     // Initialize agent state with deployment manager
     let agent_state = Arc::new(Mutex::new(AgentState::new()?));
     watch_system(agent_state).await
