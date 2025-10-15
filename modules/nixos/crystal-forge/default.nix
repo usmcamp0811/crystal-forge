@@ -1125,12 +1125,16 @@ in {
 
         # Allow writes where we actually need them
         ReadWritePaths = [
+          "/nix/var/nix/profiles"
+          "/nix/var/nix/gcroots"
+          "/boot"
           "/var/lib/crystal-forge"
           "/var/cache/crystal-forge"
           "/tmp"
           "/run/crystal-forge"
         ];
-
+        # Also ensure read-only access to CA bundle (good practice):
+        ReadOnlyPaths = ["/etc/ssl/certs"];
         PrivateTmp = true;
         Restart = "always";
         RestartSec = 5;
