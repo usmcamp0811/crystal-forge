@@ -1090,6 +1090,7 @@ in {
         findutils
         vulnix
         nix
+        nixos-rebuild
       ];
       environment = {
         RUST_LOG = cfg.log_level;
