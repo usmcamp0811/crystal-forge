@@ -1091,6 +1091,7 @@ in {
         vulnix
         nix
         nixos-rebuild
+        git
       ];
       environment = {
         RUST_LOG = cfg.log_level;
