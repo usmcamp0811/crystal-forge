@@ -2,6 +2,7 @@ use crate::handlers::agent::heartbeat::LogResponse;
 use crate::models::config::deployment::DeploymentConfig;
 use anyhow::{Context, Result};
 use std::process::Command;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 /// Result of a deployment operation
@@ -66,6 +67,7 @@ impl DeploymentResult {
 pub struct AgentDeploymentManager {
     config: DeploymentConfig,
     current_target: Option<String>,
+    deployment_lock: Arc<Semaphore>,
 }
 
 impl AgentDeploymentManager {
@@ -73,6 +75,7 @@ impl AgentDeploymentManager {
         Self {
             config,
             current_target: None,
+            deployment_lock: Arc::new(Semaphore::new(1)), // Only 1 deployment at a time
         }
     }
 
@@ -117,6 +120,9 @@ impl AgentDeploymentManager {
 
     /// Execute the actual deployment
     async fn execute_deployment(&self, target: &str) -> Result<DeploymentResult> {
+        // Acquire the lock - if another deployment is running, this will wait
+        let _permit = self.deployment_lock.acquire().await?;
+
         info!("Starting deployment execution for: {}", target);
 
         // Optionally run dry-run first
@@ -251,14 +257,37 @@ impl AgentDeploymentManager {
     async fn deploy_local_build(&self, target: &str) -> Result<DeploymentResult> {
         info!("Deploying with local build: {}", target);
 
-        let output = Command::new("nixos-rebuild")
-            .args(&["switch", "--flake", target])
-            .output()
-            .context("Failed to execute nixos-rebuild switch")?;
+        const MAX_RETRIES: u32 = 3;
+        const RETRY_DELAY_SECS: u64 = 10;
 
-        if !output.status.success() {
+        for attempt in 1..=MAX_RETRIES {
+            let output = Command::new("nixos-rebuild")
+                .args(&["switch", "--flake", target])
+                .output()
+                .context("Failed to execute nixos-rebuild switch")?;
+
+            if output.status.success() {
+                return Ok(DeploymentResult::SuccessLocalBuild);
+            }
+
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
+
+            // Check if it's a lock error
+            if stderr.contains("Could not acquire lock") {
+                if attempt < MAX_RETRIES {
+                    warn!(
+                        "Could not acquire lock (attempt {}/{}), retrying in {} seconds...",
+                        attempt, MAX_RETRIES, RETRY_DELAY_SECS
+                    );
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
+                    continue;
+                } else {
+                    error!("Failed to acquire lock after {} attempts", MAX_RETRIES);
+                }
+            }
+
+            // Not a lock error or final attempt - log and fail
             error!("Local build deployment stdout: {}", stdout);
             error!("Local build deployment stderr: {}", stderr);
             anyhow::bail!(
@@ -269,7 +298,43 @@ impl AgentDeploymentManager {
             );
         }
 
-        Ok(DeploymentResult::SuccessLocalBuild)
+        // Should never reach here, but just in case
+        anyhow::bail!("Failed to deploy after {} retries", MAX_RETRIES)
+    }
+
+    async fn handle_stale_locks(&self) -> Result<()> {
+        // Check if nixos-rebuild is running
+        let check = Command::new("pgrep")
+            .args(&["-f", "nixos-rebuild"])
+            .output()
+            .await?;
+
+        if check.status.success() && !check.stdout.is_empty() {
+            warn!("Another nixos-rebuild process appears to be running");
+            // Wait a bit for it to finish
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+
+        Ok(())
+    }
+
+    async fn force_clear_locks(&self) -> Result<()> {
+        warn!("Attempting to clear system profile locks");
+
+        // Remove lock files (requires root)
+        let lock_paths = [
+            "/nix/var/nix/profiles/system.lock",
+            "/nix/var/nix/profiles/per-user/root/profile.lock",
+        ];
+
+        for lock_path in &lock_paths {
+            if std::path::Path::new(lock_path).exists() {
+                info!("Removing stale lock: {}", lock_path);
+                let _ = Command::new("rm").arg("-f").arg(lock_path).output().await;
+            }
+        }
+
+        Ok(())
     }
 
     /// Update current target (called when system state changes)
