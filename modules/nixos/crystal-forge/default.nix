@@ -1097,6 +1097,10 @@ in {
         CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
         CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
         CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
+        # make nix/git caches writable for the agent
+        HOME = "/var/lib/crystal-forge";
+        XDG_CACHE_HOME = "/var/lib/crystal-forge/.cache";
+        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge";
       };
 
       serviceConfig = {
@@ -1105,18 +1109,28 @@ in {
         User = "root";
         Group = "root";
 
+        # Keep state + runtime under /var/lib and /run
         StateDirectory = "crystal-forge";
         StateDirectoryMode = "0750";
         RuntimeDirectory = "crystal-forge";
         RuntimeDirectoryMode = "0700";
         WorkingDirectory = "/var/lib/crystal-forge";
 
+        CacheDirectory = "crystal-forge";
+
         NoNewPrivileges = true;
         ProtectSystem = "strict";
         ProtectHome = true;
-        ReadWritePaths = ["/var/lib/crystal-forge"];
-        PrivateTmp = true;
 
+        # Allow writes where we actually need them
+        ReadWritePaths = [
+          "/var/lib/crystal-forge"
+          "/var/cache/crystal-forge"
+          "/tmp"
+          "/run/crystal-forge"
+        ];
+
+        PrivateTmp = true;
         Restart = "always";
         RestartSec = 5;
       };
