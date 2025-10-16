@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
 use tracing::{debug, error, warn};
 
-#[derive(Debug, FromRow)]
+#[derive(Debug, FromRow, Clone)]
 pub struct CachePushJob {
     pub id: i32,
     pub derivation_id: i32,

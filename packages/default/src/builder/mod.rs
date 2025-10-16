@@ -17,6 +17,7 @@ use crate::queries::derivations::{
 };
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
+use futures::FutureExt;
 use sqlx::PgPool;
 use tokio::fs;
 use tokio::time::sleep;
@@ -255,7 +256,7 @@ pub async fn run_cve_scan_loop(pool: PgPool) {
     }
 }
 
-/// Runs the periodic cache push loop
+/// Runs the periodic cache push loop with robust error handling
 pub async fn run_cache_push_loop(pool: PgPool) {
     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
         warn!("Failed to load Crystal Forge config: {}, using defaults", e);
@@ -270,7 +271,7 @@ pub async fn run_cache_push_loop(pool: PgPool) {
     }
 
     info!(
-        "🔍 Starting Cache Push loop (every {}s)...",
+        "🔄 Starting Cache Push loop (every {}s)...",
         cache_config.poll_interval.as_secs()
     );
     debug!(
@@ -279,20 +280,69 @@ pub async fn run_cache_push_loop(pool: PgPool) {
     );
 
     let mut iteration = 0;
+    let mut consecutive_failures = 0;
+
     loop {
         iteration += 1;
         debug!("📤 Cache push loop iteration {} starting", iteration);
 
-        if let Err(e) = process_cache_pushes(&pool, &cache_config, &build_config).await {
-            error!("❌ Error in cache push cycle: {e}");
+        // Add a global timeout for the entire cache push cycle
+        // This prevents any single operation from hanging indefinitely
+        let cycle_timeout = std::time::Duration::from_secs(
+            cache_config.push_timeout_seconds.max(300), // At least 5 minutes
+        );
+
+        match tokio::time::timeout(
+            cycle_timeout,
+            process_cache_pushes_safe(&pool, &cache_config, &build_config),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                // Success - reset failure counter
+                consecutive_failures = 0;
+                debug!("📤 Cache push cycle completed successfully");
+            }
+            Ok(Err(e)) => {
+                // Error in processing, but didn't timeout
+                error!("❌ Error in cache push cycle: {e}");
+                consecutive_failures += 1;
+            }
+            Err(_) => {
+                // Timeout occurred
+                error!(
+                    "⏱️ Cache push cycle timed out after {}s",
+                    cycle_timeout.as_secs()
+                );
+                consecutive_failures += 1;
+            }
         }
+
+        // Graduated delays based on failure count - keeps trying but backs off
+        let delay = if consecutive_failures == 0 {
+            cache_config.poll_interval
+        } else if consecutive_failures < 3 {
+            // Minor issues: double the normal interval
+            cache_config.poll_interval * 2
+        } else if consecutive_failures < 10 {
+            // Persistent issues: wait 30 seconds
+            std::time::Duration::from_secs(30)
+        } else {
+            // Major issues: wait 60 seconds but keep trying
+            warn!(
+                "🟡 {} consecutive failures in cache push loop, backing off to 60s intervals",
+                consecutive_failures
+            );
+            // Don't reset counter - let it naturally recover when pushes succeed
+            std::time::Duration::from_secs(60)
+        };
 
         debug!(
             "📤 Cache push loop iteration {} complete, sleeping for {}s",
             iteration,
-            cache_config.poll_interval.as_secs()
+            delay.as_secs()
         );
-        sleep(cache_config.poll_interval).await;
+        sleep(delay).await;
     }
 }
 
@@ -424,32 +474,60 @@ async fn scan_derivations(
     Ok(())
 }
 
-/// Process cache pushes for completed builds
+/// Wrapper around process_cache_pushes that ensures errors don't propagate
+async fn process_cache_pushes_safe(
+    pool: &PgPool,
+    cache_config: &CacheConfig,
+    build_config: &BuildConfig,
+) -> Result<()> {
+    // Catch any panics and convert to errors
+    let result =
+        std::panic::AssertUnwindSafe(process_cache_pushes(pool, cache_config, build_config))
+            .catch_unwind()
+            .await;
+
+    match result {
+        Ok(res) => res,
+        Err(_) => {
+            error!("💥 Cache push process panicked! Recovering...");
+            Err(anyhow::anyhow!("Cache push process panicked"))
+        }
+    }
+}
+
+/// Process cache pushes for completed builds (one at a time to avoid batching issues)
 pub async fn process_cache_pushes(
     pool: &PgPool,
     cache_config: &CacheConfig,
     build_config: &BuildConfig,
 ) -> Result<()> {
     let Some(destination) = cache_config.push_to.as_deref() else {
-        debug!("⏭️ No cache destination configured, skipping cache push");
+        debug!("⭐️ No cache destination configured, skipping cache push");
         return Ok(());
     };
 
-    // Step 1: Queue new jobs for derivations that need pushing
-    match get_derivations_needing_cache_push_for_dest(
-        pool,
-        destination,
-        Some(10),
-        1, // Only create job once - retries handled by push_to_cache_with_retry
+    // Add timeout for database operations
+    let db_timeout = std::time::Duration::from_secs(30);
+
+    // Step 1: Queue new job (one at a time)
+    let queue_result = tokio::time::timeout(
+        db_timeout,
+        get_derivations_needing_cache_push_for_dest(
+            pool,
+            destination,
+            Some(1), // Process one at a time - FIXED
+            1,
+        ),
     )
-    .await
-    {
-        Ok(derivations) => {
+    .await;
+
+    match queue_result {
+        Ok(Ok(derivations)) => {
             for derivation in derivations {
                 if let Some(store_path) = &derivation.store_path {
                     if !cache_config.should_push(&derivation.derivation_name) {
                         debug!(
-                            "⏭️ Skipping cache push for {} (filtered)",
+                            "⭐️ Skipping cache push for {} (filtered)",
                             derivation.derivation_name
                         );
                         continue;
@@ -460,6 +538,7 @@ pub async fn process_cache_pushes(
                         derivation.derivation_name, destination
                     );
 
+                    // Don't let a single job creation failure stop the loop
                     if let Err(e) =
                         create_cache_push_job(pool, derivation.id, store_path, Some(destination))
                             .await
@@ -469,109 +548,200 @@ pub async fn process_cache_pushes(
                 }
             }
         }
-        Err(e) => error!("❌ Failed to get derivations needing cache push: {e}"),
+        Ok(Err(e)) => {
+            error!("❌ Failed to get derivations needing cache push: {e}");
+        }
+        Err(_) => {
+            error!("⏱️ Timeout getting derivations needing cache push");
+        }
     }
 
-    cleanup_stale_cache_push_jobs(pool, 10).await.ok();
+    // Always try to cleanup stale jobs, but don't fail if it doesn't work
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        cleanup_stale_cache_push_jobs(pool, 10),
+    )
+    .await;
 
-    // Step 2: Process pending jobs
-    match get_pending_cache_push_jobs(pool, Some(5)).await {
-        Ok(jobs) => {
+    // Step 2: Process pending job (one at a time)
+    let jobs_result =
+        tokio::time::timeout(db_timeout, get_pending_cache_push_jobs(pool, Some(1))).await; // FIXED
+
+    match jobs_result {
+        Ok(Ok(jobs)) => {
             for job in jobs {
-                // Mark job as in-progress
-                if let Err(e) = mark_cache_push_in_progress(pool, job.id).await {
-                    error!("❌ Failed to mark job {} in-progress: {}", job.id, e);
-                    continue;
-                }
-
-                // Determine what to push
-                let path_to_push = match &job.store_path {
-                    Some(p) => p.clone(),
-                    None => {
-                        // Fallback to derivation_path if no store_path
-                        match crate::queries::derivations::get_derivation_by_id(
-                            pool,
-                            job.derivation_id,
-                        )
-                        .await
-                        {
-                            Ok(deriv) if deriv.derivation_path.is_some() => {
-                                info!("📤 Using derivation_path for job {}", job.id);
-                                deriv.derivation_path.unwrap()
-                            }
-                            Ok(_) => {
-                                error!("❌ Job {}: no store_path or derivation_path", job.id);
-                                mark_cache_push_failed(pool, job.id, "No path available")
-                                    .await
-                                    .ok();
-                                continue;
-                            }
-                            Err(e) => {
-                                error!("❌ Failed to load derivation {}: {}", job.derivation_id, e);
-                                mark_cache_push_failed(pool, job.id, &e.to_string())
-                                    .await
-                                    .ok();
-                                continue;
-                            }
-                        }
-                    }
-                };
-
-                // Get the derivation
-                let derivation = match crate::queries::derivations::get_derivation_by_id(
-                    pool,
-                    job.derivation_id,
-                )
-                .await
+                // Process each job in isolation
+                if let Err(e) =
+                    process_single_cache_push_job(pool, job, cache_config, build_config).await
                 {
-                    Ok(d) => d,
-                    Err(e) => {
-                        error!("❌ Failed to load derivation {}: {}", job.derivation_id, e);
-                        mark_cache_push_failed(pool, job.id, &e.to_string())
-                            .await
-                            .ok();
-                        continue;
-                    }
-                };
-
-                let start_time = std::time::Instant::now();
-
-                // Push with built-in retries
-                match derivation
-                    .push_to_cache_with_retry(&path_to_push, cache_config, build_config)
-                    .await
-                {
-                    Ok(()) => {
-                        let duration_ms = start_time.elapsed().as_millis() as i32;
-                        info!(
-                            "✅ Cache push completed for {} in {}ms",
-                            derivation.derivation_name, duration_ms
-                        );
-
-                        if let Err(e) =
-                            mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await
-                        {
-                            error!("❌ Failed to mark job {} completed: {}", job.id, e);
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "❌ Cache push failed for {}: {}",
-                            derivation.derivation_name, e
-                        );
-
-                        if let Err(e2) = mark_cache_push_failed(pool, job.id, &e.to_string()).await
-                        {
-                            error!("❌ Failed to mark job {} failed: {}", job.id, e2);
-                        }
-                    }
+                    error!("❌ Failed to process cache push job: {}", e);
+                    // Continue to next job even if this one failed
                 }
             }
         }
-        Err(e) => error!("❌ Failed to get pending cache push jobs: {e}"),
+        Ok(Err(e)) => {
+            error!("❌ Failed to get pending cache push jobs: {e}");
+        }
+        Err(_) => {
+            error!("⏱️ Timeout getting pending cache push jobs");
+        }
     }
 
     Ok(())
+}
+
+/// Process a single cache push job with proper error isolation
+async fn process_single_cache_push_job(
+    pool: &PgPool,
+    job: crate::queries::cache_push::CachePushJob, // Fixed: use the correct type
+    cache_config: &CacheConfig,
+    build_config: &BuildConfig,
+) -> Result<()> {
+    // Wrap entire job processing in a timeout
+    let job_timeout = std::time::Duration::from_secs(
+        cache_config.push_timeout_seconds.max(600), // At least 10 minutes per job
+    );
+
+    match tokio::time::timeout(
+        job_timeout,
+        process_job_inner(pool, job.clone(), cache_config, build_config),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => {
+            error!(
+                "⏱️ Cache push job {} timed out after {}s",
+                job.id,
+                job_timeout.as_secs()
+            );
+            // Mark job as failed due to timeout
+            mark_cache_push_failed(pool, job.id, "Job timed out")
+                .await
+                .ok();
+            Err(anyhow::anyhow!("Job timed out"))
+        }
+    }
+}
+
+/// Inner job processing logic with re-queue on failure
+async fn process_job_inner(
+    pool: &PgPool,
+    job: crate::queries::cache_push::CachePushJob, // Fixed: use the correct type
+    cache_config: &CacheConfig,
+    build_config: &BuildConfig,
+) -> Result<()> {
+    // Mark job as in-progress
+    mark_cache_push_in_progress(pool, job.id).await?;
+
+    // Determine what to push
+    let path_to_push = match &job.store_path {
+        Some(p) => p.clone(),
+        None => {
+            // Fallback to derivation_path if no store_path
+            match crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id).await {
+                Ok(deriv) if deriv.derivation_path.is_some() => {
+                    info!("📤 Using derivation_path for job {}", job.id);
+                    deriv.derivation_path.unwrap()
+                }
+                Ok(_) => {
+                    error!("❌ Job {}: no store_path or derivation_path", job.id);
+                    mark_cache_push_failed(pool, job.id, "No path available")
+                        .await
+                        .ok();
+                    return Err(anyhow::anyhow!("No path available"));
+                }
+                Err(e) => {
+                    error!("❌ Failed to load derivation {}: {}", job.derivation_id, e);
+                    mark_cache_push_failed(pool, job.id, &e.to_string())
+                        .await
+                        .ok();
+                    return Err(e);
+                }
+            }
+        }
+    };
+
+    // Get the derivation
+    let derivation =
+        crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id).await?;
+
+    let start_time = std::time::Instant::now();
+
+    // Push with built-in retries (already has timeout handling)
+    match derivation
+        .push_to_cache_with_retry(&path_to_push, cache_config, build_config)
+        .await
+    {
+        Ok(()) => {
+            let duration_ms = start_time.elapsed().as_millis() as i32;
+            info!(
+                "✅ Cache push completed for {} in {}ms",
+                derivation.derivation_name, duration_ms
+            );
+
+            mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;
+            Ok(())
+        }
+        Err(e) => {
+            error!(
+                "❌ Cache push failed for {}: {}",
+                derivation.derivation_name, e
+            );
+
+            // Mark as failed
+            mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
+
+            // Re-queue for retry if applicable
+            // Note: Since we don't have retry_count in the job, we could track it in the error message
+            // or just let the system naturally retry through get_derivations_needing_cache_push_for_dest
+            let error_msg = e.to_string();
+            if !error_msg.contains("(retry 3)") && !error_msg.contains("terminal error") {
+                // Extract retry count from error message if present
+                let retry_num = if error_msg.contains("(retry 2)") {
+                    3
+                } else if error_msg.contains("(retry 1)") {
+                    2
+                } else {
+                    1
+                };
+
+                if retry_num <= 3 {
+                    info!(
+                        "🔄 Re-queuing failed cache push for derivation {} (retry {})",
+                        job.derivation_id, retry_num
+                    );
+
+                    // Create a new job for retry with retry marker in destination
+                    if let Some(store_path) = &job.store_path {
+                        let destination_with_retry = format!(
+                            "{} (retry {})",
+                            cache_config.push_to.as_deref().unwrap_or("cache"),
+                            retry_num
+                        );
+
+                        if let Err(queue_err) = create_cache_push_job(
+                            pool,
+                            job.derivation_id,
+                            store_path,
+                            Some(&destination_with_retry),
+                        )
+                        .await
+                        {
+                            error!("❌ Failed to re-queue cache push: {}", queue_err);
+                        }
+                    }
+                } else {
+                    warn!(
+                        "⚠️ Cache push for derivation {} exceeded max retries",
+                        job.derivation_id
+                    );
+                }
+            }
+
+            Err(e)
+        }
+    }
 }
 
 /// Cleanup loop for stale reservations
