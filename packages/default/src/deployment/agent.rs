@@ -2,6 +2,7 @@ use crate::handlers::agent::heartbeat::LogResponse;
 use crate::models::config::deployment::DeploymentConfig;
 use anyhow::{Context, Result};
 use std::process::Command;
+use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
@@ -300,41 +301,6 @@ impl AgentDeploymentManager {
 
         // Should never reach here, but just in case
         anyhow::bail!("Failed to deploy after {} retries", MAX_RETRIES)
-    }
-
-    async fn handle_stale_locks(&self) -> Result<()> {
-        // Check if nixos-rebuild is running
-        let check = Command::new("pgrep")
-            .args(&["-f", "nixos-rebuild"])
-            .output()
-            .await?;
-
-        if check.status.success() && !check.stdout.is_empty() {
-            warn!("Another nixos-rebuild process appears to be running");
-            // Wait a bit for it to finish
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        }
-
-        Ok(())
-    }
-
-    async fn force_clear_locks(&self) -> Result<()> {
-        warn!("Attempting to clear system profile locks");
-
-        // Remove lock files (requires root)
-        let lock_paths = [
-            "/nix/var/nix/profiles/system.lock",
-            "/nix/var/nix/profiles/per-user/root/profile.lock",
-        ];
-
-        for lock_path in &lock_paths {
-            if std::path::Path::new(lock_path).exists() {
-                info!("Removing stale lock: {}", lock_path);
-                let _ = Command::new("rm").arg("-f").arg(lock_path).output().await;
-            }
-        }
-
-        Ok(())
     }
 
     /// Update current target (called when system state changes)
