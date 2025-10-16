@@ -573,6 +573,11 @@ in {
         default = 5;
         description = "Delay between retry attempts in seconds";
       };
+      poll_interval = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 5;
+        description = "Delay between cache push attempts in seconds";
+      };
     };
     deployment = {
       max_deployment_age_minutes = lib.mkOption {
