@@ -22,7 +22,6 @@ pub enum DeploymentResult {
 }
 
 impl DeploymentResult {
-    /// Check if the deployment was successful
     pub fn is_success(&self) -> bool {
         matches!(
             self,
@@ -33,7 +32,6 @@ impl DeploymentResult {
         )
     }
 
-    /// Get a human-readable description
     pub fn description(&self) -> String {
         match self {
             DeploymentResult::NoDeploymentNeeded => "No deployment needed".to_string(),
@@ -53,13 +51,12 @@ impl DeploymentResult {
         }
     }
 
-    /// Determine the change reason for system state reporting
     pub fn change_reason(&self) -> &'static str {
         match self {
             DeploymentResult::SuccessFromCache { .. } | DeploymentResult::SuccessLocalBuild => {
                 "cf_deployment"
             }
-            _ => "heartbeat", // No change occurred
+            _ => "heartbeat",
         }
     }
 }
@@ -76,11 +73,10 @@ impl AgentDeploymentManager {
         Self {
             config,
             current_target: None,
-            deployment_lock: Arc::new(Semaphore::new(1)), // Only 1 deployment at a time
+            deployment_lock: Arc::new(Semaphore::new(1)),
         }
     }
 
-    /// Process a heartbeat response from the server and apply deployment if needed
     pub async fn process_heartbeat_response(
         &mut self,
         response: LogResponse,
@@ -94,7 +90,6 @@ impl AgentDeploymentManager {
 
         info!("Received desired target: {}", desired_target);
 
-        // Check if we're already on the target
         if let Some(ref current) = self.current_target {
             if current == &desired_target {
                 debug!("Already on target, skipping deployment");
@@ -102,7 +97,6 @@ impl AgentDeploymentManager {
             }
         }
 
-        // Attempt deployment
         match self.execute_deployment(&desired_target).await {
             Ok(result) => {
                 info!("Deployment completed successfully");
@@ -119,39 +113,35 @@ impl AgentDeploymentManager {
         }
     }
 
-    /// Execute the actual deployment
     async fn execute_deployment(&self, target: &str) -> Result<DeploymentResult> {
-        // Acquire the lock - if another deployment is running, this will wait
         let _permit = self.deployment_lock.acquire().await?;
 
         info!("Starting deployment execution for: {}", target);
 
-        // Optionally run dry-run first
         if self.config.dry_run_first {
             self.execute_dry_run(target)
                 .await
                 .context("Dry run failed")?;
         }
 
-        // Execute the actual deployment
         let start_time = std::time::Instant::now();
 
         let result = if let Some(ref cache_url) = self.config.cache_url {
-            // Try cache-based deployment first
-            match self.deploy_from_cache(target, cache_url).await {
-                Ok(result) => result,
+            // Cache deployment with lock-aware retry
+            match self.deploy_from_cache_lockaware(target, cache_url).await {
+                Ok(r) => r,
                 Err(e) if self.config.fallback_to_local_build => {
                     warn!(
                         "Cache deployment failed, falling back to local build: {}",
                         e
                     );
-                    self.deploy_local_build(target).await?
+                    self.deploy_local_build_lockaware(target).await?
                 }
                 Err(e) => return Err(e),
             }
         } else {
-            // Direct local build
-            self.deploy_local_build(target).await?
+            // Local build with lock-aware retry
+            self.deploy_local_build_lockaware(target).await?
         };
 
         let duration = start_time.elapsed();
@@ -163,7 +153,6 @@ impl AgentDeploymentManager {
         Ok(result)
     }
 
-    /// Execute a dry-run to verify the deployment would work
     async fn execute_dry_run(&self, target: &str) -> Result<()> {
         info!("Executing dry-run for target: {}", target);
 
@@ -175,7 +164,6 @@ impl AgentDeploymentManager {
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
 
-        // Always log output for debugging
         if !stdout.is_empty() {
             debug!("nixos-rebuild dry-run stdout: {}", stdout);
         }
@@ -202,10 +190,35 @@ impl AgentDeploymentManager {
         Ok(())
     }
 
-    /// Deploy using binary cache
-    async fn deploy_from_cache(&self, target: &str, cache_url: &str) -> Result<DeploymentResult> {
+    /// Deploy using binary cache (lock-aware)
+    async fn deploy_from_cache_lockaware(
+        &self,
+        target: &str,
+        cache_url: &str,
+    ) -> Result<DeploymentResult> {
         info!("Deploying from cache: {} (target: {})", cache_url, target);
 
+        // First attempt
+        match self.deploy_from_cache_once(target, cache_url).await {
+            Ok(ok) => return Ok(ok),
+            Err(e) => {
+                let (stdout, stderr) = extract_stdouterr(&e);
+                if is_lock_error(&stderr) || is_lock_error(&stdout) {
+                    warn!("Cache deployment hit a lock; attempting to clear locks then retry");
+                    self.handle_and_clear_locks().await?;
+                    // One retry after clearing
+                    return self.deploy_from_cache_once(target, cache_url).await;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    async fn deploy_from_cache_once(
+        &self,
+        target: &str,
+        cache_url: &str,
+    ) -> Result<DeploymentResult> {
         let mut args = vec![
             "switch",
             "--flake",
@@ -215,7 +228,6 @@ impl AgentDeploymentManager {
             cache_url,
         ];
 
-        // Add signature verification if public key is configured
         if let Some(ref public_key) = self.config.cache_public_key {
             args.extend_from_slice(&[
                 "--option",
@@ -227,7 +239,6 @@ impl AgentDeploymentManager {
             ]);
             debug!("Using cache with signature verification");
         } else {
-            // No public key configured, proceed without signature verification
             warn!("No cache public key configured, skipping signature verification");
             args.extend_from_slice(&["--option", "require-sigs", "false"]);
         }
@@ -255,7 +266,8 @@ impl AgentDeploymentManager {
         })
     }
 
-    async fn deploy_local_build(&self, target: &str) -> Result<DeploymentResult> {
+    /// Local build (lock-aware, with backoff + clear)
+    async fn deploy_local_build_lockaware(&self, target: &str) -> Result<DeploymentResult> {
         info!("Deploying with local build: {}", target);
 
         const MAX_RETRIES: u32 = 3;
@@ -274,13 +286,13 @@ impl AgentDeploymentManager {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
 
-            // Check if it's a lock error
-            if stderr.contains("Could not acquire lock") {
+            if is_lock_error(&stderr) || is_lock_error(&stdout) {
                 if attempt < MAX_RETRIES {
                     warn!(
-                        "Could not acquire lock (attempt {}/{}), retrying in {} seconds...",
-                        attempt, MAX_RETRIES, RETRY_DELAY_SECS
+                        "Could not acquire lock (attempt {}/{}); waiting and clearing stale locks...",
+                        attempt, MAX_RETRIES
                     );
+                    self.handle_and_clear_locks().await?;
                     tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
                     continue;
                 } else {
@@ -288,7 +300,7 @@ impl AgentDeploymentManager {
                 }
             }
 
-            // Not a lock error or final attempt - log and fail
+            // Not a lock error or we've exhausted retries
             error!("Local build deployment stdout: {}", stdout);
             error!("Local build deployment stderr: {}", stderr);
             anyhow::bail!(
@@ -299,17 +311,84 @@ impl AgentDeploymentManager {
             );
         }
 
-        // Should never reach here, but just in case
         anyhow::bail!("Failed to deploy after {} retries", MAX_RETRIES)
     }
 
-    /// Update current target (called when system state changes)
     pub fn update_current_target(&mut self, target: Option<String>) {
         self.current_target = target;
     }
 
-    /// Get current target
     pub fn current_target(&self) -> Option<&str> {
         self.current_target.as_deref()
     }
+
+    /// Combined helper: if another nixos-rebuild is actually running, wait briefly;
+    /// then remove known stale profile lock files.
+    async fn handle_and_clear_locks(&self) -> Result<()> {
+        self.handle_running_rebuild().await?;
+        self.force_clear_locks().await?;
+        Ok(())
+    }
+
+    async fn handle_running_rebuild(&self) -> Result<()> {
+        // Check if nixos-rebuild is running
+        let check = Command::new("pgrep")
+            .args(&["-f", "nixos-reload|nixos-rebuild"])
+            .output()
+            .context("Failed to run pgrep to check nixos-rebuild")?;
+
+        if check.status.success() && !check.stdout.is_empty() {
+            warn!("Another nixos-rebuild appears to be running; waiting 5s");
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+        Ok(())
+    }
+
+    async fn force_clear_locks(&self) -> Result<()> {
+        use std::fs;
+
+        // Known lock files that can get stuck
+        const LOCK_PATHS: &[&str] = &[
+            "/nix/var/nix/profiles/system.lock",
+            "/nix/var/nix/profiles/per-user/root/profile.lock",
+        ];
+
+        warn!("Attempting to clear system profile locks");
+
+        for path in LOCK_PATHS {
+            if std::path::Path::new(path).exists() {
+                info!("Removing stale lock: {}", path);
+                // Best-effort delete; log errors but continue
+                if let Err(e) = fs::remove_file(path) {
+                    warn!("Failed to remove {}: {}", path, e);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Utility: detect various lock messages from nix/nixos-rebuild
+fn is_lock_error(s: &str) -> bool {
+    let s = s.to_ascii_lowercase();
+    s.contains("could not acquire lock")
+        || s.contains("cannot acquire write lock")
+        || s.contains("timed out while waiting for lock")
+        || s.contains("lock is held by")
+        || s.contains("error: opening lock file")
+}
+
+/// Best effort to pull stdout/stderr from an anyhow error message we created above
+fn extract_stdouterr(e: &anyhow::Error) -> (String, String) {
+    // Our bail! messages include "stdout: ...\nstderr: ..." — grab those if present.
+    let msg = format!("{:#}", e);
+    let mut out = String::new();
+    let mut err = String::new();
+    if let Some(i) = msg.find("stdout:") {
+        if let Some(j) = msg[i..].find("\nstderr:") {
+            out = msg[i + 7..i + j].trim().to_string();
+            err = msg[i + j + 9..].trim().to_string();
+        }
+    }
+    (out, err)
 }
