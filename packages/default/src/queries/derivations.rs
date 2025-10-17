@@ -1731,53 +1731,6 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
     Ok(out)
 }
 
-/// Discover and queue all transitive dependencies for NixOS systems
-pub async fn discover_and_queue_all_transitive_dependencies(
-    pool: &PgPool,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    // Get all NixOS systems that have completed dry-run but haven't had dependencies discovered
-    let nixos_systems = sqlx::query_as!(
-        Derivation,
-        r#"
-        SELECT
-            id, commit_id, derivation_type as "derivation_type: DerivationType",
-            derivation_name, derivation_path, derivation_target, scheduled_at,
-            completed_at, started_at, attempt_count, evaluation_duration_ms,
-            error_message, pname, version, status_id, build_elapsed_seconds,
-            build_current_target, build_last_activity_seconds, build_last_heartbeat,
-            cf_agent_enabled, store_path
-        FROM derivations 
-        WHERE derivation_type = 'nixos' 
-        AND status_id = $1
-        AND NOT EXISTS (
-            SELECT 1 FROM derivation_dependencies dd WHERE dd.derivation_id = derivations.id
-        )
-        "#,
-        EvaluationStatus::DryRunComplete.as_id()
-    )
-    .fetch_all(pool)
-    .await?;
-
-    for nixos_system in nixos_systems {
-        info!(
-            "Discovering dependencies for NixOS system: {}",
-            nixos_system.derivation_name
-        );
-
-        if let Err(e) =
-            discover_all_transitive_dependencies_for_system(pool, &nixos_system, build_config).await
-        {
-            error!(
-                "Failed to discover dependencies for {}: {}",
-                nixos_system.derivation_name, e
-            );
-        }
-    }
-
-    Ok(())
-}
-
 /// Discover all transitive dependencies for a single NixOS system using nix-store --query
 async fn discover_all_transitive_dependencies_for_system(
     pool: &PgPool,

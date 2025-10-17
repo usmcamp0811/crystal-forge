@@ -107,7 +107,6 @@ impl Derivation {
         build_config: &BuildConfig,
     ) -> Result<String> {
         let eval_result = Self::dry_run_derivation_path(flake_target, build_config).await?;
-
         let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
             Ok(enabled) => enabled,
             Err(e) => {
@@ -115,19 +114,18 @@ impl Derivation {
                 false
             }
         };
-
         self.cf_agent_enabled = Some(cf_agent_enabled);
 
-        // Insert dependencies into database
-        if !eval_result.dependency_derivation_paths.is_empty() {
+        // **NEW**: Get the complete closure (all transitive dependencies)
+        let all_deps =
+            get_complete_closure(&eval_result.main_derivation_path, build_config).await?;
+
+        // Insert ALL dependencies into database at once
+        if !all_deps.is_empty() {
             crate::queries::derivations::discover_and_insert_packages(
                 pool,
                 self.id,
-                &eval_result
-                    .dependency_derivation_paths
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>(),
+                &all_deps.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
             )
             .await?;
         }
@@ -693,4 +691,29 @@ pub fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) 
 pub fn build_evaluation_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     format!("{flake_ref}#nixosConfigurations.{system_name}.config.system.build.toplevel")
+}
+
+async fn get_complete_closure(
+    derivation_path: &str,
+    build_config: &BuildConfig,
+) -> Result<Vec<String>> {
+    let output = Command::new("nix") // Just use "nix" directly
+        .args(["path-info", "--derivation", "--recursive", derivation_path])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "Failed to get closure: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let closure = String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.is_empty() && *line != derivation_path) // Dereference line
+        .map(|s| s.to_string())
+        .collect();
+
+    Ok(closure)
 }
