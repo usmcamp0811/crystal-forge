@@ -116,18 +116,49 @@ impl Derivation {
         };
         self.cf_agent_enabled = Some(cf_agent_enabled);
 
-        // **NEW**: Get the complete closure (all transitive dependencies)
+        // Get the complete closure with build status
         let all_deps =
             get_complete_closure(&eval_result.main_derivation_path, build_config).await?;
 
-        // Insert ALL dependencies into database at once
+        let built_count = all_deps.iter().filter(|(_, is_built)| *is_built).count();
+        info!(
+            "📦 Found {} total dependencies: {} already built, {} need building",
+            all_deps.len(),
+            built_count,
+            all_deps.len() - built_count
+        );
+
+        // Insert all dependencies
         if !all_deps.is_empty() {
-            crate::queries::derivations::discover_and_insert_packages(
-                pool,
-                self.id,
-                &all_deps.iter().map(|s| s.as_str()).collect::<Vec<_>>(),
-            )
-            .await?;
+            let all_paths: Vec<&str> = all_deps.iter().map(|(path, _)| path.as_str()).collect();
+
+            crate::queries::derivations::discover_and_insert_packages(pool, self.id, &all_paths)
+                .await?;
+
+            // Mark the already-built ones as complete
+            for (drv_path, is_built) in all_deps {
+                if is_built {
+                    // Get the store path for this derivation
+                    if let Ok(store_path) = get_store_path_from_drv(&drv_path).await {
+                        // Find the derivation we just inserted
+                        if let Ok(deriv) =
+                            crate::queries::derivations::get_derivation_by_path(pool, &drv_path)
+                                .await
+                        {
+                            if let Err(e) =
+                                crate::queries::derivations::mark_derivation_build_complete(
+                                    pool,
+                                    deriv.id,
+                                    &store_path,
+                                )
+                                .await
+                            {
+                                warn!("Failed to mark {} as built: {}", drv_path, e);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Update status and derivation_path
@@ -696,8 +727,9 @@ pub fn build_evaluation_target(repo_url: &str, commit_hash: &str, system_name: &
 async fn get_complete_closure(
     derivation_path: &str,
     build_config: &BuildConfig,
-) -> Result<Vec<String>> {
-    let output = Command::new("nix") // Just use "nix" directly
+) -> Result<Vec<(String, bool)>> {
+    // Return (drv_path, is_built)
+    let output = Command::new("nix")
         .args(["path-info", "--derivation", "--recursive", derivation_path])
         .output()
         .await?;
@@ -709,11 +741,41 @@ async fn get_complete_closure(
         );
     }
 
-    let closure = String::from_utf8(output.stdout)?
+    let drv_paths: Vec<String> = String::from_utf8(output.stdout)?
         .lines()
-        .filter(|line| !line.is_empty() && *line != derivation_path) // Dereference line
+        .filter(|line| !line.is_empty() && *line != derivation_path)
         .map(|s| s.to_string())
         .collect();
 
+    // Check which ones are already built in the local store
+    let mut closure = Vec::new();
+    for drv_path in drv_paths {
+        let is_built = check_if_built(&drv_path).await.unwrap_or(false);
+        closure.push((drv_path, is_built));
+    }
+
     Ok(closure)
+}
+
+async fn check_if_built(drv_path: &str) -> Result<bool> {
+    // Check if all outputs of this derivation exist in the store
+    let output = Command::new("nix")
+        .args(["path-info", "--json", drv_path])
+        .output()
+        .await?;
+
+    Ok(output.status.success())
+}
+
+async fn get_store_path_from_drv(drv_path: &str) -> Result<String> {
+    let output = Command::new("nix-store")
+        .args(["--query", "--outputs", drv_path])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!("Failed to get store path for {}", drv_path);
+    }
+
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
 }

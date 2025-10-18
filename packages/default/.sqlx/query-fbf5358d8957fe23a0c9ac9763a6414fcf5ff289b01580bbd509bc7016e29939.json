@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id, commit_id, derivation_type as \"derivation_type: DerivationType\",\n            derivation_name, derivation_path, derivation_target, scheduled_at,\n            completed_at, started_at, attempt_count, evaluation_duration_ms,\n            error_message, pname, version, status_id, build_elapsed_seconds,\n            build_current_target, build_last_activity_seconds, build_last_heartbeat,\n            cf_agent_enabled, store_path\n        FROM derivations \n        WHERE derivation_type = 'nixos' \n        AND status_id = $1\n        AND NOT EXISTS (\n            SELECT 1 FROM derivation_dependencies dd WHERE dd.derivation_id = derivations.id\n        )\n        ",
+  "query": "\n        SELECT \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE derivation_path = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -111,7 +111,7 @@
     ],
     "parameters": {
       "Left": [
-        "Int4"
+        "Text"
       ]
     },
     "nullable": [
@@ -138,5 +138,5 @@
       true
     ]
   },
-  "hash": "a59074c0eacc5177d41971f1c8fa01597d742befd38d463955dae4a5896da398"
+  "hash": "fbf5358d8957fe23a0c9ac9763a6414fcf5ff289b01580bbd509bc7016e29939"
 }
