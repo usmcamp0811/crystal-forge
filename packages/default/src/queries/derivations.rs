@@ -1879,3 +1879,27 @@ pub async fn batch_queue_cache_jobs(pool: &PgPool, destination: &str) -> Result<
 
     Ok(count)
 }
+
+/// Reset a derivation back to dry-run-complete status when store path is missing
+pub async fn reset_derivation_for_rebuild(pool: &PgPool, derivation_id: i32) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = 5,  -- dry-run-complete
+            store_path = NULL,
+            completed_at = NULL,
+            error_message = 'Store path was garbage collected, needs rebuild'
+        WHERE id = $1
+        "#,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+
+    info!(
+        "Reset derivation {} to dry-run-complete for rebuild",
+        derivation_id
+    );
+    Ok(())
+}

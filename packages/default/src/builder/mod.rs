@@ -11,11 +11,11 @@ use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
     save_scan_results,
 };
-use crate::queries::derivations::batch_queue_cache_jobs;
 use crate::queries::derivations::{
     EvaluationStatus, handle_derivation_failure, mark_target_build_complete,
     update_derivation_status,
 };
+use crate::queries::derivations::{batch_queue_cache_jobs, reset_derivation_for_rebuild};
 use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use futures::FutureExt;
@@ -557,9 +557,39 @@ async fn process_batch_cache_push(
 
     info!("📤 Processing batch of {} cache push jobs", jobs.len());
 
+    // Mark all as in-progress and validate paths exist
+    let mut valid_jobs = Vec::new();
+
     // Mark all as in-progress
     for job in &jobs {
         mark_cache_push_in_progress(pool, job.id).await?;
+
+        if let Some(ref store_path) = job.store_path {
+            // Check if path actually exists locally
+            if tokio::fs::try_exists(store_path).await.unwrap_or(false) {
+                valid_jobs.push(job.clone()); 
+            } else {
+                warn!("❌ Store path doesn't exist locally: {}", store_path);
+
+                // Mark job as failed
+                mark_cache_push_failed(
+                    pool,
+                    job.id,
+                    &format!("Store path does not exist: {}", store_path),
+                )
+                .await?;
+
+                // Reset derivation to dry-run-complete so it can be rebuilt
+                if let Err(e) = reset_derivation_for_rebuild(pool, job.derivation_id).await {
+                    warn!(
+                        "Failed to reset derivation {} for rebuild: {}",
+                        job.derivation_id, e
+                    );
+                }
+            }
+        } else {
+            mark_cache_push_failed(pool, job.id, "No store path specified").await?;
+        }
     }
 
     // Collect all store paths with their job IDs
@@ -858,4 +888,3 @@ async fn create_gc_root(store_path: &str, derivation_id: i32) -> Result<()> {
     debug!("Created GC root: {} -> {}", gc_root_path, store_path);
     Ok(())
 }
-
