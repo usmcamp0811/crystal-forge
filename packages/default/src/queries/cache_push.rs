@@ -202,6 +202,14 @@ pub async fn mark_cache_push_completed(
     push_size_bytes: Option<i64>,
     push_duration_ms: Option<i32>,
 ) -> Result<()> {
+    // Get derivation_id before updating
+    let derivation_id = sqlx::query_scalar!(
+        "SELECT derivation_id FROM cache_push_jobs WHERE id = $1",
+        job_id
+    )
+    .fetch_one(pool)
+    .await?;
+
     sqlx::query!(
         r#"
         UPDATE cache_push_jobs 
@@ -220,6 +228,15 @@ pub async fn mark_cache_push_completed(
     .await?;
 
     debug!("Marked cache push job {} as completed", job_id);
+
+    // Remove GC root now that it's in cache
+    if let Err(e) = remove_gc_root(derivation_id).await {
+        warn!(
+            "Failed to remove GC root for derivation {}: {}",
+            derivation_id, e
+        );
+    }
+
     Ok(())
 }
 
@@ -312,6 +329,24 @@ pub async fn cleanup_stale_cache_push_jobs(pool: &PgPool, timeout_minutes: i32) 
             "🧹 Cleaned up {} stale cache push jobs",
             result.rows_affected()
         );
+    }
+
+    Ok(())
+}
+
+/// Remove GC root after successful cache push
+async fn remove_gc_root(derivation_id: i32) -> Result<()> {
+    let gc_root_path = format!(
+        "/var/cache/crystal-forge/gc-roots/derivation-{}",
+        derivation_id
+    );
+
+    if let Err(e) = tokio::fs::remove_file(&gc_root_path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!("Failed to remove GC root {}: {}", gc_root_path, e);
+        }
+    } else {
+        debug!("Removed GC root: {}", gc_root_path);
     }
 
     Ok(())

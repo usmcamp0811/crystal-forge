@@ -788,6 +788,12 @@ async fn mark_build_complete_and_release(
     mark_target_build_complete(&mut *tx, derivation_id, store_path).await?;
 
     tx.commit().await?;
+
+    // Create GC root to prevent cleanup before cache push
+    if let Err(e) = create_gc_root(store_path, derivation_id).await {
+        warn!("Failed to create GC root for {}: {}", store_path, e);
+    }
+
     Ok(())
 }
 
@@ -831,3 +837,25 @@ async fn worker_heartbeat_loop(worker_uuid: String, pool: PgPool) {
         }
     }
 }
+
+/// Create a GC root to prevent garbage collection until cache push
+async fn create_gc_root(store_path: &str, derivation_id: i32) -> Result<()> {
+    let gc_root_dir = "/var/cache/crystal-forge/gc-roots";
+
+    // Ensure directory exists
+    tokio::fs::create_dir_all(gc_root_dir).await?;
+
+    let gc_root_path = format!("{}/derivation-{}", gc_root_dir, derivation_id);
+
+    // Create symlink to store path
+    if let Err(e) = tokio::fs::symlink(store_path, &gc_root_path).await {
+        // Ignore if already exists
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(e.into());
+        }
+    }
+
+    debug!("Created GC root: {} -> {}", gc_root_path, store_path);
+    Ok(())
+}
+
