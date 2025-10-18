@@ -285,65 +285,6 @@ impl Derivation {
         })
     }
 
-    /// Execute command with systemd fallback pattern
-    async fn execute_with_systemd_fallback<F>(
-        build_config: &BuildConfig,
-        systemd_cmd_builder: F,
-        fallback_args: &[&str],
-        operation_name: &str,
-    ) -> Result<Output>
-    where
-        F: FnOnce() -> Command,
-    {
-        if !build_config.should_use_systemd() {
-            info!(
-                "📋 Systemd disabled in config, using direct execution for {}",
-                operation_name
-            );
-            return Self::run_direct_command(fallback_args, build_config).await;
-        }
-
-        let mut cmd = systemd_cmd_builder();
-        build_config.apply_to_command(&mut cmd);
-
-        match cmd.output().await {
-            Ok(output) if output.status.success() => Ok(output),
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if Self::is_systemd_error_str(&stderr) {
-                    warn!(
-                        "⚠️ Systemd {} failed, falling back to direct execution",
-                        operation_name
-                    );
-                    Self::run_direct_command(fallback_args, build_config).await
-                } else {
-                    Ok(output)
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!(
-                    "📋 systemd-run not available for {}, using direct execution",
-                    operation_name
-                );
-                Self::run_direct_command(fallback_args, build_config).await
-            }
-            Err(e) => {
-                warn!(
-                    "⚠️ systemd-run failed for {}: {}, trying direct execution",
-                    operation_name, e
-                );
-                Self::run_direct_command(fallback_args, build_config).await
-            }
-        }
-    }
-
-    async fn run_direct_command(args: &[&str], build_config: &BuildConfig) -> Result<Output> {
-        let mut cmd = Command::new(args[0]);
-        cmd.args(&args[1..]);
-        build_config.apply_to_command(&mut cmd);
-        Ok(cmd.output().await?)
-    }
-
     async fn build_with_direct_nix_store(
         &self,
         pool: &PgPool,
