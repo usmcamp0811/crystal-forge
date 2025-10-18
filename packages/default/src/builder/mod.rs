@@ -287,67 +287,70 @@ pub async fn run_cache_push_loop(pool: PgPool) {
         iteration += 1;
         debug!("📤 Cache push loop iteration {} starting", iteration);
 
+        // Batch queue any missing cache jobs first
         if let Some(destination) = cache_config.push_to.as_deref() {
             if let Err(e) = batch_queue_cache_jobs(&pool, destination).await {
                 warn!("Failed to batch queue cache jobs: {}", e);
             }
         }
 
-        // Add a global timeout for the entire cache push cycle
-        // This prevents any single operation from hanging indefinitely
-        let cycle_timeout = std::time::Duration::from_secs(
-            cache_config.push_timeout_seconds.max(300), // At least 5 minutes
-        );
+        let cycle_timeout =
+            std::time::Duration::from_secs(cache_config.push_timeout_seconds.max(300));
 
-        match tokio::time::timeout(
+        let processed_jobs = match tokio::time::timeout(
             cycle_timeout,
             process_cache_pushes_safe(&pool, &cache_config, &build_config),
         )
         .await
         {
-            Ok(Ok(())) => {
+            Ok(Ok(count)) => {
                 // Success - reset failure counter
                 consecutive_failures = 0;
                 debug!("📤 Cache push cycle completed successfully");
+                count
             }
             Ok(Err(e)) => {
-                // Error in processing, but didn't timeout
                 error!("❌ Error in cache push cycle: {e}");
                 consecutive_failures += 1;
+                0
             }
             Err(_) => {
-                // Timeout occurred
                 error!(
                     "⏱️ Cache push cycle timed out after {}s",
                     cycle_timeout.as_secs()
                 );
                 consecutive_failures += 1;
+                0
             }
-        }
+        };
 
-        // Graduated delays based on failure count - keeps trying but backs off
-        let delay = if consecutive_failures == 0 {
+        // Smart delay based on work done and failures
+        let delay = if consecutive_failures > 0 {
+            // Has failures - use graduated backoff
+            if consecutive_failures < 3 {
+                cache_config.poll_interval * 2
+            } else if consecutive_failures < 10 {
+                std::time::Duration::from_secs(30)
+            } else {
+                warn!(
+                    "🟡 {} consecutive failures in cache push loop",
+                    consecutive_failures
+                );
+                std::time::Duration::from_secs(60)
+            }
+        } else if processed_jobs == 0 {
+            // No work to do - wait the full interval
             cache_config.poll_interval
-        } else if consecutive_failures < 3 {
-            // Minor issues: double the normal interval
-            cache_config.poll_interval * 2
-        } else if consecutive_failures < 10 {
-            // Persistent issues: wait 30 seconds
-            std::time::Duration::from_secs(30)
         } else {
-            // Major issues: wait 60 seconds but keep trying
-            warn!(
-                "🟡 {} consecutive failures in cache push loop, backing off to 60s intervals",
-                consecutive_failures
-            );
-            // Don't reset counter - let it naturally recover when pushes succeed
-            std::time::Duration::from_secs(60)
+            // Successfully processed jobs - minimal delay, keep pushing!
+            std::time::Duration::from_millis(100)
         };
 
         debug!(
-            "📤 Cache push loop iteration {} complete, sleeping for {}s",
+            "📤 Cache push loop iteration {} complete, sleeping for {}ms (processed {} jobs)",
             iteration,
-            delay.as_secs()
+            delay.as_millis(),
+            processed_jobs
         );
         sleep(delay).await;
     }
@@ -486,8 +489,7 @@ async fn process_cache_pushes_safe(
     pool: &PgPool,
     cache_config: &CacheConfig,
     build_config: &BuildConfig,
-) -> Result<()> {
-    // Catch any panics and convert to errors
+) -> Result<usize> {
     let result =
         std::panic::AssertUnwindSafe(process_cache_pushes(pool, cache_config, build_config))
             .catch_unwind()
@@ -507,10 +509,11 @@ pub async fn process_cache_pushes(
     pool: &PgPool,
     cache_config: &CacheConfig,
     build_config: &BuildConfig,
-) -> Result<()> {
+) -> Result<usize> {
+    // ← Changed from Result<()> to Result<usize>
     let Some(destination) = cache_config.push_to.as_deref() else {
         debug!("⭐️ No cache destination configured, skipping cache push");
-        return Ok(());
+        return Ok(0); // ← Changed from Ok(()) to Ok(0)
     };
 
     let db_timeout = std::time::Duration::from_secs(30);
@@ -528,21 +531,22 @@ pub async fn process_cache_pushes(
 
     match jobs_result {
         Ok(Ok(jobs)) if !jobs.is_empty() => {
-            // Batch process all jobs together
+            let job_count = jobs.len();
             if let Err(e) = process_batch_cache_push(pool, jobs, cache_config, build_config).await {
                 error!("❌ Failed to process batch cache push: {}", e);
             }
+            Ok(job_count)
         }
         Ok(Err(e)) => {
             error!("❌ Failed to get pending cache push jobs: {e}");
+            Ok(0)
         }
         Err(_) => {
             error!("⏱️ Timeout getting pending cache push jobs");
+            Ok(0)
         }
-        _ => {}
+        _ => Ok(0),
     }
-
-    Ok(())
 }
 
 async fn process_batch_cache_push(
@@ -567,7 +571,7 @@ async fn process_batch_cache_push(
         if let Some(ref store_path) = job.store_path {
             // Check if path actually exists locally
             if tokio::fs::try_exists(store_path).await.unwrap_or(false) {
-                valid_jobs.push(job.clone()); 
+                valid_jobs.push(job.clone());
             } else {
                 warn!("❌ Store path doesn't exist locally: {}", store_path);
 
