@@ -21,6 +21,7 @@ pub struct CachePushJob {
 }
 
 /// Get derivations that need cache pushing (build-complete status)
+/// Prioritizes dependencies of newest NixOS systems first, then the systems themselves
 pub async fn get_derivations_needing_cache_push_for_dest(
     pool: &PgPool,
     destination: &str,
@@ -39,6 +40,24 @@ pub async fn get_derivations_needing_cache_push_for_dest(
             FROM cache_push_jobs
             WHERE cache_destination = $3
             GROUP BY derivation_id
+        ),
+        newest_nixos_systems AS (
+            SELECT DISTINCT d.id as nixos_id, d.completed_at as nixos_completed_at
+            FROM derivations d
+            WHERE d.derivation_type = 'nixos'
+                AND d.status_id = $2
+                AND d.completed_at IS NOT NULL
+            ORDER BY d.completed_at DESC
+            LIMIT 20
+        ),
+        prioritized_derivations AS (
+            SELECT 
+                d.id,
+                MAX(nns.nixos_completed_at) as newest_nixos_parent
+            FROM derivations d
+            LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
+            LEFT JOIN newest_nixos_systems nns ON nns.nixos_id = dd.derivation_id
+            GROUP BY d.id
         )
         SELECT
             d.id, d.commit_id, d.derivation_type, d.derivation_name,
@@ -50,13 +69,17 @@ pub async fn get_derivations_needing_cache_push_for_dest(
             d.build_last_heartbeat, d.cf_agent_enabled, d.store_path
         FROM derivations d
         LEFT JOIN job_status js ON js.derivation_id = d.id
+        LEFT JOIN prioritized_derivations pd ON pd.id = d.id
         WHERE d.status_id = $2
             AND d.store_path IS NOT NULL
             AND (
-                js.derivation_id IS NULL  -- No jobs for this destination
-                OR (js.has_active = 0 AND js.has_retryable = 1)  -- Only retryable failures
+                js.derivation_id IS NULL
+                OR (js.has_active = 0 AND js.has_retryable = 1)
             )
-        ORDER BY d.completed_at ASC NULLS LAST
+        ORDER BY 
+            CASE WHEN d.derivation_type = 'nixos' THEN 1 ELSE 0 END,
+            pd.newest_nixos_parent DESC NULLS LAST,
+            d.completed_at ASC NULLS LAST
         LIMIT $1
     "#;
 

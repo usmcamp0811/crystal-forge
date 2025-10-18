@@ -11,6 +11,7 @@ use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
     save_scan_results,
 };
+use crate::queries::derivations::batch_queue_cache_jobs;
 use crate::queries::derivations::{
     EvaluationStatus, handle_derivation_failure, mark_target_build_complete,
     update_derivation_status,
@@ -285,6 +286,12 @@ pub async fn run_cache_push_loop(pool: PgPool) {
     loop {
         iteration += 1;
         debug!("📤 Cache push loop iteration {} starting", iteration);
+
+        if let Some(destination) = cache_config.push_to.as_deref() {
+            if let Err(e) = batch_queue_cache_jobs(&pool, destination).await {
+                warn!("Failed to batch queue cache jobs: {}", e);
+            }
+        }
 
         // Add a global timeout for the entire cache push cycle
         // This prevents any single operation from hanging indefinitely
@@ -689,55 +696,9 @@ async fn process_job_inner(
                 derivation.derivation_name, e
             );
 
-            // Mark as failed
+            // Mark as failed - the get_derivations_needing_cache_push_for_dest
+            // query will automatically retry failed jobs with attempts < max_attempts
             mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
-
-            // Re-queue for retry if applicable
-            // Note: Since we don't have retry_count in the job, we could track it in the error message
-            // or just let the system naturally retry through get_derivations_needing_cache_push_for_dest
-            let error_msg = e.to_string();
-            if !error_msg.contains("(retry 3)") && !error_msg.contains("terminal error") {
-                // Extract retry count from error message if present
-                let retry_num = if error_msg.contains("(retry 2)") {
-                    3
-                } else if error_msg.contains("(retry 1)") {
-                    2
-                } else {
-                    1
-                };
-
-                if retry_num <= 3 {
-                    info!(
-                        "🔄 Re-queuing failed cache push for derivation {} (retry {})",
-                        job.derivation_id, retry_num
-                    );
-
-                    // Create a new job for retry with retry marker in destination
-                    if let Some(store_path) = &job.store_path {
-                        let destination_with_retry = format!(
-                            "{} (retry {})",
-                            cache_config.push_to.as_deref().unwrap_or("cache"),
-                            retry_num
-                        );
-
-                        if let Err(queue_err) = create_cache_push_job(
-                            pool,
-                            job.derivation_id,
-                            store_path,
-                            Some(&destination_with_retry),
-                        )
-                        .await
-                        {
-                            error!("❌ Failed to re-queue cache push: {}", queue_err);
-                        }
-                    }
-                } else {
-                    warn!(
-                        "⚠️ Cache push for derivation {} exceeded max retries",
-                        job.derivation_id
-                    );
-                }
-            }
 
             Err(e)
         }
