@@ -1848,7 +1848,7 @@ pub async fn update_cf_agent_enabled(
 }
 
 /// Batch create cache push jobs for all built derivations missing jobs
-pub async fn batch_queue_cache_jobs(pool: &PgPool, destination: &str) -> Result<usize> {
+async fn batch_queue_cache_jobs(pool: &PgPool, destination: &str) -> Result<usize> {
     let count = sqlx::query_scalar!(
         r#"
         INSERT INTO cache_push_jobs (derivation_id, store_path, cache_destination, status)
@@ -1858,12 +1858,12 @@ pub async fn batch_queue_cache_jobs(pool: &PgPool, destination: &str) -> Result<
             $1,
             'pending'
         FROM derivations d
-        WHERE d.status_id = 3  -- BuildComplete
+        WHERE d.status_id = 10  -- build-complete
             AND d.store_path IS NOT NULL
             AND NOT EXISTS (
                 SELECT 1 FROM cache_push_jobs cpj 
                 WHERE cpj.derivation_id = d.id
-                AND cpj.cache_destination = $1
+                AND cpj.cache_destination = $1  -- CHECK SPECIFIC DESTINATION
             )
         RETURNING id
         "#,
