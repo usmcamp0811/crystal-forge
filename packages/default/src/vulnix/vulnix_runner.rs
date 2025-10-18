@@ -1,13 +1,11 @@
 use crate::models::config::VulnixConfig;
-use crate::vulnix::vulnix_parser::{VulnixEntry, VulnixParser};
+use crate::vulnix::vulnix_parser::VulnixEntry;
 
 use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::HashMap;
 use std::process::Command;
 use tokio::process::Command as AsyncCommand;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 
 /// Array of VulnixEntry - this is what vulnix outputs as JSON
 pub type VulnixScanOutput = Vec<VulnixEntry>;

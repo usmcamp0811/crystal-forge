@@ -1,15 +1,7 @@
-use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
-use crate::models::derivations::{Derivation, DerivationType};
-use crate::vulnix::vulnix_runner::VulnixRunner;
-use anyhow::Result;
-use anyhow::bail;
-use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::fs;
 use tokio::sync::RwLock;
-use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
 #[derive(Debug, Clone)]
 pub struct WorkerStatus {

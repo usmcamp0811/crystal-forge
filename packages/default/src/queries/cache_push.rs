@@ -1,8 +1,7 @@
-use crate::queries::derivations::EvaluationStatus;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
-use tracing::{debug, error, warn};
+use tracing::{debug, warn};
 
 #[derive(Debug, FromRow, Clone)]
 pub struct CachePushJob {

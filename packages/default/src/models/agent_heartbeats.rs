@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct AgentHeartbeat {

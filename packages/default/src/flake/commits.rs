@@ -217,36 +217,6 @@ fn normalize_repo_url_for_git(repo_url: &str) -> String {
     }
 }
 
-async fn run_ls_remote(repo_url: &str) -> Result<String> {
-    use tokio::process::Command;
-
-    let git_url = normalize_repo_url_for_git(repo_url);
-    let output = Command::new("git")
-        .args(&["ls-remote", "--heads", "--tags", &git_url])
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to spawn git process for 'git ls-remote --heads --tags {}' (normalized from '{}')",
-                git_url, repo_url
-            )
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        return Err(anyhow::anyhow!(
-            "git ls-remote failed for repository '{}' (exit code: {})\nError output: {}",
-            repo_url,
-            exit_code,
-            stderr.trim()
-        ));
-    }
-
-    Ok(String::from_utf8(output.stdout)?)
-}
-
 /// Get commits with timestamps, optionally since a specific commit
 async fn get_commits_with_timestamps(
     repo_url: &str,

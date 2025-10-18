@@ -5,7 +5,7 @@ use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use tokio::time::{Duration, Instant, sleep};
+use tokio::time::{Instant, sleep};
 use tracing::{debug, error, info, warn};
 pub mod agent;
 pub use agent::*;
@@ -171,23 +171,6 @@ impl DeploymentPolicyManager {
         }
 
         Ok(updated_count)
-    }
-
-    /// Get the flake target from a successful derivation for deployment
-    /// For deployments, we need the flake target that agents can actually deploy
-    fn get_derivation_flake_target(
-        &self,
-        derivation: &crate::models::derivations::Derivation,
-    ) -> Result<String> {
-        // derivation_target should contain the flake target for deployments
-        if let Some(target) = &derivation.derivation_target {
-            Ok(target.clone())
-        } else {
-            anyhow::bail!(
-                "Derivation {} has no derivation_target - cannot determine flake target for deployment",
-                derivation.id
-            );
-        }
     }
 }
 

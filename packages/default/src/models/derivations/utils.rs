@@ -2,7 +2,7 @@ use crate::models::config::BuildConfig;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use tokio::process::Command;
-use tracing::{debug, error, info};
+use tracing::debug;
 
 /// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
 pub const CACHE_ENV_ALLOWLIST: &[&str] = &[

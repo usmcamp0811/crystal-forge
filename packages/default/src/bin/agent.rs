@@ -12,7 +12,7 @@ use serde_json::Value;
 use std::{ffi::OsStr, fs, path::PathBuf, process::Command, sync::Arc};
 use tokio::sync::Mutex;
 use tokio::time::{Duration, sleep};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 // Agent state that holds the deployment manager

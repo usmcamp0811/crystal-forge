@@ -1,25 +1,20 @@
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
-use crate::models::config::VulnixConfig;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::models::derivations::build_agent_target;
-use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
 use crate::queries::derivations::{
-    get_pending_dry_run_derivations, handle_derivation_failure, increment_derivation_attempt_count,
-    insert_derivation_with_target, mark_derivation_dry_run_in_progress,
-    mark_target_dry_run_complete, mark_target_failed, reset_non_terminal_derivations,
-    update_derivation_path, update_scheduled_at,
+    get_pending_dry_run_derivations, handle_derivation_failure,
+    insert_derivation_with_target, mark_derivation_dry_run_in_progress, update_scheduled_at,
 };
 use crate::queries::flakes::get_all_flakes_from_db;
-use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
 use futures::stream;
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::StreamExt;
 use tokio::time::interval;
 
 use sqlx::PgPool;
-use tokio::time::{Duration, sleep};
+use tokio::time::Duration;
 use tracing::{debug, error, info, warn};
 
 use crate::flake::eval::list_nixos_configurations_from_commit;

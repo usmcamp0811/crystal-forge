@@ -118,10 +118,10 @@ pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    
     use crate::handlers::agent_request::deserialize_system_state_versioned;
     use crate::models::system_states::{SystemState, SystemStateV1};
-    use anyhow::Result;
+    
     use chrono::Utc;
 
     #[test]

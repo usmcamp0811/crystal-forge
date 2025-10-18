@@ -1,9 +1,7 @@
 use super::Derivation;
-use crate::models::config::BuildConfig;
 use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
 use tokio::process::Command;
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 #[derive(Debug)]
 pub struct PackageInfo {
@@ -40,56 +38,6 @@ impl Derivation {
         // Return the first output path (typically there's only one)
         Ok(store_paths[0].to_string())
     }
-}
-
-/// Get the main derivation path for a flake target
-pub async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
-    // Example: "<flake>#…config.system.build.toplevel" -> ask Nix for ".drvPath"
-    let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--raw", &format!("{flake_target}.drvPath")]);
-    build_config.apply_to_command(&mut cmd);
-
-    let out = cmd.output().await?;
-    if !out.status.success() {
-        bail!(
-            "nix eval failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// List immediate input derivations for a given derivation
-pub async fn list_immediate_input_drvs(
-    drv_path: &str,
-    build_config: &BuildConfig,
-) -> Result<Vec<String>> {
-    // `nix derivation show <drv>` yields {"<drv>": {"inputDrvs": {"<drv2>": ["out"], …}, …}}
-    let mut cmd = Command::new("nix");
-    cmd.args(["derivation", "show", drv_path]);
-    build_config.apply_to_command(&mut cmd);
-
-    let out = cmd.output().await?;
-    if !out.status.success() {
-        bail!(
-            "nix derivation show failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let v: Value = serde_json::from_slice(&out.stdout)?;
-    let obj = v
-        .as_object()
-        .and_then(|m| m.get(drv_path))
-        .and_then(|x| x.as_object())
-        .ok_or_else(|| anyhow!("bad JSON from nix derivation show"))?;
-
-    let deps = obj
-        .get("inputDrvs")
-        .and_then(|x| x.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_else(Vec::new);
-
-    Ok(deps)
 }
 
 /// Resolve a .drv path to its output store path(s) - static version

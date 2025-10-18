@@ -3,12 +3,8 @@ use super::utils::*;
 use crate::models::config::{BuildConfig, CacheConfig};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
-use std::collections::HashSet;
-use std::sync::Mutex;
-use std::sync::OnceLock;
-use tokio::process::Command;
 use tokio::time::{Duration, sleep};
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 
 impl Derivation {
     pub async fn push_to_cache_with_retry(
@@ -114,7 +110,7 @@ impl Derivation {
             }
         };
 
-        let mut effective_command = cache_cmd.command.clone();
+        let effective_command = cache_cmd.command.clone();
         let mut effective_args = cache_cmd.args.clone();
 
         // --- Special handling for Attic -------------------------------------------------------

@@ -1,10 +1,9 @@
 use crate::models::commits::Commit;
-use crate::models::config::BuildConfig; // Add this line
+ // Add this line
 use crate::models::derivations::build_agent_target;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
 use anyhow::Result;
 use anyhow::anyhow;
-use anyhow::bail;
 use sqlx::PgPool;
 use sqlx::{Executor, Postgres};
 use tracing::{debug, error, info, warn};
@@ -1765,49 +1764,6 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
         .collect();
 
     Ok(out)
-}
-
-/// Discover all transitive dependencies for a single NixOS system using nix-store --query
-async fn discover_all_transitive_dependencies_for_system(
-    pool: &PgPool,
-    nixos_system: &Derivation,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    let drv_path = nixos_system
-        .derivation_path
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("NixOS system missing derivation_path"))?;
-
-    // Use nix-store --query --requisites to get ALL transitive dependencies
-    let mut cmd = tokio::process::Command::new("nix-store");
-    cmd.args(["--query", "--requisites", drv_path]);
-    build_config.apply_to_command(&mut cmd);
-
-    let output = cmd.output().await?;
-    if !output.status.success() {
-        bail!(
-            "nix-store query failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let stdout_str = String::from_utf8_lossy(&output.stdout);
-    let all_deps: Vec<&str> = stdout_str
-        .lines()
-        .filter(|line| line.ends_with(".drv"))
-        .filter(|line| *line != drv_path) // Exclude self
-        .collect();
-
-    info!(
-        "Found {} transitive dependencies for {}",
-        all_deps.len(),
-        nixos_system.derivation_name
-    );
-
-    // Insert all dependencies as individual derivations
-    discover_and_insert_packages(pool, nixos_system.id, &all_deps).await?;
-
-    Ok(())
 }
 
 pub async fn mark_derivation_cache_pushed(pool: &PgPool, derivation_id: i32) -> Result<()> {

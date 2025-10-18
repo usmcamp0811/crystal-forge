@@ -1,10 +1,8 @@
 use super::Derivation;
 use super::utils::*;
 use crate::models::config::BuildConfig;
-use crate::models::derivations::parse_derivation_paths;
 use crate::models::derivations::resolve_drv_to_store_path_static;
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
+use anyhow::{Result, anyhow, bail};
 use sqlx::PgPool;
 use std::option::Option;
 use std::path::Path;
@@ -613,67 +611,6 @@ pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig)
             Ok(false)
         }
     }
-}
-
-async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
-    let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--json", &format!("{flake_target}.drvPath")]);
-    build_config.apply_to_command(&mut cmd);
-
-    let out = cmd.output().await?;
-    if !out.status.success() {
-        bail!(
-            "nix eval failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-
-    // Parse JSON output instead of raw text
-    let json_output = String::from_utf8_lossy(&out.stdout);
-    let drv_path: String =
-        serde_json::from_str(json_output.trim()).context("Failed to parse derivation path JSON")?;
-    Ok(drv_path)
-}
-
-async fn list_immediate_input_drvs(
-    drv_path: &str,
-    build_config: &BuildConfig,
-) -> Result<Vec<String>> {
-    let systemd_cmd = || {
-        let mut cmd = build_config.systemd_scoped_cmd_base();
-        cmd.args(["nix", "derivation", "show", drv_path]);
-        cmd
-    };
-
-    let output = Derivation::execute_with_systemd_fallback(
-        build_config,
-        systemd_cmd,
-        &["nix", "derivation", "show", drv_path],
-        "derivation show",
-    )
-    .await?;
-
-    if !output.status.success() {
-        bail!(
-            "nix derivation show failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let v: Value = serde_json::from_slice(&output.stdout)?;
-    let obj = v
-        .as_object()
-        .and_then(|m| m.get(drv_path))
-        .and_then(|x| x.as_object())
-        .ok_or_else(|| anyhow!("bad JSON from nix derivation show"))?;
-
-    let deps = obj
-        .get("inputDrvs")
-        .and_then(|x| x.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_else(Vec::new);
-
-    Ok(deps)
 }
 
 fn parse_input_drvs_from_json(json_str: &str) -> Result<Vec<String>> {

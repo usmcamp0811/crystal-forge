@@ -32,12 +32,10 @@ use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::borrow::Cow;
-use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 use tokio_postgres::NoTls;
-use tracing::{debug, info};
+use tracing::debug;
 
 mod duration_serde {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -140,7 +138,7 @@ impl CrystalForgeConfig {
             .build()
             .context("loading configuration")?;
 
-        let mut config: Self = settings
+        let config: Self = settings
             .try_deserialize()
             .context("parsing configuration")?;
 

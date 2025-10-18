@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Represents an active build reservation
 #[derive(Debug, FromRow)]

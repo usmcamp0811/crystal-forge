@@ -1,10 +1,9 @@
 use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
-use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
+use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::build_reservations;
 use crate::queries::cache_push::{
-    cleanup_stale_cache_push_jobs, create_cache_push_job,
-    get_derivations_needing_cache_push_for_dest, get_pending_cache_push_jobs,
+    cleanup_stale_cache_push_jobs, get_pending_cache_push_jobs,
     mark_cache_push_completed, mark_cache_push_failed, mark_cache_push_in_progress,
 };
 use crate::queries::cve_scans::{
@@ -673,114 +672,6 @@ async fn process_batch_cache_push(
     }
 
     Ok(())
-}
-
-/// Process a single cache push job with proper error isolation
-async fn process_single_cache_push_job(
-    pool: &PgPool,
-    job: crate::queries::cache_push::CachePushJob, // Fixed: use the correct type
-    cache_config: &CacheConfig,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    // Wrap entire job processing in a timeout
-    let job_timeout = std::time::Duration::from_secs(
-        cache_config.push_timeout_seconds.max(600), // At least 10 minutes per job
-    );
-
-    match tokio::time::timeout(
-        job_timeout,
-        process_job_inner(pool, job.clone(), cache_config, build_config),
-    )
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            error!(
-                "⏱️ Cache push job {} timed out after {}s",
-                job.id,
-                job_timeout.as_secs()
-            );
-            // Mark job as failed due to timeout
-            mark_cache_push_failed(pool, job.id, "Job timed out")
-                .await
-                .ok();
-            Err(anyhow::anyhow!("Job timed out"))
-        }
-    }
-}
-
-/// Inner job processing logic with re-queue on failure
-async fn process_job_inner(
-    pool: &PgPool,
-    job: crate::queries::cache_push::CachePushJob, // Fixed: use the correct type
-    cache_config: &CacheConfig,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    // Mark job as in-progress
-    mark_cache_push_in_progress(pool, job.id).await?;
-
-    // Determine what to push
-    let path_to_push = match &job.store_path {
-        Some(p) => p.clone(),
-        None => {
-            // Fallback to derivation_path if no store_path
-            match crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id).await {
-                Ok(deriv) if deriv.derivation_path.is_some() => {
-                    info!("📤 Using derivation_path for job {}", job.id);
-                    deriv.derivation_path.unwrap()
-                }
-                Ok(_) => {
-                    error!("❌ Job {}: no store_path or derivation_path", job.id);
-                    mark_cache_push_failed(pool, job.id, "No path available")
-                        .await
-                        .ok();
-                    return Err(anyhow::anyhow!("No path available"));
-                }
-                Err(e) => {
-                    error!("❌ Failed to load derivation {}: {}", job.derivation_id, e);
-                    mark_cache_push_failed(pool, job.id, &e.to_string())
-                        .await
-                        .ok();
-                    return Err(e);
-                }
-            }
-        }
-    };
-
-    // Get the derivation
-    let derivation =
-        crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id).await?;
-
-    let start_time = std::time::Instant::now();
-
-    // Push with built-in retries (already has timeout handling)
-    match derivation
-        .push_to_cache_with_retry(&path_to_push, cache_config, build_config)
-        .await
-    {
-        Ok(()) => {
-            let duration_ms = start_time.elapsed().as_millis() as i32;
-            info!(
-                "✅ Cache push completed for {} in {}ms",
-                derivation.derivation_name, duration_ms
-            );
-
-            mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;
-            Ok(())
-        }
-        Err(e) => {
-            error!(
-                "❌ Cache push failed for {}: {}",
-                derivation.derivation_name, e
-            );
-
-            // Mark as failed - the get_derivations_needing_cache_push_for_dest
-            // query will automatically retry failed jobs with attempts < max_attempts
-            mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
-
-            Err(e)
-        }
-    }
 }
 
 /// Cleanup loop for stale reservations
