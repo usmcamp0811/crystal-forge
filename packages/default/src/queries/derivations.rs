@@ -1848,7 +1848,7 @@ pub async fn update_cf_agent_enabled(
 }
 
 /// Batch create cache push jobs for all built derivations missing jobs
-async fn batch_queue_cache_jobs(pool: &PgPool, destination: &str) -> Result<usize> {
+pub async fn batch_queue_cache_jobs(pool: &PgPool, destination: &str) -> Result<usize> {
     let count = sqlx::query_scalar!(
         r#"
         INSERT INTO cache_push_jobs (derivation_id, store_path, cache_destination, status)
