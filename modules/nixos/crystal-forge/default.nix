@@ -779,6 +779,7 @@ in {
       "d /var/lib/crystal-forge/.config/nix 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
+      "d /var/cache/crystal-forge/gc-roots 0755 crystal-forge crystal-forge -" # <-- ADD THIS
       "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
     ];
 
@@ -1013,6 +1014,7 @@ in {
             "/tmp"
             "/run/crystal-forge"
             "/var/cache/crystal-forge-nix"
+            "/var/cache/crystal-forge"
           ];
           ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
@@ -1061,6 +1063,7 @@ in {
           "/tmp"
           "/run/crystal-forge"
           "/var/cache/crystal-forge-nix"
+          "/var/cache/crystal-forge"
         ];
         PrivateTmp = true;
         ProtectKernelTunables = true;
