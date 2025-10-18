@@ -995,6 +995,9 @@ in {
           CacheDirectoryMode = "0750";
           WorkingDirectory = "/var/lib/crystal-forge/workdir";
 
+          # When this service stops, kill all children
+          KillMode = "control-group";
+
           # Make sure we load the environment file
           EnvironmentFile = [
             "-${cfg.env-file}"

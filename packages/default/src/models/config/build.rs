@@ -99,11 +99,18 @@ impl BuildConfig {
     }
 
     /// Create a systemd-run command with configured resource limits
-    pub fn systemd_scoped_cmd_base(&self) -> tokio::process::Command {
+    pub fn systemd_scoped_cmd_base(&self, derivation_id: i32) -> tokio::process::Command {
         let mut cmd = tokio::process::Command::new("systemd-run");
 
-        // Base systemd-run arguments
-        cmd.args(["--scope", "--collect", "--quiet"]);
+        // Base systemd-run arguments with unique unit name
+        let unit_name = format!("crystal-forge-build-{}.scope", derivation_id);
+        cmd.args([
+            "--scope",
+            "--collect",
+            "--quiet",
+            "--slice=crystal-forge-builds.slice", // Put under parent slice
+            &format!("--unit={}", unit_name),     // Unique name per build
+        ]);
 
         // Memory limit
         if let Some(ref memory_max) = self.systemd_memory_max {
@@ -127,7 +134,6 @@ impl BuildConfig {
 
         // Add the actual command to run
         cmd.args(["--", "nix", "build"]);
-
         cmd
     }
 
