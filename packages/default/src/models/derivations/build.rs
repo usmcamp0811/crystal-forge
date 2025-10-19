@@ -159,16 +159,40 @@ impl Derivation {
                     .collect();
 
                 // Mark all as complete
-                for (drv_path, store_path) in built_deps {
-                    if let Some(&deriv_id) = deriv_map.get(&drv_path) {
-                        if let Err(e) = crate::queries::derivations::mark_derivation_build_complete(
-                            pool,
-                            deriv_id,
-                            &store_path,
-                        )
-                        .await
+                if !built_deps.is_empty() {
+                    let built_paths: Vec<&str> =
+                        built_deps.iter().map(|(p, _)| p.as_str()).collect();
+                    let derivations =
+                        crate::queries::derivations::get_derivations_by_paths(pool, &built_paths)
+                            .await?;
+
+                    // Create vectors of IDs and store paths for batch update
+                    let mut deriv_ids = Vec::new();
+                    let mut store_paths = Vec::new();
+
+                    let deriv_map: std::collections::HashMap<String, i32> = derivations
+                        .into_iter()
+                        .filter_map(|d| d.derivation_path.map(|path| (path, d.id)))
+                        .collect();
+
+                    for (drv_path, store_path) in built_deps {
+                        if let Some(&deriv_id) = deriv_map.get(&drv_path) {
+                            deriv_ids.push(deriv_id);
+                            store_paths.push(store_path);
+                        }
+                    }
+
+                    // Single batch update
+                    if !deriv_ids.is_empty() {
+                        if let Err(e) =
+                            crate::queries::derivations::batch_mark_derivations_complete(
+                                pool,
+                                &deriv_ids,
+                                &store_paths,
+                            )
+                            .await
                         {
-                            warn!("Failed to mark {} as built: {}", drv_path, e);
+                            warn!("Failed to batch mark derivations as built: {}", e);
                         }
                     }
                 }

@@ -1828,3 +1828,34 @@ pub async fn reset_derivation_for_rebuild(pool: &PgPool, derivation_id: i32) -> 
     );
     Ok(())
 }
+
+pub async fn batch_mark_derivations_complete(
+    pool: &PgPool,
+    deriv_ids: &[i32],
+    store_paths: &[String],
+) -> Result<()> {
+    use anyhow::Context;
+
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,
+            completed_at = NOW(),
+            evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+            store_path = data.store_path
+        FROM (
+            SELECT UNNEST($2::int[]) as id, UNNEST($3::text[]) as store_path
+        ) as data
+        WHERE derivations.id = data.id
+        "#,
+        EvaluationStatus::DryRunComplete as i32,
+        deriv_ids,
+        store_paths
+    )
+    .execute(pool)
+    .await
+    .context("Failed to batch mark derivations as complete")?;
+
+    Ok(())
+}
