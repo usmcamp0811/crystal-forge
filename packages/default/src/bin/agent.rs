@@ -248,6 +248,11 @@ pub async fn post_system_heartbeat_with_deployment(
             drop(state);
             post_system_state_change(current_system, "cf_deployment")?;
         }
+        DeploymentResult::Started { ref unit_name } => {
+            println!("🚀 Deployment started in systemd unit: {}", unit_name);
+            println!("   Agent will restart automatically after deployment completes");
+            // No need to post state change - the agent will restart and report new state
+        }
         DeploymentResult::Failed {
             ref error,
             ref desired_target,
