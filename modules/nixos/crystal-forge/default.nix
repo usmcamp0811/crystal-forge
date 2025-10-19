@@ -1153,10 +1153,10 @@ in {
           "/nix/var/nix/profiles"
           "/nix/var/nix/gcroots"
           "/boot"
-          "/var/lib/crystal-forge"
-          "/var/cache/crystal-forge"
+          "/var/lib/crystal-forge-agent"
+          "/var/cache/crystal-forge-agent"
           "/tmp"
-          "/run/crystal-forge"
+          "/run/crystal-forge-agent"
         ];
         # Also ensure read-only access to CA bundle (good practice):
         ReadOnlyPaths = ["/etc/ssl/certs"];
