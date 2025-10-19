@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE status_id = $1\n        AND attempt_count < 5\n        ORDER BY scheduled_at DESC\n        ",
+  "query": "\n        SELECT\n            d.id,\n            d.commit_id,\n            d.derivation_type as \"derivation_type: DerivationType\",\n            d.derivation_name,\n            d.derivation_path,\n            d.derivation_target,\n            d.scheduled_at,\n            d.completed_at,\n            d.started_at,\n            d.attempt_count,\n            d.evaluation_duration_ms,\n            d.error_message,\n            d.pname,\n            d.version,\n            d.status_id,\n            d.build_elapsed_seconds,\n            d.build_current_target,\n            d.build_last_activity_seconds,\n            d.build_last_heartbeat,\n            d.cf_agent_enabled,\n            d.store_path\n        FROM derivations d\n        LEFT JOIN commits c ON d.commit_id = c.id\n        WHERE d.status_id = $1\n        AND d.attempt_count < 5\n        ORDER BY c.commit_timestamp DESC NULLS LAST\n        ",
   "describe": {
     "columns": [
       {
@@ -138,5 +138,5 @@
       true
     ]
   },
-  "hash": "10d40253ba3f055b80305b269a845b642cb5ea319dcab8d944b44c052d023a4b"
+  "hash": "e5b7de4cc4ceab63369dc9bf6692e1b04097fe8c980fefe1e90b1b42de53a87b"
 }

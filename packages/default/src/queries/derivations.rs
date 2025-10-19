@@ -1197,31 +1197,32 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
         Derivation,
         r#"
         SELECT
-            id,
-            commit_id,
-            derivation_type as "derivation_type: DerivationType",
-            derivation_name,
-            derivation_path,
-            derivation_target,
-            scheduled_at,
-            completed_at,
-            started_at,
-            attempt_count,
-            evaluation_duration_ms,
-            error_message,
-            pname,
-            version,
-            status_id,
-            build_elapsed_seconds,
-            build_current_target,
-            build_last_activity_seconds,
-            build_last_heartbeat,
-            cf_agent_enabled,
-            store_path
-        FROM derivations
-        WHERE status_id = $1
-        AND attempt_count < 5
-        ORDER BY scheduled_at DESC
+            d.id,
+            d.commit_id,
+            d.derivation_type as "derivation_type: DerivationType",
+            d.derivation_name,
+            d.derivation_path,
+            d.derivation_target,
+            d.scheduled_at,
+            d.completed_at,
+            d.started_at,
+            d.attempt_count,
+            d.evaluation_duration_ms,
+            d.error_message,
+            d.pname,
+            d.version,
+            d.status_id,
+            d.build_elapsed_seconds,
+            d.build_current_target,
+            d.build_last_activity_seconds,
+            d.build_last_heartbeat,
+            d.cf_agent_enabled,
+            d.store_path
+        FROM derivations d
+        LEFT JOIN commits c ON d.commit_id = c.id
+        WHERE d.status_id = $1
+        AND d.attempt_count < 5
+        ORDER BY c.commit_timestamp DESC NULLS LAST
         "#,
         EvaluationStatus::DryRunPending.as_id()
     )
