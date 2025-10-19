@@ -15,6 +15,10 @@ pub enum DeploymentResult {
         cache_url: String,
     },
     SuccessLocalBuild,
+    Started {
+        // ADD THIS
+        unit_name: String,
+    },
     Failed {
         error: String,
         desired_target: String,
@@ -29,6 +33,7 @@ impl DeploymentResult {
                 | DeploymentResult::AlreadyOnTarget
                 | DeploymentResult::SuccessFromCache { .. }
                 | DeploymentResult::SuccessLocalBuild
+                | DeploymentResult::Started { .. } // ADD THIS
         )
     }
 
@@ -42,6 +47,10 @@ impl DeploymentResult {
             DeploymentResult::SuccessLocalBuild => {
                 "Successfully deployed with local build".to_string()
             }
+            DeploymentResult::Started { unit_name } => {
+                // ADD THIS
+                format!("Deployment started in unit: {}", unit_name)
+            }
             DeploymentResult::Failed {
                 error,
                 desired_target,
@@ -53,7 +62,10 @@ impl DeploymentResult {
 
     pub fn change_reason(&self) -> &'static str {
         match self {
-            DeploymentResult::SuccessFromCache { .. } | DeploymentResult::SuccessLocalBuild => {
+            DeploymentResult::SuccessFromCache { .. }
+            | DeploymentResult::SuccessLocalBuild
+            | DeploymentResult::Started { .. } => {
+                // ADD THIS
                 "cf_deployment"
             }
             _ => "heartbeat",
@@ -219,7 +231,19 @@ impl AgentDeploymentManager {
         target: &str,
         cache_url: &str,
     ) -> Result<DeploymentResult> {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let unit_name = format!("crystal-forge-deploy-{}", timestamp);
+
         let mut args = vec![
+            "--unit",
+            &unit_name,
+            "--no-block",
+            "--same-dir",
+            "--collect",
+            "--",
+            "nixos-rebuild",
             "switch",
             "--flake",
             target,
@@ -228,11 +252,13 @@ impl AgentDeploymentManager {
             cache_url,
         ];
 
+        let public_key_str;
         if let Some(ref public_key) = self.config.cache_public_key {
+            public_key_str = public_key.clone();
             args.extend_from_slice(&[
                 "--option",
                 "trusted-public-keys",
-                public_key,
+                &public_key_str,
                 "--option",
                 "require-sigs",
                 "true",
@@ -243,75 +269,68 @@ impl AgentDeploymentManager {
             args.extend_from_slice(&["--option", "require-sigs", "false"]);
         }
 
-        let output = Command::new("nixos-rebuild")
+        let output = Command::new("systemd-run")
             .args(&args)
             .output()
-            .context("Failed to execute nixos-rebuild switch with cache")?;
+            .context("Failed to execute systemd-run with nixos-rebuild")?;
 
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("Cache deployment stdout: {}", stdout);
-            error!("Cache deployment stderr: {}", stderr);
+            error!("systemd-run failed stdout: {}", stdout);
+            error!("systemd-run failed stderr: {}", stderr);
             anyhow::bail!(
-                "Cache deployment failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                "systemd-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
                 output.status.code(),
                 stdout.trim(),
                 stderr.trim()
             );
         }
 
-        Ok(DeploymentResult::SuccessFromCache {
-            cache_url: cache_url.to_string(),
-        })
+        info!("Deployment detached to systemd unit: {}", unit_name);
+        Ok(DeploymentResult::Started { unit_name })
     }
 
     /// Local build (lock-aware, with backoff + clear)
     async fn deploy_local_build_lockaware(&self, target: &str) -> Result<DeploymentResult> {
         info!("Deploying with local build: {}", target);
 
-        const MAX_RETRIES: u32 = 3;
-        const RETRY_DELAY_SECS: u64 = 10;
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let unit_name = format!("crystal-forge-deploy-{}", timestamp);
 
-        for attempt in 1..=MAX_RETRIES {
-            let output = Command::new("nixos-rebuild")
-                .args(&["switch", "--flake", target])
-                .output()
-                .context("Failed to execute nixos-rebuild switch")?;
+        let output = Command::new("systemd-run")
+            .args(&[
+                "--unit",
+                &unit_name,
+                "--no-block",
+                "--same-dir",
+                "--collect",
+                "--",
+                "nixos-rebuild",
+                "switch",
+                "--flake",
+                target,
+            ])
+            .output()
+            .context("Failed to execute systemd-run with nixos-rebuild")?;
 
-            if output.status.success() {
-                return Ok(DeploymentResult::SuccessLocalBuild);
-            }
-
+        if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-
-            if is_lock_error(&stderr) || is_lock_error(&stdout) {
-                if attempt < MAX_RETRIES {
-                    warn!(
-                        "Could not acquire lock (attempt {}/{}); waiting and clearing stale locks...",
-                        attempt, MAX_RETRIES
-                    );
-                    self.handle_and_clear_locks().await?;
-                    tokio::time::sleep(tokio::time::Duration::from_secs(RETRY_DELAY_SECS)).await;
-                    continue;
-                } else {
-                    error!("Failed to acquire lock after {} attempts", MAX_RETRIES);
-                }
-            }
-
-            // Not a lock error or we've exhausted retries
-            error!("Local build deployment stdout: {}", stdout);
-            error!("Local build deployment stderr: {}", stderr);
+            error!("systemd-run failed stdout: {}", stdout);
+            error!("systemd-run failed stderr: {}", stderr);
             anyhow::bail!(
-                "Local build deployment failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                "systemd-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
                 output.status.code(),
                 stdout.trim(),
                 stderr.trim()
             );
         }
 
-        anyhow::bail!("Failed to deploy after {} retries", MAX_RETRIES)
+        info!("Deployment detached to systemd unit: {}", unit_name);
+        Ok(DeploymentResult::Started { unit_name })
     }
 
     pub fn update_current_target(&mut self, target: Option<String>) {
