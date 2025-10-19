@@ -3,6 +3,7 @@ use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::models::derivations::build_agent_target;
+use crate::queries::commits::get_commit_distance_from_head;
 use crate::queries::derivations::{
     get_pending_dry_run_derivations, handle_derivation_failure, insert_derivation_with_target,
     mark_derivation_dry_run_in_progress, update_scheduled_at,
@@ -195,12 +196,48 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
                         let worker_id = idx % concurrency_limit;
 
                         async move {
+                            // Get commit info for this derivation
+                            let task_description = if let Some(commit_id) = target.commit_id {
+                                match crate::queries::commits::get_commit_by_id(&pool, commit_id)
+                                    .await
+                                {
+                                    Ok(commit) => {
+                                        // Get distance from HEAD if possible
+                                        let distance_info = match commit.get_flake(&pool).await {
+                                            Ok(flake) => {
+                                                match get_commit_distance_from_head(
+                                                    &pool, &flake, &commit,
+                                                )
+                                                .await
+                                                {
+                                                    Ok(distance) => format!(" (HEAD~{})", distance),
+                                                    Err(_) => String::new(),
+                                                }
+                                            }
+                                            Err(_) => String::new(),
+                                        };
+
+                                        format!(
+                                            "{} @ {}{}",
+                                            target.derivation_name,
+                                            &commit.git_commit_hash[..8],
+                                            distance_info
+                                        )
+                                    }
+                                    Err(_) => {
+                                        format!("{} @ commit#{}", target.derivation_name, commit_id)
+                                    }
+                                }
+                            } else {
+                                target.derivation_name.clone()
+                            };
+
                             // Mark worker as working
                             {
                                 let mut status = dry_run_status.write().await;
                                 if let Some(worker) = status.get_mut(worker_id) {
                                     worker.state = crate::log::WorkerState::Working;
-                                    worker.current_task = Some(target.derivation_name.clone());
+                                    worker.current_task = Some(task_description.clone());
                                     worker.started_at = Some(std::time::Instant::now());
                                 }
                             }
@@ -225,11 +262,12 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
                                     let duration = start.elapsed();
                                     info!(
                                         "✅ Completed dry-run for {} in {:.2}s",
-                                        target.derivation_name,
+                                        task_description,
                                         duration.as_secs_f64()
                                     );
                                 }
                                 Err(e) => {
+                                    error!("❌ Failed dry-run for {}: {}", task_description, e);
                                     if let Err(handle_err) =
                                         handle_derivation_failure(&pool, &target, "dry-run", &e)
                                             .await

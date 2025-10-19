@@ -1,4 +1,5 @@
 use crate::models::commits::Commit;
+use crate::models::flakes::Flake;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 
@@ -99,4 +100,45 @@ pub async fn flake_last_commit(pool: &PgPool, repo_url: &str) -> Result<Commit> 
     .fetch_one(pool)
     .await?;
     Ok(commit)
+}
+
+pub async fn get_commit_distance_from_head(
+    pool: &PgPool,
+    flake: &Flake,
+    commit: &Commit,
+) -> Result<i32> {
+    // Get the latest commit for this flake
+    let latest_commit = sqlx::query!(
+        r#"
+        SELECT id, git_commit_hash
+        FROM commits
+        WHERE flake_id = $1
+        ORDER BY commit_timestamp DESC
+        LIMIT 1
+        "#,
+        flake.id
+    )
+    .fetch_one(pool)
+    .await?;
+
+    // If this is the latest commit, distance is 0
+    if latest_commit.id == commit.id {
+        return Ok(0);
+    }
+
+    // Count commits between this one and HEAD
+    let distance = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*)::int as "count!"
+        FROM commits
+        WHERE flake_id = $1
+        AND commit_timestamp > $2
+        "#,
+        flake.id,
+        commit.commit_timestamp
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(distance)
 }
