@@ -4,8 +4,8 @@ use crate::log::log_builder_worker_status;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::models::derivations::build_agent_target;
 use crate::queries::derivations::{
-    get_pending_dry_run_derivations, handle_derivation_failure,
-    insert_derivation_with_target, mark_derivation_dry_run_in_progress, update_scheduled_at,
+    get_pending_dry_run_derivations, handle_derivation_failure, insert_derivation_with_target,
+    mark_derivation_dry_run_in_progress, update_scheduled_at,
 };
 use crate::queries::flakes::get_all_flakes_from_db;
 use anyhow::Result;
@@ -157,40 +157,100 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
 
 async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
     update_scheduled_at(pool).await?;
+
+    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
+        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
+        CrystalForgeConfig::default()
+    });
+    let build_config = cfg.get_build_config();
+
     match get_pending_dry_run_derivations(pool).await {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
-            let concurrency_limit = 10; // adjust as needed
-            stream::iter(pending_targets.into_iter().map(|mut target| {
-                let pool = pool.clone();
-                async move {
-                    if let Err(e) = mark_derivation_dry_run_in_progress(&pool, target.id).await {
-                        error!("❌ Failed to mark target in-progress: {e}");
-                        return;
-                    }
 
-                    // Use the new evaluate_and_build method instead of resolve_derivation_path
-                    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
-                        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
-                        CrystalForgeConfig::default()
+            let concurrency_limit = 20;
+
+            // Initialize worker status
+            let dry_run_status = crate::log::get_dry_run_status();
+            {
+                let mut status = dry_run_status.write().await;
+                status.clear();
+                for i in 0..concurrency_limit {
+                    status.push(crate::log::WorkerStatus {
+                        worker_id: i,
+                        current_task: None,
+                        started_at: None,
+                        state: crate::log::WorkerState::Idle,
                     });
-                    let build_config = cfg.get_build_config();
+                }
+            }
 
-                    match target.evaluate_and_build(&pool, false, &build_config).await {
-                        Ok(_derivation_path) => {
-                            // The evaluate_and_build already updated the status, path, and store_path
-                            info!("✅ Completed dry-run for: {}", target.derivation_name);
-                        }
-                        Err(e) => {
-                            if let Err(handle_err) =
-                                handle_derivation_failure(&pool, &target, "dry-run", &e).await
+            stream::iter(
+                pending_targets
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, mut target)| {
+                        let pool = pool.clone();
+                        let build_config = build_config.clone();
+                        let worker_id = idx % concurrency_limit;
+
+                        async move {
+                            // Mark worker as working
                             {
-                                error!("❌ Failed to handle derivation failure: {handle_err}");
+                                let mut status = dry_run_status.write().await;
+                                if let Some(worker) = status.get_mut(worker_id) {
+                                    worker.state = crate::log::WorkerState::Working;
+                                    worker.current_task = Some(target.derivation_name.clone());
+                                    worker.started_at = Some(std::time::Instant::now());
+                                }
+                            }
+
+                            if let Err(e) =
+                                mark_derivation_dry_run_in_progress(&pool, target.id).await
+                            {
+                                error!("❌ Failed to mark target in-progress: {e}");
+                                // Mark worker as idle
+                                let mut status = dry_run_status.write().await;
+                                if let Some(worker) = status.get_mut(worker_id) {
+                                    worker.state = crate::log::WorkerState::Idle;
+                                    worker.current_task = None;
+                                    worker.started_at = None;
+                                }
+                                return;
+                            }
+
+                            let start = std::time::Instant::now();
+                            match target.evaluate_and_build(&pool, false, &build_config).await {
+                                Ok(_derivation_path) => {
+                                    let duration = start.elapsed();
+                                    info!(
+                                        "✅ Completed dry-run for {} in {:.2}s",
+                                        target.derivation_name,
+                                        duration.as_secs_f64()
+                                    );
+                                }
+                                Err(e) => {
+                                    if let Err(handle_err) =
+                                        handle_derivation_failure(&pool, &target, "dry-run", &e)
+                                            .await
+                                    {
+                                        error!(
+                                            "❌ Failed to handle derivation failure: {handle_err}"
+                                        );
+                                    }
+                                }
+                            }
+
+                            // Mark worker as idle
+                            let mut status = dry_run_status.write().await;
+                            if let Some(worker) = status.get_mut(worker_id) {
+                                worker.state = crate::log::WorkerState::Idle;
+                                worker.current_task = None;
+                                worker.started_at = None;
                             }
                         }
-                    }
-                }
-            }))
+                    }),
+            )
             .for_each_concurrent(concurrency_limit, |fut| fut)
             .await;
         }
