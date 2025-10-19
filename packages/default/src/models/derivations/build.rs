@@ -129,30 +129,46 @@ impl Derivation {
         // Insert all dependencies
         if !all_deps.is_empty() {
             let all_paths: Vec<&str> = all_deps.iter().map(|(path, _)| path.as_str()).collect();
-
             crate::queries::derivations::discover_and_insert_packages(pool, self.id, &all_paths)
                 .await?;
 
-            // Mark the already-built ones as complete
-            for (drv_path, is_built) in all_deps {
-                if is_built {
-                    // Get the store path for this derivation
-                    if let Ok(store_path) = get_store_path_from_drv(&drv_path).await {
-                        // Find the derivation we just inserted
-                        if let Ok(deriv) =
-                            crate::queries::derivations::get_derivation_by_path(pool, &drv_path)
-                                .await
+            // NEW: Collect all built derivations first
+            let built_deps: Vec<(String, String)> = {
+                let mut built = Vec::new();
+                for (drv_path, is_built) in &all_deps {
+                    if *is_built {
+                        if let Ok(store_path) = get_store_path_from_drv(drv_path).await {
+                            built.push((drv_path.clone(), store_path));
+                        }
+                    }
+                }
+                built
+            };
+
+            // NEW: Batch query all built derivations
+            if !built_deps.is_empty() {
+                let built_paths: Vec<&str> = built_deps.iter().map(|(p, _)| p.as_str()).collect();
+                let derivations =
+                    crate::queries::derivations::get_derivations_by_paths(pool, &built_paths)
+                        .await?;
+
+                // Create a map for quick lookup
+                let deriv_map: std::collections::HashMap<String, i32> = derivations
+                    .into_iter()
+                    .filter_map(|d| d.derivation_path.map(|path| (path, d.id)))
+                    .collect();
+
+                // Mark all as complete
+                for (drv_path, store_path) in built_deps {
+                    if let Some(&deriv_id) = deriv_map.get(&drv_path) {
+                        if let Err(e) = crate::queries::derivations::mark_derivation_build_complete(
+                            pool,
+                            deriv_id,
+                            &store_path,
+                        )
+                        .await
                         {
-                            if let Err(e) =
-                                crate::queries::derivations::mark_derivation_build_complete(
-                                    pool,
-                                    deriv.id,
-                                    &store_path,
-                                )
-                                .await
-                            {
-                                warn!("Failed to mark {} as built: {}", drv_path, e);
-                            }
+                            warn!("Failed to mark {} as built: {}", drv_path, e);
                         }
                     }
                 }

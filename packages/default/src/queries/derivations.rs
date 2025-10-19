@@ -2,6 +2,7 @@ use crate::models::commits::Commit;
 // Add this line
 use crate::models::derivations::build_agent_target;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
 use sqlx::PgPool;
@@ -1118,40 +1119,30 @@ pub async fn update_derivation_path(
     .await
 }
 
-pub async fn get_derivation_by_path(pool: &PgPool, derivation_path: &str) -> Result<Derivation> {
+pub async fn get_derivations_by_paths(pool: &PgPool, paths: &[&str]) -> Result<Vec<Derivation>> {
+    // Convert &[&str] to Vec<String> for sqlx
+    let paths_vec: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+
     sqlx::query_as!(
         Derivation,
         r#"
         SELECT 
-            id,
-            commit_id,
+            id, commit_id, 
             derivation_type as "derivation_type: DerivationType",
-            derivation_name,
-            derivation_path,
-            derivation_target,
-            scheduled_at,
-            completed_at,
-            started_at,
-            attempt_count,
-            evaluation_duration_ms,
-            error_message,
-            pname,
-            version,
-            status_id,
-            build_elapsed_seconds,
-            build_current_target,
-            build_last_activity_seconds,
-            build_last_heartbeat,
-            cf_agent_enabled,
-            store_path
+            derivation_name, derivation_path, derivation_target,
+            scheduled_at, completed_at, started_at, attempt_count,
+            evaluation_duration_ms, error_message, pname, version,
+            status_id, build_elapsed_seconds, build_current_target,
+            build_last_activity_seconds, build_last_heartbeat,
+            cf_agent_enabled, store_path
         FROM derivations
-        WHERE derivation_path = $1
+        WHERE derivation_path = ANY($1)
         "#,
-        derivation_path
+        &paths_vec
     )
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
-    .map_err(Into::into)
+    .context("Failed to fetch derivations by paths")
 }
 
 pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Derivation> {
