@@ -169,7 +169,7 @@ async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
         Ok(pending_targets) => {
             info!("📦 Found {} pending targets", pending_targets.len());
 
-            let concurrency_limit = 20;
+            let concurrency_limit = 5;
 
             // Initialize worker status
             let dry_run_status = crate::log::get_dry_run_status();
