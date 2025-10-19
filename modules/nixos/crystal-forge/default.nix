@@ -1022,6 +1022,7 @@ in {
             "/run/crystal-forge"
             "/var/cache/crystal-forge-nix"
             "/var/cache/crystal-forge"
+            "/var/lib/crystal-forge/.cache"
           ];
           ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
@@ -1079,6 +1080,7 @@ in {
           "/run/crystal-forge"
           "/var/cache/crystal-forge-nix"
           "/var/cache/crystal-forge"
+          "/var/lib/crystal-forge/.cache"
         ];
         PrivateTmp = true;
         ProtectKernelTunables = true;
@@ -1122,9 +1124,9 @@ in {
         CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
         CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
         # make nix/git caches writable for the agent
-        HOME = "/var/lib/crystal-forge";
-        XDG_CACHE_HOME = "/var/lib/crystal-forge/.cache";
-        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge";
+        HOME = "/var/lib/crystal-forge-agent";
+        XDG_CACHE_HOME = "/var/lib/crystal-forge-agent/.cache";
+        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-agent";
       };
 
       serviceConfig = {
@@ -1134,13 +1136,13 @@ in {
         Group = "root";
 
         # Keep state + runtime under /var/lib and /run
-        StateDirectory = "crystal-forge";
+        StateDirectory = "crystal-forge-agent";
         StateDirectoryMode = "0750";
-        RuntimeDirectory = "crystal-forge";
+        RuntimeDirectory = "crystal-forge-agent";
         RuntimeDirectoryMode = "0700";
-        WorkingDirectory = "/var/lib/crystal-forge";
+        WorkingDirectory = "/var/lib/crystal-forge-agent";
 
-        CacheDirectory = "crystal-forge";
+        CacheDirectory = "crystal-forge-agent";
 
         NoNewPrivileges = true;
         ProtectSystem = "strict";
