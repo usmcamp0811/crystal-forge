@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, name, repo_url\n        FROM flakes \n        WHERE repo_url = ANY($1)\n        ORDER BY \n            CASE \n                WHEN repo_url = $2 THEN 1  -- Exact match first\n                ELSE 2\n            END\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "repo_url",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "096dbaf4afe2bfbd28c5607a38cbaf8e800b9e91aec1f63b2332788786a01aef"
+}

@@ -1,5 +1,6 @@
 use crate::models::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
+use anyhow::Context;
 use anyhow::Result;
 use sqlx::PgPool;
 
@@ -68,4 +69,30 @@ pub async fn get_all_flakes_from_db(
             }
         })
         .collect())
+}
+
+pub async fn find_flake_by_repo_urls(
+    pool: &PgPool,
+    possible_urls: &[String],
+    preferred_url: &str,
+) -> Result<Option<crate::models::flakes::Flake>> {
+    sqlx::query_as!(
+        crate::models::flakes::Flake,
+        r#"
+        SELECT id, name, repo_url
+        FROM flakes 
+        WHERE repo_url = ANY($1)
+        ORDER BY 
+            CASE 
+                WHEN repo_url = $2 THEN 1  -- Exact match first
+                ELSE 2
+            END
+        LIMIT 1
+        "#,
+        possible_urls,
+        preferred_url
+    )
+    .fetch_optional(pool)
+    .await
+    .context("Failed to find flake by repo URLs")
 }
