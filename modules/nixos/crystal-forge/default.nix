@@ -952,7 +952,7 @@ in {
         mkdir -p /var/lib/crystal-forge/.config/attic
 
         # Ensure attic config directory has proper ownership
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge
 
         # Source the attic environment if it exists
         if [ -f ${cfg.env-file} ]; then
