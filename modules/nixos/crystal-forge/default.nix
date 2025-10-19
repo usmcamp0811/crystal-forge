@@ -983,8 +983,8 @@ in {
         {
           Type = "exec";
           ExecStart = builderScript;
-          User = "root";
-          Group = "root";
+          User = "crystal-forge";
+          Group = "crystal-forge";
           Slice = "crystal-forge-builds.slice";
 
           StateDirectory = "crystal-forge";
@@ -1006,7 +1006,7 @@ in {
 
           NoNewPrivileges = true;
           ProtectSystem = "no";
-          ProtectHome = true;
+          ProtectHome = false;
           PrivateTmp = true;
           ProtectKernelTunables = true;
           ProtectKernelModules = true;
@@ -1047,8 +1047,8 @@ in {
       serviceConfig = {
         Type = "exec";
         ExecStart = serverScript;
-        User = "root";
-        Group = "root";
+        User = "crystal-forge";
+        Group = "crystal-forge";
 
         StateDirectory = "crystal-forge";
         StateDirectoryMode = "0750";
@@ -1060,7 +1060,7 @@ in {
 
         NoNewPrivileges = true;
         ProtectSystem = "no";
-        ProtectHome = true;
+        ProtectHome = false;
         ReadWritePaths = [
           "/var/lib/crystal-forge"
           "/tmp"
@@ -1132,7 +1132,7 @@ in {
 
         NoNewPrivileges = true;
         ProtectSystem = "strict";
-        ProtectHome = true;
+        ProtectHome = false;
 
         # Allow writes where we actually need them
         ReadWritePaths = [
