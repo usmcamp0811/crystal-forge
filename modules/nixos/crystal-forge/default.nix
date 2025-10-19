@@ -951,8 +951,12 @@ in {
         mkdir -p /run/crystal-forge
         mkdir -p /var/lib/crystal-forge/.config/attic
 
-        # Ensure attic config directory has proper ownership
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge
+        # Ensure proper ownership - do this AFTER creating all directories
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
+        # Ensure proper permissions
+        chmod -R 755 /var/lib/crystal-forge/.cache
+        chmod -R 755 /var/lib/crystal-forge/.config
 
         # Source the attic environment if it exists
         if [ -f ${cfg.env-file} ]; then
@@ -1042,6 +1046,14 @@ in {
       preStart = ''
         ${configScript}
         mkdir -p /run/crystal-forge
+        mkdir -p /var/lib/crystal-forge/.config/attic
+
+        # Ensure proper ownership - do this AFTER creating all directories
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
+        # Ensure proper permissions
+        chmod -R 755 /var/lib/crystal-forge/.cache
+        chmod -R 755 /var/lib/crystal-forge/.config
       '';
 
       serviceConfig = {
