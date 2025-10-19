@@ -983,8 +983,8 @@ in {
         {
           Type = "exec";
           ExecStart = builderScript;
-          User = "crystal-forge";
-          Group = "crystal-forge";
+          User = "root";
+          Group = "root";
           Slice = "crystal-forge-builds.slice";
 
           StateDirectory = "crystal-forge";
@@ -1047,8 +1047,8 @@ in {
       serviceConfig = {
         Type = "exec";
         ExecStart = serverScript;
-        User = "crystal-forge";
-        Group = "crystal-forge";
+        User = "root";
+        Group = "root";
 
         StateDirectory = "crystal-forge";
         StateDirectoryMode = "0750";
