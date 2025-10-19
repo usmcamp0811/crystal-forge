@@ -1,5 +1,5 @@
 use crate::models::commits::Commit;
- // Add this line
+// Add this line
 use crate::models::derivations::build_agent_target;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
 use anyhow::Result;
@@ -1471,21 +1471,25 @@ pub async fn discover_and_insert_packages(
 ) -> Result<()> {
     use tracing::warn;
 
+    if derivation_paths.is_empty() {
+        return Ok(());
+    }
+
     info!(
         "🔍 Analyzing {} derivation paths for package information",
         derivation_paths.len()
     );
 
+    // NEW: Batch collect all valid packages first
+    let mut packages_to_insert = Vec::new();
+
     for &drv_path in derivation_paths {
-        // Parse derivation path to extract package information
         if let Some(package_info) = parse_derivation_path(drv_path) {
-            // Skip the main NixOS system derivation - it should already exist as the parent
             if drv_path.contains("nixos-system-") {
                 debug!("⏭️ Skipping NixOS system derivation: {}", drv_path);
                 continue;
             }
 
-            // Use the parsed package name as the derivation_name, fallback to derivation path
             let derivation_name = package_info
                 .pname
                 .as_ref()
@@ -1503,10 +1507,22 @@ pub async fn discover_and_insert_packages(
                         .to_string()
                 });
 
-            // Insert package derivation - using DO NOTHING to skip duplicates
-            let package_derivation = sqlx::query_as!(
-                Derivation,
-                r#"
+            packages_to_insert.push((drv_path, derivation_name, package_info));
+        }
+    }
+
+    if packages_to_insert.is_empty() {
+        info!("No packages to insert");
+        return Ok(());
+    }
+
+    // NEW: Batch insert all packages in a single transaction
+    let mut tx = pool.begin().await?;
+
+    for (drv_path, derivation_name, package_info) in packages_to_insert {
+        let result = sqlx::query!(
+            r#"
+            WITH inserted AS (
                 INSERT INTO derivations (
                     commit_id,
                     derivation_type, 
@@ -1522,69 +1538,30 @@ pub async fn discover_and_insert_packages(
                     derivation_name = EXCLUDED.derivation_name,
                     pname = EXCLUDED.pname,
                     version = EXCLUDED.version
-                RETURNING 
-                    id,
-                    commit_id,
-                    derivation_type as "derivation_type: DerivationType",
-                    derivation_name,
-                    derivation_path,
-                    derivation_target,
-                    scheduled_at,
-                    completed_at,
-                    started_at,
-                    attempt_count,
-                    evaluation_duration_ms,
-                    error_message,
-                    pname,
-                    version,
-                    status_id,
-                    build_elapsed_seconds,
-                    build_current_target,
-                    build_last_activity_seconds,
-                    build_last_heartbeat,
-                    cf_agent_enabled,
-                    store_path
-                "#,
-                None::<i32>,     // commit_id is NULL for discovered packages
-                "package",       // derivation_type = "package"
-                derivation_name, // derivation_name
-                drv_path,        // derivation_path
-                package_info.pname.as_deref(), // pname
-                package_info.version.as_deref(), // version
-                EvaluationStatus::DryRunComplete.as_id()
+                RETURNING id
             )
-            .fetch_one(pool)
-            .await;
+            INSERT INTO derivation_dependencies (derivation_id, depends_on_id)
+            SELECT $8, id FROM inserted
+            ON CONFLICT (derivation_id, depends_on_id) DO NOTHING
+            "#,
+            None::<i32>,
+            "package",
+            derivation_name,
+            drv_path,
+            package_info.pname.as_deref(),
+            package_info.version.as_deref(),
+            EvaluationStatus::DryRunComplete.as_id(),
+            parent_derivation_id
+        )
+        .execute(&mut *tx)
+        .await;
 
-            match package_derivation {
-                Ok(pkg_deriv) => {
-                    // CORRECT dependency relationship: The NixOS system (parent) depends on packages
-                    let dependency_result = sqlx::query!(
-                        r#"
-                        INSERT INTO derivation_dependencies (derivation_id, depends_on_id)
-                        VALUES ($1, $2)
-                        ON CONFLICT (derivation_id, depends_on_id) DO NOTHING
-                        "#,
-                        parent_derivation_id, // The NixOS system derivation
-                        pkg_deriv.id          // depends on this package
-                    )
-                    .execute(pool)
-                    .await;
-
-                    if let Err(e) = dependency_result {
-                        warn!(
-                            "⚠️ Failed to insert dependency relationship for {}: {}",
-                            drv_path, e
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!("⚠️ Failed to insert package derivation {}: {}", drv_path, e);
-                }
-            }
+        if let Err(e) = result {
+            warn!("⚠️ Failed to insert package {}: {}", drv_path, e);
         }
     }
 
+    tx.commit().await?;
     info!("✅ Completed package discovery");
     Ok(())
 }
