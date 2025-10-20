@@ -348,25 +348,36 @@ async fn evaluate_and_discover_nixos_configs(
     );
 
     let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
-    let eval_target = format!("{}#nixosConfigurations", flake_ref);
+
+    // Use --expr to bypass lock file issues
+    let nix_expr = format!(
+        r#"
+        let
+          flake = builtins.getFlake "{}";
+        in
+          builtins.mapAttrs (_: cfg: cfg.config.system.build.toplevel) flake.nixosConfigurations
+        "#,
+        flake_ref
+    );
 
     let mut cmd = Command::new("nix-eval-jobs");
     cmd.args([
-        "--flake",
-        &eval_target,
-        "--check-cache-status", // Tells us what's already built
+        "--expr",
+        &nix_expr,
+        "--check-cache-status",
         "--workers",
         &num_cpus::get().to_string(),
         "--max-memory-size",
         "4096",
+        "--meta",
     ]);
-
-    // Apply any build config if needed
-    // build_config.apply_to_command(&mut cmd);
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    debug!("Running: nix-eval-jobs --flake {}", eval_target);
+    debug!(
+        "Running: nix-eval-jobs with builtins.getFlake for {}",
+        flake_ref
+    );
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().unwrap();
@@ -390,11 +401,15 @@ async fn evaluate_and_discover_nixos_configs(
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
                                 debug!(
-                                    "📦 Evaluated: {} (cache: {:?}, error: {:?})",
-                                    result.attr,
-                                    result.cache_status,
-                                    result.error
+                                    "📦 Evaluated: attr={:?}, cache={:?}",
+                                    result.attr_path,
+                                    result.cache_status
                                 );
+
+                                if let Some(error) = &result.error {
+                                    warn!("⚠️ Evaluation error for {:?}: {}", result.attr_path, error);
+                                }
+
                                 eval_results.push(result);
                             }
                             Err(e) => {
@@ -411,7 +426,7 @@ async fn evaluate_and_discover_nixos_configs(
                     Some(line) => {
                         if line.contains("error:") {
                             error!("nix-eval-jobs: {}", line);
-                        } else {
+                        } else if !line.starts_with("warning:") {
                             debug!("nix-eval-jobs: {}", line);
                         }
                         stderr_output.push(line);
@@ -437,21 +452,17 @@ async fn evaluate_and_discover_nixos_configs(
     }
 
     if eval_results.is_empty() {
-        warn!("No nixosConfigurations found in {}", eval_target);
+        warn!("No nixosConfigurations found in {}", flake_ref);
         return Ok(0);
     }
 
-    info!(
-        "✅ Successfully evaluated {} nixosConfigurations",
-        eval_results.len()
-    );
+    info!("✅ Evaluated {} nixosConfigurations", eval_results.len());
 
     // Now insert all discovered derivations into the database
     let mut inserted_count = 0;
     for result in eval_results {
-        // Extract the system name from attrPath
-        // attrPath will be like ["nixosConfigurations", "butler"]
-        let system_name = match result.attr_path.get(1) {
+        // With mapAttrs, attrPath will be like ["system-name"]
+        let system_name = match result.attr_path.first() {
             Some(name) => name,
             None => {
                 warn!(
@@ -466,7 +477,6 @@ async fn evaluate_and_discover_nixos_configs(
         if let Some(error) = &result.error {
             error!("❌ Evaluation failed for {}: {}", system_name, error);
 
-            // Still insert it so we track the failure
             let derivation_target =
                 build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
 
@@ -480,11 +490,10 @@ async fn evaluate_and_discover_nixos_configs(
             .await
             {
                 Ok(deriv) => {
-                    // Mark it as failed immediately
                     let _ = crate::queries::derivations::update_derivation_status(
                         pool,
                         deriv.id,
-                        crate::queries::derivations::EvaluationStatus::DryRunFailed,
+                        crate::queries::derivations::EvaluationStatus::Failed,
                         None,
                         Some(error),
                         None,
@@ -498,7 +507,6 @@ async fn evaluate_and_discover_nixos_configs(
             continue;
         }
 
-        // Get the derivation path
         let drv_path = match &result.drv_path {
             Some(path) => path,
             None => {
@@ -507,18 +515,15 @@ async fn evaluate_and_discover_nixos_configs(
             }
         };
 
-        // Get the store path
         let store_path = result
             .outputs
             .as_ref()
             .and_then(|o| o.get("out"))
             .map(|s| s.as_str());
 
-        // Build the target string
         let derivation_target =
             build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
 
-        // Insert the derivation
         match insert_derivation_with_target(
             pool,
             Some(commit),
@@ -534,7 +539,6 @@ async fn evaluate_and_discover_nixos_configs(
                     system_name, commit.git_commit_hash, derivation_target
                 );
 
-                // Update with the evaluation results immediately
                 let _ = crate::queries::derivations::update_derivation_status(
                     pool,
                     deriv.id,
@@ -545,7 +549,6 @@ async fn evaluate_and_discover_nixos_configs(
                 )
                 .await;
 
-                // If it's already cached locally, mark it as complete
                 if result.cache_status.as_deref() == Some("local") {
                     if let Some(sp) = store_path {
                         info!("💾 {} is already built locally", system_name);
@@ -554,12 +557,6 @@ async fn evaluate_and_discover_nixos_configs(
                         )
                         .await;
                     }
-                } else {
-                    // Otherwise just mark dry-run complete since we have the drv_path
-                    let _ = crate::queries::derivations::mark_derivation_dry_run_complete(
-                        pool, deriv.id, drv_path,
-                    )
-                    .await;
                 }
 
                 inserted_count += 1;
