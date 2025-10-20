@@ -3,6 +3,7 @@ use super::utils::*;
 use crate::models::config::BuildConfig;
 use crate::models::derivations::resolve_drv_to_store_path_static;
 use anyhow::{Result, anyhow, bail};
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::option::Option;
 use std::path::Path;
@@ -11,6 +12,21 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{Duration, Instant, interval};
 use tracing::{debug, error, info, warn};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NixEvalJobResult {
+    attr: String,
+    #[serde(rename = "attrPath")]
+    attr_path: Vec<String>,
+    #[serde(rename = "drvPath")]
+    drv_path: Option<String>,
+    outputs: Option<std::collections::HashMap<String, String>>,
+    system: Option<String>,
+    error: Option<String>,
+    #[serde(rename = "cacheStatus")]
+    cache_status: Option<String>, // "local", "cached", "notBuilt"
+}
 
 #[derive(Debug, Clone)]
 pub struct EvaluationResult {
@@ -98,13 +114,68 @@ impl Derivation {
         }
     }
 
+    /// Refactored dry-run using nix-eval-jobs for parallel evaluation
     async fn evaluate_nixos_dry_run(
         &mut self,
         pool: &PgPool,
         flake_target: &str,
         build_config: &BuildConfig,
     ) -> Result<String> {
-        let eval_result = Self::dry_run_derivation_path(flake_target, build_config).await?;
+        info!("🔍 Starting parallel evaluation with nix-eval-jobs");
+
+        let commit_id = self
+            .commit_id
+            .ok_or_else(|| anyhow::anyhow!("Cannot evaluate NixOS derivation without commit_id"))?;
+
+        let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
+        let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
+
+        // Use nix-eval-jobs to evaluate all nixosConfigurations in parallel
+        let eval_results = Self::evaluate_with_nix_eval_jobs(
+            &flake.repo_url,
+            &commit.git_commit_hash,
+            &self.derivation_name,
+            build_config,
+        )
+        .await?;
+
+        // Find our specific configuration's result
+        let our_config_attr = format!("nixosConfigurations.{}", self.derivation_name);
+        let main_result = eval_results
+            .iter()
+            .find(|r| {
+                r.attr == our_config_attr || r.attr_path.last() == Some(&self.derivation_name)
+            })
+            .ok_or_else(|| {
+                anyhow!(
+                    "Could not find evaluation result for {}",
+                    self.derivation_name
+                )
+            })?;
+
+        if let Some(error) = &main_result.error {
+            bail!("Evaluation failed for {}: {}", self.derivation_name, error);
+        }
+
+        let main_drv_path = main_result
+            .drv_path
+            .as_ref()
+            .ok_or_else(|| anyhow!("No derivation path in eval result"))?;
+
+        let store_path = main_result
+            .outputs
+            .as_ref()
+            .and_then(|o| o.get("out"))
+            .ok_or_else(|| anyhow!("No output path in eval result"))?;
+
+        info!("📦 Main derivation: {}", main_drv_path);
+        info!("📦 Store path: {}", store_path);
+
+        // Check cache status
+        let cache_status = main_result.cache_status.as_deref().unwrap_or("notBuilt");
+        info!("💾 Cache status: {}", cache_status);
+
+        // Check CF agent status
         let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
             Ok(enabled) => enabled,
             Err(e) => {
@@ -114,11 +185,10 @@ impl Derivation {
         };
         self.cf_agent_enabled = Some(cf_agent_enabled);
 
-        // Get the complete closure with build status
-        let all_deps =
-            get_complete_closure(&eval_result.main_derivation_path, build_config).await?;
+        // Get complete closure to discover all dependencies
+        let all_deps = get_complete_closure_with_cache_status(main_drv_path, build_config).await?;
 
-        let built_count = all_deps.iter().filter(|(_, is_built)| *is_built).count();
+        let built_count = all_deps.iter().filter(|(_, _, is_built)| *is_built).count();
         info!(
             "📦 Found {} total dependencies: {} already built, {} need building",
             all_deps.len(),
@@ -128,93 +198,165 @@ impl Derivation {
 
         // Insert all dependencies
         if !all_deps.is_empty() {
-            let all_paths: Vec<&str> = all_deps.iter().map(|(path, _)| path.as_str()).collect();
+            let all_paths: Vec<&str> = all_deps
+                .iter()
+                .map(|(drv_path, _, _)| drv_path.as_str())
+                .collect();
+
             crate::queries::derivations::discover_and_insert_packages(pool, self.id, &all_paths)
                 .await?;
 
-            // NEW: Collect all built derivations first
-            let built_deps: Vec<(String, String)> = {
-                let mut built = Vec::new();
-                for (drv_path, is_built) in &all_deps {
-                    if *is_built {
-                        if let Ok(store_path) = get_store_path_from_drv(drv_path).await {
-                            built.push((drv_path.clone(), store_path));
-                        }
-                    }
-                }
-                built
-            };
+            // Batch mark already-built derivations as complete
+            let built_deps: Vec<(String, String)> = all_deps
+                .iter()
+                .filter(|(_, _, is_built)| *is_built)
+                .map(|(drv_path, store_path, _)| (drv_path.clone(), store_path.clone()))
+                .collect();
 
-            // NEW: Batch query all built derivations
             if !built_deps.is_empty() {
-                let built_paths: Vec<&str> = built_deps.iter().map(|(p, _)| p.as_str()).collect();
+                let built_drv_paths: Vec<&str> =
+                    built_deps.iter().map(|(p, _)| p.as_str()).collect();
+
                 let derivations =
-                    crate::queries::derivations::get_derivations_by_paths(pool, &built_paths)
+                    crate::queries::derivations::get_derivations_by_paths(pool, &built_drv_paths)
                         .await?;
 
-                // Create a map for quick lookup
                 let deriv_map: std::collections::HashMap<String, i32> = derivations
                     .into_iter()
                     .filter_map(|d| d.derivation_path.map(|path| (path, d.id)))
                     .collect();
 
-                // Mark all as complete
-                if !built_deps.is_empty() {
-                    let built_paths: Vec<&str> =
-                        built_deps.iter().map(|(p, _)| p.as_str()).collect();
-                    let derivations =
-                        crate::queries::derivations::get_derivations_by_paths(pool, &built_paths)
-                            .await?;
+                let mut deriv_ids = Vec::new();
+                let mut store_paths = Vec::new();
 
-                    // Create vectors of IDs and store paths for batch update
-                    let mut deriv_ids = Vec::new();
-                    let mut store_paths = Vec::new();
-
-                    let deriv_map: std::collections::HashMap<String, i32> = derivations
-                        .into_iter()
-                        .filter_map(|d| d.derivation_path.map(|path| (path, d.id)))
-                        .collect();
-
-                    for (drv_path, store_path) in built_deps {
-                        if let Some(&deriv_id) = deriv_map.get(&drv_path) {
-                            deriv_ids.push(deriv_id);
-                            store_paths.push(store_path);
-                        }
+                for (drv_path, store_path) in built_deps {
+                    if let Some(&deriv_id) = deriv_map.get(&drv_path) {
+                        deriv_ids.push(deriv_id);
+                        store_paths.push(store_path);
                     }
+                }
 
-                    // Single batch update
-                    if !deriv_ids.is_empty() {
-                        if let Err(e) =
-                            crate::queries::derivations::batch_mark_derivations_complete(
-                                pool,
-                                &deriv_ids,
-                                &store_paths,
-                            )
-                            .await
-                        {
-                            warn!("Failed to batch mark derivations as built: {}", e);
-                        }
+                if !deriv_ids.is_empty() {
+                    if let Err(e) = crate::queries::derivations::batch_mark_derivations_complete(
+                        pool,
+                        &deriv_ids,
+                        &store_paths,
+                    )
+                    .await
+                    {
+                        warn!("Failed to batch mark derivations as built: {}", e);
+                    } else {
+                        info!(
+                            "✅ Marked {} pre-built derivations as complete",
+                            deriv_ids.len()
+                        );
                     }
                 }
             }
         }
 
-        // Update status and derivation_path
+        // Update this derivation's status
         crate::queries::derivations::update_derivation_status(
             pool,
             self.id,
             crate::queries::derivations::EvaluationStatus::DryRunComplete,
-            Some(&eval_result.main_derivation_path),
+            Some(main_drv_path),
             None,
-            Some(&eval_result.store_path),
+            Some(store_path),
         )
         .await?;
 
-        // Update cf_agent_enabled
         crate::queries::derivations::update_cf_agent_enabled(pool, self.id, cf_agent_enabled)
             .await?;
 
-        Ok(eval_result.main_derivation_path)
+        Ok(main_drv_path.clone())
+    }
+
+    /// Use nix-eval-jobs to evaluate all nixosConfigurations in parallel
+    async fn evaluate_with_nix_eval_jobs(
+        repo_url: &str,
+        commit_hash: &str,
+        target_system: &str,
+        build_config: &BuildConfig,
+    ) -> Result<Vec<NixEvalJobResult>> {
+        let flake_ref = build_flake_reference(repo_url, commit_hash);
+
+        let mut cmd = Command::new("nix-eval-jobs");
+        cmd.args([
+            "--flake",
+            &format!("{}#nixosConfigurations", flake_ref),
+            "--check-cache-status", // This tells us what's already built!
+            "--workers",
+            &num_cpus::get().to_string(),
+            "--max-memory-size",
+            "4096", // 4GB per worker
+        ]);
+
+        build_config.apply_to_command(&mut cmd);
+
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        info!("🚀 Running: nix-eval-jobs for {}", target_system);
+
+        let mut child = cmd.spawn()?;
+        let stdout = child.stdout.take().unwrap();
+        let mut reader = BufReader::new(stdout).lines();
+
+        let mut results = Vec::new();
+        let mut found_target = false;
+
+        // nix-eval-jobs outputs newline-delimited JSON
+        while let Some(line) = reader.next_line().await? {
+            if line.trim().is_empty() {
+                continue;
+            }
+
+            match serde_json::from_str::<NixEvalJobResult>(&line) {
+                Ok(result) => {
+                    debug!(
+                        "Evaluated: {} (cache: {:?})",
+                        result.attr, result.cache_status
+                    );
+
+                    // Check if this is our target system
+                    if result.attr_path.last() == Some(&target_system.to_string()) {
+                        found_target = true;
+                        info!("✅ Found target system: {}", target_system);
+                    }
+
+                    if let Some(error) = &result.error {
+                        warn!("⚠️ Evaluation error for {}: {}", result.attr, error);
+                    }
+
+                    results.push(result);
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to parse nix-eval-jobs output: {}\nLine: {}",
+                        e, line
+                    );
+                }
+            }
+        }
+
+        let status = child.wait().await?;
+        if !status.success() {
+            bail!(
+                "nix-eval-jobs failed with exit code: {}",
+                status.code().unwrap_or(-1)
+            );
+        }
+
+        if !found_target {
+            bail!(
+                "nix-eval-jobs did not evaluate target system: {}",
+                target_system
+            );
+        }
+
+        info!("✅ Evaluated {} configurations in parallel", results.len());
+
+        Ok(results)
     }
 
     /// Phase 2: Build a derivation from its .drv path
@@ -696,4 +838,76 @@ async fn get_store_path_from_drv(drv_path: &str) -> Result<String> {
     }
 
     Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Enhanced version that gets closure with cache status in one pass
+async fn get_complete_closure_with_cache_status(
+    derivation_path: &str,
+    build_config: &BuildConfig,
+) -> Result<Vec<(String, String, bool)>> {
+    // Returns (drv_path, store_path, is_built)
+
+    // Get all derivations in closure
+    let output = Command::new("nix")
+        .args(["path-info", "--derivation", "--recursive", derivation_path])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "Failed to get closure: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let drv_paths: Vec<String> = String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.is_empty() && *line != derivation_path)
+        .map(|s| s.to_string())
+        .collect();
+
+    info!(
+        "🔍 Checking build status for {} derivations...",
+        drv_paths.len()
+    );
+
+    // Check status in batches for better performance
+    let mut closure = Vec::new();
+    for drv_path in drv_paths {
+        let (store_path, is_built) = match get_store_path_and_build_status(&drv_path).await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!("Failed to check status for {}: {}", drv_path, e);
+                (String::new(), false)
+            }
+        };
+        closure.push((drv_path, store_path, is_built));
+    }
+
+    Ok(closure)
+}
+
+/// Get store path and check if it's built in one call
+async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, bool)> {
+    // First get the store path
+    let output = Command::new("nix-store")
+        .args(["--query", "--outputs", drv_path])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!("Failed to get store path for {}", drv_path);
+    }
+
+    let store_path = String::from_utf8(output.stdout)?.trim().to_string();
+
+    // Check if it exists
+    let is_built = Command::new("nix")
+        .args(["path-info", &store_path])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    Ok((store_path, is_built))
 }
