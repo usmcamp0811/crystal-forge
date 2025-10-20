@@ -1,17 +1,26 @@
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
+use crate::models::commits::Commit;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
+use crate::models::derivations::NixEvalJobResult;
 use crate::models::derivations::build_agent_target;
+use crate::models::flakes::Flake;
 use crate::queries::commits::get_commit_distance_from_head;
+use crate::queries::commits::increment_commit_list_attempt_count;
 use crate::queries::derivations::{
     get_pending_dry_run_derivations, handle_derivation_failure, insert_derivation_with_target,
     mark_derivation_dry_run_in_progress, update_scheduled_at,
 };
 use crate::queries::flakes::get_all_flakes_from_db;
 use anyhow::Result;
+use anyhow::bail;
 use futures::stream;
 use futures::stream::StreamExt;
+use std::process::Stdio;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::BufReader;
+use tokio::process::Command;
 use tokio::time::interval;
 
 use sqlx::PgPool;
@@ -93,61 +102,38 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
             for commit in pending_commits {
-                let target_type = "nixos";
-                match list_nixos_configurations_from_commit(&pool, &commit).await {
-                    Ok(nixos_targets) => {
-                        info!(
-                            "📂 Commit {} has {} nixos targets",
-                            commit.git_commit_hash,
-                            nixos_targets.len()
+                // Get flake info
+                let flake = match commit.get_flake(&pool).await {
+                    Ok(flake) => flake,
+                    Err(e) => {
+                        error!(
+                            "❌ Failed to get flake for commit {}: {}",
+                            commit.git_commit_hash, e
                         );
+                        continue;
+                    }
+                };
 
-                        // Get flake info to build the derivation target
-                        let flake = match commit.get_flake(&pool).await {
-                            Ok(flake) => flake,
-                            Err(e) => {
-                                error!(
-                                    "❌ Failed to get flake for commit {}: {}",
-                                    commit.git_commit_hash, e
-                                );
-                                continue;
-                            }
-                        };
-
-                        for derivation_name in nixos_targets {
-                            // Build the complete flake target string
-                            let derivation_target = build_agent_target(
-                                &flake.repo_url,
-                                &commit.git_commit_hash,
-                                &derivation_name,
-                            );
-
-                            match insert_derivation_with_target(
-                                &pool,
-                                Some(&commit),
-                                &derivation_name,
-                                target_type,
-                                Some(&derivation_target),
-                            )
-                            .await
-                            {
-                                Ok(_) => info!(
-                                    "✅ Inserted NixOS derivation: {} (commit {}) with target: {}",
-                                    derivation_name, commit.git_commit_hash, derivation_target
-                                ),
-                                Err(e) => {
-                                    error!(
-                                        "❌ Failed to insert NixOS derivation for {}: {}",
-                                        derivation_name, e
-                                    )
-                                }
-                            }
+                // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations in one pass
+                match evaluate_and_discover_nixos_configs(pool, &commit, &flake).await {
+                    Ok(count) => {
+                        info!(
+                            "✅ Evaluated and inserted {} NixOS configurations for commit {}",
+                            count, commit.git_commit_hash
+                        );
+                    }
+                    Err(e) => {
+                        error!(
+                            "❌ Failed to evaluate commit {}: {}",
+                            commit.git_commit_hash, e
+                        );
+                        // Increment attempt count so we don't retry forever
+                        if let Err(inc_err) =
+                            increment_commit_list_attempt_count(&pool, &commit).await
+                        {
+                            error!("❌ Failed to increment attempt count: {}", inc_err);
                         }
                     }
-                    Err(e) => error!(
-                        "❌ Failed to list nixos configs for commit {}: {}",
-                        commit.git_commit_hash, e
-                    ),
                 }
             }
         }
@@ -347,5 +333,259 @@ async fn log_memory_usage(pool: &PgPool) {
         if let Some(num_threads) = contents.split_whitespace().nth(19) {
             debug!("📊 Threads: {}", num_threads);
         }
+    }
+}
+
+/// Use nix-eval-jobs to discover AND evaluate all nixosConfigurations in one parallel pass
+async fn evaluate_and_discover_nixos_configs(
+    pool: &PgPool,
+    commit: &Commit,
+    flake: &Flake,
+) -> Result<usize> {
+    info!(
+        "🚀 Evaluating all nixosConfigurations for commit {} with nix-eval-jobs",
+        commit.git_commit_hash
+    );
+
+    let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
+    let eval_target = format!("{}#nixosConfigurations", flake_ref);
+
+    let mut cmd = Command::new("nix-eval-jobs");
+    cmd.args([
+        "--flake",
+        &eval_target,
+        "--check-cache-status", // Tells us what's already built
+        "--workers",
+        &num_cpus::get().to_string(),
+        "--max-memory-size",
+        "4096",
+    ]);
+
+    // Apply any build config if needed
+    // build_config.apply_to_command(&mut cmd);
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    debug!("Running: nix-eval-jobs --flake {}", eval_target);
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let mut eval_results = Vec::new();
+    let mut stderr_output = Vec::new();
+
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+
+    // Read both stdout and stderr concurrently
+    loop {
+        tokio::select! {
+            line_result = stdout_reader.next_line(), if !stdout_done => {
+                match line_result? {
+                    Some(line) if !line.trim().is_empty() => {
+                        match serde_json::from_str::<NixEvalJobResult>(&line) {
+                            Ok(result) => {
+                                debug!(
+                                    "📦 Evaluated: {} (cache: {:?}, error: {:?})",
+                                    result.attr,
+                                    result.cache_status,
+                                    result.error
+                                );
+                                eval_results.push(result);
+                            }
+                            Err(e) => {
+                                warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
+                            }
+                        }
+                    }
+                    Some(_) => {}, // empty line
+                    None => stdout_done = true,
+                }
+            }
+            line_result = stderr_reader.next_line(), if !stderr_done => {
+                match line_result? {
+                    Some(line) => {
+                        if line.contains("error:") {
+                            error!("nix-eval-jobs: {}", line);
+                        } else {
+                            debug!("nix-eval-jobs: {}", line);
+                        }
+                        stderr_output.push(line);
+                    }
+                    None => stderr_done = true,
+                }
+            }
+        }
+
+        if stdout_done && stderr_done {
+            break;
+        }
+    }
+
+    let status = child.wait().await?;
+    if !status.success() {
+        let stderr_text = stderr_output.join("\n");
+        bail!(
+            "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
+            status.code().unwrap_or(-1),
+            stderr_text
+        );
+    }
+
+    if eval_results.is_empty() {
+        warn!("No nixosConfigurations found in {}", eval_target);
+        return Ok(0);
+    }
+
+    info!(
+        "✅ Successfully evaluated {} nixosConfigurations",
+        eval_results.len()
+    );
+
+    // Now insert all discovered derivations into the database
+    let mut inserted_count = 0;
+    for result in eval_results {
+        // Extract the system name from attrPath
+        // attrPath will be like ["nixosConfigurations", "butler"]
+        let system_name = match result.attr_path.get(1) {
+            Some(name) => name,
+            None => {
+                warn!(
+                    "Could not extract system name from attrPath: {:?}",
+                    result.attr_path
+                );
+                continue;
+            }
+        };
+
+        // Skip if there was an evaluation error
+        if let Some(error) = &result.error {
+            error!("❌ Evaluation failed for {}: {}", system_name, error);
+
+            // Still insert it so we track the failure
+            let derivation_target =
+                build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
+
+            match insert_derivation_with_target(
+                pool,
+                Some(commit),
+                system_name,
+                "nixos",
+                Some(&derivation_target),
+            )
+            .await
+            {
+                Ok(deriv) => {
+                    // Mark it as failed immediately
+                    let _ = crate::queries::derivations::update_derivation_status(
+                        pool,
+                        deriv.id,
+                        crate::queries::derivations::EvaluationStatus::DryRunFailed,
+                        None,
+                        Some(error),
+                        None,
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    error!("Failed to insert failed derivation {}: {}", system_name, e);
+                }
+            }
+            continue;
+        }
+
+        // Get the derivation path
+        let drv_path = match &result.drv_path {
+            Some(path) => path,
+            None => {
+                warn!("No derivation path for {}", system_name);
+                continue;
+            }
+        };
+
+        // Get the store path
+        let store_path = result
+            .outputs
+            .as_ref()
+            .and_then(|o| o.get("out"))
+            .map(|s| s.as_str());
+
+        // Build the target string
+        let derivation_target =
+            build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
+
+        // Insert the derivation
+        match insert_derivation_with_target(
+            pool,
+            Some(commit),
+            system_name,
+            "nixos",
+            Some(&derivation_target),
+        )
+        .await
+        {
+            Ok(deriv) => {
+                info!(
+                    "✅ Inserted NixOS derivation: {} (commit {}) -> {}",
+                    system_name, commit.git_commit_hash, derivation_target
+                );
+
+                // Update with the evaluation results immediately
+                let _ = crate::queries::derivations::update_derivation_status(
+                    pool,
+                    deriv.id,
+                    crate::queries::derivations::EvaluationStatus::DryRunComplete,
+                    Some(drv_path),
+                    None,
+                    store_path,
+                )
+                .await;
+
+                // If it's already cached locally, mark it as complete
+                if result.cache_status.as_deref() == Some("local") {
+                    if let Some(sp) = store_path {
+                        info!("💾 {} is already built locally", system_name);
+                        let _ = crate::queries::derivations::mark_derivation_build_complete(
+                            pool, deriv.id, sp,
+                        )
+                        .await;
+                    }
+                } else {
+                    // Otherwise just mark dry-run complete since we have the drv_path
+                    let _ = crate::queries::derivations::mark_derivation_dry_run_complete(
+                        pool, deriv.id, drv_path,
+                    )
+                    .await;
+                }
+
+                inserted_count += 1;
+            }
+            Err(e) => {
+                error!(
+                    "❌ Failed to insert NixOS derivation for {}: {}",
+                    system_name, e
+                );
+            }
+        }
+    }
+
+    Ok(inserted_count)
+}
+
+/// Build the base flake reference (git+url?rev=hash)
+fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
+    if repo_url.starts_with("git+") {
+        if repo_url.contains("?rev=") {
+            repo_url.to_string()
+        } else {
+            format!("{}?rev={}", repo_url, commit_hash)
+        }
+    } else {
+        let separator = if repo_url.contains('?') { "&" } else { "?" };
+        format!("git+{}{separator}rev={}", repo_url, commit_hash)
     }
 }

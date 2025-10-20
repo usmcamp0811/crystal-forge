@@ -15,17 +15,17 @@ use tracing::{debug, error, info, warn};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct NixEvalJobResult {
-    attr: String,
+pub struct NixEvalJobResult {
+    pub attr: String,
     #[serde(rename = "attrPath")]
-    attr_path: Vec<String>,
+    pub attr_path: Vec<String>,
     #[serde(rename = "drvPath")]
-    drv_path: Option<String>,
-    outputs: Option<std::collections::HashMap<String, String>>,
-    system: Option<String>,
-    error: Option<String>,
+    pub drv_path: Option<String>,
+    pub outputs: Option<std::collections::HashMap<String, String>>,
+    pub system: Option<String>,
+    pub error: Option<String>,
     #[serde(rename = "cacheStatus")]
-    cache_status: Option<String>, // "local", "cached", "notBuilt"
+    pub cache_status: Option<String>, // "local", "cached", "notBuilt"
 }
 
 #[derive(Debug, Clone)]
@@ -297,60 +297,92 @@ impl Derivation {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         info!("🚀 Running: nix-eval-jobs for {}", target_system);
+        debug!(
+            "Command: nix-eval-jobs --flake {}#nixosConfigurations",
+            flake_ref
+        );
 
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().unwrap();
-        let mut reader = BufReader::new(stdout).lines();
+        let stderr = child.stderr.take().unwrap();
+
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
 
         let mut results = Vec::new();
         let mut found_target = false;
+        let mut stderr_output = Vec::new();
 
-        // nix-eval-jobs outputs newline-delimited JSON
-        while let Some(line) = reader.next_line().await? {
-            if line.trim().is_empty() {
-                continue;
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+
+        // Read both stdout and stderr concurrently
+        loop {
+            tokio::select! {
+                line_result = stdout_reader.next_line(), if !stdout_done => {
+                    match line_result? {
+                        Some(line) if !line.trim().is_empty() => {
+                            match serde_json::from_str::<NixEvalJobResult>(&line) {
+                                Ok(result) => {
+                                    debug!("Evaluated: {} (cache: {:?})", result.attr, result.cache_status);
+
+                                    // Check if this is our target system
+                                    if result.attr_path.last() == Some(&target_system.to_string()) {
+                                        found_target = true;
+                                        info!("✅ Found target system: {}", target_system);
+                                    }
+
+                                    if let Some(error) = &result.error {
+                                        warn!("⚠️ Evaluation error for {}: {}", result.attr, error);
+                                    }
+
+                                    results.push(result);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
+                                }
+                            }
+                        }
+                        Some(_) => {}, // empty line
+                        None => stdout_done = true,
+                    }
+                }
+                line_result = stderr_reader.next_line(), if !stderr_done => {
+                    match line_result? {
+                        Some(line) => {
+                            // Log stderr immediately for debugging
+                            if line.contains("error:") {
+                                error!("nix-eval-jobs stderr: {}", line);
+                            } else {
+                                debug!("nix-eval-jobs stderr: {}", line);
+                            }
+                            stderr_output.push(line);
+                        }
+                        None => stderr_done = true,
+                    }
+                }
             }
 
-            match serde_json::from_str::<NixEvalJobResult>(&line) {
-                Ok(result) => {
-                    debug!(
-                        "Evaluated: {} (cache: {:?})",
-                        result.attr, result.cache_status
-                    );
-
-                    // Check if this is our target system
-                    if result.attr_path.last() == Some(&target_system.to_string()) {
-                        found_target = true;
-                        info!("✅ Found target system: {}", target_system);
-                    }
-
-                    if let Some(error) = &result.error {
-                        warn!("⚠️ Evaluation error for {}: {}", result.attr, error);
-                    }
-
-                    results.push(result);
-                }
-                Err(e) => {
-                    warn!(
-                        "Failed to parse nix-eval-jobs output: {}\nLine: {}",
-                        e, line
-                    );
-                }
+            if stdout_done && stderr_done {
+                break;
             }
         }
 
         let status = child.wait().await?;
         if !status.success() {
+            let stderr_text = stderr_output.join("\n");
             bail!(
-                "nix-eval-jobs failed with exit code: {}",
-                status.code().unwrap_or(-1)
+                "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
+                status.code().unwrap_or(-1),
+                stderr_text
             );
         }
 
         if !found_target {
             bail!(
-                "nix-eval-jobs did not evaluate target system: {}",
-                target_system
+                "nix-eval-jobs did not evaluate target system: {}\nEvaluated systems: {:?}",
+                target_system,
+                results.iter().map(|r| r.attr.as_str()).collect::<Vec<_>>()
             );
         }
 
