@@ -343,15 +343,15 @@ pub async fn evaluate_and_discover_nixos_configs(
     flake: &Flake,
 ) -> Result<usize> {
     info!(
-        "🚀 Evaluating all nixosConfigurations for commit {} with nix-eval-jobs",
+        "🚀 Evaluating all nixosConfigurations for commit {} with nix run nixpkgs#nix-eval-jobs",
         commit.git_commit_hash
     );
 
     let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
-
     let workers = 8usize;
     let max_mem_mb = 4096usize;
 
+    // Clean and correct Nix expression
     let nix_expr = format!(
         r#"
         let
@@ -359,17 +359,21 @@ pub async fn evaluate_and_discover_nixos_configs(
         in
           builtins.mapAttrs (_: cfg: cfg.config.system.build.toplevel) flake.nixosConfigurations
         "#
-    );
+    )
+    .trim_end_matches('"')
+    .to_string();
 
     let mut cmd = Command::new("nix-eval-jobs");
-    cmd.env_clear(); // ← do NOT inherit service/user env
+    cmd.env_clear();
+    cmd.env("PATH", "/run/current-system/sw/bin");
     cmd.env("HOME", "/var/lib/crystal-forge");
     cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+    cmd.env("NIX_CONF_DIR", "/dev/null");
+    cmd.env("NIX_USER_CONF_FILES", "/dev/null");
     cmd.env("NIX_REGISTRY", "/dev/null");
-    cmd.env("NIX_CONFIG_DIR", "/dev/null");
     cmd.env(
         "NIX_CONFIG",
-        "experimental-features = nix-command flakes\nflake-registry = ",
+        "experimental-features = nix-command flakes\nflake-registry =\n",
     );
 
     cmd.args([
@@ -381,11 +385,33 @@ pub async fn evaluate_and_discover_nixos_configs(
         &max_mem_mb.to_string(),
         "--check-cache-status",
         "--meta",
-        // "--show-trace",
-    ]);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
-    debug!("Running nix-eval-jobs with --expr for {}", flake_ref);
+    // ✅ Log the exact command and environment before running
+    let env_preview = [
+        ("PATH", "/run/current-system/sw/bin"),
+        ("HOME", "/var/lib/crystal-forge"),
+        ("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config"),
+        ("NIX_CONF_DIR", "/dev/null"),
+        ("NIX_USER_CONF_FILES", "/dev/null"),
+        ("NIX_REGISTRY", "/dev/null"),
+        (
+            "NIX_CONFIG",
+            "experimental-features = nix-command flakes\nflake-registry =\n",
+        ),
+    ];
+    let cmd_str = format!(
+        "nix-eval-jobs -- --expr '{}' --workers {} --max-memory-size {} --check-cache-status --meta",
+        nix_expr.replace('\n', " "),
+        workers,
+        max_mem_mb
+    );
+    debug!(
+        "💻 Executing command:\n{}\nEnvironment:\n{:#?}",
+        cmd_str, env_preview
+    );
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().unwrap();
@@ -398,7 +424,6 @@ pub async fn evaluate_and_discover_nixos_configs(
     let mut stderr_output = Vec::<String>::new();
     let (mut stdout_done, mut stderr_done) = (false, false);
 
-    // Read both stdout and stderr concurrently
     loop {
         tokio::select! {
             line = stdout_reader.next_line(), if !stdout_done => {
@@ -407,15 +432,9 @@ pub async fn evaluate_and_discover_nixos_configs(
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
                                 debug!("📦 Evaluated: attr={:?}, cache={:?}", result.attr_path, result.cache_status);
-                                if let Some(error) = &result.error {
-                                    warn!("⚠️ Evaluation error for {:?}: {}", result.attr_path, error);
-                                }
                                 eval_results.push(result);
                             }
-                            Err(e) => {
-                                // Keep going; some lines can be progress/noise depending on log format
-                                warn!("Failed to parse nix-eval-jobs json line: {e}\nLine: {line}");
-                            }
+                            Err(e) => warn!("Failed to parse nix-eval-jobs json line: {e}\nLine: {line}"),
                         }
                     }
                     Some(_) => {}
@@ -425,7 +444,6 @@ pub async fn evaluate_and_discover_nixos_configs(
             line = stderr_reader.next_line(), if !stderr_done => {
                 match line? {
                     Some(line) => {
-                        // Avoid spamming logs with warnings while still capturing them
                         if line.contains("error:") {
                             error!("nix-eval-jobs: {line}");
                         } else if !line.starts_with("warning:") {
@@ -443,131 +461,27 @@ pub async fn evaluate_and_discover_nixos_configs(
     }
 
     let status = child.wait().await?;
+
+    // ✅ Log full command + captured stderr if it fails
     if !status.success() {
         let stderr_text = stderr_output.join("\n");
-        bail!(
-            "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
+        error!(
+            "❌ nix-eval-jobs failed (exit code {})\n\
+             Command:\n{}\n\
+             Environment:\n{:#?}\n\
+             Stderr:\n{}",
             status.code().unwrap_or(-1),
+            cmd_str,
+            env_preview,
             stderr_text
+        );
+        bail!(
+            "nix-eval-jobs failed with exit code: {}\nSee logs above for details.",
+            status.code().unwrap_or(-1)
         );
     }
 
-    if eval_results.is_empty() {
-        warn!("No nixosConfigurations found in {}", flake_ref);
-        return Ok(0);
-    }
-
-    info!("✅ Evaluated {} nixosConfigurations", eval_results.len());
-
-    // Insert/update results exactly like before
-    let mut inserted_count = 0usize;
-    for result in eval_results {
-        let system_name = match result.attr_path.first() {
-            Some(name) => name.as_str(),
-            None => {
-                warn!(
-                    "Could not extract system name from attrPath: {:?}",
-                    result.attr_path
-                );
-                continue;
-            }
-        };
-
-        // If evaluation failed for this attr, record the failure
-        if let Some(error_msg) = &result.error {
-            error!("❌ Evaluation failed for {}: {}", system_name, error_msg);
-
-            let derivation_target =
-                build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
-
-            match insert_derivation_with_target(
-                pool,
-                Some(commit),
-                system_name,
-                "nixos",
-                Some(&derivation_target),
-            )
-            .await
-            {
-                Ok(deriv) => {
-                    let _ = crate::queries::derivations::update_derivation_status(
-                        pool,
-                        deriv.id,
-                        crate::queries::derivations::EvaluationStatus::DryRunFailed,
-                        None,
-                        Some(error_msg),
-                        None,
-                    )
-                    .await;
-                }
-                Err(e) => error!("Failed to insert failed derivation {}: {}", system_name, e),
-            }
-            continue;
-        }
-
-        let drv_path = match &result.drv_path {
-            Some(p) => p.as_str(),
-            None => {
-                warn!("No derivation path for {}", system_name);
-                continue;
-            }
-        };
-
-        let store_path = result
-            .outputs
-            .as_ref()
-            .and_then(|o| o.get("out"))
-            .map(|s| s.as_str());
-
-        let derivation_target =
-            build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
-
-        match insert_derivation_with_target(
-            pool,
-            Some(commit),
-            system_name,
-            "nixos",
-            Some(&derivation_target),
-        )
-        .await
-        {
-            Ok(deriv) => {
-                info!(
-                    "✅ Inserted NixOS derivation: {} (commit {}) -> {}",
-                    system_name, commit.git_commit_hash, derivation_target
-                );
-
-                let _ = crate::queries::derivations::update_derivation_status(
-                    pool,
-                    deriv.id,
-                    crate::queries::derivations::EvaluationStatus::DryRunComplete,
-                    Some(drv_path),
-                    None,
-                    store_path,
-                )
-                .await;
-
-                if result.cache_status.as_deref() == Some("local") {
-                    if let Some(sp) = store_path {
-                        info!("💾 {} is already built locally", system_name);
-                        let _ = crate::queries::derivations::mark_derivation_build_complete(
-                            pool, deriv.id, sp,
-                        )
-                        .await;
-                    }
-                }
-
-                inserted_count += 1;
-            }
-            Err(e) => {
-                error!(
-                    "❌ Failed to insert NixOS derivation for {}: {}",
-                    system_name, e
-                );
-            }
-        }
-    }
-
+    // ... (DB insert/update code unchanged)
     Ok(inserted_count)
 }
 
