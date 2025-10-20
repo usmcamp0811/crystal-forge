@@ -3,8 +3,8 @@ use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::build_reservations;
 use crate::queries::cache_push::{
-    cleanup_stale_cache_push_jobs, get_pending_cache_push_jobs,
-    mark_cache_push_completed, mark_cache_push_failed, mark_cache_push_in_progress,
+    cleanup_stale_cache_push_jobs, get_pending_cache_push_jobs, mark_cache_push_completed,
+    mark_cache_push_failed, mark_cache_push_in_progress,
 };
 use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
@@ -143,28 +143,63 @@ async fn build_worker(
 
         match build_reservations::claim_next_derivation(&pool, &worker_uuid, wait_for_cache).await {
             Ok(Some(mut derivation)) => {
+                // Build a nice task description with commit info
+                let task_description = if let Some(commit_id) = derivation.commit_id {
+                    match crate::queries::commits::get_commit_by_id(&pool, commit_id).await {
+                        Ok(commit) => {
+                            // Try to get distance from HEAD
+                            let distance_info = match commit.get_flake(&pool).await {
+                                Ok(flake) => {
+                                    match crate::queries::commits::get_commit_distance_from_head(
+                                        &pool, &flake, &commit,
+                                    )
+                                    .await
+                                    {
+                                        Ok(distance) => format!(" (HEAD~{})", distance),
+                                        Err(_) => String::new(),
+                                    }
+                                }
+                                Err(_) => String::new(),
+                            };
+
+                            format!(
+                                "{} @ {}{}",
+                                derivation.derivation_name,
+                                &commit.git_commit_hash[..8],
+                                distance_info
+                            )
+                        }
+                        Err(_) => format!("{} @ commit#{}", derivation.derivation_name, commit_id),
+                    }
+                } else {
+                    derivation.derivation_name.clone()
+                };
+
                 // Update status: building
                 {
                     let mut statuses = get_build_status().write().await;
                     if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-                        status.current_task =
-                            Some(derivation.derivation_path.clone().unwrap_or_else(|| {
-                                format!("{} <unknown derivation path>", derivation.derivation_name)
-                            }));
+                        status.current_task = Some(task_description.clone());
                         status.started_at = Some(std::time::Instant::now());
+                        status.state = WorkerState::Working;
                     }
                 }
 
                 info!(
                     "Worker {} claimed: {} (type: {:?})",
-                    worker_id, derivation.derivation_name, derivation.derivation_type
+                    worker_id, task_description, derivation.derivation_type
                 );
 
+                let start = std::time::Instant::now();
                 match build_single_derivation(&pool, &mut derivation, &build_config).await {
                     Ok(store_path) => {
+                        let duration = start.elapsed();
                         info!(
-                            "Worker {} built {}: {}",
-                            worker_id, derivation.derivation_name, store_path
+                            "✅ Worker {} completed {} in {:.1}s: {}",
+                            worker_id,
+                            task_description,
+                            duration.as_secs_f64(),
+                            store_path
                         );
 
                         // Mark complete and delete reservation in transaction
@@ -181,8 +216,8 @@ async fn build_worker(
                     }
                     Err(e) => {
                         error!(
-                            "Worker {} build failed for {}: {}",
-                            worker_id, derivation.derivation_name, e
+                            "❌ Worker {} build failed for {}: {}",
+                            worker_id, task_description, e
                         );
 
                         // Mark failed and delete reservation
