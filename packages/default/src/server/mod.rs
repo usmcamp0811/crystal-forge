@@ -337,7 +337,7 @@ async fn log_memory_usage(pool: &PgPool) {
 }
 
 /// Use nix-eval-jobs to discover AND evaluate all nixosConfigurations in one parallel pass
-async fn evaluate_and_discover_nixos_configs(
+pub async fn evaluate_and_discover_nixos_configs(
     pool: &PgPool,
     commit: &Commit,
     flake: &Flake,
@@ -349,35 +349,36 @@ async fn evaluate_and_discover_nixos_configs(
 
     let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
 
-    // Use --expr to bypass lock file issues
+    // Keep resource usage reasonable for interactive machines.
+    // You can make this come from config/env later if you want.
+    let workers = 8usize;
+    let max_mem_mb = 4096usize;
+
+    // Same expression as in your working CLI one-liner
     let nix_expr = format!(
         r#"
         let
-          flake = builtins.getFlake "{}";
+          flake = builtins.getFlake "{flake_ref}";
         in
           builtins.mapAttrs (_: cfg: cfg.config.system.build.toplevel) flake.nixosConfigurations
-        "#,
-        flake_ref
+        "#
     );
 
     let mut cmd = Command::new("nix-eval-jobs");
     cmd.args([
         "--expr",
         &nix_expr,
-        "--check-cache-status",
         "--workers",
-        &num_cpus::get().to_string(),
+        &workers.to_string(),
         "--max-memory-size",
-        "4096",
+        &max_mem_mb.to_string(),
+        "--check-cache-status",
         "--meta",
     ]);
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    debug!(
-        "Running: nix-eval-jobs with builtins.getFlake for {}",
-        flake_ref
-    );
+    debug!("Running nix-eval-jobs with --expr for {}", flake_ref);
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().unwrap();
@@ -386,48 +387,42 @@ async fn evaluate_and_discover_nixos_configs(
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
 
-    let mut eval_results = Vec::new();
-    let mut stderr_output = Vec::new();
-
-    let mut stdout_done = false;
-    let mut stderr_done = false;
+    let mut eval_results = Vec::<NixEvalJobResult>::new();
+    let mut stderr_output = Vec::<String>::new();
+    let (mut stdout_done, mut stderr_done) = (false, false);
 
     // Read both stdout and stderr concurrently
     loop {
         tokio::select! {
-            line_result = stdout_reader.next_line(), if !stdout_done => {
-                match line_result? {
+            line = stdout_reader.next_line(), if !stdout_done => {
+                match line? {
                     Some(line) if !line.trim().is_empty() => {
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
-                                debug!(
-                                    "📦 Evaluated: attr={:?}, cache={:?}",
-                                    result.attr_path,
-                                    result.cache_status
-                                );
-
+                                debug!("📦 Evaluated: attr={:?}, cache={:?}", result.attr_path, result.cache_status);
                                 if let Some(error) = &result.error {
                                     warn!("⚠️ Evaluation error for {:?}: {}", result.attr_path, error);
                                 }
-
                                 eval_results.push(result);
                             }
                             Err(e) => {
-                                warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
+                                // Keep going; some lines can be progress/noise depending on log format
+                                warn!("Failed to parse nix-eval-jobs json line: {e}\nLine: {line}");
                             }
                         }
                     }
-                    Some(_) => {}, // empty line
+                    Some(_) => {}
                     None => stdout_done = true,
                 }
             }
-            line_result = stderr_reader.next_line(), if !stderr_done => {
-                match line_result? {
+            line = stderr_reader.next_line(), if !stderr_done => {
+                match line? {
                     Some(line) => {
+                        // Avoid spamming logs with warnings while still capturing them
                         if line.contains("error:") {
-                            error!("nix-eval-jobs: {}", line);
+                            error!("nix-eval-jobs: {line}");
                         } else if !line.starts_with("warning:") {
-                            debug!("nix-eval-jobs: {}", line);
+                            debug!("nix-eval-jobs: {line}");
                         }
                         stderr_output.push(line);
                     }
@@ -435,7 +430,6 @@ async fn evaluate_and_discover_nixos_configs(
                 }
             }
         }
-
         if stdout_done && stderr_done {
             break;
         }
@@ -458,12 +452,11 @@ async fn evaluate_and_discover_nixos_configs(
 
     info!("✅ Evaluated {} nixosConfigurations", eval_results.len());
 
-    // Now insert all discovered derivations into the database
-    let mut inserted_count = 0;
+    // Insert/update results exactly like before
+    let mut inserted_count = 0usize;
     for result in eval_results {
-        // With mapAttrs, attrPath will be like ["system-name"]
         let system_name = match result.attr_path.first() {
-            Some(name) => name,
+            Some(name) => name.as_str(),
             None => {
                 warn!(
                     "Could not extract system name from attrPath: {:?}",
@@ -473,9 +466,9 @@ async fn evaluate_and_discover_nixos_configs(
             }
         };
 
-        // Skip if there was an evaluation error
-        if let Some(error) = &result.error {
-            error!("❌ Evaluation failed for {}: {}", system_name, error);
+        // If evaluation failed for this attr, record the failure
+        if let Some(error_msg) = &result.error {
+            error!("❌ Evaluation failed for {}: {}", system_name, error_msg);
 
             let derivation_target =
                 build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
@@ -495,20 +488,18 @@ async fn evaluate_and_discover_nixos_configs(
                         deriv.id,
                         crate::queries::derivations::EvaluationStatus::DryRunFailed,
                         None,
-                        Some(error),
+                        Some(error_msg),
                         None,
                     )
                     .await;
                 }
-                Err(e) => {
-                    error!("Failed to insert failed derivation {}: {}", system_name, e);
-                }
+                Err(e) => error!("Failed to insert failed derivation {}: {}", system_name, e),
             }
             continue;
         }
 
         let drv_path = match &result.drv_path {
-            Some(path) => path,
+            Some(p) => p.as_str(),
             None => {
                 warn!("No derivation path for {}", system_name);
                 continue;
