@@ -349,12 +349,9 @@ pub async fn evaluate_and_discover_nixos_configs(
 
     let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
 
-    // Keep resource usage reasonable for interactive machines.
-    // You can make this come from config/env later if you want.
     let workers = 8usize;
     let max_mem_mb = 4096usize;
 
-    // Same expression as in your working CLI one-liner
     let nix_expr = format!(
         r#"
         let
@@ -365,6 +362,16 @@ pub async fn evaluate_and_discover_nixos_configs(
     );
 
     let mut cmd = Command::new("nix-eval-jobs");
+    cmd.env_clear(); // ← do NOT inherit service/user env
+    cmd.env("HOME", "/var/lib/crystal-forge");
+    cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+    cmd.env("NIX_REGISTRY", "/dev/null");
+    cmd.env("NIX_CONFIG_DIR", "/dev/null");
+    cmd.env(
+        "NIX_CONFIG",
+        "experimental-features = nix-command flakes\nflake-registry = ",
+    );
+
     cmd.args([
         "--expr",
         &nix_expr,
@@ -374,8 +381,8 @@ pub async fn evaluate_and_discover_nixos_configs(
         &max_mem_mb.to_string(),
         "--check-cache-status",
         "--meta",
+        // "--show-trace",
     ]);
-
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     debug!("Running nix-eval-jobs with --expr for {}", flake_ref);

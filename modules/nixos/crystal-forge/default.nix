@@ -852,7 +852,9 @@ in {
         DB_USER = cfg.database.user;
         DB_PASSWORD = lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
         JOB_DIR = "${pkgs.crystal-forge.run-postgres-jobs}/jobs";
-        NIX_CONFIG_DIR = "/var/lib/crystal-forge/.config/nix";
+        # disable registry and per-user nix.conf for deterministic evals
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
       };
 
       script =
@@ -927,11 +929,15 @@ in {
       environment = lib.mkMerge [
         {
           RUST_LOG = cfg.log_level;
-          NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
+          NIX_REMOTE = "daemon";
+          # NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
           TMPDIR = "/var/lib/crystal-forge/tmp";
           XDG_RUNTIME_DIR = "/run/crystal-forge";
           XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
           HOME = "/var/lib/crystal-forge";
+          # disable registry and per-user nix.conf for deterministic evals
+          NIX_REGISTRY = "/dev/null";
+          NIX_CONFIG_DIR = "/dev/null";
         }
         # Add Attic-specific environment variables if using Attic cache
         (lib.mkIf (cfg.cache.cache_type == "Attic") {
@@ -1023,6 +1029,7 @@ in {
             "/var/cache/crystal-forge-nix"
             "/var/cache/crystal-forge"
             "/var/lib/crystal-forge/.cache"
+            "/nix/var/nix/daemon-socket"
           ];
           ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
@@ -1038,21 +1045,52 @@ in {
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
-      path = with pkgs; [nix git nix-fast-build nix-eval-jobs];
+      path = with pkgs; [
+        nix
+        git
+        nix-fast-build
+        nix-eval-jobs
+        coreutils
+        findutils
+        gnused
+        gnugrep
+      ];
+
       environment = {
+        # Core runtime
         RUST_LOG = cfg.log_level;
+        TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+
+        # --- Critical Nix environment for deterministic evaluation ---
+        # Use the daemon socket for evaluation
+        NIX_REMOTE = "daemon";
+
+        # Completely isolate from user registries/config
+        HOME = "/var/lib/crystal-forge";
+        XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
+        NIX_USER_CONF_FILES = "/dev/null";
+
+        # Enable flakes and nix-command — exactly as in your manual test
+        NIX_CONFIG = ''
+          experimental-features = nix-command flakes
+          flake-registry =
+        '';
+
+        # Required to allow git+ssh or https fetches
+        GIT_SSH_COMMAND = "ssh -i /var/lib/crystal-forge/.ssh/id_ed25519 -o UserKnownHostsFile=/var/lib/crystal-forge/.ssh/known_hosts -o StrictHostKeyChecking=yes";
+
+        # Optional: specify cache location for nix-eval-jobs
         NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
       };
 
       preStart = ''
-        ${configScript}
         mkdir -p /run/crystal-forge
         mkdir -p /var/lib/crystal-forge/.config/attic
-
-        # Ensure proper ownership - do this AFTER creating all directories
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
-        # Ensure proper permissions
         chmod -R 755 /var/lib/crystal-forge/.cache
         chmod -R 755 /var/lib/crystal-forge/.config
       '';
@@ -1062,27 +1100,32 @@ in {
         ExecStart = serverScript;
         User = "crystal-forge";
         Group = "crystal-forge";
+        WorkingDirectory = "/var/lib/crystal-forge";
 
+        # Filesystem permissions
         StateDirectory = "crystal-forge";
         StateDirectoryMode = "0750";
         RuntimeDirectory = "crystal-forge";
         RuntimeDirectoryMode = "0700";
         CacheDirectory = "crystal-forge-nix";
         CacheDirectoryMode = "0750";
-        WorkingDirectory = "/var/lib/crystal-forge";
 
-        NoNewPrivileges = true;
-        ProtectSystem = "no";
-        ProtectHome = false;
+        # Read/write permissions
         ReadWritePaths = [
           "/var/lib/crystal-forge"
+          "/var/lib/crystal-forge/.cache"
           "/tmp"
           "/run/crystal-forge"
-          "/var/cache/crystal-forge-nix"
           "/var/cache/crystal-forge"
-          "/var/lib/crystal-forge/.cache"
+          "/var/cache/crystal-forge-nix"
+          "/nix/var/nix/daemon-socket"
         ];
+
+        # Security isolation
+        NoNewPrivileges = true;
         PrivateTmp = true;
+        ProtectSystem = "no";
+        ProtectHome = false;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
         ProtectControlGroups = true;
