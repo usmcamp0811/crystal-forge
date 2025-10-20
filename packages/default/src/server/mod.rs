@@ -493,7 +493,7 @@ async fn evaluate_and_discover_nixos_configs(
                     let _ = crate::queries::derivations::update_derivation_status(
                         pool,
                         deriv.id,
-                        crate::queries::derivations::EvaluationStatus::Failed,
+                        crate::queries::derivations::EvaluationStatus::DryRunFailed,
                         None,
                         Some(error),
                         None,
