@@ -920,7 +920,7 @@ in {
       wants = lib.optional cfg.local-database "postgresql.service";
 
       path = with pkgs;
-        [nix git vulnix systemd]
+        [nix git vulnix systemd nix-fast-build nix-eval-jobs]
         ++ lib.optional (cfg.cache.cache_type == "Attic") attic-client;
 
       # Merge existing env with any Environment=… pairs from systemd_properties
@@ -1038,7 +1038,7 @@ in {
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
-      path = with pkgs; [nix git];
+      path = with pkgs; [nix git nix-fast-build nix-eval-jobs];
       environment = {
         RUST_LOG = cfg.log_level;
         NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
@@ -1098,6 +1098,8 @@ in {
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
       path = with pkgs; [
+        nix-eval-jobs
+        nix-fast-build
         coreutils
         zfs
         util-linux
