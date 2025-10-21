@@ -364,8 +364,6 @@ pub async fn evaluate_and_discover_nixos_configs(
     .to_string();
 
     let mut cmd = Command::new("nix-eval-jobs");
-    cmd.env_clear();
-    cmd.env("PATH", "/run/current-system/sw/bin");
     cmd.env("HOME", "/var/lib/crystal-forge");
     cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
     cmd.env("NIX_CONF_DIR", "/dev/null");
@@ -391,7 +389,6 @@ pub async fn evaluate_and_discover_nixos_configs(
 
     // ✅ Log the exact command and environment before running
     let env_preview = [
-        ("PATH", "/run/current-system/sw/bin"),
         ("HOME", "/var/lib/crystal-forge"),
         ("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config"),
         ("NIX_CONF_DIR", "/dev/null"),
@@ -403,7 +400,7 @@ pub async fn evaluate_and_discover_nixos_configs(
         ),
     ];
     let cmd_str = format!(
-        "nix run nixpkgs#nix-eval-jobs -- --expr '{}' --workers {} --max-memory-size {} --check-cache-status --meta",
+        "nix-eval-jobs -- --expr '{}' --workers {} --max-memory-size {} --check-cache-status --meta",
         nix_expr.replace('\n', " "),
         workers,
         max_mem_mb
