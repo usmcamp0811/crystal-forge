@@ -1,7 +1,6 @@
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
-
 use crate::models::commits::Commit;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::models::derivations::NixEvalJobResult;
@@ -15,7 +14,6 @@ use crate::queries::derivations::{
 };
 use crate::queries::flakes::get_all_flakes_from_db;
 use anyhow::Result;
-use anyhow::bail;
 use anyhow::{Context, Result, bail};
 use futures::stream;
 use futures::stream::StreamExt;
@@ -23,7 +21,6 @@ use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
-use tokio::process::Command;
 use tokio::process::Command;
 use tokio::time::interval;
 
@@ -497,11 +494,6 @@ pub async fn evaluate_and_discover_nixos_configs(
             status.code().unwrap_or(-1),
             stderr_text
         );
-    }
-
-    if eval_results.is_empty() {
-        warn!("No nixosConfigurations found in {}", flake_ref);
-        return Ok(0);
     }
 
     info!("✅ Evaluated {} nixosConfigurations", eval_results.len());
