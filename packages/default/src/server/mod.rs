@@ -199,8 +199,8 @@ pub async fn evaluate_and_discover_nixos_configs(
     let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
 
     // Use config values
-    let workers = server_config.eval_workers;
-    let max_mem_mb = server_config.eval_max_memory_mb;
+    let workers = server_config.eval_workers.to_string();
+    let max_mem_mb = server_config.eval_max_memory_mb.to_string();
 
     // Clean and correct Nix expression
     let nix_expr = format!(
@@ -220,9 +220,9 @@ pub async fn evaluate_and_discover_nixos_configs(
         "--expr",
         &nix_expr,
         "--workers",
-        &workers.to_string(),
+        &workers,
         "--max-memory-size",
-        &max_mem_mb.to_string(),
+        &max_mem_mb,
     ];
 
     // Only add cache check if enabled
