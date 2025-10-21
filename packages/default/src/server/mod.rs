@@ -383,6 +383,8 @@ pub async fn evaluate_and_discover_nixos_configs(
         &max_mem_mb.to_string(),
         "--check-cache-status",
         "--meta",
+        "--show-trace",
+        "--debug",
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
