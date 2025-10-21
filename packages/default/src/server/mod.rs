@@ -1,6 +1,7 @@
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
+
 use crate::models::commits::Commit;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::models::derivations::NixEvalJobResult;
@@ -15,11 +16,14 @@ use crate::queries::derivations::{
 use crate::queries::flakes::get_all_flakes_from_db;
 use anyhow::Result;
 use anyhow::bail;
+use anyhow::{Context, Result, bail};
 use futures::stream;
 use futures::stream::StreamExt;
+use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
+use tokio::process::Command;
 use tokio::process::Command;
 use tokio::time::interval;
 
@@ -342,51 +346,57 @@ pub async fn evaluate_and_discover_nixos_configs(
     commit: &Commit,
     flake: &Flake,
 ) -> Result<usize> {
-    info!(
-        "🚀 Evaluating all nixosConfigurations for commit {} with nix run nixpkgs#nix-eval-jobs",
-        commit.git_commit_hash
-    );
-
-    let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
     let workers = 8usize;
     let max_mem_mb = 4096usize;
 
-    // Clean and correct Nix expression
+    // 1) Get narHash once (cache/store in DB later if you want)
+    let nar_hash = prefetch_nar_hash(&flake.repo_url, &commit.git_commit_hash).await?;
+
+    // 2) Pure expr: fetchTree -> getFlake "path:${src}"
     let nix_expr = format!(
         r#"
         let
-          flake = builtins.getFlake "{flake_ref}";
+          src = builtins.fetchTree {{
+            type = "git";
+            url  = "{url}";
+            // keep `ref` if you use it in your workflow; it's ignored if `rev` is present
+            ref  = "nixos";
+            rev  = "{rev}";
+            narHash = "{nar}";
+          }};
+          flake = builtins.getFlake "path:${{src}}";
         in
-          builtins.mapAttrs (_: cfg: cfg.config.system.build.toplevel) flake.nixosConfigurations
-        "#
-    )
-    .trim_end_matches('"')
-    .to_string();
-
-    let mut cmd = Command::new("nix-eval-jobs");
-    cmd.env("HOME", "/var/lib/crystal-forge");
-    cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
-    cmd.env("NIX_CONF_DIR", "/dev/null");
-    cmd.env("NIX_USER_CONF_FILES", "/dev/null");
-    cmd.env("NIX_REGISTRY", "/dev/null");
-    cmd.env(
-        "NIX_CONFIG",
-        "experimental-features = nix-command flakes\nflake-registry =\n",
+          builtins.mapAttrs (_: cfg: cfg.config.system.build.toplevel)
+            flake.nixosConfigurations
+        "#,
+        url = flake.repo_url.trim_start_matches("git+"),
+        rev = commit.git_commit_hash,
+        nar = nar_hash,
     );
 
-    cmd.args([
-        "--expr",
-        &nix_expr,
-        "--workers",
-        &workers.to_string(),
-        "--max-memory-size",
-        &max_mem_mb.to_string(),
-        "--check-cache-status",
-        "--meta",
-        "--show-trace",
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    let mut cmd = Command::new("nix-eval-jobs");
+    cmd.env("HOME", "/var/lib/crystal-forge")
+        .env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config")
+        .env("NIX_CONF_DIR", "/dev/null")
+        .env("NIX_USER_CONF_FILES", "/dev/null")
+        .env("NIX_REGISTRY", "/dev/null")
+        .env(
+            "NIX_CONFIG",
+            "experimental-features = nix-command flakes\nflake-registry =\n",
+        )
+        .args([
+            "--expr",
+            &nix_expr,
+            "--workers",
+            &workers.to_string(),
+            "--max-memory-size",
+            &max_mem_mb.to_string(),
+            "--check-cache-status",
+            "--meta",
+            "--show-trace",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
 
     // ✅ Log the exact command and environment before running
     let env_preview = [
@@ -620,4 +630,52 @@ fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
         let separator = if repo_url.contains('?') { "&" } else { "?" };
         format!("git+{}{separator}rev={}", repo_url, commit_hash)
     }
+}
+
+async fn prefetch_nar_hash(repo_url: &str, commit: &str) -> Result<String> {
+    // Works for "git+https://…" or plain "https://…"
+    let flake_ref = if repo_url.starts_with("git+") {
+        if repo_url.contains("?rev=") {
+            repo_url.to_string()
+        } else {
+            format!("{}?rev={}", repo_url, commit)
+        }
+    } else {
+        let sep = if repo_url.contains('?') { "&" } else { "?" };
+        format!("git+{}{sep}rev={}", repo_url, commit)
+    };
+
+    let output = Command::new("nix")
+        .args([
+            "flake",
+            "prefetch",
+            &flake_ref,
+            "--json",
+            // ensure purity even when run by systemd:
+            "--extra-experimental-features",
+            "nix-command flakes",
+        ])
+        .env("NIX_CONF_DIR", "/dev/null")
+        .env("NIX_USER_CONF_FILES", "/dev/null")
+        .env("NIX_REGISTRY", "/dev/null")
+        .env(
+            "NIX_CONFIG",
+            "experimental-features = nix-command flakes\nflake-registry =\n",
+        )
+        .output()
+        .await
+        .context("running `nix flake prefetch`")?;
+
+    if !output.status.success() {
+        bail!(
+            "prefetch failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let v: Value = serde_json::from_slice(&output.stdout)?;
+    let nar_hash = v
+        .get("narHash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("missing narHash in prefetch output"))?;
+    Ok(nar_hash.to_string())
 }
