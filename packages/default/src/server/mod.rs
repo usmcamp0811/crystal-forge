@@ -123,6 +123,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                         );
                     }
                     Err(e) => {
+                        // TODO: Add fall back to nix build --dry-run
                         error!(
                             "❌ Failed to evaluate commit {}: {}",
                             commit.git_commit_hash, e
