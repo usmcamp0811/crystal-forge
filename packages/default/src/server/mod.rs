@@ -624,7 +624,7 @@ fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
 }
 
 async fn prefetch_nar_hash(repo_url: &str, commit: &str) -> Result<String> {
-    // Works for "git+https://…" or plain "https://…"
+    // Normalize to a flake URL, preserving any existing query
     let flake_ref = if repo_url.starts_with("git+") {
         if repo_url.contains("?rev=") {
             repo_url.to_string()
@@ -642,7 +642,6 @@ async fn prefetch_nar_hash(repo_url: &str, commit: &str) -> Result<String> {
             "prefetch",
             &flake_ref,
             "--json",
-            // ensure purity even when run by systemd:
             "--extra-experimental-features",
             "nix-command flakes",
         ])
@@ -663,10 +662,28 @@ async fn prefetch_nar_hash(repo_url: &str, commit: &str) -> Result<String> {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let v: Value = serde_json::from_slice(&output.stdout)?;
+
+    let v: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("parsing `nix flake prefetch --json`")?;
+
+    // Try multiple known shapes:
+    // - Newer Nix: { locked: { narHash: "…" }, storePath: "…" }
+    // - Older Nix (rare): { narHash: "…", storePath: "…" }
     let nar_hash = v
-        .get("narHash")
-        .and_then(Value::as_str)
-        .ok_or_else(|| anyhow::anyhow!("missing narHash in prefetch output"))?;
-    Ok(nar_hash.to_string())
+        .get("locked")
+        .and_then(|l| l.get("narHash"))
+        .and_then(|s| s.as_str())
+        .or_else(|| v.get("narHash").and_then(|s| s.as_str()))
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            // Include the JSON to make debugging easier
+            let pretty =
+                serde_json::to_string_pretty(&v).unwrap_or_else(|_| "<unprintable>".into());
+            anyhow::anyhow!(format!(
+                "missing narHash in prefetch output; got:\n{}",
+                pretty
+            ))
+        })?;
+
+    Ok(nar_hash)
 }
