@@ -13,7 +13,6 @@ use crate::queries::derivations::{
     mark_derivation_dry_run_in_progress, update_scheduled_at,
 };
 use crate::queries::flakes::get_all_flakes_from_db;
-use anyhow::Result;
 use anyhow::{Context, Result, bail};
 use futures::stream;
 use futures::stream::StreamExt;
