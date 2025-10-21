@@ -343,7 +343,7 @@ pub async fn evaluate_and_discover_nixos_configs(
     flake: &Flake,
 ) -> Result<usize> {
     info!(
-        "🚀 Evaluating all nixosConfigurations for commit {} with nix run nixpkgs#nix-eval-jobs",
+        "🚀 Evaluating all nixosConfigurations for commit {} with nix-eval-jobs",
         commit.git_commit_hash
     );
 
@@ -394,7 +394,7 @@ pub async fn evaluate_and_discover_nixos_configs(
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
 
-    let mut eval_results = Vec::<NixEvalJobResult>::new();
+    let mut inserted_count = 0usize;
     let mut stderr_output = Vec::<String>::new();
     let (mut stdout_done, mut stderr_done) = (false, false);
 
@@ -406,7 +406,98 @@ pub async fn evaluate_and_discover_nixos_configs(
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
                                 debug!("📦 Evaluated: attr={:?}, cache={:?}", result.attr_path, result.cache_status);
-                                eval_results.push(result);
+
+                                // **NEW: Insert immediately as we discover systems**
+                                let system_name = match result.attr_path.first() {
+                                    Some(name) => name.as_str(),
+                                    None => {
+                                        warn!("Could not extract system name from attrPath: {:?}", result.attr_path);
+                                        continue;
+                                    }
+                                };
+
+                                let derivation_target = build_agent_target(
+                                    &flake.repo_url,
+                                    &commit.git_commit_hash,
+                                    system_name
+                                );
+
+                                // If evaluation failed for this attr, record the failure
+                                if let Some(error_msg) = &result.error {
+                                    error!("❌ Evaluation failed for {}: {}", system_name, error_msg);
+
+                                    match insert_derivation_with_target(
+                                        pool,
+                                        Some(commit),
+                                        system_name,
+                                        "nixos",
+                                        Some(&derivation_target),
+                                    ).await {
+                                        Ok(deriv) => {
+                                            let _ = crate::queries::derivations::update_derivation_status(
+                                                pool,
+                                                deriv.id,
+                                                crate::queries::derivations::EvaluationStatus::DryRunFailed,
+                                                None,
+                                                Some(error_msg),
+                                                None,
+                                            ).await;
+                                        }
+                                        Err(e) => error!("Failed to insert failed derivation {}: {}", system_name, e),
+                                    }
+                                    continue;
+                                }
+
+                                // Get derivation path and store path
+                                let drv_path = match &result.drv_path {
+                                    Some(p) => p.as_str(),
+                                    None => {
+                                        warn!("No derivation path for {}", system_name);
+                                        continue;
+                                    }
+                                };
+
+                                let store_path = result
+                                    .outputs
+                                    .as_ref()
+                                    .and_then(|o| o.get("out"))
+                                    .map(|s| s.as_str());
+
+                                // Insert the derivation
+                                match insert_derivation_with_target(
+                                    pool,
+                                    Some(commit),
+                                    system_name,
+                                    "nixos",
+                                    Some(&derivation_target),
+                                ).await {
+                                    Ok(deriv) => {
+                                        info!("✅ Inserted NixOS derivation: {} -> {}", system_name, derivation_target);
+
+                                        let _ = crate::queries::derivations::update_derivation_status(
+                                            pool,
+                                            deriv.id,
+                                            crate::queries::derivations::EvaluationStatus::DryRunComplete,
+                                            Some(drv_path),
+                                            None,
+                                            store_path,
+                                        ).await;
+
+                                        if result.cache_status.as_deref() == Some("local") {
+                                            if let Some(sp) = store_path {
+                                                info!("💾 {} is already built locally", system_name);
+                                                let _ = crate::queries::derivations::mark_derivation_build_complete(
+                                                    pool, deriv.id, sp,
+                                                ).await;
+                                            }
+                                        }
+
+                                        inserted_count += 1;
+                                    }
+                                    Err(e) => {
+                                        error!("❌ Failed to insert NixOS derivation for {}: {}", system_name, e);
+                                    }
+                                }
                             }
                             Err(e) => warn!("Failed to parse nix-eval-jobs json line: {e}\nLine: {line}"),
                         }
@@ -453,130 +544,13 @@ pub async fn evaluate_and_discover_nixos_configs(
         );
     }
 
-    let status = child.wait().await?;
-    if !status.success() {
-        let stderr_text = stderr_output.join("\n");
-        bail!(
-            "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
-            status.code().unwrap_or(-1),
-            stderr_text
-        );
-    }
-
-    if eval_results.is_empty() {
+    if inserted_count == 0 {
         warn!("No nixosConfigurations found in {}", flake_ref);
-        return Ok(0);
-    }
-
-    info!("✅ Evaluated {} nixosConfigurations", eval_results.len());
-
-    // Insert/update results exactly like before
-    let mut inserted_count = 0usize;
-    for result in eval_results {
-        let system_name = match result.attr_path.first() {
-            Some(name) => name.as_str(),
-            None => {
-                warn!(
-                    "Could not extract system name from attrPath: {:?}",
-                    result.attr_path
-                );
-                continue;
-            }
-        };
-
-        // If evaluation failed for this attr, record the failure
-        if let Some(error_msg) = &result.error {
-            error!("❌ Evaluation failed for {}: {}", system_name, error_msg);
-
-            let derivation_target =
-                build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
-
-            match insert_derivation_with_target(
-                pool,
-                Some(commit),
-                system_name,
-                "nixos",
-                Some(&derivation_target),
-            )
-            .await
-            {
-                Ok(deriv) => {
-                    let _ = crate::queries::derivations::update_derivation_status(
-                        pool,
-                        deriv.id,
-                        crate::queries::derivations::EvaluationStatus::DryRunFailed,
-                        None,
-                        Some(error_msg),
-                        None,
-                    )
-                    .await;
-                }
-                Err(e) => error!("Failed to insert failed derivation {}: {}", system_name, e),
-            }
-            continue;
-        }
-
-        let drv_path = match &result.drv_path {
-            Some(p) => p.as_str(),
-            None => {
-                warn!("No derivation path for {}", system_name);
-                continue;
-            }
-        };
-
-        let store_path = result
-            .outputs
-            .as_ref()
-            .and_then(|o| o.get("out"))
-            .map(|s| s.as_str());
-
-        let derivation_target =
-            build_agent_target(&flake.repo_url, &commit.git_commit_hash, system_name);
-
-        match insert_derivation_with_target(
-            pool,
-            Some(commit),
-            system_name,
-            "nixos",
-            Some(&derivation_target),
-        )
-        .await
-        {
-            Ok(deriv) => {
-                info!(
-                    "✅ Inserted NixOS derivation: {} (commit {}) -> {}",
-                    system_name, commit.git_commit_hash, derivation_target
-                );
-
-                let _ = crate::queries::derivations::update_derivation_status(
-                    pool,
-                    deriv.id,
-                    crate::queries::derivations::EvaluationStatus::DryRunComplete,
-                    Some(drv_path),
-                    None,
-                    store_path,
-                )
-                .await;
-
-                if result.cache_status.as_deref() == Some("local") {
-                    if let Some(sp) = store_path {
-                        info!("💾 {} is already built locally", system_name);
-                        let _ = crate::queries::derivations::mark_derivation_build_complete(
-                            pool, deriv.id, sp,
-                        )
-                        .await;
-                    }
-                }
-
-                inserted_count += 1;
-            }
-            Err(e) => {
-                error!(
-                    "❌ Failed to insert NixOS derivation for {}: {}",
-                    system_name, e
-                );
-            }
-        }
+    } else {
+        info!(
+            "✅ Evaluated and inserted {} nixosConfigurations",
+            inserted_count
+        );
     }
 
     Ok(inserted_count)
