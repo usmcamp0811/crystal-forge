@@ -355,8 +355,6 @@ pub async fn evaluate_and_discover_nixos_configs(
           src = builtins.fetchTree {{
             type = "git";
             url  = "{url}";
-            // keep `ref` if you use it in your workflow; it's ignored if `rev` is present
-            ref  = "nixos";
             rev  = "{rev}";
             narHash = "{nar}";
           }};
