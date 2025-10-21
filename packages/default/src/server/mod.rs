@@ -384,7 +384,6 @@ pub async fn evaluate_and_discover_nixos_configs(
         "--check-cache-status",
         "--meta",
         "--show-trace",
-        "--debug",
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
