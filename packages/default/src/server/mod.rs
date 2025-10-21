@@ -13,10 +13,10 @@ use crate::queries::derivations::{
     mark_derivation_dry_run_in_progress, update_scheduled_at,
 };
 use crate::queries::flakes::get_all_flakes_from_db;
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+use anyhow::bail;
 use futures::stream;
 use futures::stream::StreamExt;
-use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
@@ -342,55 +342,51 @@ pub async fn evaluate_and_discover_nixos_configs(
     commit: &Commit,
     flake: &Flake,
 ) -> Result<usize> {
+    info!(
+        "🚀 Evaluating all nixosConfigurations for commit {} with nix run nixpkgs#nix-eval-jobs",
+        commit.git_commit_hash
+    );
+
+    let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
     let workers = 8usize;
     let max_mem_mb = 4096usize;
 
-    // 1) Get narHash once (cache/store in DB later if you want)
-    let nar_hash = prefetch_nar_hash(&flake.repo_url, &commit.git_commit_hash).await?;
-
-    // 2) Pure expr: fetchTree -> getFlake "path:${src}"
+    // Clean and correct Nix expression
     let nix_expr = format!(
         r#"
         let
-          src = builtins.fetchTree {{
-            type = "git";
-            url  = "{url}";
-            rev  = "{rev}";
-            narHash = "{nar}";
-          }};
-          flake = builtins.getFlake "path:${{src}}";
+          flake = builtins.getFlake "{flake_ref}";
         in
-          builtins.mapAttrs (_: cfg: cfg.config.system.build.toplevel)
-            flake.nixosConfigurations
-        "#,
-        url = flake.repo_url.trim_start_matches("git+"),
-        rev = commit.git_commit_hash,
-        nar = nar_hash,
-    );
+          builtins.mapAttrs (_: cfg: cfg.config.system.build.toplevel) flake.nixosConfigurations
+        "#
+    )
+    .trim_end_matches('"')
+    .to_string();
 
     let mut cmd = Command::new("nix-eval-jobs");
-    cmd.env("HOME", "/var/lib/crystal-forge")
-        .env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config")
-        .env("NIX_CONF_DIR", "/dev/null")
-        .env("NIX_USER_CONF_FILES", "/dev/null")
-        .env("NIX_REGISTRY", "/dev/null")
-        .env(
-            "NIX_CONFIG",
-            "experimental-features = nix-command flakes\nflake-registry =\n",
-        )
-        .args([
-            "--expr",
-            &nix_expr,
-            "--workers",
-            &workers.to_string(),
-            "--max-memory-size",
-            &max_mem_mb.to_string(),
-            "--check-cache-status",
-            "--meta",
-            "--show-trace",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    cmd.env("HOME", "/var/lib/crystal-forge");
+    cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+    cmd.env("NIX_CONF_DIR", "/dev/null");
+    cmd.env("NIX_USER_CONF_FILES", "/dev/null");
+    cmd.env("NIX_REGISTRY", "/dev/null");
+    cmd.env(
+        "NIX_CONFIG",
+        "experimental-features = nix-command flakes\nflake-registry =\n",
+    );
+
+    cmd.args([
+        "--expr",
+        &nix_expr,
+        "--workers",
+        &workers.to_string(),
+        "--max-memory-size",
+        &max_mem_mb.to_string(),
+        "--check-cache-status",
+        "--meta",
+        "--show-trace",
+    ])
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
 
     // ✅ Log the exact command and environment before running
     let env_preview = [
@@ -491,6 +487,11 @@ pub async fn evaluate_and_discover_nixos_configs(
             status.code().unwrap_or(-1),
             stderr_text
         );
+    }
+
+    if eval_results.is_empty() {
+        warn!("No nixosConfigurations found in {}", flake_ref);
+        return Ok(0);
     }
 
     info!("✅ Evaluated {} nixosConfigurations", eval_results.len());
@@ -619,70 +620,4 @@ fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
         let separator = if repo_url.contains('?') { "&" } else { "?" };
         format!("git+{}{separator}rev={}", repo_url, commit_hash)
     }
-}
-
-async fn prefetch_nar_hash(repo_url: &str, commit: &str) -> Result<String> {
-    // Normalize to a flake URL, preserving any existing query
-    let flake_ref = if repo_url.starts_with("git+") {
-        if repo_url.contains("?rev=") {
-            repo_url.to_string()
-        } else {
-            format!("{}?rev={}", repo_url, commit)
-        }
-    } else {
-        let sep = if repo_url.contains('?') { "&" } else { "?" };
-        format!("git+{}{sep}rev={}", repo_url, commit)
-    };
-
-    let output = Command::new("nix")
-        .args([
-            "flake",
-            "prefetch",
-            &flake_ref,
-            "--json",
-            "--extra-experimental-features",
-            "nix-command flakes",
-        ])
-        .env("NIX_CONF_DIR", "/dev/null")
-        .env("NIX_USER_CONF_FILES", "/dev/null")
-        .env("NIX_REGISTRY", "/dev/null")
-        .env(
-            "NIX_CONFIG",
-            "experimental-features = nix-command flakes\nflake-registry =\n",
-        )
-        .output()
-        .await
-        .context("running `nix flake prefetch`")?;
-
-    if !output.status.success() {
-        bail!(
-            "prefetch failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let v: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("parsing prefetch JSON")?;
-
-    // Accept multiple shapes:
-    // - Newer Nix: { hash: "sha256-…", storePath: "…" }
-    // - Some versions: { locked: { narHash: "sha256-…" }, … }
-    // - Older: { narHash: "sha256-…" }
-    let nar_hash = v
-        .get("locked")
-        .and_then(|l| l.get("narHash"))
-        .and_then(|s| s.as_str())
-        .or_else(|| v.get("narHash").and_then(|s| s.as_str()))
-        .or_else(|| v.get("hash").and_then(|s| s.as_str())) // <-- your case
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            let pretty =
-                serde_json::to_string_pretty(&v).unwrap_or_else(|_| "<unprintable>".into());
-            anyhow::anyhow!(format!(
-                "missing narHash/hash in prefetch output; got:\n{}",
-                pretty
-            ))
-        })?;
-
-    Ok(nar_hash)
 }
