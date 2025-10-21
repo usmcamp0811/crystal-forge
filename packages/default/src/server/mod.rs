@@ -664,23 +664,24 @@ async fn prefetch_nar_hash(repo_url: &str, commit: &str) -> Result<String> {
     }
 
     let v: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("parsing `nix flake prefetch --json`")?;
+        serde_json::from_slice(&output.stdout).context("parsing prefetch JSON")?;
 
-    // Try multiple known shapes:
-    // - Newer Nix: { locked: { narHash: "…" }, storePath: "…" }
-    // - Older Nix (rare): { narHash: "…", storePath: "…" }
+    // Accept multiple shapes:
+    // - Newer Nix: { hash: "sha256-…", storePath: "…" }
+    // - Some versions: { locked: { narHash: "sha256-…" }, … }
+    // - Older: { narHash: "sha256-…" }
     let nar_hash = v
         .get("locked")
         .and_then(|l| l.get("narHash"))
         .and_then(|s| s.as_str())
         .or_else(|| v.get("narHash").and_then(|s| s.as_str()))
+        .or_else(|| v.get("hash").and_then(|s| s.as_str())) // <-- your case
         .map(str::to_owned)
         .ok_or_else(|| {
-            // Include the JSON to make debugging easier
             let pretty =
                 serde_json::to_string_pretty(&v).unwrap_or_else(|_| "<unprintable>".into());
             anyhow::anyhow!(format!(
-                "missing narHash in prefetch output; got:\n{}",
+                "missing narHash/hash in prefetch output; got:\n{}",
                 pretty
             ))
         })?;
