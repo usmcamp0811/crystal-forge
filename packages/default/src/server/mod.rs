@@ -442,11 +442,9 @@ pub async fn evaluate_and_discover_nixos_configs(
         error!(
             "❌ nix-eval-jobs failed (exit code {})\n\
              Command:\n{}\n\
-             Environment:\n{:#?}\n\
              Stderr:\n{}",
             status.code().unwrap_or(-1),
             cmd_str,
-            env_preview,
             stderr_text
         );
         bail!(
