@@ -1,10 +1,10 @@
 use super::Derivation;
-use crate::models::commits::Commit;
- use crate::models::flakes::Flake;
-use crate::queries::derivations::insert_derivation_with_target;
 use super::utils::*;
+use crate::models::commits::Commit;
 use crate::models::config::BuildConfig;
 use crate::models::derivations::resolve_drv_to_store_path_static;
+use crate::models::flakes::Flake;
+use crate::queries::derivations::insert_derivation_with_target;
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
@@ -65,6 +65,7 @@ impl Derivation {
                     self.evaluate_and_build_nixos(pool, &flake_target, build_config)
                         .await
                 } else {
+                    // TODO: This can probably go away now
                     self.evaluate_nixos_dry_run(pool, &flake_target, build_config)
                         .await
                 }

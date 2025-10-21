@@ -348,9 +348,14 @@ pub async fn evaluate_and_discover_nixos_configs(
         commit.git_commit_hash
     );
 
+    let config = CrystalForgeConfig::load().unwrap_or_default();
+    let server_config = &config.server;
+
     let flake_ref = build_flake_reference(&flake.repo_url, &commit.git_commit_hash);
-    let workers = 8usize;
-    let max_mem_mb = 4096usize;
+
+    // Use config values
+    let workers = server_config.eval_workers;
+    let max_mem_mb = server_config.eval_max_memory_mb;
 
     // Clean and correct Nix expression
     let nix_expr = format!(
@@ -366,26 +371,39 @@ pub async fn evaluate_and_discover_nixos_configs(
 
     let mut cmd = Command::new("nix-eval-jobs");
 
-    cmd.args([
+    let mut args = vec![
         "--expr",
         &nix_expr,
         "--workers",
         &workers.to_string(),
         "--max-memory-size",
         &max_mem_mb.to_string(),
-        "--check-cache-status",
-        "--meta",
-    ])
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
+    ];
 
-    // ✅ Log the exact command and environment before running
-    let cmd_str = format!(
-        "nix-eval-jobs -- --expr '{}' --workers {} --max-memory-size {} --check-cache-status --meta",
-        nix_expr.replace('\n', " "),
-        workers,
-        max_mem_mb
-    );
+    // Only add cache check if enabled
+    if server_config.eval_check_cache {
+        args.push("--check-cache-status");
+    }
+
+    args.push("--meta");
+
+    cmd.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let cmd_str = if server_config.eval_check_cache {
+        format!(
+            "nix-eval-jobs --expr '{}' --workers {} --max-memory-size {} --check-cache-status --meta",
+            nix_expr.replace('\n', " "),
+            workers,
+            max_mem_mb
+        )
+    } else {
+        format!(
+            "nix-eval-jobs --expr '{}' --workers {} --max-memory-size {} --meta",
+            nix_expr.replace('\n', " "),
+            workers,
+            max_mem_mb
+        )
+    };
     debug!("💻 Executing command:\n{}", cmd_str);
 
     let mut child = cmd.spawn()?;
