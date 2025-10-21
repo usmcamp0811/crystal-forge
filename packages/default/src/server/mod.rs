@@ -364,15 +364,6 @@ pub async fn evaluate_and_discover_nixos_configs(
     .to_string();
 
     let mut cmd = Command::new("nix-eval-jobs");
-    cmd.env("HOME", "/var/lib/crystal-forge");
-    cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
-    cmd.env("NIX_CONF_DIR", "/dev/null");
-    cmd.env("NIX_USER_CONF_FILES", "/dev/null");
-    cmd.env("NIX_REGISTRY", "/dev/null");
-    cmd.env(
-        "NIX_CONFIG",
-        "experimental-features = nix-command flakes\nflake-registry =\n",
-    );
 
     cmd.args([
         "--expr",
@@ -383,33 +374,18 @@ pub async fn evaluate_and_discover_nixos_configs(
         &max_mem_mb.to_string(),
         "--check-cache-status",
         "--meta",
-        "--show-trace",
     ])
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
 
     // ✅ Log the exact command and environment before running
-    let env_preview = [
-        ("HOME", "/var/lib/crystal-forge"),
-        ("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config"),
-        ("NIX_CONF_DIR", "/dev/null"),
-        ("NIX_USER_CONF_FILES", "/dev/null"),
-        ("NIX_REGISTRY", "/dev/null"),
-        (
-            "NIX_CONFIG",
-            "experimental-features = nix-command flakes\nflake-registry =\n",
-        ),
-    ];
     let cmd_str = format!(
         "nix-eval-jobs -- --expr '{}' --workers {} --max-memory-size {} --check-cache-status --meta",
         nix_expr.replace('\n', " "),
         workers,
         max_mem_mb
     );
-    debug!(
-        "💻 Executing command:\n{}\nEnvironment:\n{:#?}",
-        cmd_str, env_preview
-    );
+    debug!("💻 Executing command:\n{}", cmd_str);
 
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take().unwrap();

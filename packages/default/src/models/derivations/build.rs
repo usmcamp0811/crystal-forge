@@ -131,7 +131,11 @@ impl Derivation {
         let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
 
         // Use nix-eval-jobs to evaluate all nixosConfigurations in parallel
+        // This also inserts all discovered systems into the database
         let eval_results = Self::evaluate_with_nix_eval_jobs(
+            pool,
+            &commit,
+            &flake,
             &flake.repo_url,
             &commit.git_commit_hash,
             &self.derivation_name,
@@ -140,12 +144,9 @@ impl Derivation {
         .await?;
 
         // Find our specific configuration's result
-        let our_config_attr = format!("nixosConfigurations.{}", self.derivation_name);
         let main_result = eval_results
             .iter()
-            .find(|r| {
-                r.attr == our_config_attr || r.attr_path.last() == Some(&self.derivation_name)
-            })
+            .find(|r| r.attr_path.last() == Some(&self.derivation_name))
             .ok_or_else(|| {
                 anyhow!(
                     "Could not find evaluation result for {}",
@@ -274,6 +275,9 @@ impl Derivation {
 
     /// Use nix-eval-jobs to evaluate all nixosConfigurations in parallel
     async fn evaluate_with_nix_eval_jobs(
+        pool: &PgPool,
+        commit: &Commit,
+        flake: &Flake,
         repo_url: &str,
         commit_hash: &str,
         target_system: &str,
@@ -324,7 +328,27 @@ impl Derivation {
                         Some(line) if !line.trim().is_empty() => {
                             match serde_json::from_str::<NixEvalJobResult>(&line) {
                                 Ok(result) => {
-                                    debug!("Evaluated: {} (cache: {:?})", result.attr, result.cache_status);
+                                    debug!("📦 Evaluated: attr={:?}, cache={:?}", result.attr_path, result.cache_status);
+
+                                    // **NEW: Insert immediately as we discover systems**
+                                    if let Some(system_name) = result.attr_path.last() {
+                                        let derivation_target = build_agent_target(
+                                            &flake.repo_url,
+                                            &commit.git_commit_hash,
+                                            system_name
+                                        );
+
+                                        match insert_derivation_with_target(
+                                            pool,
+                                            Some(commit),
+                                            system_name,
+                                            "nixos",
+                                            Some(&derivation_target),
+                                        ).await {
+                                            Ok(_) => debug!("✅ Inserted/updated {}", system_name),
+                                            Err(e) => warn!("⚠️ Failed to insert {}: {}", system_name, e),
+                                        }
+                                    }
 
                                     // Check if this is our target system
                                     if result.attr_path.last() == Some(&target_system.to_string()) {
