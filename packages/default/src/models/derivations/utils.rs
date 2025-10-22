@@ -1,8 +1,9 @@
 use crate::models::config::BuildConfig;
+use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 use tokio::process::Command;
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 /// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
 pub const CACHE_ENV_ALLOWLIST: &[&str] = &[
@@ -183,4 +184,170 @@ pub fn apply_cache_env(scoped: &mut Command) {
         scoped.arg("--setenv");
         scoped.arg("AWS_EC2_METADATA_DISABLED=true");
     }
+}
+
+// ============================================================================
+// Flake reference building helpers
+// ============================================================================
+
+/// Build the base flake reference (git+url?rev=hash)
+pub fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
+    if repo_url.starts_with("git+") {
+        if repo_url.contains("?rev=") {
+            repo_url.to_string()
+        } else {
+            format!("{}?rev={}", repo_url, commit_hash)
+        }
+    } else {
+        let separator = if repo_url.contains('?') { "&" } else { "?" };
+        format!("git+{}{separator}rev={}", repo_url, commit_hash)
+    }
+}
+
+/// Build flake target for agent deployment (nixos-rebuild compatible)
+pub fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
+    let flake_ref = build_flake_reference(repo_url, commit_hash);
+    debug!("Making Deployment Target for {system_name} ==> {flake_ref}#{system_name}");
+    format!("{flake_ref}#{system_name}")
+}
+
+/// Build flake target for evaluation (nix path-info compatible)
+pub fn build_evaluation_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
+    let flake_ref = build_flake_reference(repo_url, commit_hash);
+    format!("{flake_ref}#nixosConfigurations.{system_name}.config.system.build.toplevel")
+}
+
+// ============================================================================
+// Derivation closure and build status helpers
+// ============================================================================
+
+/// Get all derivations in a closure with their build status
+pub async fn get_complete_closure(
+    derivation_path: &str,
+    build_config: &BuildConfig,
+) -> Result<Vec<(String, bool)>> {
+    // Return (drv_path, is_built)
+    let output = Command::new("nix")
+        .args(["path-info", "--derivation", "--recursive", derivation_path])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "Failed to get closure: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let drv_paths: Vec<String> = String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.is_empty() && *line != derivation_path)
+        .map(|s| s.to_string())
+        .collect();
+
+    // Check which ones are already built in the local store
+    let mut closure = Vec::new();
+    for drv_path in drv_paths {
+        let is_built = check_if_built(&drv_path).await.unwrap_or(false);
+        closure.push((drv_path, is_built));
+    }
+
+    Ok(closure)
+}
+
+/// Check if a derivation is already built in the Nix store
+pub async fn check_if_built(drv_path: &str) -> Result<bool> {
+    // Check if all outputs of this derivation exist in the store
+    let output = Command::new("nix")
+        .args(["path-info", "--json", drv_path])
+        .output()
+        .await?;
+
+    Ok(output.status.success())
+}
+
+/// Get the store path from a .drv path
+pub async fn get_store_path_from_drv(drv_path: &str) -> Result<String> {
+    let output = Command::new("nix-store")
+        .args(["--query", "--outputs", drv_path])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!("Failed to get store path for {}", drv_path);
+    }
+
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+/// Enhanced version that gets closure with cache status in one pass
+pub async fn get_complete_closure_with_cache_status(
+    derivation_path: &str,
+    build_config: &BuildConfig,
+) -> Result<Vec<(String, String, bool)>> {
+    // Returns (drv_path, store_path, is_built)
+
+    // Get all derivations in closure
+    let output = Command::new("nix")
+        .args(["path-info", "--derivation", "--recursive", derivation_path])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "Failed to get closure: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let drv_paths: Vec<String> = String::from_utf8(output.stdout)?
+        .lines()
+        .filter(|line| !line.is_empty() && *line != derivation_path)
+        .map(|s| s.to_string())
+        .collect();
+
+    info!(
+        "🔍 Checking build status for {} derivations...",
+        drv_paths.len()
+    );
+
+    // Check status in batches for better performance
+    let mut closure = Vec::new();
+    for drv_path in drv_paths {
+        let (store_path, is_built) = match get_store_path_and_build_status(&drv_path).await {
+            Ok(result) => result,
+            Err(e) => {
+                warn!("Failed to check status for {}: {}", drv_path, e);
+                (String::new(), false)
+            }
+        };
+        closure.push((drv_path, store_path, is_built));
+    }
+
+    Ok(closure)
+}
+
+/// Get store path and check if it's built in one call
+pub async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, bool)> {
+    // First get the store path
+    let output = Command::new("nix-store")
+        .args(["--query", "--outputs", drv_path])
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        anyhow::bail!("Failed to get store path for {}", drv_path);
+    }
+
+    let store_path = String::from_utf8(output.stdout)?.trim().to_string();
+
+    // Check if it exists
+    let is_built = Command::new("nix")
+        .args(["path-info", &store_path])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    Ok((store_path, is_built))
 }

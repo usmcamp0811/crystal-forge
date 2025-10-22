@@ -1859,3 +1859,32 @@ pub async fn batch_mark_derivations_complete(
 
     Ok(())
 }
+
+/// Update the database with build progress information
+pub async fn update_build_heartbeat(
+    pool: &PgPool,
+    derivation_id: i32,
+    elapsed_seconds: i32,
+    current_target: Option<&str>,
+    last_activity_seconds: i32,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+            UPDATE derivations
+            SET 
+                build_elapsed_seconds = $1,
+                build_current_target = $2,
+                build_last_activity_seconds = $3,
+                build_last_heartbeat = NOW()
+            WHERE id = $4
+            "#,
+        elapsed_seconds,
+        current_target,
+        last_activity_seconds,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}

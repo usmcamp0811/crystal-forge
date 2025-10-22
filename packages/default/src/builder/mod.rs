@@ -41,7 +41,7 @@ async fn build_single_derivation(
             .await
     } else {
         // For NixOS systems, use the full evaluate_and_build process
-        derivation.evaluate_and_build(pool, build_config).await
+        derivation.build(pool, build_config).await
     }
 }
 

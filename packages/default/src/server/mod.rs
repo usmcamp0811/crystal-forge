@@ -21,6 +21,8 @@ use std::process::Stdio;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
 use tokio::process::Command;
+use tokio::time;
+use tokio::time::Instant;
 use tokio::time::interval;
 
 use sqlx::PgPool;
@@ -70,16 +72,23 @@ async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
 }
 
 /// Runs the periodic commit evaluation check loop
-async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
+pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
     info!(
         "🔁 Starting periodic commit evaluation check loop (every {:?})...",
         interval
     );
+
+    // `PgPool` is cheap to clone; keep an owned copy in the task.
+    let pool = pool.clone();
+
+    // Use an interval ticker to avoid accumulating sleep drift.
+    let mut ticker = time::interval_at(Instant::now() + interval, interval);
+
     loop {
         if let Err(e) = process_pending_commits(&pool).await {
             error!("❌ Error in commit evaluation cycle: {e}");
         }
-        tokio::time::sleep(interval).await;
+        ticker.tick().await;
     }
 }
 

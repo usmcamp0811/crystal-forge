@@ -1,12 +1,35 @@
 use super::Derivation;
+use crate::models::commits::Commit;
+use crate::models::config::BuildConfig;
+use crate::models::flakes::Flake;
+use crate::queries::derivations::insert_derivation_with_target;
 use anyhow::{Context, Result, anyhow, bail};
+use serde::Deserialize;
+use sqlx::PgPool;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tracing::{debug, error};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub struct PackageInfo {
     pub pname: Option<String>,
     pub version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NixEvalJobResult {
+    pub attr: String,
+    #[serde(rename = "attrPath")]
+    pub attr_path: Vec<String>,
+    #[serde(rename = "drvPath")]
+    pub drv_path: Option<String>,
+    pub outputs: Option<std::collections::HashMap<String, String>>,
+    pub system: Option<String>,
+    pub error: Option<String>,
+    #[serde(rename = "cacheStatus")]
+    pub cache_status: Option<String>, // "local", "cached", "notBuilt"
 }
 
 impl Derivation {
@@ -37,6 +60,153 @@ impl Derivation {
 
         // Return the first output path (typically there's only one)
         Ok(store_paths[0].to_string())
+    }
+
+    /// Use nix-eval-jobs to evaluate all nixosConfigurations in parallel
+    /// Returns results for all systems found in the flake
+    pub async fn evaluate_with_nix_eval_jobs(
+        pool: &PgPool,
+        commit: &Commit,
+        flake: &Flake,
+        repo_url: &str,
+        commit_hash: &str,
+        target_system: &str,
+        build_config: &BuildConfig,
+    ) -> Result<Vec<NixEvalJobResult>> {
+        // TODO: Eventually rework this to be generic and handle any flake output
+        // Have nixosConfigurations be an arg
+        let flake_ref =
+            crate::models::derivations::utils::build_flake_reference(repo_url, commit_hash);
+
+        let mut cmd = Command::new("nix-eval-jobs");
+        // TODO: get memory per worker from config
+        cmd.args([
+            "--flake",
+            &format!("{}#nixosConfigurations", flake_ref),
+            "--check-cache-status", // This tells us what's already built!
+            "--workers",
+            &num_cpus::get().to_string(),
+            "--max-memory-size",
+            "4096", // 4GB per worker
+        ]);
+
+        build_config.apply_to_command(&mut cmd);
+
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        info!("🚀 Running: nix-eval-jobs for {}", target_system);
+        debug!(
+            "Command: nix-eval-jobs --flake {}#nixosConfigurations",
+            flake_ref
+        );
+
+        let mut child = cmd.spawn()?;
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
+
+        let mut results = Vec::new();
+        let mut found_target = false;
+        let mut stderr_output = Vec::new();
+
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+
+        // Read both stdout and stderr concurrently
+        loop {
+            tokio::select! {
+                line_result = stdout_reader.next_line(), if !stdout_done => {
+                    match line_result? {
+                        Some(line) if !line.trim().is_empty() => {
+                            match serde_json::from_str::<NixEvalJobResult>(&line) {
+                                Ok(result) => {
+                                    debug!("📦 Evaluated: attr={:?}, cache={:?}", result.attr_path, result.cache_status);
+
+                                    // Insert immediately as we discover systems
+                                    if let Some(system_name) = result.attr_path.last() {
+                                        let derivation_target = crate::models::derivations::utils::build_agent_target(
+                                            &flake.repo_url,
+                                            &commit.git_commit_hash,
+                                            system_name
+                                        );
+
+                                        match insert_derivation_with_target(
+                                            pool,
+                                            Some(commit),
+                                            system_name,
+                                            "nixos",
+                                            Some(&derivation_target),
+                                        ).await {
+                                            Ok(_) => debug!("✅ Inserted/updated {}", system_name),
+                                            Err(e) => warn!("⚠️ Failed to insert {}: {}", system_name, e),
+                                        }
+                                    }
+
+                                    // Check if this is our target system
+                                    if result.attr_path.last() == Some(&target_system.to_string()) {
+                                        found_target = true;
+                                        info!("✅ Found target system: {}", target_system);
+                                    }
+
+                                    if let Some(error) = &result.error {
+                                        warn!("⚠️ Evaluation error for {}: {}", result.attr, error);
+                                    }
+
+                                    results.push(result);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
+                                }
+                            }
+                        }
+                        Some(_) => {}, // empty line
+                        None => stdout_done = true,
+                    }
+                }
+                line_result = stderr_reader.next_line(), if !stderr_done => {
+                    match line_result? {
+                        Some(line) => {
+                            // Log stderr immediately for debugging
+                            if line.contains("error:") {
+                                error!("nix-eval-jobs stderr: {}", line);
+                            } else {
+                                debug!("nix-eval-jobs stderr: {}", line);
+                            }
+                            stderr_output.push(line);
+                        }
+                        None => stderr_done = true,
+                    }
+                }
+            }
+
+            if stdout_done && stderr_done {
+                break;
+            }
+        }
+
+        let status = child.wait().await?;
+        if !status.success() {
+            let stderr_text = stderr_output.join("\n");
+            bail!(
+                "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
+                status.code().unwrap_or(-1),
+                stderr_text
+            );
+        }
+
+        if !found_target {
+            bail!(
+                "nix-eval-jobs did not evaluate target system: {}\nEvaluated systems: {:?}",
+                target_system,
+                results.iter().map(|r| r.attr.as_str()).collect::<Vec<_>>()
+            );
+        }
+
+        info!("✅ Evaluated {} configurations in parallel", results.len());
+
+        Ok(results)
     }
 }
 
@@ -175,4 +345,90 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
         pname: Some(name_version.to_string()),
         version: None,
     })
+}
+
+// ============================================================================
+// OPTIONAL: Add these helper functions to eval.rs if needed
+// ============================================================================
+
+/// Check if this derivation has Crystal Forge agent enabled
+pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig) -> Result<bool> {
+    // Test environment check
+    if std::env::var("CF_TEST_ENVIRONMENT").is_ok() || flake_target.contains("cf-test-sys") {
+        return Ok(true);
+    }
+
+    // Extract the system name from the flake target
+    let system_name = flake_target
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('.').nth(1))
+        .unwrap_or("unknown");
+
+    // Extract the flake URL (before the #)
+    let flake_url = flake_target.split('#').next().unwrap_or(flake_target);
+
+    // Use a simpler evaluation that's less likely to fail
+    let eval_expr = format!(
+        "let flake = builtins.getFlake \"{}\"; cfg = flake.nixosConfigurations.{}.config.services.crystal-forge or {{}}; in {{ enable = cfg.enable or false; client_enable = cfg.client.enable or false; }}",
+        flake_url, system_name
+    );
+
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--expr", &eval_expr]);
+    build_config.apply_to_command(&mut cmd);
+
+    match cmd.output().await {
+        Ok(output) if output.status.success() => {
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(json) => {
+                    let cf_enabled = json
+                        .get("enable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let cf_client_enabled = json
+                        .get("client_enable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    Ok(cf_enabled && cf_client_enabled)
+                }
+                Err(e) => {
+                    warn!("Failed to parse CF agent status JSON: {}", e);
+                    Ok(false)
+                }
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("CF agent evaluation failed: {}", stderr);
+            Ok(false)
+        }
+        Err(e) => {
+            warn!("Failed to run CF agent evaluation: {}", e);
+            Ok(false)
+        }
+    }
+}
+
+/// Parse derivation dependencies from `nix derivation show` JSON output
+pub fn parse_input_drvs_from_json(json_str: &str) -> Result<Vec<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(json_str)?;
+
+    let mut deps = Vec::new();
+
+    // nix derivation show returns a map of derivation paths to their info
+    if let Some(obj) = parsed.as_object() {
+        for (_drv_path, drv_info) in obj {
+            if let Some(input_drvs) = drv_info.get("inputDrvs") {
+                if let Some(inputs) = input_drvs.as_object() {
+                    for (input_drv, _outputs) in inputs {
+                        deps.push(input_drv.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(deps)
 }
