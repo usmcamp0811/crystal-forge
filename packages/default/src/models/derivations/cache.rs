@@ -295,16 +295,13 @@ impl Derivation {
     pub async fn evaluate_and_push_to_cache(
         &mut self,
         pool: &PgPool,
-        full_build: bool,
         build_config: &BuildConfig,
         cache_config: &CacheConfig,
     ) -> Result<String> {
-        let store_path: String = self
-            .evaluate_and_build(pool, full_build, build_config)
-            .await?;
+        let store_path: String = self.evaluate_and_build(pool, build_config).await?;
 
         // Only push to cache if we did a full build (not a dry-run)
-        if full_build && cache_config.push_after_build {
+        if cache_config.push_after_build {
             if let Err(e) = self
                 .push_to_cache(&store_path, cache_config, build_config)
                 .await
