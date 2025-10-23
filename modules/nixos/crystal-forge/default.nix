@@ -79,16 +79,28 @@
     // lib.optionalAttrs cfg.build.enable {
       build =
         {
+          # Core settings (kept for backward compatibility)
           cores = cfg.build.cores;
+
+          # New concurrency control
+          max_concurrent_derivations = cfg.build.max_concurrent_derivations;
           max_jobs = cfg.build.max_jobs;
+          cores_per_job = cfg.build.cores_per_job;
+
+          # Binary cache and network
           use_substitutes = cfg.build.use_substitutes;
           offline = cfg.build.offline;
+
+          # Timing
           poll_interval = cfg.build.poll_interval;
           max_silent_time = cfg.build.max_silent_time;
           timeout = cfg.build.timeout;
+
+          # Security
           sandbox = cfg.build.sandbox;
+
+          # Systemd isolation
           use_systemd_scope = cfg.build.use_systemd_scope;
-          max_concurrent_derivations = cfg.build.max_concurrent_derivations;
         }
         // lib.optionalAttrs (cfg.build.systemd_memory_max != null) {
           systemd_memory_max = cfg.build.systemd_memory_max;
@@ -391,85 +403,345 @@ in {
         default = cfg.server.enable;
         description = "Crystal Forge Builder";
       };
-      cores = lib.mkOption {
+
+      # === BUILD CONCURRENCY SETTINGS ===
+
+      max_concurrent_derivations = lib.mkOption {
         type = lib.types.ints.positive;
         default = 1;
-        description = "Maximum CPU cores to use per build job";
+        description = lib.mdDoc ''
+          Maximum number of concurrent nix-store --realise processes.
+
+          This controls how many builds Crystal Forge runs in parallel across
+          the entire system.
+
+          **Formula for CPU usage:**
+          ```
+          Max CPU = max_concurrent_derivations × max_jobs × cores_per_job
+          ```
+
+          **Default**: 1 (very conservative - one build at a time)
+
+          **Recommended values by system:**
+          - 4-8 cores: 1-2
+          - 16 cores: 2-3
+          - 32 cores: 3-4
+          - 64+ cores: 4-8
+
+          ⚠️  Too high = system overload and slowdown
+        '';
+        example = 3;
       };
+
       max_jobs = lib.mkOption {
         type = lib.types.ints.positive;
         default = 1;
-        description = "Maximum number of concurrent build jobs";
+        description = lib.mdDoc ''
+          Number of parallel derivations within each nix-store process.
+
+          Passed as `--max-jobs` to Nix. This is NOT cores per build - it's
+          how many different derivations can build simultaneously within a
+          single build process.
+
+          **Default**: 1 (sequential derivations within each build)
+
+          **Example**: If max_jobs=2, a single build process can compile
+          two different packages at the same time.
+
+          **Recommended values:**
+          - Conservative: 1 (one derivation at a time)
+          - Moderate: 2-3 (some parallelism)
+          - Aggressive: 4-6 (high parallelism, needs many cores)
+
+          ⚠️  Total parallelism = max_concurrent_derivations × max_jobs
+        '';
+        example = 2;
       };
+
+      cores_per_job = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = lib.mdDoc ''
+          Number of CPU cores each derivation build can use.
+
+          Passed as `--cores` to Nix. Controls how many cores a single
+          derivation (e.g., compiling a package) can utilize.
+
+          **Special value 0**: Unrestricted - each derivation can use all
+          available cores. This is the Nix default and works well when
+          max_concurrent_derivations = 1.
+
+          **Default**: 0 (unrestricted for single builds)
+
+          **Recommended values:**
+          - If max_concurrent_derivations = 1: 0 (let it use all cores)
+          - If max_concurrent_derivations > 1: Set to avoid oversubscription
+
+          **Formula to avoid oversubscription:**
+          ```
+          cores_per_job ≤ total_cores / (max_concurrent_derivations × max_jobs)
+          ```
+
+          **Example on 32-core system:**
+          - max_concurrent_derivations=3, max_jobs=2 → cores_per_job=4
+          - (3 × 2 × 4 = 24 cores, leaves 8 for system)
+
+          ⚠️  If 0 with max_concurrent_derivations > 1, you'll oversubscribe CPUs!
+        '';
+        example = 4;
+      };
+
+      # === BINARY CACHE SETTINGS ===
+
       use_substitutes = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Whether to use binary substitutes/caches";
+        description = lib.mdDoc ''
+          Whether to use binary substitutes/caches.
+
+          When true, Nix will download pre-built packages from caches
+          instead of building them locally.
+
+          **Recommended**: true (much faster builds)
+          **Disable if**: Testing local builds or working offline
+        '';
       };
+
       offline = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Build in offline mode (no network access)";
+        description = lib.mdDoc ''
+          Build in offline mode (no network access).
+
+          When true, Nix will not attempt to download anything. Useful
+          for air-gapped environments or testing.
+
+          **Note**: Requires all sources to be pre-fetched or in store.
+        '';
       };
+
+      # === TIMING SETTINGS ===
+
       poll_interval = lib.mkOption {
         type = lib.types.str;
         default = "5m";
-        description = "Interval between checking for new build jobs";
+        description = lib.mdDoc ''
+          Interval between checking for new build jobs.
+
+          How often the build coordinator checks the database for new
+          derivations to build.
+
+          **Default**: "5m" (5 minutes)
+          **For active development**: "5s" (5 seconds)
+          **For production**: "1m" - "5m"
+
+          Format: duration string (e.g., "30s", "5m", "1h")
+        '';
+        example = "30s";
       };
+
       max_silent_time = lib.mkOption {
         type = lib.types.str;
         default = "1h";
-        description = "Maximum time a build can be silent before timing out";
+        description = lib.mdDoc ''
+          Maximum time a build can be silent before timing out.
+
+          If a build produces no output for this duration, it will be
+          killed. Prevents hung builds from consuming resources.
+
+          **Default**: "1h" (1 hour)
+
+          **Adjust for:**
+          - Large builds (Firefox, Chromium): "2h" or more
+          - Small packages: "30m"
+
+          Format: duration string (e.g., "30m", "2h")
+        '';
+        example = "2h";
       };
+
       timeout = lib.mkOption {
         type = lib.types.str;
         default = "2h";
-        description = "Maximum total time for a build before timing out";
+        description = lib.mdDoc ''
+          Maximum total time for a build before timing out.
+
+          The absolute maximum time any build can run, regardless of
+          whether it's producing output.
+
+          **Default**: "2h" (2 hours)
+
+          **Adjust for:**
+          - Very large builds (LLVM, WebKit): "6h" or more
+          - Typical packages: "1h" - "3h"
+
+          Format: duration string (e.g., "1h", "6h")
+        '';
+        example = "6h";
       };
+
+      # === SECURITY SETTINGS ===
+
       sandbox = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Enable sandbox for builds";
+        description = lib.mdDoc ''
+          Enable sandbox for builds.
+
+          When true, builds run in an isolated environment with restricted
+          network and filesystem access. This is a security best practice.
+
+          **Recommended**: true (always)
+          **Disable only if**: Build requires network access (rare, usually wrong)
+        '';
       };
 
-      max_concurrent_derivations = lib.mkOption {
-        type = lib.types.int;
-        default = 8;
-        description = "Maximum concurrent dry run derivations to process";
-      };
+      # === SYSTEMD RESOURCE ISOLATION ===
 
-      # Systemd resource controls
       use_systemd_scope = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Whether to use systemd-run for resource isolation";
+        description = lib.mdDoc ''
+          Whether to use systemd-run for resource isolation.
+
+          When enabled, each build runs in a systemd scope with enforced
+          resource limits (memory, CPU). This prevents runaway builds from
+          taking down the entire system.
+
+          **Benefits:**
+          - Memory limits prevent OOM kills of main process
+          - CPU quotas prevent one build from starving others
+          - Automatic cleanup of build processes
+
+          **Requires**: systemd (works on NixOS, most Linux distros)
+
+          **Fallback**: If systemd-run fails, builds run directly
+
+          **Recommended**: true (critical for production)
+        '';
       };
+
       systemd_memory_max = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = "32G";
-        description = "Memory limit for systemd scope (e.g., '4G', '2048M')";
+        description = lib.mdDoc ''
+          Memory limit for each build scope.
+
+          Maximum amount of RAM a single build scope can use. When
+          exceeded, the scope's processes will be OOM-killed, protecting
+          the main Crystal Forge process.
+
+          **Formula:**
+          ```
+          Total memory usage ≤ max_concurrent_derivations × systemd_memory_max
+          ```
+
+          **Default**: "32G" (32 GB per build)
+
+          **Recommended values:**
+          - 16GB system: "4G" per build
+          - 32GB system: "8G" - "16G" per build
+          - 64GB system: "16G" - "32G" per build
+          - 128GB+ system: "32G" - "64G" per build
+
+          **Large builds (LLVM, Chromium)**: May need 16GB+
+
+          Format: suffixed size (e.g., "4G", "2048M", "8192M")
+
+          Set to `null` to disable memory limits (not recommended).
+        '';
+        example = "16G";
       };
+
       systemd_cpu_quota = lib.mkOption {
         type = lib.types.nullOr lib.types.ints.positive;
         default = 800;
-        description = "CPU quota as percentage (e.g., 300 for 3 cores worth)";
+        description = lib.mdDoc ''
+          CPU quota for each build scope as percentage.
+
+          Limits the total CPU time available to an entire build scope
+          (which may run multiple derivations via max_jobs).
+
+          **Value**: Percentage × 100 (e.g., 400 = 4 cores, 800 = 8 cores)
+
+          **Default**: 800 (8 cores per build scope)
+
+          **Formula for setting:**
+          ```
+          systemd_cpu_quota ≥ (max_jobs × cores_per_job) × 100
+          ```
+
+          **Example:**
+          - max_jobs=2, cores_per_job=4 → systemd_cpu_quota should be ≥ 800
+
+          **Recommended values:**
+          - Small systems: 200-400 (2-4 cores per build)
+          - Medium systems: 400-800 (4-8 cores per build)
+          - Large systems: 800-1200 (8-12 cores per build)
+
+          ⚠️  If too low, builds will be throttled even if cores are free
+
+          Set to `null` to disable CPU quotas (not recommended).
+        '';
+        example = 600;
       };
+
       systemd_timeout_stop_sec = lib.mkOption {
         type = lib.types.nullOr lib.types.ints.positive;
         default = 600;
-        description = "Timeout for systemd scope stop operation in seconds";
+        description = lib.mdDoc ''
+          Timeout for systemd scope stop operation in seconds.
+
+          How long systemd will wait for a build scope to stop gracefully
+          before force-killing it.
+
+          **Default**: 600 (10 minutes)
+
+          **Recommended values:**
+          - Quick builds: 300 (5 minutes)
+          - Normal builds: 600 (10 minutes)
+          - Large builds: 900 (15 minutes)
+
+          ⚠️  Too short = premature kills during cleanup
+          ⚠️  Too long = delays in canceling stuck builds
+        '';
+        example = 900;
       };
+
       systemd_properties = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [
           "MemorySwapMax=2G"
           "TasksMax=3000"
         ];
-        description = "Additional systemd properties to set";
+        description = lib.mdDoc ''
+          Additional systemd properties to set for build scopes.
+
+          These are passed as `--property` arguments to systemd-run.
+          Only certain properties are valid for scopes.
+
+          **Default properties:**
+          - `MemorySwapMax=2G`: Limit swap usage
+          - `TasksMax=3000`: Limit number of processes/threads
+
+          **Valid property prefixes for scopes:**
+          - Memory* (MemoryMax, MemorySwapMax, MemoryHigh, etc.)
+          - CPU* (CPUQuota, CPUWeight, etc.)
+          - Tasks* (TasksMax)
+          - IO* (IOWeight, IOReadBandwidthMax, etc.)
+          - Kill* (KillMode, KillSignal)
+          - OOM* (OOMPolicy, OOMScoreAdjust)
+          - Device* (DevicePolicy, DeviceAllow)
+          - IPAccounting* (IPAccounting, IPAddressAllow, etc.)
+
+          **Note**: Service-only properties (Environment, Restart,
+          WorkingDirectory) are ignored for scopes.
+        '';
         example = [
-          "MemorySwapMax=2G"
-          "TasksMax=3000"
+          "MemorySwapMax=4G"
+          "TasksMax=5000"
           "IOWeight=100"
+          "CPUWeight=100"
         ];
       };
     };
