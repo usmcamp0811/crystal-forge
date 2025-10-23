@@ -1259,8 +1259,8 @@ in {
       ];
 
       preStart = ''
-        ${configScript}
         mkdir -p /run/crystal-forge
+        ${configScript}
         mkdir -p /var/lib/crystal-forge/.config/attic
 
         # Ensure proper ownership - do this AFTER creating all directories
@@ -1394,6 +1394,7 @@ in {
 
       preStart = ''
         mkdir -p /run/crystal-forge
+        ${configScript}
         mkdir -p /var/lib/crystal-forge/.config/attic
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config

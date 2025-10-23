@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO derivations (\n            commit_id,\n            derivation_type,\n            derivation_name,\n            derivation_target,\n            status_id,\n            attempt_count,\n            scheduled_at\n        )\n        VALUES ($1, $2, $3, $4, $5, 0, NOW())\n        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)\n        DO UPDATE SET\n            -- keep terminal states; otherwise reset\n            status_id = CASE\n                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.status_id\n                ELSE EXCLUDED.status_id\n            END,\n            -- keep/refresh target if provided\n            derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),\n            -- nudge the scheduler only for non-terminal rows\n            scheduled_at = CASE\n                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.scheduled_at\n                ELSE NOW()\n            END\n        RETURNING\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        ",
+  "query": "\n        INSERT INTO derivations (\n            commit_id,\n            derivation_type,\n            derivation_name,\n            derivation_target,\n            status_id,\n            attempt_count,\n            scheduled_at,\n            cf_agent_enabled\n        )\n        VALUES ($1, $2, $3, $4, $5, 0, NOW(), $10)\n        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)\n        DO UPDATE SET\n            -- keep terminal states; otherwise reset\n            status_id = CASE\n                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.status_id\n                ELSE EXCLUDED.status_id\n            END,\n            -- keep/refresh target if provided\n            derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),\n            -- nudge the scheduler only for non-terminal rows\n            scheduled_at = CASE\n                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.scheduled_at\n                ELSE NOW()\n            END\n        RETURNING\n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        ",
   "describe": {
     "columns": [
       {
@@ -119,7 +119,8 @@
         "Int4",
         "Int4",
         "Int4",
-        "Int4"
+        "Int4",
+        "Bool"
       ]
     },
     "nullable": [
@@ -146,5 +147,5 @@
       true
     ]
   },
-  "hash": "1f270469ece87f63efe3704a8b9eebac3531332bedc5104f74270d885e9d7096"
+  "hash": "6d05ded67c744fa9a11649368bed0e108d43ec2df979a0f7b33386902c1fa177"
 }

@@ -3,6 +3,7 @@ pub mod commits;
 pub mod config;
 pub mod cve_scans;
 pub mod cves;
+pub mod deployment_policies;
 pub mod derivations;
 pub mod environments;
 pub mod flakes;

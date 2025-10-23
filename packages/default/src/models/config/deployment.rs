@@ -1,4 +1,5 @@
 use crate::models::config::duration_serde;
+use crate::models::deployment_policies::DeploymentPolicy;
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -16,6 +17,10 @@ pub struct DeploymentConfig {
     pub cache_public_key: Option<String>,
     #[serde(with = "duration_serde")]
     pub deployment_poll_interval: Duration,
+    
+    /// Deployment policies that systems must satisfy
+    #[serde(default)]
+    pub policies: Vec<DeploymentPolicy>,
 }
 
 impl Default for DeploymentConfig {
@@ -29,6 +34,10 @@ impl Default for DeploymentConfig {
             cache_url: None,
             cache_public_key: None,
             deployment_poll_interval: Duration::from_secs(60),
+            policies: vec![
+                // Default: require CF agent
+                DeploymentPolicy::RequireCrystalForgeAgent { strict: false },
+            ],
         }
     }
 }

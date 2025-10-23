@@ -120,6 +120,7 @@ pub async fn insert_derivation_with_target(
     derivation_name: &str,
     derivation_type: &str,
     derivation_target: Option<&str>,
+    cf_agent_enabled: Option<bool>,
 ) -> Result<crate::models::derivations::Derivation> {
     let commit_id = commit.map(|c| c.id);
 
@@ -133,9 +134,10 @@ pub async fn insert_derivation_with_target(
             derivation_target,
             status_id,
             attempt_count,
-            scheduled_at
+            scheduled_at,
+            cf_agent_enabled
         )
-        VALUES ($1, $2, $3, $4, $5, 0, NOW())
+        VALUES ($1, $2, $3, $4, $5, 0, NOW(), $10)
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
         DO UPDATE SET
             -- keep terminal states; otherwise reset
@@ -184,6 +186,7 @@ pub async fn insert_derivation_with_target(
         EvaluationStatus::DryRunFailed.as_id(),
         EvaluationStatus::BuildComplete.as_id(),
         EvaluationStatus::BuildFailed.as_id(),
+        cf_agent_enabled
     )
     .fetch_one(pool)
     .await?;
