@@ -255,10 +255,6 @@
     mkdir -p /var/lib/crystal-forge/workdir
     cd /var/lib/crystal-forge/workdir
     cleanup_old_builds
-
-    export NIX_BUILD_CORES="${toString cfg.build.cores}"
-    export NIX_MAX_JOBS="${toString cfg.build.max_jobs}"
-
     exec ${pkgs.crystal-forge.server}/bin/builder "$@"
   '';
 
