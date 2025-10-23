@@ -34,6 +34,9 @@
       server = {
         host = cfg.server.host;
         port = cfg.server.port;
+        evalWorkers = cfg.server.evalWorkers;
+        evalMaxMemoryMb = cfg.server.evalMaxMemoryMb;
+        evalCheckCache = cfg.server.evalCheckCache;
       };
     }
     // lib.optionalAttrs cfg.client.enable {
@@ -711,6 +714,44 @@ in {
         type = lib.types.port;
         default = 3000;
         description = "Server port";
+      };
+
+      evalWorkers = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 0; # 0 means use num_cpus
+        description = lib.mdDoc ''
+          Number of worker threads for nix-eval-jobs parallel evaluation.
+          Set to 0 to automatically use the number of CPU cores available.
+
+          This controls how many systems can be evaluated concurrently
+          when processing flake commits.
+        '';
+      };
+
+      evalMaxMemoryMb = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 4096;
+        description = lib.mdDoc ''
+          Maximum memory size per worker in MB for nix-eval-jobs.
+
+          Each evaluation worker will be limited to this amount of memory.
+          Default is 4096 MB (4 GB) per worker.
+
+          Adjust based on available system memory and the number of workers.
+        '';
+      };
+
+      evalCheckCache = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = lib.mdDoc ''
+          Whether to check cache status during evaluation.
+
+          When enabled, nix-eval-jobs will report which derivations are
+          already built (in local store or binary cache) vs need building.
+
+          Disable if cache checking is slow or causing issues.
+        '';
       };
     };
 

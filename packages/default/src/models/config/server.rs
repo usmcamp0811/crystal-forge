@@ -23,7 +23,7 @@ pub struct ServerConfig {
 
 // Default value functions for serde
 fn default_eval_workers() -> usize {
-    num_cpus::get()
+    0 // Let the module config control this
 }
 
 fn default_eval_max_memory_mb() -> usize {
@@ -50,5 +50,12 @@ impl ServerConfig {
     /// Returns the full socket address to bind to.
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+    pub fn get_eval_workers(&self) -> usize {
+        if self.eval_workers == 0 {
+            num_cpus::get()
+        } else {
+            self.eval_workers
+        }
     }
 }
