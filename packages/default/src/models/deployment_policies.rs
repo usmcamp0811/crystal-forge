@@ -175,14 +175,13 @@ impl PolicyCheckResult {
 /// Build the complete Nix expression for nix-eval-jobs with policy checks
 pub fn build_nix_eval_expression(flake_ref: &str, policies: &[DeploymentPolicy]) -> String {
     let policy_fields = if policies.is_empty() {
-        // No policies - empty attrset
-        "      # No policies configured".to_string()
+        "        # No policies configured".to_string()
     } else {
         policies
             .iter()
             .map(|policy| {
                 let (field_name, expr) = policy.to_nix_expression();
-                format!("      {} = {};", field_name, expr)
+                format!("        {} = {};", field_name, expr)
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -194,17 +193,25 @@ let
   flake = builtins.getFlake "{}";
   configs = flake.nixosConfigurations;
 in
-  builtins.mapAttrs (name: cfg: {{
-    # Standard derivation info
-    inherit name;
-    drvPath = cfg.config.system.build.toplevel.drvPath or null;
-    outputs = cfg.config.system.build.toplevel.outputs or {{}};
-    
-    # Policy check results (evaluated in parallel by nix-eval-jobs!)
-    policies = {{
+  builtins.mapAttrs (name: cfg: 
+    let
+      # The actual derivation that nix-eval-jobs expects
+      drv = cfg.config.system.build.toplevel;
+      
+      # Policy check results
+      policyResults = {{
 {}
-    }};
-  }}) configs
+      }};
+    in
+      # Return the derivation WITH policy data attached as meta
+      drv // {{
+        # nix-eval-jobs will see this as a derivation and output it
+        # We attach our policy data as an attribute
+        meta = (drv.meta or {{}}) // {{
+          policies = policyResults;
+        }};
+      }}
+  ) configs
 "#,
         flake_ref, policy_fields
     )

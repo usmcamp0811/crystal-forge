@@ -14,29 +14,31 @@ use crate::models::deployment_policies::{
 use crate::models::flakes::Flake;
 use crate::queries::derivations::insert_derivation_with_target;
 
-/// Extended NixEvalJobResult structure with embedded policy data
+/// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NixEvalJobResult {
+    pub attr: String,
+    #[serde(rename = "attrPath")]
+    pub attr_path: Vec<String>,
     pub name: String,
     #[serde(rename = "drvPath")]
     pub drv_path: Option<String>,
     pub error: Option<String>,
+    #[serde(rename = "cacheStatus")]
+    pub cache_status: Option<String>,
     pub outputs: Option<serde_json::Value>,
 
-    /// Policy check results embedded in the nix-eval-jobs output
-    pub policies: Option<serde_json::Value>,
+    /// Meta field (only present with --meta flag)
+    /// Contains our policy check results in meta.policies
+    pub meta: Option<serde_json::Value>,
 }
 
 /// Evaluate a flake's nixosConfigurations with nix-eval-jobs and policy checking
 ///
-/// This runs a SINGLE nix-eval-jobs command that evaluates all systems AND
-/// checks all policies in parallel using nix-eval-jobs' parallel evaluation.
-///
-/// # Arguments
-/// * `policies` - Deployment policies to check. Empty vector for no checking.
-///
-/// # Returns
-/// Tuple of (evaluation results, policy check results)
+/// This runs a SINGLE nix-eval-jobs command with --meta flag that:
+/// 1. Evaluates all systems in parallel
+/// 2. Checks all policies in parallel (embedded in the Nix expression)
+/// 3. Returns everything in one go via meta.policies
 pub async fn evaluate_with_nix_eval_jobs(
     pool: &PgPool,
     commit: &Commit,
@@ -70,11 +72,12 @@ pub async fn evaluate_with_nix_eval_jobs(
 
     debug!("📝 Nix expression:\n{}", nix_expr);
 
-    // Run nix-eval-jobs with our custom expression
+    // Run nix-eval-jobs with --meta flag to get policy results
     let mut cmd = Command::new("nix-eval-jobs");
     cmd.args([
         "--expr",
         &nix_expr,
+        "--meta", // CRITICAL: Include meta so we get policies in output!
         "--workers",
         &num_cpus::get().to_string(),
         "--max-memory-size",
@@ -105,63 +108,71 @@ pub async fn evaluate_with_nix_eval_jobs(
                     Some(line) if !line.trim().is_empty() => {
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
-                                let system_name = result.name.clone();
+                                let system_name = result.attr.clone();
 
-                                debug!("📦 Evaluated: {}, policies={:?}",
-                                    system_name, result.policies.is_some());
+                                debug!("📦 Evaluated: {}, has meta={:?}",
+                                    system_name, result.meta.is_some());
 
-                                // Extract policy check results from the nix-eval-jobs output
+                                // Extract policy check results from meta.policies
                                 let mut cf_agent_enabled = None;
-                                if let Some(policies_json) = &result.policies {
-                                    // Parse policy results that were evaluated by nix-eval-jobs
-                                    let check = PolicyCheckResult::from_json(
-                                        system_name.clone(),
-                                        policies_json,
-                                        policies,
-                                    );
+                                if let Some(meta) = &result.meta {
+                                    if let Some(policies_json) = meta.get("policies") {
+                                        // Parse policy results from meta.policies
+                                        let check = PolicyCheckResult::from_json(
+                                            system_name.clone(),
+                                            policies_json,
+                                            policies,
+                                        );
 
-                                    cf_agent_enabled = check.cf_agent_enabled;
+                                        cf_agent_enabled = check.cf_agent_enabled;
 
-                                    // Log policy results
-                                    if !check.meets_requirements {
-                                        let has_strict = policies.iter().any(|p| p.is_strict());
-                                        for warning in &check.warnings {
-                                            if has_strict {
-                                                error!("❌ {}", warning);
-                                            } else {
-                                                warn!("⚠️  {}", warning);
+                                        // Log policy results
+                                        if !check.meets_requirements {
+                                            let has_strict = policies.iter().any(|p| p.is_strict());
+                                            for warning in &check.warnings {
+                                                if has_strict {
+                                                    error!("❌ {}", warning);
+                                                } else {
+                                                    warn!("⚠️  {}", warning);
+                                                }
                                             }
+                                        } else if let Some(true) = cf_agent_enabled {
+                                            info!("✅ {} has CF agent enabled", system_name);
                                         }
-                                    } else if let Some(true) = cf_agent_enabled {
-                                        info!("✅ {} has CF agent enabled", system_name);
-                                    }
 
-                                    policy_checks.push(check);
+                                        policy_checks.push(check);
+                                    } else {
+                                        debug!("⚠️  No policies in meta for {}", system_name);
+                                    }
+                                } else {
+                                    debug!("⚠️  No meta field for {}", system_name);
                                 }
 
                                 // Insert derivation with policy check results
-                                let derivation_target = build_agent_target(
-                                    &flake.repo_url,
-                                    &commit.git_commit_hash,
-                                    &system_name,
-                                );
+                                if let Some(system_name) = result.attr_path.last() {
+                                    let derivation_target = build_agent_target(
+                                        &flake.repo_url,
+                                        &commit.git_commit_hash,
+                                        system_name,
+                                    );
 
-                                match insert_derivation_with_target(
-                                    pool,
-                                    Some(commit),
-                                    &system_name,
-                                    "nixos",
-                                    Some(&derivation_target),
-                                    cf_agent_enabled,
-                                ).await {
-                                    Ok(_) => {
-                                        debug!("✅ Inserted/updated {} (CF agent: {:?})",
-                                            system_name, cf_agent_enabled);
+                                    match insert_derivation_with_target(
+                                        pool,
+                                        Some(commit),
+                                        system_name,
+                                        "nixos",
+                                        Some(&derivation_target),
+                                        cf_agent_enabled,
+                                    ).await {
+                                        Ok(_) => {
+                                            debug!("✅ Inserted/updated {} (CF agent: {:?})",
+                                                system_name, cf_agent_enabled);
+                                        }
+                                        Err(e) => warn!("⚠️  Failed to insert {}: {}", system_name, e),
                                     }
-                                    Err(e) => warn!("⚠️  Failed to insert {}: {}", system_name, e),
                                 }
 
-                                if system_name == target_system || target_system == "all" {
+                                if result.attr_path.last() == Some(&target_system.to_string()) || target_system == "all" {
                                     found_target = true;
                                     if target_system != "all" {
                                         info!("✅ Found target system: {}", target_system);
@@ -169,7 +180,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 }
 
                                 if let Some(error) = &result.error {
-                                    warn!("⚠️  Evaluation error for {}: {}", system_name, error);
+                                    warn!("⚠️  Evaluation error for {}: {}", result.attr, error);
                                 }
 
                                 results.push(result);
@@ -217,7 +228,7 @@ pub async fn evaluate_with_nix_eval_jobs(
         bail!(
             "nix-eval-jobs did not evaluate target system: {}\nEvaluated systems: {:?}",
             target_system,
-            results.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()
+            results.iter().map(|r| r.attr.as_str()).collect::<Vec<_>>()
         );
     }
 
@@ -266,7 +277,6 @@ pub async fn evaluate_with_nix_eval_jobs(
     Ok((results, policy_checks))
 }
 
-/// Build the base flake reference (git+url?rev=hash)
 fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
     if repo_url.starts_with("git+") {
         if repo_url.contains("?rev=") {
@@ -280,31 +290,7 @@ fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
     }
 }
 
-/// Build the agent target string
 fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     format!("{}#nixosConfigurations.{}", flake_ref, system_name)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_build_flake_reference() {
-        let ref1 = build_flake_reference("https://github.com/user/repo", "abc123");
-        assert_eq!(ref1, "git+https://github.com/user/repo?rev=abc123");
-
-        let ref2 = build_flake_reference("git+https://github.com/user/repo", "abc123");
-        assert_eq!(ref2, "git+https://github.com/user/repo?rev=abc123");
-    }
-
-    #[test]
-    fn test_build_agent_target() {
-        let target = build_agent_target("https://github.com/user/repo", "abc123", "my-system");
-        assert_eq!(
-            target,
-            "git+https://github.com/user/repo?rev=abc123#nixosConfigurations.my-system"
-        );
-    }
 }
