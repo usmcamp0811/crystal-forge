@@ -718,7 +718,7 @@ in {
 
       evalWorkers = lib.mkOption {
         type = lib.types.ints.positive;
-        default = 0; # 0 means use num_cpus
+        default = 4;
         description = lib.mdDoc ''
           Number of worker threads for nix-eval-jobs parallel evaluation.
           Set to 0 to automatically use the number of CPU cores available.
