@@ -79,9 +79,6 @@
     // lib.optionalAttrs cfg.build.enable {
       build =
         {
-          # Core settings (kept for backward compatibility)
-          cores = cfg.build.cores;
-
           # New concurrency control
           max_concurrent_derivations = cfg.build.max_concurrent_derivations;
           max_jobs = cfg.build.max_jobs;
