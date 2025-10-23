@@ -66,6 +66,8 @@ impl Derivation {
     async fn get_derivation_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
         let mut cmd = Command::new("nix");
         cmd.args(["path-info", "--derivation", flake_target]);
+
+        // apply_to_command takes &self, not &mut self
         build_config.apply_to_command(&mut cmd);
 
         let output = cmd.output().await?;
@@ -117,6 +119,8 @@ impl Derivation {
         };
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        // apply_to_command takes &self, not &mut self
         build_config.apply_to_command(&mut cmd);
 
         match Self::run_streaming_build(cmd, drv_path, self.id, pool).await {
@@ -201,7 +205,7 @@ impl Derivation {
                     let elapsed = start_time.elapsed().as_secs() as i32;
                     let last_activity = last_output.elapsed().as_secs() as i32;
 
-                    if let Err(e) = crate::queries::derivations::update_build_heartbeat(
+                    if let Err(e) = Self::update_build_heartbeat(
                         &pool_clone,
                         derivation_id,
                         elapsed,
@@ -227,6 +231,35 @@ impl Derivation {
         Ok(store_path)
     }
 
+    /// Update the database with build progress information
+    async fn update_build_heartbeat(
+        pool: &PgPool,
+        derivation_id: i32,
+        elapsed_seconds: i32,
+        current_target: Option<&str>,
+        last_activity_seconds: i32,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE derivations
+            SET 
+                build_elapsed_seconds = $1,
+                build_current_target = $2,
+                build_last_activity_seconds = $3,
+                build_last_heartbeat = NOW()
+            WHERE id = $4
+            "#,
+            elapsed_seconds,
+            current_target,
+            last_activity_seconds,
+            derivation_id
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
     /// Fallback: build directly without systemd isolation
     async fn build_with_direct_nix_store(
         &self,
@@ -242,6 +275,8 @@ impl Derivation {
         let mut cmd = Command::new("nix-store");
         cmd.args(["--realise", drv_path]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        // apply_to_command takes &self, not &mut self
         build_config.apply_to_command(&mut cmd);
 
         Self::run_streaming_build(cmd, drv_path, self.id, pool).await

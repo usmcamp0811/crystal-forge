@@ -52,7 +52,7 @@ pub async fn run_build_loop(pool: PgPool) {
         CrystalForgeConfig::default()
     });
     let build_config = cfg.get_build_config();
-    let num_workers = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
+    let num_workers = build_config.max_concurrent_derivations;
 
     info!("🏗 Starting {} continuous build workers...", num_workers);
 
@@ -137,7 +137,8 @@ async fn build_worker(
         }
 
         // Get wait_for_cache_push setting from config
-        let wait_for_cache = build_config.wait_for_cache_push.unwrap_or(false);
+        // TODO: remove wait for cache
+        let wait_for_cache = false;
 
         match build_reservations::claim_next_derivation(&pool, &worker_uuid, wait_for_cache).await {
             Ok(Some(mut derivation)) => {
