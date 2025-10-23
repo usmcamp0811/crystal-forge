@@ -1,16 +1,5 @@
-use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use std::collections::HashMap;
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::Command;
-use tracing::{debug, error, info, warn};
-
-use crate::models::commits::Commit;
-use crate::models::config::BuildConfig;
-use crate::models::flakes::Flake;
-use crate::queries::derivations::insert_derivation_with_target;
 
 /// A deployment policy that systems must satisfy
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,8 +16,12 @@ pub enum DeploymentPolicy {
     /// Custom Nix expression evaluation
     CustomCheck {
         /// Nix expression that should evaluate to true
+        /// Available bindings: cfg (the nixosConfiguration)
         expression: String,
+        /// Human-readable description
         description: String,
+        /// Field name in the output JSON
+        field_name: String,
         strict: bool,
     },
 }
@@ -53,368 +46,214 @@ impl DeploymentPolicy {
             DeploymentPolicy::CustomCheck { description, .. } => description.clone(),
         }
     }
+
+    /// Generate the Nix expression fragment for this policy
+    /// Returns (field_name, nix_expression)
+    pub fn to_nix_expression(&self) -> (String, String) {
+        match self {
+            DeploymentPolicy::RequireCrystalForgeAgent { .. } => (
+                "cfAgentEnabled".to_string(),
+                "(cfg.config.services.crystal-forge.enable or false) && \
+                 (cfg.config.services.crystal-forge.client.enable or false)"
+                    .to_string(),
+            ),
+            DeploymentPolicy::RequirePackages { packages, .. } => {
+                let package_list = packages
+                    .iter()
+                    .map(|p| format!("\"{}\"", p.replace('"', "\\\""))) // Escape quotes
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                (
+                    "hasRequiredPackages".to_string(),
+                    format!(
+                        "let pkgNames = builtins.map (p: p.pname or p.name or \"\") \
+                         cfg.config.environment.systemPackages; \
+                         required = [ {} ]; \
+                         in builtins.all (pkg: builtins.elem pkg pkgNames) required",
+                        package_list
+                    ),
+                )
+            }
+            DeploymentPolicy::CustomCheck {
+                expression,
+                field_name,
+                ..
+            } => (field_name.clone(), expression.clone()),
+        }
+    }
+
+    /// Get the field name this policy uses in JSON output
+    pub fn field_name(&self) -> String {
+        match self {
+            DeploymentPolicy::RequireCrystalForgeAgent { .. } => "cfAgentEnabled".to_string(),
+            DeploymentPolicy::RequirePackages { .. } => "hasRequiredPackages".to_string(),
+            DeploymentPolicy::CustomCheck { field_name, .. } => field_name.clone(),
+        }
+    }
 }
 
-/// Results from checking deployment policies
+/// Results from checking deployment policies for a single system
 #[derive(Debug, Clone)]
 pub struct PolicyCheckResult {
     pub system_name: String,
     pub cf_agent_enabled: Option<bool>,
+    pub has_required_packages: Option<bool>,
+    pub custom_checks: HashMap<String, bool>,
     pub meets_requirements: bool,
     pub warnings: Vec<String>,
 }
 
-/// Extended NixEvalJobResult structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NixEvalJobResult {
-    pub attr: String,
-    #[serde(rename = "attrPath")]
-    pub attr_path: Vec<String>,
-    pub name: String,
-    #[serde(rename = "drvPath")]
-    pub drv_path: Option<String>,
-    pub error: Option<String>,
-    #[serde(rename = "cacheStatus")]
-    pub cache_status: Option<String>,
-    pub outputs: Option<serde_json::Value>,
-}
+impl PolicyCheckResult {
+    /// Create a new PolicyCheckResult from parsed JSON and policies
+    pub fn from_json(
+        system_name: String,
+        policies_json: &serde_json::Value,
+        policies: &[DeploymentPolicy],
+    ) -> Self {
+        let mut warnings = Vec::new();
+        let mut cf_agent_enabled = None;
+        let mut has_required_packages = None;
+        let mut custom_checks = HashMap::new();
 
-/// Evaluate a flake's nixosConfigurations with nix-eval-jobs and policy checking
-///
-/// # Arguments
-/// * `policies` - Deployment policies to check. Empty vector for no checking.
-///
-/// # Returns
-/// Tuple of (evaluation results, policy check results)
-pub async fn evaluate_with_nix_eval_jobs(
-    pool: &PgPool,
-    commit: &Commit,
-    flake: &Flake,
-    repo_url: &str,
-    commit_hash: &str,
-    target_system: &str,
-    build_config: &BuildConfig,
-    policies: &[DeploymentPolicy],
-) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
-
-    let mut cmd = Command::new("nix-eval-jobs");
-    cmd.args([
-        "--flake",
-        &format!("{}#nixosConfigurations", flake_ref),
-        "--check-cache-status",
-        "--workers",
-        &num_cpus::get().to_string(),
-        "--max-memory-size",
-        "4096",
-    ]);
-
-    build_config.apply_to_command(&mut cmd);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    info!("🚀 Running: nix-eval-jobs for {}", target_system);
-    if !policies.is_empty() {
-        info!("   Checking {} deployment policies", policies.len());
         for policy in policies {
-            info!(
-                "     - {} (strict={})",
-                policy.description(),
-                policy.is_strict()
-            );
-        }
-    }
+            let field_name = policy.field_name();
+            let value = policies_json.get(&field_name).and_then(|v| v.as_bool());
 
-    let mut child = cmd.spawn()?;
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-
-    let mut stdout_reader = BufReader::new(stdout).lines();
-    let mut stderr_reader = BufReader::new(stderr).lines();
-
-    let mut results = Vec::new();
-    let mut policy_checks = Vec::new();
-    let mut found_target = false;
-    let mut stderr_output = Vec::new();
-    let mut stdout_done = false;
-    let mut stderr_done = false;
-
-    loop {
-        tokio::select! {
-            line_result = stdout_reader.next_line(), if !stdout_done => {
-                match line_result? {
-                    Some(line) if !line.trim().is_empty() => {
-                        match serde_json::from_str::<NixEvalJobResult>(&line) {
-                            Ok(result) => {
-                                debug!("📦 Evaluated: attr={:?}, cache={:?}",
-                                    result.attr_path, result.cache_status);
-
-                                // Check deployment policies for this system
-                                let mut cf_agent_enabled = None;
-                                if !policies.is_empty() {
-                                    if let Some(system_name) = result.attr_path.last() {
-                                        let check = check_policies_for_system(
-                                            system_name,
-                                            &flake_ref,
-                                            policies,
-                                            build_config,
-                                        ).await;
-
-                                        cf_agent_enabled = check.cf_agent_enabled;
-                                        policy_checks.push(check.clone());
-
-                                        // Log policy results
-                                        if !check.meets_requirements {
-                                            let has_strict = policies.iter().any(|p| p.is_strict());
-                                            for warning in &check.warnings {
-                                                if has_strict {
-                                                    error!("❌ {}: {}", system_name, warning);
-                                                } else {
-                                                    warn!("⚠️  {}: {}", system_name, warning);
-                                                }
-                                            }
-                                        } else if let Some(true) = cf_agent_enabled {
-                                            info!("✅ {} has CF agent enabled", system_name);
-                                        }
-                                    }
-                                }
-
-                                // Insert derivation with policy check results
-                                if let Some(system_name) = result.attr_path.last() {
-                                    let derivation_target = build_agent_target(
-                                        &flake.repo_url,
-                                        &commit.git_commit_hash,
-                                        system_name
-                                    );
-
-                                    match insert_derivation_with_target(
-                                        pool,
-                                        Some(commit),
-                                        system_name,
-                                        "nixos",
-                                        Some(&derivation_target),
-                                        cf_agent_enabled,
-                                    ).await {
-                                        Ok(_) => {
-                                            debug!("✅ Inserted/updated {} (CF agent: {:?})",
-                                                system_name, cf_agent_enabled);
-                                        }
-                                        Err(e) => warn!("⚠️  Failed to insert {}: {}", system_name, e),
-                                    }
-                                }
-
-                                if result.attr_path.last() == Some(&target_system.to_string()) {
-                                    found_target = true;
-                                    info!("✅ Found target system: {}", target_system);
-                                }
-
-                                if let Some(error) = &result.error {
-                                    warn!("⚠️  Evaluation error for {}: {}", result.attr, error);
-                                }
-
-                                results.push(result);
-                            }
-                            Err(e) => {
-                                warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
-                            }
-                        }
+            match policy {
+                DeploymentPolicy::RequireCrystalForgeAgent { .. } => {
+                    cf_agent_enabled = value;
+                    if value != Some(true) {
+                        warnings.push(format!(
+                            "Crystal Forge agent not enabled for {}",
+                            system_name
+                        ));
                     }
-                    Some(_) => {},
-                    None => stdout_done = true,
                 }
-            }
-            line_result = stderr_reader.next_line(), if !stderr_done => {
-                match line_result? {
-                    Some(line) => {
-                        if line.contains("error:") {
-                            error!("nix-eval-jobs stderr: {}", line);
-                        } else {
-                            debug!("nix-eval-jobs stderr: {}", line);
-                        }
-                        stderr_output.push(line);
+                DeploymentPolicy::RequirePackages { packages, .. } => {
+                    has_required_packages = value;
+                    if value != Some(true) {
+                        warnings.push(format!(
+                            "Missing required packages for {}: {}",
+                            system_name,
+                            packages.join(", ")
+                        ));
                     }
-                    None => stderr_done = true,
+                }
+                DeploymentPolicy::CustomCheck {
+                    description,
+                    field_name,
+                    ..
+                } => {
+                    if let Some(v) = value {
+                        custom_checks.insert(field_name.clone(), v);
+                        if !v {
+                            warnings.push(format!("{}: {}", system_name, description));
+                        }
+                    } else {
+                        warnings.push(format!(
+                            "{}: Could not evaluate custom check '{}'",
+                            system_name, description
+                        ));
+                    }
                 }
             }
         }
 
-        if stdout_done && stderr_done {
-            break;
+        let meets_requirements = warnings.is_empty();
+
+        PolicyCheckResult {
+            system_name,
+            cf_agent_enabled,
+            has_required_packages,
+            custom_checks,
+            meets_requirements,
+            warnings,
         }
-    }
-
-    let status = child.wait().await?;
-    if !status.success() {
-        let stderr_text = stderr_output.join("\n");
-        bail!(
-            "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
-            status.code().unwrap_or(-1),
-            stderr_text
-        );
-    }
-
-    if !found_target {
-        bail!(
-            "nix-eval-jobs did not evaluate target system: {}\nEvaluated systems: {:?}",
-            target_system,
-            results.iter().map(|r| r.attr.as_str()).collect::<Vec<_>>()
-        );
-    }
-
-    // Check for strict policy failures
-    let strict_failures: Vec<_> = policy_checks
-        .iter()
-        .filter(|c| !c.meets_requirements && policies.iter().any(|p| p.is_strict()))
-        .collect();
-
-    if !strict_failures.is_empty() {
-        error!(
-            "❌ {} systems failed strict policy checks",
-            strict_failures.len()
-        );
-        for failure in &strict_failures {
-            error!("  - {}: {:?}", failure.system_name, failure.warnings);
-        }
-        bail!(
-            "{} systems failed strict deployment policies",
-            strict_failures.len()
-        );
-    }
-
-    info!("✅ Evaluated {} configurations in parallel", results.len());
-    if !policies.is_empty() && !policy_checks.is_empty() {
-        let with_agent = policy_checks
-            .iter()
-            .filter(|c| c.cf_agent_enabled == Some(true))
-            .count();
-        info!(
-            "   CF agent: {}/{} systems enabled ({:.1}%)",
-            with_agent,
-            policy_checks.len(),
-            (with_agent as f64 / policy_checks.len() as f64) * 100.0
-        );
-    }
-
-    Ok((results, policy_checks))
-}
-
-/// Check deployment policies for a specific system
-async fn check_policies_for_system(
-    system_name: &str,
-    flake_ref: &str,
-    policies: &[DeploymentPolicy],
-    build_config: &BuildConfig,
-) -> PolicyCheckResult {
-    let mut warnings = Vec::new();
-    let mut cf_agent_enabled = None;
-
-    for policy in policies {
-        match policy {
-            DeploymentPolicy::RequireCrystalForgeAgent { strict: _ } => {
-                match check_cf_agent_for_system(flake_ref, system_name, build_config).await {
-                    Ok(enabled) => {
-                        cf_agent_enabled = Some(enabled);
-                        if !enabled {
-                            warnings.push(format!(
-                                "Crystal Forge agent not enabled for {}",
-                                system_name
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to check CF agent for {}: {}", system_name, e);
-                        warnings.push(format!("Could not verify CF agent status: {}", e));
-                    }
-                }
-            }
-            DeploymentPolicy::RequirePackages {
-                packages,
-                strict: _,
-            } => {
-                // TODO: Implement package checking
-                debug!("Package checking not yet implemented for {}", system_name);
-            }
-            DeploymentPolicy::CustomCheck {
-                expression,
-                description,
-                strict: _,
-            } => {
-                // TODO: Implement custom check evaluation
-                debug!(
-                    "Custom check '{}' not yet implemented for {}",
-                    description, system_name
-                );
-            }
-        }
-    }
-
-    PolicyCheckResult {
-        system_name: system_name.to_string(),
-        cf_agent_enabled,
-        meets_requirements: warnings.is_empty(),
-        warnings,
     }
 }
 
-/// Check if Crystal Forge agent is enabled for a specific system
-async fn check_cf_agent_for_system(
-    flake_ref: &str,
-    system_name: &str,
-    build_config: &BuildConfig,
-) -> Result<bool> {
-    // Test environment always returns true
-    if std::env::var("CF_TEST_ENVIRONMENT").is_ok() || system_name.contains("cf-test-sys") {
-        return Ok(true);
-    }
-
-    let eval_expr = format!(
-        "let flake = builtins.getFlake \"{}\"; \
-         cfg = flake.nixosConfigurations.{}.config.services.crystal-forge or {{}}; \
-         in {{ enable = cfg.enable or false; client_enable = cfg.client.enable or false; }}",
-        flake_ref, system_name
-    );
-
-    let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--json", "--expr", &eval_expr]);
-    build_config.apply_to_command(&mut cmd);
-
-    let output = cmd.output().await?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("CF agent check failed: {}", stderr);
-    }
-
-    let json_str = String::from_utf8_lossy(&output.stdout);
-    let json: serde_json::Value = serde_json::from_str(&json_str)?;
-
-    let cf_enabled = json
-        .get("enable")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let cf_client_enabled = json
-        .get("client_enable")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-
-    Ok(cf_enabled && cf_client_enabled)
-}
-
-/// Build the base flake reference (git+url?rev=hash)
-fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
-    if repo_url.starts_with("git+") {
-        if repo_url.contains("?rev=") {
-            repo_url.to_string()
-        } else {
-            format!("{}?rev={}", repo_url, commit_hash)
-        }
+/// Build the complete Nix expression for nix-eval-jobs with policy checks
+pub fn build_nix_eval_expression(flake_ref: &str, policies: &[DeploymentPolicy]) -> String {
+    let policy_fields = if policies.is_empty() {
+        // No policies - empty attrset
+        "      # No policies configured".to_string()
     } else {
-        let separator = if repo_url.contains('?') { "&" } else { "?" };
-        format!("git+{}{separator}rev={}", repo_url, commit_hash)
-    }
+        policies
+            .iter()
+            .map(|policy| {
+                let (field_name, expr) = policy.to_nix_expression();
+                format!("      {} = {};", field_name, expr)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        r#"
+let
+  flake = builtins.getFlake "{}";
+  configs = flake.nixosConfigurations;
+in
+  builtins.mapAttrs (name: cfg: {{
+    # Standard derivation info
+    inherit name;
+    drvPath = cfg.config.system.build.toplevel.drvPath or null;
+    outputs = cfg.config.system.build.toplevel.outputs or {{}};
+    
+    # Policy check results (evaluated in parallel by nix-eval-jobs!)
+    policies = {{
+{}
+    }};
+  }}) configs
+"#,
+        flake_ref, policy_fields
+    )
 }
 
-/// Build the agent target string
-fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
-    format!("{}#nixosConfigurations.{}", flake_ref, system_name)
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cf_agent_policy_expression() {
+        let policy = DeploymentPolicy::RequireCrystalForgeAgent { strict: false };
+        let (field_name, expr) = policy.to_nix_expression();
+        assert_eq!(field_name, "cfAgentEnabled");
+        assert!(expr.contains("services.crystal-forge.enable"));
+        assert!(expr.contains("services.crystal-forge.client.enable"));
+    }
+
+    #[test]
+    fn test_package_policy_expression() {
+        let policy = DeploymentPolicy::RequirePackages {
+            packages: vec!["vim".to_string(), "git".to_string()],
+            strict: false,
+        };
+        let (field_name, expr) = policy.to_nix_expression();
+        assert_eq!(field_name, "hasRequiredPackages");
+        assert!(expr.contains("\"vim\""));
+        assert!(expr.contains("\"git\""));
+    }
+
+    #[test]
+    fn test_build_expression_no_policies() {
+        let expr = build_nix_eval_expression("github:user/repo", &[]);
+        assert!(expr.contains("builtins.getFlake"));
+        assert!(expr.contains("No policies configured"));
+    }
+
+    #[test]
+    fn test_build_expression_with_policies() {
+        let policies = vec![
+            DeploymentPolicy::RequireCrystalForgeAgent { strict: false },
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["vim".to_string()],
+                strict: false,
+            },
+        ];
+        let expr = build_nix_eval_expression("github:user/repo", &policies);
+        assert!(expr.contains("cfAgentEnabled"));
+        assert!(expr.contains("hasRequiredPackages"));
+        assert!(expr.contains("services.crystal-forge"));
+    }
 }

@@ -4,7 +4,7 @@ use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::models::deployment_policies::DeploymentPolicy;
-use crate::models::deployment_policies::evaluate_with_nix_eval_jobs;
+use crate::models::evaluate_with_policies::evaluate_with_nix_eval_jobs;
 use crate::models::flakes::Flake;
 use crate::queries::commits::increment_commit_list_attempt_count;
 use crate::queries::flakes::get_all_flakes_from_db;
