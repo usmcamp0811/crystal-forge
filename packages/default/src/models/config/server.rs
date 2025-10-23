@@ -23,7 +23,7 @@ pub struct ServerConfig {
 
 // Default value functions for serde
 fn default_eval_workers() -> usize {
-    0 // Let the module config control this
+    4
 }
 
 fn default_eval_max_memory_mb() -> usize {
