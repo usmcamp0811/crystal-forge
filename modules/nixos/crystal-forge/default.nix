@@ -717,7 +717,7 @@ in {
       };
 
       evalWorkers = lib.mkOption {
-        type = lib.types.ints.positive;
+        type = lib.types.int;
         default = 4;
         description = lib.mdDoc ''
           Number of worker threads for nix-eval-jobs parallel evaluation.
@@ -729,7 +729,7 @@ in {
       };
 
       evalMaxMemoryMb = lib.mkOption {
-        type = lib.types.ints.positive;
+        type = lib.types.int;
         default = 4096;
         description = lib.mdDoc ''
           Maximum memory size per worker in MB for nix-eval-jobs.
