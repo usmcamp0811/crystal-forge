@@ -221,10 +221,11 @@ pub async fn get_next_buildable_derivation(
 
 /// Claim the next derivation that needs building
 ///
-/// Grabs any nixos config that:
-/// - Hasn't completed successfully (not status 10)
-/// - Didn't fail dry run permanently (not status 6)  
-/// - Has attempts left (< 5)
+/// FIXED: Only claims derivations with status = 5 (DryRunComplete)
+/// This ensures we only build derivations that are ready, not ones that are:
+/// - Still being evaluated (DryRunPending, DryRunInProgress)
+/// - Already building (BuildInProgress)
+/// - Failed (DryRunFailed, BuildFailed)
 pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Option<Derivation>> {
     let mut tx = pool.begin().await?;
 
@@ -255,14 +256,19 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             store_path
         FROM derivations
         WHERE derivation_type = 'nixos'
-        AND status_id NOT IN (6, 10)  -- Exclude: DryRunFailed, BuildComplete
+        AND status_id = $1  -- FIXED: Only claim DryRunComplete (ready to build)
         AND (attempt_count < 5 OR attempt_count IS NULL)
+        AND NOT EXISTS (
+            SELECT 1 FROM build_reservations 
+            WHERE build_reservations.derivation_id = derivations.id
+        )
         ORDER BY 
             (cf_agent_enabled = true) DESC,  -- CF agent systems first
             scheduled_at ASC                  -- Then oldest
         LIMIT 1
         FOR UPDATE SKIP LOCKED
         "#,
+        EvaluationStatus::DryRunComplete.as_id(), // 5
     )
     .fetch_optional(&mut *tx)
     .await?;
