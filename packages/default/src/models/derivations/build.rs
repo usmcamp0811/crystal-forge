@@ -122,6 +122,7 @@ impl Derivation {
 
         // apply_to_command takes &self, not &mut self
         build_config.apply_to_command(&mut cmd);
+        debug!("📋 About to spawn command for {}", drv_path);
 
         match Self::run_streaming_build(cmd, drv_path, self.id, pool).await {
             Ok(output_path) => Ok(output_path),

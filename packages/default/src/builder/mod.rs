@@ -101,13 +101,10 @@ pub async fn run_build_loop(pool: PgPool) {
 }
 
 /// Build a task description for display/logging
-/// 
+///
 /// This helper function encapsulates all the commit-related queries
 /// that were previously embedded in build_worker
-async fn build_task_description(
-    pool: &PgPool,
-    derivation: &Derivation,
-) -> String {
+async fn build_task_description(pool: &PgPool, derivation: &Derivation) -> String {
     if let Some(commit_id) = derivation.commit_id {
         match crate::queries::commits::get_commit_by_id(pool, commit_id).await {
             Ok(commit) => {
@@ -141,13 +138,9 @@ async fn build_task_description(
 }
 
 /// Update worker status (helper to reduce boilerplate)
-/// 
+///
 /// This function updates the global worker status in a non-blocking way
-fn update_worker_status(
-    worker_id: usize,
-    state: WorkerState,
-    current_task: Option<String>,
-) {
+fn update_worker_status(worker_id: usize, state: WorkerState, current_task: Option<String>) {
     tokio::spawn(async move {
         let mut statuses = get_build_status().write().await;
         if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
@@ -211,6 +204,28 @@ async fn build_worker(
 
         match build_reservations::claim_next_derivation(&pool, &worker_uuid).await {
             Ok(Some(mut derivation)) => {
+                info!(
+                    "✅ Worker {} CLAIMED derivation {}",
+                    worker_id, derivation.derivation_name
+                );
+
+                // ADD THIS DEBUG LINE
+                info!(
+                    "🔨 Worker {} STARTING BUILD for {}",
+                    worker_id, derivation.derivation_name
+                );
+
+                let start = std::time::Instant::now();
+                let build_result =
+                    build_single_derivation(&pool, &mut derivation, &build_config).await;
+
+                info!(
+                    "🏁 Worker {} FINISHED BUILD for {} after {:.1}s",
+                    worker_id,
+                    derivation.derivation_name,
+                    start.elapsed().as_secs_f64()
+                );
+
                 // Build task description using helper function (no embedded SQL)
                 let task_description = build_task_description(&pool, &derivation).await;
 
