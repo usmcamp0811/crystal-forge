@@ -174,7 +174,6 @@ impl Derivation {
                 return Err(anyhow::anyhow!("Failed to spawn build process: {}", e));
             }
         };
-        let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let stderr = child.stderr.take().expect("Failed to capture stderr");
 
