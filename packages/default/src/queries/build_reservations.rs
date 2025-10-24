@@ -221,12 +221,13 @@ pub async fn get_next_buildable_derivation(
 
 /// Claim the next derivation that needs building
 ///
-/// Simple version: just grab the next nixos config that needs to be built
+/// Grabs any nixos config that:
+/// - Hasn't completed successfully (not status 10)
+/// - Didn't fail dry run permanently (not status 6)  
+/// - Has attempts left (< 5)
 pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Option<Derivation>> {
     let mut tx = pool.begin().await?;
 
-    // Get the next nixos derivation that's ready to build
-    // Priority: CF agent enabled systems first, then oldest scheduled
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
@@ -254,11 +255,11 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             store_path
         FROM derivations
         WHERE derivation_type = 'nixos'
-        AND status_id IN (3, 5, 7)  -- DryRunPending, DryRunComplete, or BuildPending
-        AND (attempt_count < 3 OR attempt_count IS NULL)
+        AND status_id NOT IN (6, 10)  -- Exclude: DryRunFailed, BuildComplete
+        AND (attempt_count < 5 OR attempt_count IS NULL)
         ORDER BY 
-            (cf_agent_enabled = true) DESC,
-            scheduled_at ASC
+            (cf_agent_enabled = true) DESC,  -- CF agent systems first
+            scheduled_at ASC                  -- Then oldest
         LIMIT 1
         FOR UPDATE SKIP LOCKED
         "#,
@@ -283,16 +284,17 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     .execute(&mut *tx)
     .await?;
 
-    // Mark as building
+    // Mark as building and increment attempt count
     sqlx::query!(
         r#"
         UPDATE derivations
         SET 
-            status_id = 8,  -- BuildInProgress
+            status_id = $1,  -- BuildInProgress (8)
             started_at = NOW(),
             attempt_count = COALESCE(attempt_count, 0) + 1
-        WHERE id = $1
+        WHERE id = $2
         "#,
+        EvaluationStatus::BuildInProgress.as_id(),
         derivation.id
     )
     .execute(&mut *tx)
@@ -301,8 +303,11 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     tx.commit().await?;
 
     info!(
-        "Worker {} claimed derivation {} ({})",
-        worker_id, derivation.id, derivation.derivation_name
+        "Worker {} claimed derivation {} ({}) - attempt {}/5",
+        worker_id,
+        derivation.id,
+        derivation.derivation_name,
+        derivation.attempt_count + 1
     );
 
     Ok(Some(derivation))
