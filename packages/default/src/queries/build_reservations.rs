@@ -17,15 +17,6 @@ pub struct BuildReservation {
     pub heartbeat_at: DateTime<Utc>,
 }
 
-#[derive(Debug)]
-pub struct BuildQueueStats {
-    pub pending: usize,
-    pub building: usize,
-    pub complete: usize,
-    pub failed: usize,
-    pub pending_with_agent: usize,
-}
-
 /// Represents a row from view_buildable_derivations
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct BuildableDerivation {
@@ -228,14 +219,88 @@ pub async fn get_next_buildable_derivation(
     Ok(row)
 }
 
-/// Claim the next derivation that needs building
-///
-/// Simple version: just grab the next nixos config that needs to be built
-pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Option<Derivation>> {
+/// Atomically claim the next derivation to build
+pub async fn claim_next_derivation(
+    pool: &PgPool,
+    worker_id: &str,
+    wait_for_cache_push: bool,
+) -> Result<Option<Derivation>> {
     let mut tx = pool.begin().await?;
 
-    // Get the next nixos derivation that's ready to build
-    // Priority: CF agent enabled systems first, then oldest scheduled
+    // Get the next buildable derivation
+    let buildable = sqlx::query_as!(
+        BuildableDerivation,
+        r#"
+        SELECT 
+            id as "id!",
+            derivation_name as "derivation_name!",
+            derivation_type as "derivation_type!",
+            derivation_path,
+            pname,
+            version,
+            status_id as "status_id!",
+            nixos_id,
+            nixos_commit_ts,
+            total_packages,
+            completed_packages,
+            cached_packages,
+            active_workers,
+            build_type as "build_type!",
+            queue_position
+        FROM view_buildable_derivations
+        WHERE 
+            CASE 
+                WHEN build_type = 'system' AND $1 = true THEN 
+                    cached_packages = total_packages
+                ELSE true
+            END
+        ORDER BY queue_position
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+        "#,
+        wait_for_cache_push
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(buildable) = buildable else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+
+    // Create reservation
+    let nixos_id = if buildable.build_type == "package" {
+        buildable.nixos_id // Already an Option<i32>, don't wrap it again
+    } else {
+        None
+    };
+
+    sqlx::query!(
+        r#"
+        INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)
+        VALUES ($1, $2, $3)
+        "#,
+        worker_id,
+        buildable.id,
+        nixos_id
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Mark derivation as in-progress
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET status_id = $1, started_at = NOW()
+        WHERE id = $2
+        "#,
+        EvaluationStatus::BuildInProgress.as_id(),
+        buildable.id
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Fetch full derivation
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
@@ -262,49 +327,11 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             cf_agent_enabled,
             store_path
         FROM derivations
-        WHERE derivation_type = 'nixos'
-        AND status_id IN (3, 5, 7)  -- DryRunPending, DryRunComplete, or BuildPending
-        AND (attempt_count < 3 OR attempt_count IS NULL)
-        ORDER BY 
-            (cf_agent_enabled = true) DESC,
-            scheduled_at ASC
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED
-        "#,
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some(derivation) = derivation else {
-        tx.rollback().await?;
-        return Ok(None);
-    };
-
-    // Create reservation
-    sqlx::query!(
-        r#"
-        INSERT INTO build_reservations (worker_id, derivation_id)
-        VALUES ($1, $2)
-        "#,
-        worker_id,
-        derivation.id,
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Mark as building
-    sqlx::query!(
-        r#"
-        UPDATE derivations
-        SET 
-            status_id = 8,  -- BuildInProgress
-            started_at = NOW(),
-            attempt_count = COALESCE(attempt_count, 0) + 1
         WHERE id = $1
         "#,
-        derivation.id
+        buildable.id
     )
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
 
     tx.commit().await?;
@@ -317,34 +344,36 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     Ok(Some(derivation))
 }
 
-/// Get build queue statistics
-pub async fn get_build_queue_stats(pool: &PgPool) -> Result<BuildQueueStats> {
-    let stats = sqlx::query!(
+/// Get all systems in the queue with their progress
+pub async fn get_queue_status(pool: &PgPool) -> Result<Vec<QueueStatus>> {
+    let rows = sqlx::query_as!(
+        QueueStatus,
         r#"
         SELECT 
-            COUNT(*) FILTER (WHERE status_id = $1) as "pending!",
-            COUNT(*) FILTER (WHERE status_id = $2) as "building!",
-            COUNT(*) FILTER (WHERE status_id = $3) as "complete!",
-            COUNT(*) FILTER (WHERE status_id = $4) as "failed!",
-            COUNT(*) FILTER (WHERE cf_agent_enabled = true AND status_id = $1) as "pending_with_agent!"
-        FROM derivations
-        WHERE derivation_type = 'nixos'
-        "#,
-        EvaluationStatus::BuildPending.as_id(),      // 7
-        EvaluationStatus::BuildInProgress.as_id(),   // 8
-        EvaluationStatus::BuildComplete.as_id(),     // 10
-        EvaluationStatus::BuildFailed.as_id(),       // 12
+            nixos_id as "nixos_id!",
+            system_name as "system_name!",
+            commit_timestamp as "commit_timestamp!",
+            git_commit_hash as "git_commit_hash!",
+            total_packages as "total_packages!",
+            completed_packages as "completed_packages!",
+            building_packages as "building_packages!",
+            pending_packages as "pending_packages!",
+            cached_packages as "cached_packages!",
+            active_workers as "active_workers!",
+            worker_ids,
+            earliest_reservation,
+            latest_heartbeat,
+            status as "status!",
+            cache_status,
+            has_stale_workers as "has_stale_workers!"
+        FROM view_build_queue_status
+        ORDER BY commit_timestamp DESC
+        "#
     )
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await?;
 
-    Ok(BuildQueueStats {
-        pending: stats.pending as usize,
-        building: stats.building as usize,
-        complete: stats.complete as usize,
-        failed: stats.failed as usize,
-        pending_with_agent: stats.pending_with_agent as usize,
-    })
+    Ok(rows)
 }
 
 /// Get queue status for a specific system
