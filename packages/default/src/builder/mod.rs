@@ -136,7 +136,7 @@ async fn build_worker(
             }
         }
 
-        // Get wait_for_cache_push setting from config
+        // Claim next BuildPending derivation (simplified - no wait_for_cache_push needed)
         match build_reservations::claim_next_derivation(&pool, &worker_uuid).await {
             Ok(Some(mut derivation)) => {
                 // Build a nice task description with commit info
@@ -182,8 +182,12 @@ async fn build_worker(
                 }
 
                 info!(
-                    "Worker {} claimed: {} (type: {:?})",
-                    worker_id, task_description, derivation.derivation_type
+                    "Worker {} claimed: {} (type: {:?}, cf_agent: {:?}, attempt: {})",
+                    worker_id,
+                    task_description,
+                    derivation.derivation_type,
+                    derivation.cf_agent_enabled,
+                    derivation.attempt_count
                 );
 
                 let start = std::time::Instant::now();
@@ -211,9 +215,13 @@ async fn build_worker(
                         }
                     }
                     Err(e) => {
+                        let duration = start.elapsed();
                         error!(
-                            "❌ Worker {} build failed for {}: {}",
-                            worker_id, task_description, e
+                            "❌ Worker {} build failed for {} after {:.1}s: {}",
+                            worker_id,
+                            task_description,
+                            duration.as_secs_f64(),
+                            e
                         );
 
                         // Mark failed and delete reservation

@@ -19,11 +19,11 @@ pub struct BuildReservation {
 
 #[derive(Debug)]
 pub struct BuildQueueStats {
-    pub queued: usize,
+    pub pending: usize,
     pub building: usize,
-    pub built: usize,
+    pub complete: usize,
     pub failed: usize,
-    pub queued_with_agent: usize,
+    pub pending_with_agent: usize,
 }
 
 /// Represents a row from view_buildable_derivations
@@ -266,7 +266,7 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             store_path
         FROM derivations
         WHERE derivation_type = 'nixos'
-        AND status_id = $1  -- BuildPending
+        AND status_id = $1  -- BuildPending (7)
         AND (attempt_count < 3 OR attempt_count IS NULL)  -- Max 3 attempts
         ORDER BY 
             -- CF agent systems first
@@ -332,61 +332,29 @@ pub async fn get_build_queue_stats(pool: &PgPool) -> Result<BuildQueueStats> {
     let stats = sqlx::query!(
         r#"
         SELECT 
-            COUNT(*) FILTER (WHERE status_id = $1) as "queued!",
+            COUNT(*) FILTER (WHERE status_id = $1) as "pending!",
             COUNT(*) FILTER (WHERE status_id = $2) as "building!",
-            COUNT(*) FILTER (WHERE status_id = $3) as "built!",
+            COUNT(*) FILTER (WHERE status_id = $3) as "complete!",
             COUNT(*) FILTER (WHERE status_id = $4) as "failed!",
-            COUNT(*) FILTER (WHERE cf_agent_enabled = true AND status_id = $1) as "queued_with_agent!"
+            COUNT(*) FILTER (WHERE cf_agent_enabled = true AND status_id = $1) as "pending_with_agent!"
         FROM derivations
         WHERE derivation_type = 'nixos'
         "#,
-        EvaluationStatus::BuildPending.as_id(),
-        EvaluationStatus::BuildInProgress.as_id(),
-        EvaluationStatus::BuildComplete.as_id(),
-        EvaluationStatus::BuildFailed.as_id(),
+        EvaluationStatus::BuildPending.as_id(),      // 7
+        EvaluationStatus::BuildInProgress.as_id(),   // 8
+        EvaluationStatus::BuildComplete.as_id(),     // 10
+        EvaluationStatus::BuildFailed.as_id(),       // 12
     )
     .fetch_one(pool)
     .await?;
 
     Ok(BuildQueueStats {
-        queued: stats.queued as usize,
+        pending: stats.pending as usize,
         building: stats.building as usize,
-        built: stats.built as usize,
+        complete: stats.complete as usize,
         failed: stats.failed as usize,
-        queued_with_agent: stats.queued_with_agent as usize,
+        pending_with_agent: stats.pending_with_agent as usize,
     })
-}
-
-/// Get all systems in the queue with their progress
-pub async fn get_queue_status(pool: &PgPool) -> Result<Vec<QueueStatus>> {
-    let rows = sqlx::query_as!(
-        QueueStatus,
-        r#"
-        SELECT 
-            nixos_id as "nixos_id!",
-            system_name as "system_name!",
-            commit_timestamp as "commit_timestamp!",
-            git_commit_hash as "git_commit_hash!",
-            total_packages as "total_packages!",
-            completed_packages as "completed_packages!",
-            building_packages as "building_packages!",
-            pending_packages as "pending_packages!",
-            cached_packages as "cached_packages!",
-            active_workers as "active_workers!",
-            worker_ids,
-            earliest_reservation,
-            latest_heartbeat,
-            status as "status!",
-            cache_status,
-            has_stale_workers as "has_stale_workers!"
-        FROM view_build_queue_status
-        ORDER BY commit_timestamp DESC
-        "#
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(rows)
 }
 
 /// Get queue status for a specific system

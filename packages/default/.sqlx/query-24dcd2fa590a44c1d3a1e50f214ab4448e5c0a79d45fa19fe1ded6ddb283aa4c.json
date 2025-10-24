@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: crate::models::derivations::DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE derivation_type = 'nixos'\n        AND status_id = $1  -- BuildPending\n        AND (attempt_count < 3 OR attempt_count IS NULL)  -- Max 3 attempts\n        ORDER BY \n            -- CF agent systems first\n            (cf_agent_enabled = true) DESC,\n            -- Then oldest scheduled\n            scheduled_at ASC\n        LIMIT 1\n        FOR UPDATE SKIP LOCKED\n        ",
+  "query": "\n        SELECT \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: crate::models::derivations::DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE derivation_type = 'nixos'\n        AND status_id = $1  -- BuildPending (7)\n        AND (attempt_count < 3 OR attempt_count IS NULL)  -- Max 3 attempts\n        ORDER BY \n            -- CF agent systems first\n            (cf_agent_enabled = true) DESC,\n            -- Then oldest scheduled\n            scheduled_at ASC\n        LIMIT 1\n        FOR UPDATE SKIP LOCKED\n        ",
   "describe": {
     "columns": [
       {
@@ -138,5 +138,5 @@
       true
     ]
   },
-  "hash": "a56836171717a09f714af6f16dbecabc259793f2015208bd301852d492880385"
+  "hash": "24dcd2fa590a44c1d3a1e50f214ab4448e5c0a79d45fa19fe1ded6ddb283aa4c"
 }

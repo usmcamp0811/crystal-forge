@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            COUNT(*) FILTER (WHERE status_id = $1) as \"pending!\",\n            COUNT(*) FILTER (WHERE status_id = $2) as \"building!\",\n            COUNT(*) FILTER (WHERE status_id = $3) as \"complete!\",\n            COUNT(*) FILTER (WHERE status_id = $4) as \"failed!\",\n            COUNT(*) FILTER (WHERE cf_agent_enabled = true AND status_id = $1) as \"pending_with_agent!\"\n        FROM derivations\n        WHERE derivation_type = 'nixos'\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pending!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "building!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "complete!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "failed!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "pending_with_agent!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "ce9b9ac790f2ec46e58db1f82baa060c2427b1fb6ed8a6576c6f17199e62ee0a"
+}

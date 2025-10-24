@@ -1891,3 +1891,104 @@ pub async fn update_build_heartbeat(
 
     Ok(())
 }
+
+/// Queue derivations for building after successful dry run
+///
+/// This transitions derivations from DryRunComplete (5) to BuildPending (7)
+/// so they can be claimed by builders.
+pub async fn queue_derivations_for_build(pool: &PgPool, commit_id: i32) -> Result<usize> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,  -- BuildPending (7)
+            scheduled_at = COALESCE(scheduled_at, NOW())
+        WHERE commit_id = $2
+        AND status_id = $3  -- DryRunComplete (5)
+        AND derivation_type = 'nixos'
+        RETURNING id
+        "#,
+        EvaluationStatus::BuildPending.as_id(), // 7
+        commit_id,
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let count = result.len();
+
+    if count > 0 {
+        info!(
+            "Queued {} derivations for building (commit_id={})",
+            count, commit_id
+        );
+    }
+
+    Ok(count)
+}
+
+/// Queue all derivations that completed dry run
+///
+/// This is useful for batch operations or catching up after server restart
+pub async fn queue_all_ready_derivations(pool: &PgPool) -> Result<usize> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,  -- BuildPending (7)
+            scheduled_at = COALESCE(scheduled_at, NOW())
+        WHERE status_id = $2  -- DryRunComplete (5)
+        AND derivation_type = 'nixos'
+        RETURNING id
+        "#,
+        EvaluationStatus::BuildPending.as_id(),   // 7
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let count = result.len();
+
+    if count > 0 {
+        info!("Queued {} derivations for building", count);
+    }
+
+    Ok(count)
+}
+
+/// Auto-queue derivations with CF agent enabled
+///
+/// This can be called after evaluation to immediately queue systems
+/// that have the CF agent enabled, skipping dry run.
+pub async fn auto_queue_cf_agent_systems(pool: &PgPool, commit_id: i32) -> Result<usize> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,  -- BuildPending (7)
+            scheduled_at = COALESCE(scheduled_at, NOW())
+        WHERE commit_id = $2
+        AND cf_agent_enabled = true
+        AND derivation_type = 'nixos'
+        AND status_id IN ($3, $4)  -- DryRunPending or DryRunComplete
+        RETURNING id
+        "#,
+        EvaluationStatus::BuildPending.as_id(), // 7
+        commit_id,
+        EvaluationStatus::DryRunPending.as_id(),  // 3
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let count = result.len();
+
+    if count > 0 {
+        info!(
+            "Auto-queued {} CF agent systems for building (commit_id={})",
+            count, commit_id
+        );
+    }
+
+    Ok(count)
+}
