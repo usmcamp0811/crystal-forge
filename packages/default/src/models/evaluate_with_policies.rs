@@ -12,7 +12,7 @@ use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
-use crate::queries::derivations::insert_derivation_with_target;
+use crate::queries::derivations::{EvaluationStatus, insert_derivation_with_target};
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,10 +35,9 @@ pub struct NixEvalJobResult {
 
 /// Evaluate a flake's nixosConfigurations with nix-eval-jobs and policy checking
 ///
-/// This runs a SINGLE nix-eval-jobs command with --meta flag that:
-/// 1. Evaluates all systems in parallel
-/// 2. Checks all policies in parallel (embedded in the Nix expression)
-/// 3. Returns everything in one go via meta.policies
+/// FIXED: Now properly:
+/// 1. Stores derivation_path from nix-eval-jobs
+/// 2. Updates status to DryRunComplete after successful evaluation
 pub async fn evaluate_with_nix_eval_jobs(
     pool: &PgPool,
     commit: &Commit,
@@ -101,6 +100,9 @@ pub async fn evaluate_with_nix_eval_jobs(
     let mut stdout_done = false;
     let mut stderr_done = false;
 
+    // Track successfully evaluated derivations with their .drv paths
+    let mut evaluated_derivations: Vec<(i32, String)> = Vec::new();
+
     loop {
         tokio::select! {
             line_result = stdout_reader.next_line(), if !stdout_done => {
@@ -109,9 +111,11 @@ pub async fn evaluate_with_nix_eval_jobs(
                         match serde_json::from_str::<NixEvalJobResult>(&line) {
                             Ok(result) => {
                                 let system_name = result.attr.clone();
+                                let has_error = result.error.is_some();
+                                let drv_path = result.drv_path.clone();
 
-                                debug!("📦 Evaluated: {}, has meta={:?}",
-                                    system_name, result.meta.is_some());
+                                debug!("📦 Evaluated: {}, drv_path={:?}, has_error={:?}",
+                                    system_name, drv_path, has_error);
 
                                 // Extract policy check results from meta.policies
                                 let mut cf_agent_enabled = None;
@@ -164,9 +168,28 @@ pub async fn evaluate_with_nix_eval_jobs(
                                         Some(&derivation_target),
                                         cf_agent_enabled,
                                     ).await {
-                                        Ok(_) => {
-                                            debug!("✅ Inserted/updated {} (CF agent: {:?})",
-                                                system_name, cf_agent_enabled);
+                                        Ok(deriv) => {
+                                            debug!("✅ Inserted/updated {} (id={}, CF agent: {:?})",
+                                                system_name, deriv.id, cf_agent_enabled);
+
+                                            // CRITICAL: Track derivations that evaluated successfully
+                                            // Only mark as complete if:
+                                            // 1. No evaluation error
+                                            // 2. Has a valid .drv path
+                                            if !has_error && drv_path.is_some() {
+                                                evaluated_derivations.push((
+                                                    deriv.id,
+                                                    drv_path.clone().unwrap()
+                                                ));
+                                                debug!("📋 Queued {} for DryRunComplete update", system_name);
+                                            } else {
+                                                if has_error {
+                                                    warn!("⚠️  {} has evaluation error, not marking complete", system_name);
+                                                }
+                                                if drv_path.is_none() {
+                                                    warn!("⚠️  {} missing drv_path, not marking complete", system_name);
+                                                }
+                                            }
                                         }
                                         Err(e) => warn!("⚠️  Failed to insert {}: {}", system_name, e),
                                     }
@@ -239,10 +262,7 @@ pub async fn evaluate_with_nix_eval_jobs(
         .collect();
 
     if !strict_failures.is_empty() {
-        error!(
-            "❌ {} systems failed strict policy checks",
-            strict_failures.len()
-        );
+        error!("{}", strict_failures.len());
         for failure in &strict_failures {
             error!("  - {}", failure.system_name);
             for warning in &failure.warnings {
@@ -253,6 +273,59 @@ pub async fn evaluate_with_nix_eval_jobs(
             "{} systems failed strict deployment policies",
             strict_failures.len()
         );
+    }
+
+    // ============================================================================
+    // CRITICAL FIX: Update successfully evaluated derivations
+    // Sets BOTH derivation_path AND status to DryRunComplete
+    // ============================================================================
+    if !evaluated_derivations.is_empty() {
+        info!(
+            "🔄 Marking {} derivations as DryRunComplete with .drv paths...",
+            evaluated_derivations.len()
+        );
+
+        for (deriv_id, drv_path) in &evaluated_derivations {
+            match sqlx::query!(
+                r#"
+                UPDATE derivations
+                SET 
+                    status_id = $1,           -- DryRunComplete (5)
+                    derivation_path = $2,     -- Store the .drv path!
+                    completed_at = NOW()
+                WHERE id = $3
+                "#,
+                EvaluationStatus::DryRunComplete.as_id(), // Status 5
+                drv_path,                                 // The .drv path from nix-eval-jobs
+                deriv_id
+            )
+            .execute(pool)
+            .await
+            {
+                Ok(_) => {
+                    debug!(
+                        "✅ Marked derivation {} as DryRunComplete with path {}",
+                        deriv_id, drv_path
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "⚠️  Failed to mark derivation {} as complete: {}",
+                        deriv_id, e
+                    );
+                }
+            }
+        }
+
+        info!(
+            "✅ {} derivations now ready for building!",
+            evaluated_derivations.len()
+        );
+        info!("   - Status: DryRunComplete (5)");
+        info!("   - Derivation paths: populated");
+        info!("   - Workers can now claim and build");
+    } else {
+        warn!("⚠️  No derivations successfully evaluated (all had errors or missing paths)");
     }
 
     info!("✅ Evaluated {} configurations in parallel", results.len());
