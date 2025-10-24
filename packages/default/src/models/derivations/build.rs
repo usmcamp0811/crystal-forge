@@ -106,35 +106,47 @@ impl Derivation {
             bail!("Expected .drv path, got: {}", drv_path);
         }
 
+        // Build the command
         let mut cmd = if build_config.should_use_systemd() {
+            info!("  → Using systemd-run for {}", drv_path);
             let mut scoped = Command::new("systemd-run");
             scoped.args(["--scope", "--collect", "--quiet"]);
             apply_systemd_props_for_scope(build_config, &mut scoped);
             scoped.args(["--", "nix-store", "--realise", drv_path]);
             scoped
         } else {
+            info!("  → Using direct nix-store for {}", drv_path);
             let mut direct = Command::new("nix-store");
             direct.args(["--realise", drv_path]);
             direct
         };
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-        // apply_to_command takes &self, not &mut self
         build_config.apply_to_command(&mut cmd);
-        debug!("📋 About to spawn command for {}", drv_path);
 
+        // CRITICAL: Log before spawn attempt
+        info!("  → About to spawn command for {}", drv_path);
+
+        // Try to run with systemd
         match Self::run_streaming_build(cmd, drv_path, self.id, pool).await {
-            Ok(output_path) => Ok(output_path),
+            Ok(output_path) => {
+                info!("✅ Build succeeded: {}", output_path);
+                Ok(output_path)
+            }
             Err(e) if build_config.should_use_systemd() && Self::is_systemd_error(&e) => {
                 warn!(
-                    "⚠️ Systemd scope creation failed, falling back to direct execution: {}",
+                    "⚠️  Systemd scope creation failed, falling back to direct execution: {}",
                     e
                 );
                 self.build_with_direct_nix_store(pool, drv_path, build_config)
                     .await
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // CRITICAL: Log the actual error
+                error!("❌ Build failed for {}: {}", drv_path, e);
+                error!("   Error details: {:?}", e);
+                Err(e)
+            }
         }
     }
 
@@ -146,7 +158,22 @@ impl Derivation {
         pool: &PgPool,
     ) -> Result<String> {
         let start_time = Instant::now();
-
+        info!("  → Spawning build process for {}", drv_path);
+        let mut child = match cmd.spawn() {
+            Ok(child) => {
+                info!(
+                    "  ✅ Process spawned successfully (PID: {})",
+                    child.id().unwrap_or(0)
+                );
+                child
+            }
+            Err(e) => {
+                error!("  ❌ SPAWN FAILED for {}: {}", drv_path, e);
+                error!("     Error kind: {:?}", e.kind());
+                error!("     OS error: {:?}", e.raw_os_error());
+                return Err(anyhow::anyhow!("Failed to spawn build process: {}", e));
+            }
+        };
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let stderr = child.stderr.take().expect("Failed to capture stderr");
