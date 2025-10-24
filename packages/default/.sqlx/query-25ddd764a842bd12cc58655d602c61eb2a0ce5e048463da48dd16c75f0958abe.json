@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM build_reservations WHERE derivation_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "25ddd764a842bd12cc58655d602c61eb2a0ce5e048463da48dd16c75f0958abe"
+}

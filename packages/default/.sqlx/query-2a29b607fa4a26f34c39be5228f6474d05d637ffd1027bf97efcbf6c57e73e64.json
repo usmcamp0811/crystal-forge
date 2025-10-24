@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: crate::models::derivations::DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE derivation_type = 'nixos'\n        AND status_id = $1  -- FIXED: Only claim DryRunComplete (ready to build)\n        AND (attempt_count < 5 OR attempt_count IS NULL)\n        AND NOT EXISTS (\n            SELECT 1 FROM build_reservations \n            WHERE build_reservations.derivation_id = derivations.id\n        )\n        ORDER BY \n            (cf_agent_enabled = true) DESC,  -- CF agent systems first\n            scheduled_at ASC                  -- Then oldest\n        LIMIT 1\n        FOR UPDATE SKIP LOCKED\n        ",
+  "query": "\n        SELECT \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: crate::models::derivations::DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE derivation_type = 'nixos'\n          AND status_id = $1        -- DryRunComplete (ready to build)\n          AND (attempt_count < 5 OR attempt_count IS NULL)\n          AND NOT EXISTS (\n              SELECT 1 FROM build_reservations \n              WHERE build_reservations.derivation_id = derivations.id\n          )\n        ORDER BY \n            (cf_agent_enabled = true) DESC,  -- CF agent systems first\n            scheduled_at ASC                  -- Then oldest\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -138,5 +138,5 @@
       true
     ]
   },
-  "hash": "e0580ef0a6b0ac96267d679aa2d88adf595eacc1cb59369a25be5bbdf3e5c51e"
+  "hash": "2a29b607fa4a26f34c39be5228f6474d05d637ffd1027bf97efcbf6c57e73e64"
 }
