@@ -17,6 +17,15 @@ pub struct BuildReservation {
     pub heartbeat_at: DateTime<Utc>,
 }
 
+#[derive(Debug)]
+pub struct BuildQueueStats {
+    pub queued: usize,
+    pub building: usize,
+    pub built: usize,
+    pub failed: usize,
+    pub queued_with_agent: usize,
+}
+
 /// Represents a row from view_buildable_derivations
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct BuildableDerivation {
@@ -219,88 +228,17 @@ pub async fn get_next_buildable_derivation(
     Ok(row)
 }
 
-/// Atomically claim the next derivation to build
-pub async fn claim_next_derivation(
-    pool: &PgPool,
-    worker_id: &str,
-    wait_for_cache_push: bool,
-) -> Result<Option<Derivation>> {
+/// Claim the next NixOS configuration that needs building
+///
+/// This only claims toplevel NixOS configurations, not individual packages.
+/// Nix will handle building all dependencies as part of the toplevel build.
+pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Option<Derivation>> {
     let mut tx = pool.begin().await?;
 
-    // Get the next buildable derivation
-    let buildable = sqlx::query_as!(
-        BuildableDerivation,
-        r#"
-        SELECT 
-            id as "id!",
-            derivation_name as "derivation_name!",
-            derivation_type as "derivation_type!",
-            derivation_path,
-            pname,
-            version,
-            status_id as "status_id!",
-            nixos_id,
-            nixos_commit_ts,
-            total_packages,
-            completed_packages,
-            cached_packages,
-            active_workers,
-            build_type as "build_type!",
-            queue_position
-        FROM view_buildable_derivations
-        WHERE 
-            CASE 
-                WHEN build_type = 'system' AND $1 = true THEN 
-                    cached_packages = total_packages
-                ELSE true
-            END
-        ORDER BY queue_position
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED
-        "#,
-        wait_for_cache_push
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some(buildable) = buildable else {
-        tx.rollback().await?;
-        return Ok(None);
-    };
-
-    // Create reservation
-    let nixos_id = if buildable.build_type == "package" {
-        buildable.nixos_id // Already an Option<i32>, don't wrap it again
-    } else {
-        None
-    };
-
-    sqlx::query!(
-        r#"
-        INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)
-        VALUES ($1, $2, $3)
-        "#,
-        worker_id,
-        buildable.id,
-        nixos_id
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Mark derivation as in-progress
-    sqlx::query!(
-        r#"
-        UPDATE derivations
-        SET status_id = $1, started_at = NOW()
-        WHERE id = $2
-        "#,
-        EvaluationStatus::BuildInProgress.as_id(),
-        buildable.id
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Fetch full derivation
+    // Get the next buildable NixOS derivation
+    // Priority order:
+    // 1. CF agent enabled systems (highest priority)
+    // 2. Scheduled oldest first
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
@@ -327,21 +265,96 @@ pub async fn claim_next_derivation(
             cf_agent_enabled,
             store_path
         FROM derivations
-        WHERE id = $1
+        WHERE derivation_type = 'nixos'
+        AND status_id = $1  -- BuildPending
+        AND (attempt_count < 3 OR attempt_count IS NULL)  -- Max 3 attempts
+        ORDER BY 
+            -- CF agent systems first
+            (cf_agent_enabled = true) DESC,
+            -- Then oldest scheduled
+            scheduled_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
         "#,
-        buildable.id
+        EvaluationStatus::BuildPending.as_id()
     )
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(derivation) = derivation else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+
+    // Create reservation
+    sqlx::query!(
+        r#"
+        INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)
+        VALUES ($1, $2, NULL)
+        "#,
+        worker_id,
+        derivation.id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Mark derivation as in-progress
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,
+            started_at = NOW(),
+            attempt_count = COALESCE(attempt_count, 0) + 1
+        WHERE id = $2
+        "#,
+        EvaluationStatus::BuildInProgress.as_id(),
+        derivation.id
+    )
+    .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;
 
     info!(
-        "Worker {} claimed derivation {} ({})",
-        worker_id, derivation.id, derivation.derivation_name
+        "Worker {} claimed derivation {} ({}) - attempt {}",
+        worker_id,
+        derivation.id,
+        derivation.derivation_name,
+        derivation.attempt_count + 1
     );
 
     Ok(Some(derivation))
+}
+
+/// Get build queue statistics
+pub async fn get_build_queue_stats(pool: &PgPool) -> Result<BuildQueueStats> {
+    let stats = sqlx::query!(
+        r#"
+        SELECT 
+            COUNT(*) FILTER (WHERE status_id = $1) as "queued!",
+            COUNT(*) FILTER (WHERE status_id = $2) as "building!",
+            COUNT(*) FILTER (WHERE status_id = $3) as "built!",
+            COUNT(*) FILTER (WHERE status_id = $4) as "failed!",
+            COUNT(*) FILTER (WHERE cf_agent_enabled = true AND status_id = $1) as "queued_with_agent!"
+        FROM derivations
+        WHERE derivation_type = 'nixos'
+        "#,
+        EvaluationStatus::BuildPending.as_id(),
+        EvaluationStatus::BuildInProgress.as_id(),
+        EvaluationStatus::BuildComplete.as_id(),
+        EvaluationStatus::BuildFailed.as_id(),
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(BuildQueueStats {
+        queued: stats.queued as usize,
+        building: stats.building as usize,
+        built: stats.built as usize,
+        failed: stats.failed as usize,
+        queued_with_agent: stats.queued_with_agent as usize,
+    })
 }
 
 /// Get all systems in the queue with their progress
