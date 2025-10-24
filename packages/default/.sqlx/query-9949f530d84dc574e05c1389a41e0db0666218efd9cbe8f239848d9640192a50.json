@@ -1,24 +1,15 @@
 {
   "db_name": "PostgreSQL",
-<<<<<<<< HEAD:packages/default/.sqlx/query-9949f530d84dc574e05c1389a41e0db0666218efd9cbe8f239848d9640192a50.json
   "query": "\n        INSERT INTO build_reservations (worker_id, derivation_id)\n        VALUES ($1, $2)\n        ",
-========
-  "query": "\n        INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)\n        VALUES ($1, $2, $3)\n        ",
->>>>>>>> parent of 2ecca11 (fixing build que):packages/default/.sqlx/query-5c13c9d2fc23861c2c6ae104130366174a49a0f1e027ab278be0c6131c1d4cf8.json
   "describe": {
     "columns": [],
     "parameters": {
       "Left": [
         "Text",
-        "Int4",
         "Int4"
       ]
     },
     "nullable": []
   },
-<<<<<<<< HEAD:packages/default/.sqlx/query-9949f530d84dc574e05c1389a41e0db0666218efd9cbe8f239848d9640192a50.json
   "hash": "9949f530d84dc574e05c1389a41e0db0666218efd9cbe8f239848d9640192a50"
-========
-  "hash": "5c13c9d2fc23861c2c6ae104130366174a49a0f1e027ab278be0c6131c1d4cf8"
->>>>>>>> parent of 2ecca11 (fixing build que):packages/default/.sqlx/query-5c13c9d2fc23861c2c6ae104130366174a49a0f1e027ab278be0c6131c1d4cf8.json
 }

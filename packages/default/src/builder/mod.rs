@@ -137,10 +137,7 @@ async fn build_worker(
         }
 
         // Get wait_for_cache_push setting from config
-        // TODO: remove wait for cache
-        let wait_for_cache = false;
-
-        match build_reservations::claim_next_derivation(&pool, &worker_uuid, wait_for_cache).await {
+        match build_reservations::claim_next_derivation(&pool, &worker_uuid).await {
             Ok(Some(mut derivation)) => {
                 // Build a nice task description with commit info
                 let task_description = if let Some(commit_id) = derivation.commit_id {

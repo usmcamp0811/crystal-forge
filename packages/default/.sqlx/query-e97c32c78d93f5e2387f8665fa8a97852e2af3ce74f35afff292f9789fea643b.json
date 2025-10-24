@@ -1,10 +1,6 @@
 {
   "db_name": "PostgreSQL",
-<<<<<<<< HEAD:packages/default/.sqlx/query-e97c32c78d93f5e2387f8665fa8a97852e2af3ce74f35afff292f9789fea643b.json
   "query": "\n        SELECT \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: crate::models::derivations::DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE derivation_type = 'nixos'\n        AND status_id IN (3, 5, 7)  -- DryRunPending, DryRunComplete, or BuildPending\n        AND (attempt_count < 3 OR attempt_count IS NULL)\n        ORDER BY \n            (cf_agent_enabled = true) DESC,\n            scheduled_at ASC\n        LIMIT 1\n        FOR UPDATE SKIP LOCKED\n        ",
-========
-  "query": "\n        SELECT \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: crate::models::derivations::DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        FROM derivations\n        WHERE id = $1\n        ",
->>>>>>>> parent of 2ecca11 (fixing build que):packages/default/.sqlx/query-6b5aefa77011c5c84eb7034f62048a88bd18fa9ecd2c56705f9e1b06c571e1c5.json
   "describe": {
     "columns": [
       {
@@ -140,9 +136,5 @@
       true
     ]
   },
-<<<<<<<< HEAD:packages/default/.sqlx/query-e97c32c78d93f5e2387f8665fa8a97852e2af3ce74f35afff292f9789fea643b.json
   "hash": "e97c32c78d93f5e2387f8665fa8a97852e2af3ce74f35afff292f9789fea643b"
-========
-  "hash": "6b5aefa77011c5c84eb7034f62048a88bd18fa9ecd2c56705f9e1b06c571e1c5"
->>>>>>>> parent of 2ecca11 (fixing build que):packages/default/.sqlx/query-6b5aefa77011c5c84eb7034f62048a88bd18fa9ecd2c56705f9e1b06c571e1c5.json
 }

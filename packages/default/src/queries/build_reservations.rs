@@ -219,88 +219,14 @@ pub async fn get_next_buildable_derivation(
     Ok(row)
 }
 
-/// Atomically claim the next derivation to build
-pub async fn claim_next_derivation(
-    pool: &PgPool,
-    worker_id: &str,
-    wait_for_cache_push: bool,
-) -> Result<Option<Derivation>> {
+/// Claim the next derivation that needs building
+///
+/// Simple version: just grab the next nixos config that needs to be built
+pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Option<Derivation>> {
     let mut tx = pool.begin().await?;
 
-    // Get the next buildable derivation
-    let buildable = sqlx::query_as!(
-        BuildableDerivation,
-        r#"
-        SELECT 
-            id as "id!",
-            derivation_name as "derivation_name!",
-            derivation_type as "derivation_type!",
-            derivation_path,
-            pname,
-            version,
-            status_id as "status_id!",
-            nixos_id,
-            nixos_commit_ts,
-            total_packages,
-            completed_packages,
-            cached_packages,
-            active_workers,
-            build_type as "build_type!",
-            queue_position
-        FROM view_buildable_derivations
-        WHERE 
-            CASE 
-                WHEN build_type = 'system' AND $1 = true THEN 
-                    cached_packages = total_packages
-                ELSE true
-            END
-        ORDER BY queue_position
-        LIMIT 1
-        FOR UPDATE SKIP LOCKED
-        "#,
-        wait_for_cache_push
-    )
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some(buildable) = buildable else {
-        tx.rollback().await?;
-        return Ok(None);
-    };
-
-    // Create reservation
-    let nixos_id = if buildable.build_type == "package" {
-        buildable.nixos_id // Already an Option<i32>, don't wrap it again
-    } else {
-        None
-    };
-
-    sqlx::query!(
-        r#"
-        INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)
-        VALUES ($1, $2, $3)
-        "#,
-        worker_id,
-        buildable.id,
-        nixos_id
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Mark derivation as in-progress
-    sqlx::query!(
-        r#"
-        UPDATE derivations
-        SET status_id = $1, started_at = NOW()
-        WHERE id = $2
-        "#,
-        EvaluationStatus::BuildInProgress.as_id(),
-        buildable.id
-    )
-    .execute(&mut *tx)
-    .await?;
-
-    // Fetch full derivation
+    // Get the next nixos derivation that's ready to build
+    // Priority: CF agent enabled systems first, then oldest scheduled
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
@@ -327,11 +253,49 @@ pub async fn claim_next_derivation(
             cf_agent_enabled,
             store_path
         FROM derivations
+        WHERE derivation_type = 'nixos'
+        AND status_id IN (3, 5, 7)  -- DryRunPending, DryRunComplete, or BuildPending
+        AND (attempt_count < 3 OR attempt_count IS NULL)
+        ORDER BY 
+            (cf_agent_enabled = true) DESC,
+            scheduled_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+        "#,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(derivation) = derivation else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+
+    // Create reservation
+    sqlx::query!(
+        r#"
+        INSERT INTO build_reservations (worker_id, derivation_id)
+        VALUES ($1, $2)
+        "#,
+        worker_id,
+        derivation.id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    // Mark as building
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = 8,  -- BuildInProgress
+            started_at = NOW(),
+            attempt_count = COALESCE(attempt_count, 0) + 1
         WHERE id = $1
         "#,
-        buildable.id
+        derivation.id
     )
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;
