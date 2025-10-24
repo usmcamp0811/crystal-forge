@@ -23,28 +23,6 @@ use tokio::fs;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-/// Build a single derivation directly using nix-store --realise
-async fn build_single_derivation(
-    pool: &PgPool,
-    derivation: &mut Derivation,
-    build_config: &BuildConfig,
-) -> Result<String> {
-    let drv_path = derivation
-        .derivation_path
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Derivation missing derivation_path"))?;
-
-    if derivation.derivation_type == DerivationType::Package {
-        // For packages, build the .drv directly
-        derivation
-            .build_derivation_from_path(pool, drv_path, build_config)
-            .await
-    } else {
-        // For NixOS systems, use the full evaluate_and_build process
-        derivation.build(pool, build_config).await
-    }
-}
-
 /// Runs the continuous build loop with multiple workers
 pub async fn run_build_loop(pool: PgPool) {
     let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
@@ -238,11 +216,9 @@ async fn build_worker(
 
                 // CRITICAL: Add timeout to prevent stuck workers
                 // This wraps the build in a tokio::time::timeout
-                let build_result = tokio::time::timeout(
-                    build_timeout,
-                    build_single_derivation(&pool, &mut derivation, &build_config),
-                )
-                .await;
+                let build_result =
+                    tokio::time::timeout(build_timeout, derivation.build(&pool, &build_config))
+                        .await;
 
                 match build_result {
                     // Build succeeded within timeout
