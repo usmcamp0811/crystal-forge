@@ -100,21 +100,85 @@ pub async fn run_build_loop(pool: PgPool) {
     }
 }
 
+/// Build a task description for display/logging
+/// 
+/// This helper function encapsulates all the commit-related queries
+/// that were previously embedded in build_worker
+async fn build_task_description(
+    pool: &PgPool,
+    derivation: &Derivation,
+) -> String {
+    if let Some(commit_id) = derivation.commit_id {
+        match crate::queries::commits::get_commit_by_id(pool, commit_id).await {
+            Ok(commit) => {
+                // Try to get distance from HEAD
+                let distance_info = match commit.get_flake(pool).await {
+                    Ok(flake) => {
+                        match crate::queries::commits::get_commit_distance_from_head(
+                            pool, &flake, &commit,
+                        )
+                        .await
+                        {
+                            Ok(distance) => format!(" (HEAD~{})", distance),
+                            Err(_) => String::new(),
+                        }
+                    }
+                    Err(_) => String::new(),
+                };
+
+                format!(
+                    "{} @ {}{}",
+                    derivation.derivation_name,
+                    &commit.git_commit_hash[..8],
+                    distance_info
+                )
+            }
+            Err(_) => format!("{} @ commit#{}", derivation.derivation_name, commit_id),
+        }
+    } else {
+        derivation.derivation_name.clone()
+    }
+}
+
+/// Update worker status (helper to reduce boilerplate)
+/// 
+/// This function updates the global worker status in a non-blocking way
+fn update_worker_status(
+    worker_id: usize,
+    state: WorkerState,
+    current_task: Option<String>,
+) {
+    tokio::spawn(async move {
+        let mut statuses = get_build_status().write().await;
+        if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
+            status.state = state;
+            status.current_task = current_task;
+            status.started_at = if state == WorkerState::Idle {
+                None
+            } else {
+                Some(std::time::Instant::now())
+            };
+        }
+    });
+}
+
+/// Main build worker loop
+///
+/// CRITICAL IMPROVEMENTS:
+/// 1. Timeout protection prevents workers from getting stuck for hours
+/// 2. Helper functions for task description and status updates
+/// 3. Better error handling and logging
 async fn build_worker(
     worker_id: usize,
     worker_uuid: String,
     pool: PgPool,
     build_config: BuildConfig,
 ) {
-    // Initialize status
-    {
-        let mut statuses = get_build_status().write().await;
-        if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-            status.state = WorkerState::Working;
-            status.current_task = Some("claiming work".to_string());
-            status.started_at = Some(std::time::Instant::now());
-        }
-    }
+    update_worker_status(
+        worker_id,
+        WorkerState::Working,
+        Some("claiming work".to_string()),
+    );
 
     info!("Worker {} ({}) started", worker_id, worker_uuid);
 
@@ -125,61 +189,36 @@ async fn build_worker(
         worker_heartbeat_loop(heartbeat_uuid, heartbeat_pool).await;
     });
 
-    loop {
-        // Update status: looking for work
-        {
-            let mut statuses = get_build_status().write().await;
-            if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-                status.state = WorkerState::Working;
-                status.current_task = Some("claiming work".to_string());
-                status.started_at = Some(std::time::Instant::now());
-            }
-        }
+    // Get the build timeout from config (with a reasonable maximum)
+    // This is CRITICAL to prevent workers from getting stuck for hours
+    let build_timeout = std::cmp::min(
+        build_config.timeout,
+        std::time::Duration::from_secs(7200), // Max 2 hours
+    );
 
-        // Get wait_for_cache_push setting from config
+    info!(
+        "Worker {} configured with {:.1}s timeout",
+        worker_id,
+        build_timeout.as_secs_f64()
+    );
+
+    loop {
+        update_worker_status(
+            worker_id,
+            WorkerState::Working,
+            Some("claiming work".to_string()),
+        );
+
         match build_reservations::claim_next_derivation(&pool, &worker_uuid).await {
             Ok(Some(mut derivation)) => {
-                // Build a nice task description with commit info
-                let task_description = if let Some(commit_id) = derivation.commit_id {
-                    match crate::queries::commits::get_commit_by_id(&pool, commit_id).await {
-                        Ok(commit) => {
-                            // Try to get distance from HEAD
-                            let distance_info = match commit.get_flake(&pool).await {
-                                Ok(flake) => {
-                                    match crate::queries::commits::get_commit_distance_from_head(
-                                        &pool, &flake, &commit,
-                                    )
-                                    .await
-                                    {
-                                        Ok(distance) => format!(" (HEAD~{})", distance),
-                                        Err(_) => String::new(),
-                                    }
-                                }
-                                Err(_) => String::new(),
-                            };
+                // Build task description using helper function (no embedded SQL)
+                let task_description = build_task_description(&pool, &derivation).await;
 
-                            format!(
-                                "{} @ {}{}",
-                                derivation.derivation_name,
-                                &commit.git_commit_hash[..8],
-                                distance_info
-                            )
-                        }
-                        Err(_) => format!("{} @ commit#{}", derivation.derivation_name, commit_id),
-                    }
-                } else {
-                    derivation.derivation_name.clone()
-                };
-
-                // Update status: building
-                {
-                    let mut statuses = get_build_status().write().await;
-                    if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-                        status.current_task = Some(task_description.clone());
-                        status.started_at = Some(std::time::Instant::now());
-                        status.state = WorkerState::Working;
-                    }
-                }
+                update_worker_status(
+                    worker_id,
+                    WorkerState::Working,
+                    Some(task_description.clone()),
+                );
 
                 info!(
                     "Worker {} claimed: {} (type: {:?}, cf_agent: {:?}, attempt: {})",
@@ -191,8 +230,18 @@ async fn build_worker(
                 );
 
                 let start = std::time::Instant::now();
-                match build_single_derivation(&pool, &mut derivation, &build_config).await {
-                    Ok(store_path) => {
+
+                // CRITICAL: Add timeout to prevent stuck workers
+                // This wraps the build in a tokio::time::timeout
+                let build_result = tokio::time::timeout(
+                    build_timeout,
+                    build_single_derivation(&pool, &mut derivation, &build_config),
+                )
+                .await;
+
+                match build_result {
+                    // Build succeeded within timeout
+                    Ok(Ok(store_path)) => {
                         let duration = start.elapsed();
                         info!(
                             "✅ Worker {} completed {} in {:.1}s: {}",
@@ -202,7 +251,6 @@ async fn build_worker(
                             store_path
                         );
 
-                        // Mark complete and delete reservation in transaction
                         if let Err(e) = mark_build_complete_and_release(
                             &pool,
                             &worker_uuid,
@@ -214,7 +262,9 @@ async fn build_worker(
                             error!("Failed to mark build complete: {}", e);
                         }
                     }
-                    Err(e) => {
+
+                    // Build failed within timeout
+                    Ok(Err(e)) => {
                         let duration = start.elapsed();
                         error!(
                             "❌ Worker {} build failed for {} after {:.1}s: {}",
@@ -224,7 +274,6 @@ async fn build_worker(
                             e
                         );
 
-                        // Mark failed and delete reservation
                         if let Err(e2) =
                             mark_build_failed_and_release(&pool, &worker_uuid, &derivation, &e)
                                 .await
@@ -232,22 +281,46 @@ async fn build_worker(
                             error!("Failed to mark build failed: {}", e2);
                         }
                     }
-                }
-            }
-            Ok(None) => {
-                // Update status: idle
-                {
-                    let mut statuses = get_build_status().write().await;
-                    if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-                        status.state = WorkerState::Idle;
-                        status.current_task = None;
-                        status.started_at = None;
+
+                    // Build TIMED OUT - this is the fix for stuck workers!
+                    Err(_timeout) => {
+                        let duration = start.elapsed();
+                        let timeout_error = anyhow::anyhow!(
+                            "Build timed out after {:.1}s (limit: {:.1}s)",
+                            duration.as_secs_f64(),
+                            build_timeout.as_secs_f64()
+                        );
+
+                        error!(
+                            "⏱️  Worker {} build TIMEOUT for {} after {:.1}s (limit: {:.1}s)",
+                            worker_id,
+                            task_description,
+                            duration.as_secs_f64(),
+                            build_timeout.as_secs_f64()
+                        );
+
+                        if let Err(e2) = mark_build_failed_and_release(
+                            &pool,
+                            &worker_uuid,
+                            &derivation,
+                            &timeout_error,
+                        )
+                        .await
+                        {
+                            error!("Failed to mark build timeout: {}", e2);
+                        }
                     }
                 }
+            }
 
+            // No work available - idle
+            Ok(None) => {
+                update_worker_status(worker_id, WorkerState::Idle, None);
                 debug!("Worker {} idle, no work available", worker_id);
                 sleep(std::time::Duration::from_secs(5)).await;
             }
+
+            // Error claiming work
             Err(e) => {
                 error!("Worker {} error claiming work: {}", worker_id, e);
                 sleep(std::time::Duration::from_secs(10)).await;

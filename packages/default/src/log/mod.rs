@@ -11,7 +11,7 @@ pub struct WorkerStatus {
     pub state: WorkerState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WorkerState {
     Idle,
     Working,
