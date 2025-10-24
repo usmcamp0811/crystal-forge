@@ -228,17 +228,14 @@ pub async fn get_next_buildable_derivation(
     Ok(row)
 }
 
-/// Claim the next NixOS configuration that needs building
+/// Claim the next derivation that needs building
 ///
-/// This only claims toplevel NixOS configurations, not individual packages.
-/// Nix will handle building all dependencies as part of the toplevel build.
+/// Simple version: just grab the next nixos config that needs to be built
 pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Option<Derivation>> {
     let mut tx = pool.begin().await?;
 
-    // Get the next buildable NixOS derivation
-    // Priority order:
-    // 1. CF agent enabled systems (highest priority)
-    // 2. Scheduled oldest first
+    // Get the next nixos derivation that's ready to build
+    // Priority: CF agent enabled systems first, then oldest scheduled
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
@@ -266,17 +263,14 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             store_path
         FROM derivations
         WHERE derivation_type = 'nixos'
-        AND status_id = $1  -- BuildPending (7)
-        AND (attempt_count < 3 OR attempt_count IS NULL)  -- Max 3 attempts
+        AND status_id IN (3, 5, 7)  -- DryRunPending, DryRunComplete, or BuildPending
+        AND (attempt_count < 3 OR attempt_count IS NULL)
         ORDER BY 
-            -- CF agent systems first
             (cf_agent_enabled = true) DESC,
-            -- Then oldest scheduled
             scheduled_at ASC
         LIMIT 1
         FOR UPDATE SKIP LOCKED
         "#,
-        EvaluationStatus::BuildPending.as_id()
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -289,8 +283,8 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     // Create reservation
     sqlx::query!(
         r#"
-        INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)
-        VALUES ($1, $2, NULL)
+        INSERT INTO build_reservations (worker_id, derivation_id)
+        VALUES ($1, $2)
         "#,
         worker_id,
         derivation.id,
@@ -298,17 +292,16 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     .execute(&mut *tx)
     .await?;
 
-    // Mark derivation as in-progress
+    // Mark as building
     sqlx::query!(
         r#"
         UPDATE derivations
         SET 
-            status_id = $1,
+            status_id = 8,  -- BuildInProgress
             started_at = NOW(),
             attempt_count = COALESCE(attempt_count, 0) + 1
-        WHERE id = $2
+        WHERE id = $1
         "#,
-        EvaluationStatus::BuildInProgress.as_id(),
         derivation.id
     )
     .execute(&mut *tx)
@@ -317,11 +310,8 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     tx.commit().await?;
 
     info!(
-        "Worker {} claimed derivation {} ({}) - attempt {}",
-        worker_id,
-        derivation.id,
-        derivation.derivation_name,
-        derivation.attempt_count + 1
+        "Worker {} claimed derivation {} ({})",
+        worker_id, derivation.id, derivation.derivation_name
     );
 
     Ok(Some(derivation))
