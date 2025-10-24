@@ -229,6 +229,7 @@ pub async fn get_next_buildable_derivation(
 pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Option<Derivation>> {
     let mut tx = pool.begin().await?;
 
+    // 1) Pick a candidate row, but don't lock it here.
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
@@ -256,17 +257,16 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             store_path
         FROM derivations
         WHERE derivation_type = 'nixos'
-        AND status_id = $1  -- FIXED: Only claim DryRunComplete (ready to build)
-        AND (attempt_count < 5 OR attempt_count IS NULL)
-        AND NOT EXISTS (
-            SELECT 1 FROM build_reservations 
-            WHERE build_reservations.derivation_id = derivations.id
-        )
+          AND status_id = $1        -- DryRunComplete (ready to build)
+          AND (attempt_count < 5 OR attempt_count IS NULL)
+          AND NOT EXISTS (
+              SELECT 1 FROM build_reservations 
+              WHERE build_reservations.derivation_id = derivations.id
+          )
         ORDER BY 
             (cf_agent_enabled = true) DESC,  -- CF agent systems first
             scheduled_at ASC                  -- Then oldest
         LIMIT 1
-        FOR UPDATE SKIP LOCKED
         "#,
         EvaluationStatus::DryRunComplete.as_id(), // 5
     )
@@ -278,33 +278,58 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
         return Ok(None);
     };
 
-    // Create reservation
-    sqlx::query!(
+    // 2) Atomically try to reserve it. This is the concurrency fence.
+    //    Requires a UNIQUE INDEX/CONSTRAINT on (derivation_id) in build_reservations.
+    let reserved = sqlx::query!(
         r#"
         INSERT INTO build_reservations (worker_id, derivation_id)
         VALUES ($1, $2)
+        ON CONFLICT (derivation_id) DO NOTHING
+        RETURNING derivation_id
         "#,
         worker_id,
         derivation.id,
     )
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    // Mark as building and increment attempt count
-    sqlx::query!(
+    // If another worker beat us, bail quietly.
+    if reserved.is_none() {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
+    // 3) Flip status to BuildInProgress *only if* it was still DryRunComplete.
+    //    This guards against races where status changed between SELECT and now.
+    let updated = sqlx::query!(
         r#"
         UPDATE derivations
         SET 
-            status_id = $1,  -- BuildInProgress (8)
+            status_id = $1,                -- BuildInProgress (8)
             started_at = NOW(),
             attempt_count = COALESCE(attempt_count, 0) + 1
         WHERE id = $2
+          AND status_id = $3               -- still DryRunComplete
         "#,
-        EvaluationStatus::BuildInProgress.as_id(),
-        derivation.id
+        EvaluationStatus::BuildInProgress.as_id(), // 8
+        derivation.id,
+        EvaluationStatus::DryRunComplete.as_id(), // 5
     )
     .execute(&mut *tx)
     .await?;
+
+    if updated.rows_affected() != 1 {
+        // Could not flip state (someone else raced us after the reservation insert).
+        // Drop our reservation and exit cleanly.
+        sqlx::query!(
+            r#"DELETE FROM build_reservations WHERE derivation_id = $1"#,
+            derivation.id
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+        return Ok(None);
+    }
 
     tx.commit().await?;
 
