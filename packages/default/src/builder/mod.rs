@@ -227,7 +227,8 @@ async fn build_worker(
                 );
 
                 // Build task description using helper function (no embedded SQL)
-                let task_description = build_task_description(&pool, &derivation).await;
+                let task_description = derivation.derivation_name.clone();
+                // let task_description = build_task_description(&pool, &derivation).await;
 
                 update_worker_status(
                     worker_id,
