@@ -657,57 +657,82 @@ async fn process_batch_cache_push(
         return Ok(());
     }
 
-    info!("📤 Processing {} cache push jobs", jobs.len());
+    info!("📤 Processing {} cache push jobs (parallel)", jobs.len());
 
-    // Process one at a time instead of batching
+    // Process up to 3 jobs concurrently
+    let mut tasks = Vec::new();
+
     for job in jobs {
-        if let Some(store_path) = job.store_path {
-            // Check if path exists
-            if !tokio::fs::try_exists(&store_path).await.unwrap_or(false) {
-                warn!("❌ Store path doesn't exist: {}", store_path);
-                mark_cache_push_failed(
-                    pool,
-                    job.id,
-                    &format!("Store path does not exist: {}", store_path),
+        let pool = pool.clone();
+        let cache_config = cache_config.clone();
+        let build_config = build_config.clone();
+
+        let task = tokio::spawn(async move {
+            if let Some(store_path) = job.store_path {
+                // Check if path exists
+                if !tokio::fs::try_exists(&store_path).await.unwrap_or(false) {
+                    warn!("❌ Store path doesn't exist: {}", store_path);
+                    let _ = mark_cache_push_failed(
+                        &pool,
+                        job.id,
+                        &format!("Store path does not exist: {}", store_path),
+                    )
+                    .await;
+                    return;
+                }
+
+                // Mark in-progress
+                if mark_cache_push_in_progress(&pool, job.id).await.is_err() {
+                    return;
+                }
+
+                // Get derivation
+                let derivation = match crate::queries::derivations::get_derivation_by_id(
+                    &pool,
+                    job.derivation_id,
                 )
-                .await?;
-                continue;
-            }
-
-            // Mark in-progress
-            mark_cache_push_in_progress(pool, job.id).await?;
-
-            // Get derivation for push (need this for the method)
-            let derivation =
-                match crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id)
-                    .await
+                .await
                 {
                     Ok(d) => d,
                     Err(e) => {
-                        mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
-                        continue;
+                        let _ = mark_cache_push_failed(&pool, job.id, &e.to_string()).await;
+                        return;
                     }
                 };
 
-            // Use the retry wrapper!
-            let start = std::time::Instant::now();
-            match derivation
-                .push_to_cache_with_retry(&store_path, cache_config, build_config)
-                .await
-            {
-                Ok(()) => {
-                    let duration_ms = start.elapsed().as_millis() as i32;
-                    mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;
-                    info!("✅ Pushed {} (job {})", derivation.derivation_name, job.id);
-                }
-                Err(e) => {
-                    mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
-                    error!("❌ Failed to push job {}: {}", job.id, e);
+                // Push with retry
+                let start = std::time::Instant::now();
+                match derivation
+                    .push_to_cache_with_retry(&store_path, &cache_config, &build_config)
+                    .await
+                {
+                    Ok(()) => {
+                        let duration_ms = start.elapsed().as_millis() as i32;
+                        let _ =
+                            mark_cache_push_completed(&pool, job.id, None, Some(duration_ms)).await;
+                        info!("✅ Pushed {} (job {})", derivation.derivation_name, job.id);
+                    }
+                    Err(e) => {
+                        let _ = mark_cache_push_failed(&pool, job.id, &e.to_string()).await;
+                        error!("❌ Failed to push job {}: {}", job.id, e);
+                    }
                 }
             }
-        } else {
-            mark_cache_push_failed(pool, job.id, "No store path").await?;
+        });
+
+        tasks.push(task);
+
+        // Limit concurrency - wait if we have 3 running
+        if tasks.len() >= 3 {
+            if let Some(task) = tasks.pop() {
+                let _ = task.await;
+            }
         }
+    }
+
+    // Wait for remaining tasks
+    for task in tasks {
+        let _ = task.await;
     }
 
     Ok(())
