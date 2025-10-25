@@ -1992,3 +1992,17 @@ pub async fn auto_queue_cf_agent_systems(pool: &PgPool, commit_id: i32) -> Resul
 
     Ok(count)
 }
+
+pub async fn cleanup_partial_derivations(pool: &PgPool) -> Result<()> {
+    sqlx::query!(
+        r#"
+        DELETE FROM derivations
+        WHERE derivation_path IS NULL
+          AND status_id IN (3, 4)  -- Only delete pending/in-progress
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}

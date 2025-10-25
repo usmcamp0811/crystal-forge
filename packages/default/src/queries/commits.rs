@@ -1,8 +1,8 @@
 use crate::models::commits::Commit;
-use tracing::{debug, error, info, warn};
 use crate::models::flakes::Flake;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
+use tracing::{debug, error, info, warn};
 
 pub async fn insert_commit(
     pool: &PgPool,
@@ -231,3 +231,4 @@ pub async fn mark_commit_evaluation_failed(
 
     Ok(())
 }
+
