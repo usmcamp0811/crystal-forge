@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE commits\n        SET evaluation_status = 'pending'\n        WHERE evaluation_status = 'in_progress'\n          AND evaluation_started_at < NOW() - INTERVAL '30 minutes'\n        RETURNING id, git_commit_hash\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "git_commit_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "d58a2667e92caa4bd6f01a5a7b1b27edb40eb73f4cdf94743edeb609de3a0041"
+}

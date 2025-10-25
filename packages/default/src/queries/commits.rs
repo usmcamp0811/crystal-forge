@@ -1,4 +1,5 @@
 use crate::models::commits::Commit;
+use tracing::{debug, error, info, warn};
 use crate::models::flakes::Flake;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
@@ -141,4 +142,92 @@ pub async fn get_commit_distance_from_head(
     .await?;
 
     Ok(distance)
+}
+
+/// Reset commits stuck in 'in_progress' state (from crashed evaluations)
+pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
+    let reset = sqlx::query!(
+        r#"
+        UPDATE commits
+        SET evaluation_status = 'pending'
+        WHERE evaluation_status = 'in_progress'
+          AND evaluation_started_at < NOW() - INTERVAL '30 minutes'
+        RETURNING id, git_commit_hash
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if !reset.is_empty() {
+        warn!("🧹 Reset {} stuck commit evaluations", reset.len());
+        for row in &reset {
+            info!("  - Commit {} ({})", row.id, row.git_commit_hash);
+        }
+    }
+
+    Ok(())
+}
+
+/// Mark commit evaluation as started
+pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE commits
+        SET 
+            evaluation_status = 'in_progress',
+            evaluation_started_at = NOW(),
+            evaluation_attempt_count = COALESCE(evaluation_attempt_count, 0) + 1
+        WHERE id = $1
+        "#,
+        commit_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Mark commit evaluation as successfully completed
+pub async fn mark_commit_evaluation_complete(pool: &PgPool, commit_id: i32) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE commits
+        SET 
+            evaluation_status = 'complete',
+            evaluation_completed_at = NOW(),
+            evaluation_error_message = NULL
+        WHERE id = $1
+        "#,
+        commit_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Mark commit evaluation as failed (with retry logic)
+pub async fn mark_commit_evaluation_failed(
+    pool: &PgPool,
+    commit_id: i32,
+    error: &str,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE commits
+        SET 
+            evaluation_status = CASE 
+                WHEN COALESCE(evaluation_attempt_count, 0) >= 5 THEN 'failed'
+                ELSE 'pending'
+            END,
+            evaluation_error_message = $2
+        WHERE id = $1
+        "#,
+        commit_id,
+        error
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }

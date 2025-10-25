@@ -6,7 +6,7 @@ use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::evaluate_with_nix_eval_jobs;
 use crate::models::flakes::Flake;
-use crate::queries::commits::increment_commit_list_attempt_count;
+// NOTE: removed increment_commit_list_attempt_count – we now rely on the new evaluation_* fields
 use crate::queries::flakes::get_all_flakes_from_db;
 use anyhow::Result;
 use sqlx::PgPool;
@@ -16,7 +16,11 @@ use tokio::time::Instant;
 use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use crate::queries::commits::get_commits_pending_evaluation;
+// ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
+use crate::queries::commits::{
+    get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
+    mark_commit_evaluation_started, reset_stuck_commit_evaluations,
+};
 
 pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     let flake_pool = pool.clone();
@@ -59,6 +63,11 @@ pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
         "🔁 Starting periodic commit evaluation check loop (every {:?})...",
         interval
     );
+
+    // ⬇️ cleanup any stranded 'in_progress' from previous runs
+    if let Err(e) = reset_stuck_commit_evaluations(&pool).await {
+        error!("❌ Failed to reset stuck commit evaluations: {}", e);
+    }
 
     // `PgPool` is cheap to clone; keep an owned copy in the task.
     let pool = pool.clone();
@@ -105,6 +114,15 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                 // Using non-strict mode to collect data without failing evaluations
                 let policies = vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: false }];
 
+                // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
+                if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
+                    error!(
+                        "❌ Could not mark commit {} evaluation started: {}",
+                        commit.git_commit_hash, e
+                    );
+                    continue;
+                }
+
                 // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations
                 // This will:
                 // 1. Evaluate all systems in parallel
@@ -124,6 +142,14 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                 .await
                 {
                     Ok((results, policy_checks)) => {
+                        // ⬇️ mark COMPLETE
+                        if let Err(e) = mark_commit_evaluation_complete(pool, commit.id).await {
+                            error!(
+                                "❌ Failed to mark commit {} evaluation complete: {}",
+                                commit.git_commit_hash, e
+                            );
+                        }
+
                         let total = results.len();
                         let with_agent = policy_checks
                             .iter()
@@ -158,11 +184,15 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             commit.git_commit_hash, e
                         );
 
-                        // Increment attempt count so we don't retry forever
-                        if let Err(inc_err) =
-                            increment_commit_list_attempt_count(&pool, &commit).await
+                        // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
+                        // depending on attempt limit inside your SQL)
+                        if let Err(mark_err) =
+                            mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await
                         {
-                            error!("❌ Failed to increment attempt count: {}", inc_err);
+                            error!(
+                                "❌ Failed to mark commit {} evaluation failed: {}",
+                                commit.git_commit_hash, mark_err
+                            );
                         }
                     }
                 }
