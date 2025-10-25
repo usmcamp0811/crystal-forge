@@ -619,13 +619,13 @@ pub async fn process_cache_pushes(
     // Always try to cleanup stale jobs first
     let _ = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        cleanup_stale_cache_push_jobs(pool, 10),
+        cleanup_stale_cache_push_jobs(pool, 5),
     )
     .await;
 
-    // Get pending jobs (up to 50 at a time for batching)
+    // Get pending jobs (up to 5 at a time for batching)
     let jobs_result =
-        tokio::time::timeout(db_timeout, get_pending_cache_push_jobs(pool, Some(50))).await;
+        tokio::time::timeout(db_timeout, get_pending_cache_push_jobs(pool, Some(5))).await;
 
     match jobs_result {
         Ok(Ok(jobs)) if !jobs.is_empty() => {
@@ -651,122 +651,62 @@ async fn process_batch_cache_push(
     pool: &PgPool,
     jobs: Vec<crate::queries::cache_push::CachePushJob>,
     cache_config: &CacheConfig,
-    _build_config: &BuildConfig,
+    build_config: &BuildConfig,
 ) -> Result<()> {
     if jobs.is_empty() {
         return Ok(());
     }
 
-    info!("📤 Processing batch of {} cache push jobs", jobs.len());
+    info!("📤 Processing {} cache push jobs", jobs.len());
 
-    // Mark all as in-progress and validate paths exist
-    let mut valid_jobs = Vec::new();
-
-    // Mark all as in-progress
-    for job in &jobs {
-        mark_cache_push_in_progress(pool, job.id).await?;
-
-        if let Some(ref store_path) = job.store_path {
-            // Check if path actually exists locally
-            if tokio::fs::try_exists(store_path).await.unwrap_or(false) {
-                valid_jobs.push(job.clone());
-            } else {
-                warn!("❌ Store path doesn't exist locally: {}", store_path);
-
-                // Mark job as failed
+    // Process one at a time instead of batching
+    for job in jobs {
+        if let Some(store_path) = job.store_path {
+            // Check if path exists
+            if !tokio::fs::try_exists(&store_path).await.unwrap_or(false) {
+                warn!("❌ Store path doesn't exist: {}", store_path);
                 mark_cache_push_failed(
                     pool,
                     job.id,
                     &format!("Store path does not exist: {}", store_path),
                 )
                 .await?;
+                continue;
+            }
 
-                // Reset derivation to dry-run-complete so it can be rebuilt
-                if let Err(e) = reset_derivation_for_rebuild(pool, job.derivation_id).await {
-                    warn!(
-                        "Failed to reset derivation {} for rebuild: {}",
-                        job.derivation_id, e
-                    );
+            // Mark in-progress
+            mark_cache_push_in_progress(pool, job.id).await?;
+
+            // Get derivation for push (need this for the method)
+            let derivation =
+                match crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id)
+                    .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
+                        continue;
+                    }
+                };
+
+            // Use the retry wrapper!
+            let start = std::time::Instant::now();
+            match derivation
+                .push_to_cache_with_retry(&store_path, cache_config, build_config)
+                .await
+            {
+                Ok(()) => {
+                    let duration_ms = start.elapsed().as_millis() as i32;
+                    mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;
+                    info!("✅ Pushed {} (job {})", derivation.derivation_name, job.id);
+                }
+                Err(e) => {
+                    mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
+                    error!("❌ Failed to push job {}: {}", job.id, e);
                 }
             }
         } else {
-            mark_cache_push_failed(pool, job.id, "No store path specified").await?;
-        }
-    }
-
-    // Collect all store paths with their job IDs
-    let paths_with_jobs: Vec<(i32, String)> = jobs
-        .iter()
-        .filter_map(|job| job.store_path.clone().map(|path| (job.id, path)))
-        .collect();
-
-    if paths_with_jobs.is_empty() {
-        warn!("No valid store paths in batch");
-        return Ok(());
-    }
-
-    let store_paths: Vec<&str> = paths_with_jobs.iter().map(|(_, p)| p.as_str()).collect();
-    let start_time = std::time::Instant::now();
-
-    // Execute single nix copy command with all paths
-    let result = tokio::process::Command::new("nix")
-        .arg("copy")
-        .arg("--to")
-        .arg(cache_config.push_to.as_ref().unwrap())
-        .args(&store_paths)
-        .output()
-        .await?;
-
-    let duration_ms = start_time.elapsed().as_millis() as i32;
-
-    if result.status.success() {
-        info!(
-            "✅ Batch cache push completed: {} paths in {}ms ({:.1} paths/sec)",
-            store_paths.len(),
-            duration_ms,
-            (store_paths.len() as f64) / (duration_ms as f64 / 1000.0)
-        );
-
-        // Mark all jobs as completed
-        for (job_id, _) in &paths_with_jobs {
-            if let Err(e) = mark_cache_push_completed(pool, *job_id, None, Some(duration_ms)).await
-            {
-                warn!("Failed to mark job {} as complete: {}", job_id, e);
-            }
-        }
-    } else {
-        let stderr = String::from_utf8_lossy(&result.stderr);
-        error!("❌ Batch cache push failed, checking individual paths...");
-
-        // Batch failed - check each path individually to see which ones succeeded
-        for (job_id, store_path) in &paths_with_jobs {
-            // Check if this specific path is in the cache now
-            let check_result = tokio::process::Command::new("nix")
-                .arg("path-info")
-                .arg("--store")
-                .arg(cache_config.push_to.as_ref().unwrap())
-                .arg(store_path)
-                .output()
-                .await;
-
-            match check_result {
-                Ok(check) if check.status.success() => {
-                    // Path is in cache - mark as succeeded
-                    info!("✅ Path {} was successfully pushed", store_path);
-                    if let Err(e) =
-                        mark_cache_push_completed(pool, *job_id, None, Some(duration_ms)).await
-                    {
-                        warn!("Failed to mark job {} as complete: {}", job_id, e);
-                    }
-                }
-                _ => {
-                    // Path is not in cache - mark as failed
-                    warn!("❌ Path {} failed to push", store_path);
-                    if let Err(e) = mark_cache_push_failed(pool, *job_id, &stderr).await {
-                        warn!("Failed to mark job {} as failed: {}", job_id, e);
-                    }
-                }
-            }
+            mark_cache_push_failed(pool, job.id, "No store path").await?;
         }
     }
 
