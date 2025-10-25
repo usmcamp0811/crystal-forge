@@ -125,7 +125,17 @@ impl AgentDeploymentManager {
 
         info!("Starting deployment execution for: {}", target);
 
-        if self.config.dry_run_first {
+        let is_store_path = target.starts_with("/nix/store/");
+
+        // Store paths REQUIRE cache to be configured
+        if is_store_path && self.config.cache_url.is_none() {
+            anyhow::bail!(
+                "Cannot deploy store path without cache configured. Target: {}",
+                target
+            );
+        }
+
+        if self.config.dry_run_first && !is_store_path {
             self.execute_dry_run(target)
                 .await
                 .context("Dry run failed")?;
@@ -133,22 +143,26 @@ impl AgentDeploymentManager {
 
         let start_time = std::time::Instant::now();
 
-        let result = if let Some(ref cache_url) = self.config.cache_url {
-            // Cache deployment with lock-aware retry
-            match self.deploy_from_cache_lockaware(target, cache_url).await {
+        let result = if is_store_path {
+            // Store paths: ALWAYS deploy from cache
+            let cache_url = self.config.cache_url.as_ref().unwrap(); // Safe because we checked above
+            self.deploy_store_path_from_cache(target, cache_url).await?
+        } else if let Some(ref cache_url) = self.config.cache_url {
+            // Flake URLs: Try cache first, optionally fall back to local build
+            match self.deploy_flake_from_cache(target, cache_url).await {
                 Ok(r) => r,
                 Err(e) if self.config.fallback_to_local_build => {
                     warn!(
                         "Cache deployment failed, falling back to local build: {}",
                         e
                     );
-                    self.deploy_local_build_lockaware(target).await?
+                    self.deploy_flake_local_build(target).await?
                 }
                 Err(e) => return Err(e),
             }
         } else {
-            // Local build with lock-aware retry
-            self.deploy_local_build_lockaware(target).await?
+            // Flake URLs without cache: local build only
+            self.deploy_flake_local_build(target).await?
         };
 
         let duration = start_time.elapsed();
@@ -161,36 +175,16 @@ impl AgentDeploymentManager {
     }
 
     async fn execute_dry_run(&self, target: &str) -> Result<()> {
-        info!("Executing dry-run for target: {}", target);
-
-        // Check if target is a store path - dry-run doesn't make sense for store paths
-        if target.starts_with("/nix/store/") {
-            debug!("Target is a store path, skipping dry-run");
-            return Ok(());
-        }
+        info!("Executing dry-run for flake target: {}", target);
 
         let output = Command::new("nixos-rebuild")
             .args(&["dry-run", "--flake", target])
             .output()
             .context("Failed to execute nixos-rebuild dry-run")?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        if !stdout.is_empty() {
-            debug!("nixos-rebuild dry-run stdout: {}", stdout);
-        }
-        if !stderr.is_empty() {
-            debug!("nixos-rebuild dry-run stderr: {}", stderr);
-        }
-
         if !output.status.success() {
-            error!(
-                "nixos-rebuild dry-run failed with exit code: {:?}",
-                output.status.code()
-            );
-            error!("stdout: {}", stdout);
-            error!("stderr: {}", stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!(
                 "Dry-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
                 output.status.code(),
@@ -201,47 +195,6 @@ impl AgentDeploymentManager {
 
         debug!("Dry-run completed successfully");
         Ok(())
-    }
-
-    /// Deploy using binary cache (lock-aware)
-    async fn deploy_from_cache_lockaware(
-        &self,
-        target: &str,
-        cache_url: &str,
-    ) -> Result<DeploymentResult> {
-        info!("Deploying from cache: {} (target: {})", cache_url, target);
-
-        // First attempt
-        match self.deploy_from_cache_once(target, cache_url).await {
-            Ok(ok) => return Ok(ok),
-            Err(e) => {
-                let (stdout, stderr) = extract_stdouterr(&e);
-                if is_lock_error(&stderr) || is_lock_error(&stdout) {
-                    warn!("Cache deployment hit a lock; attempting to clear locks then retry");
-                    self.handle_and_clear_locks().await?;
-                    // One retry after clearing
-                    return self.deploy_from_cache_once(target, cache_url).await;
-                }
-                Err(e)
-            }
-        }
-    }
-
-    async fn deploy_from_cache_once(
-        &self,
-        target: &str,
-        cache_url: &str,
-    ) -> Result<DeploymentResult> {
-        // Check if target is a store path or a flake URL
-        let is_store_path = target.starts_with("/nix/store/");
-
-        if is_store_path {
-            // New deployment method: nix copy + direct activation
-            self.deploy_store_path_from_cache(target, cache_url).await
-        } else {
-            // Legacy deployment method: nixos-rebuild with flake URL
-            self.deploy_flake_from_cache(target, cache_url).await
-        }
     }
 
     async fn deploy_store_path_from_cache(
@@ -266,6 +219,9 @@ impl AgentDeploymentManager {
                 "--option",
                 "trusted-public-keys",
                 &public_key_str,
+                "--option",
+                "http-connections",
+                "50",
                 "--option",
                 "require-sigs",
                 "true",
@@ -399,17 +355,9 @@ impl AgentDeploymentManager {
         Ok(DeploymentResult::Started { unit_name })
     }
 
-    /// Local build (lock-aware, with backoff + clear)
-    async fn deploy_local_build_lockaware(&self, target: &str) -> Result<DeploymentResult> {
-        info!("Deploying with local build: {}", target);
-
-        // Store paths shouldn't fall back to local build
-        if target.starts_with("/nix/store/") {
-            anyhow::bail!(
-                "Cannot perform local build for store path: {}. Store path must be available in cache.",
-                target
-            );
-        }
+    /// Local build for flake URLs only
+    async fn deploy_flake_local_build(&self, target: &str) -> Result<DeploymentResult> {
+        info!("Deploying flake with local build: {}", target);
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
@@ -452,78 +400,4 @@ impl AgentDeploymentManager {
     pub fn update_current_target(&mut self, target: Option<String>) {
         self.current_target = target;
     }
-
-    pub fn current_target(&self) -> Option<&str> {
-        self.current_target.as_deref()
-    }
-
-    /// Combined helper: if another nixos-rebuild is actually running, wait briefly;
-    /// then remove known stale profile lock files.
-    async fn handle_and_clear_locks(&self) -> Result<()> {
-        self.handle_running_rebuild().await?;
-        self.force_clear_locks().await?;
-        Ok(())
-    }
-
-    async fn handle_running_rebuild(&self) -> Result<()> {
-        // Check if nixos-rebuild is running
-        let check = Command::new("pgrep")
-            .args(&["-f", "nixos-reload|nixos-rebuild"])
-            .output()
-            .context("Failed to run pgrep to check nixos-rebuild")?;
-
-        if check.status.success() && !check.stdout.is_empty() {
-            warn!("Another nixos-rebuild appears to be running; waiting 5s");
-            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-        }
-        Ok(())
-    }
-
-    async fn force_clear_locks(&self) -> Result<()> {
-        use std::fs;
-
-        // Known lock files that can get stuck
-        const LOCK_PATHS: &[&str] = &[
-            "/nix/var/nix/profiles/system.lock",
-            "/nix/var/nix/profiles/per-user/root/profile.lock",
-        ];
-
-        warn!("Attempting to clear system profile locks");
-
-        for path in LOCK_PATHS {
-            if std::path::Path::new(path).exists() {
-                info!("Removing stale lock: {}", path);
-                // Best-effort delete; log errors but continue
-                if let Err(e) = fs::remove_file(path) {
-                    warn!("Failed to remove {}: {}", path, e);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-/// Utility: detect various lock messages from nix/nixos-rebuild
-fn is_lock_error(s: &str) -> bool {
-    let s = s.to_ascii_lowercase();
-    s.contains("could not acquire lock")
-        || s.contains("cannot acquire write lock")
-        || s.contains("timed out while waiting for lock")
-        || s.contains("lock is held by")
-        || s.contains("error: opening lock file")
-}
-
-/// Best effort to pull stdout/stderr from an anyhow error message we created above
-fn extract_stdouterr(e: &anyhow::Error) -> (String, String) {
-    // Our bail! messages include "stdout: ...\nstderr: ..." — grab those if present.
-    let msg = format!("{:#}", e);
-    let mut out = String::new();
-    let mut err = String::new();
-    if let Some(i) = msg.find("stdout:") {
-        if let Some(j) = msg[i..].find("\nstderr:") {
-            out = msg[i + 7..i + j].trim().to_string();
-            err = msg[i + j + 9..].trim().to_string();
-        }
-    }
-    (out, err)
 }
