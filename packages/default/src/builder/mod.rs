@@ -214,11 +214,17 @@ async fn build_worker(
 
                 let start = std::time::Instant::now();
 
-                // CRITICAL: Add timeout to prevent stuck workers
-                // This wraps the build in a tokio::time::timeout
+                info!(
+                    "🔨 Worker {} STARTING BUILD for {}",
+                    worker_id, derivation.derivation_name
+                );
+                info!("  → Step 1: About to call derivation.build()");
+
                 let build_result =
                     tokio::time::timeout(build_timeout, derivation.build(&pool, &build_config))
                         .await;
+
+                info!("  → Step 2: derivation.build() returned");
 
                 match build_result {
                     // Build succeeded within timeout
