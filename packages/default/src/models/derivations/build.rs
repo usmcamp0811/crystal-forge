@@ -11,95 +11,16 @@ use tracing::{debug, error, info, warn};
 
 impl Derivation {
     /// Main entry point for building a derivation
-    /// Routes to appropriate build method based on derivation type
+    /// Works for both NixOS and Package derivations using the derivation_path from database
     pub async fn build(&mut self, pool: &PgPool, build_config: &BuildConfig) -> Result<String> {
-        match self.derivation_type {
-            crate::models::derivations::DerivationType::NixOS => {
-                let commit_id = self.commit_id.ok_or_else(|| {
-                    anyhow::anyhow!("Cannot build NixOS derivation without commit_id")
-                })?;
+        // Both types use derivation_path from database (populated during dry-run phase)
+        let drv_path = self.derivation_path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{:?} derivation missing derivation_path",
+                self.derivation_type
+            )
+        })?;
 
-                let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
-                let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
-                let flake_target = build_evaluation_target(
-                    &flake.repo_url,
-                    &commit.git_commit_hash,
-                    &self.derivation_name,
-                );
-
-                // For NixOS, we need to evaluate first to get the .drv path
-                // Then build that .drv
-                self.build_nixos_system(pool, &flake_target, build_config)
-                    .await
-            }
-            crate::models::derivations::DerivationType::Package => {
-                let drv_path = self
-                    .derivation_path
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Package derivation missing derivation_path"))?;
-
-                self.build_derivation_from_path(pool, drv_path, build_config)
-                    .await
-            }
-        }
-    }
-
-    /// Build a NixOS system from a flake target
-    /// This uses nix-store --realise on the toplevel derivation
-    async fn build_nixos_system(
-        &self,
-        pool: &PgPool,
-        flake_target: &str,
-        build_config: &BuildConfig,
-    ) -> Result<String> {
-        info!("🏗️ Building NixOS system: {}", flake_target);
-
-        // Get the derivation path for this flake target
-        let drv_path = Self::get_derivation_path(flake_target, build_config).await?;
-
-        // Now build it
-        self.build_derivation_from_path(pool, &drv_path, build_config)
-            .await
-    }
-
-    /// Get the .drv path for a flake target without building
-    async fn get_derivation_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
-        let mut cmd = Command::new("nix");
-        cmd.args(["path-info", "--derivation", flake_target]);
-
-        // apply_to_command takes &self, not &mut self
-        build_config.apply_to_command(&mut cmd);
-
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "nix path-info --derivation failed for target '{}': {}",
-                flake_target,
-                stderr.trim()
-            );
-        }
-
-        let drv_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-
-        if drv_path.is_empty() || !drv_path.ends_with(".drv") {
-            bail!(
-                "Got invalid derivation path '{}' for {}",
-                drv_path,
-                flake_target
-            );
-        }
-
-        Ok(drv_path)
-    }
-
-    /// Build a derivation from its .drv path using nix-store --realise
-    pub async fn build_derivation_from_path(
-        &self,
-        pool: &PgPool,
-        drv_path: &str,
-        build_config: &BuildConfig,
-    ) -> Result<String> {
         info!("🔨 Building derivation: {}", drv_path);
 
         if !drv_path.ends_with(".drv") {
@@ -124,7 +45,6 @@ impl Derivation {
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         build_config.apply_to_command(&mut cmd);
 
-        // CRITICAL: Log before spawn attempt
         info!("  → About to spawn command for {}", drv_path);
 
         // Try to run with systemd
@@ -142,7 +62,6 @@ impl Derivation {
                     .await
             }
             Err(e) => {
-                // CRITICAL: Log the actual error
                 error!("❌ Build failed for {}: {}", drv_path, e);
                 error!("   Error details: {:?}", e);
                 Err(e)
@@ -159,6 +78,7 @@ impl Derivation {
     ) -> Result<String> {
         let start_time = Instant::now();
         info!("  → Spawning build process for {}", drv_path);
+
         let mut child = match cmd.spawn() {
             Ok(child) => {
                 info!(
@@ -174,6 +94,7 @@ impl Derivation {
                 return Err(anyhow::anyhow!("Failed to spawn build process: {}", e));
             }
         };
+
         let stdout = child.stdout.take().expect("Failed to capture stdout");
         let stderr = child.stderr.take().expect("Failed to capture stderr");
 
@@ -303,7 +224,6 @@ impl Derivation {
         cmd.args(["--realise", drv_path]);
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        // apply_to_command takes &self, not &mut self
         build_config.apply_to_command(&mut cmd);
 
         Self::run_streaming_build(cmd, drv_path, self.id, pool).await
