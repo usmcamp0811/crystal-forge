@@ -116,7 +116,7 @@ impl DeploymentPolicyManager {
             get_latest_deployable_targets_for_flake_hosts(&self.pool, flake_id, &hostnames).await?;
         let latest_by_host: HashMap<_, _> = per_host
             .into_iter()
-            .filter_map(|h| h.derivation_target.map(|t| (h.hostname, t)))
+            .filter_map(|h| h.store_path.map(|t| (h.hostname, t)))
             .collect();
 
         let mut updated_count = 0;

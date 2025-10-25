@@ -1646,6 +1646,7 @@ pub struct HostLatestTarget {
     pub hostname: String,
     pub derivation_id: i32,
     pub derivation_target: Option<String>,
+    pub store_path: Option<String>,
     pub last_cache_completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
@@ -1674,6 +1675,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
             d.derivation_name AS hostname,
             d.id              AS derivation_id,
             d.derivation_target,
+            d.store_path,
             f.repo_url        AS repo_url,
             lc.git_commit_hash AS commit_hash,
             MAX(cpj.completed_at) AS last_cache_completed_at,
@@ -1699,6 +1701,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
             d.derivation_name,
             d.id,
             d.derivation_target,
+            d.store_path,
             f.repo_url,
             lc.git_commit_hash
         )
@@ -1706,6 +1709,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
           hostname,
           derivation_id,
           derivation_target,
+          store_path,
           last_cache_completed_at,
           repo_url,
           commit_hash
@@ -1725,6 +1729,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
             HostLatestTarget {
                 hostname: hostname,
                 derivation_id: r.derivation_id,
+                store_path: Some(r.store_path),
                 derivation_target: Some(build_agent_target(
                     &r.repo_url,
                     &r.commit_hash,
