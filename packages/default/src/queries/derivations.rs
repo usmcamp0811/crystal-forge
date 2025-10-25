@@ -1729,7 +1729,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
             HostLatestTarget {
                 hostname: hostname,
                 derivation_id: r.derivation_id,
-                store_path: Some(r.store_path),
+                store_path: r.store_path,
                 derivation_target: Some(build_agent_target(
                     &r.repo_url,
                     &r.commit_hash,

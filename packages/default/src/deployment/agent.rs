@@ -16,7 +16,6 @@ pub enum DeploymentResult {
     },
     SuccessLocalBuild,
     Started {
-        // ADD THIS
         unit_name: String,
     },
     Failed {
@@ -33,7 +32,7 @@ impl DeploymentResult {
                 | DeploymentResult::AlreadyOnTarget
                 | DeploymentResult::SuccessFromCache { .. }
                 | DeploymentResult::SuccessLocalBuild
-                | DeploymentResult::Started { .. } // ADD THIS
+                | DeploymentResult::Started { .. }
         )
     }
 
@@ -48,7 +47,6 @@ impl DeploymentResult {
                 "Successfully deployed with local build".to_string()
             }
             DeploymentResult::Started { unit_name } => {
-                // ADD THIS
                 format!("Deployment started in unit: {}", unit_name)
             }
             DeploymentResult::Failed {
@@ -64,10 +62,7 @@ impl DeploymentResult {
         match self {
             DeploymentResult::SuccessFromCache { .. }
             | DeploymentResult::SuccessLocalBuild
-            | DeploymentResult::Started { .. } => {
-                // ADD THIS
-                "cf_deployment"
-            }
+            | DeploymentResult::Started { .. } => "cf_deployment",
             _ => "heartbeat",
         }
     }
@@ -168,6 +163,12 @@ impl AgentDeploymentManager {
     async fn execute_dry_run(&self, target: &str) -> Result<()> {
         info!("Executing dry-run for target: {}", target);
 
+        // Check if target is a store path - dry-run doesn't make sense for store paths
+        if target.starts_with("/nix/store/") {
+            debug!("Target is a store path, skipping dry-run");
+            return Ok(());
+        }
+
         let output = Command::new("nixos-rebuild")
             .args(&["dry-run", "--flake", target])
             .output()
@@ -231,6 +232,113 @@ impl AgentDeploymentManager {
         target: &str,
         cache_url: &str,
     ) -> Result<DeploymentResult> {
+        // Check if target is a store path or a flake URL
+        let is_store_path = target.starts_with("/nix/store/");
+
+        if is_store_path {
+            // New deployment method: nix copy + direct activation
+            self.deploy_store_path_from_cache(target, cache_url).await
+        } else {
+            // Legacy deployment method: nixos-rebuild with flake URL
+            self.deploy_flake_from_cache(target, cache_url).await
+        }
+    }
+
+    async fn deploy_store_path_from_cache(
+        &self,
+        store_path: &str,
+        cache_url: &str,
+    ) -> Result<DeploymentResult> {
+        info!("Deploying store path from cache: {}", store_path);
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_secs();
+        let unit_name = format!("crystal-forge-deploy-{}", timestamp);
+
+        // Build nix copy command
+        let mut copy_args = vec!["copy", "--from", cache_url, store_path];
+
+        let public_key_str;
+        if let Some(ref public_key) = self.config.cache_public_key {
+            public_key_str = public_key.clone();
+            copy_args.extend_from_slice(&[
+                "--option",
+                "trusted-public-keys",
+                &public_key_str,
+                "--option",
+                "require-sigs",
+                "true",
+            ]);
+            debug!("Using cache with signature verification");
+        } else {
+            warn!("No cache public key configured, skipping signature verification");
+            copy_args.extend_from_slice(&["--option", "require-sigs", "false"]);
+        }
+
+        // Step 1: Copy from cache
+        info!("Copying {} from cache...", store_path);
+        let copy_output = Command::new("nix")
+            .args(&copy_args)
+            .output()
+            .context("Failed to execute nix copy")?;
+
+        if !copy_output.status.success() {
+            let stdout = String::from_utf8_lossy(&copy_output.stdout);
+            let stderr = String::from_utf8_lossy(&copy_output.stderr);
+            error!("nix copy failed stdout: {}", stdout);
+            error!("nix copy failed stderr: {}", stderr);
+            anyhow::bail!(
+                "nix copy failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                copy_output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            );
+        }
+
+        info!("Successfully copied {} from cache", store_path);
+
+        // Step 2: Activate the configuration using systemd-run
+        let switch_script = format!("{}/bin/switch-to-configuration", store_path);
+
+        let output = Command::new("systemd-run")
+            .args(&[
+                "--unit",
+                &unit_name,
+                "--no-block",
+                "--same-dir",
+                "--collect",
+                "--",
+                &switch_script,
+                "switch",
+            ])
+            .output()
+            .context("Failed to execute systemd-run with switch-to-configuration")?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("systemd-run failed stdout: {}", stdout);
+            error!("systemd-run failed stderr: {}", stderr);
+            anyhow::bail!(
+                "systemd-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            );
+        }
+
+        info!("Deployment detached to systemd unit: {}", unit_name);
+        Ok(DeploymentResult::Started { unit_name })
+    }
+
+    async fn deploy_flake_from_cache(
+        &self,
+        target: &str,
+        cache_url: &str,
+    ) -> Result<DeploymentResult> {
+        info!("Deploying flake from cache (legacy method): {}", target);
+
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
@@ -294,6 +402,14 @@ impl AgentDeploymentManager {
     /// Local build (lock-aware, with backoff + clear)
     async fn deploy_local_build_lockaware(&self, target: &str) -> Result<DeploymentResult> {
         info!("Deploying with local build: {}", target);
+
+        // Store paths shouldn't fall back to local build
+        if target.starts_with("/nix/store/") {
+            anyhow::bail!(
+                "Cannot perform local build for store path: {}. Store path must be available in cache.",
+                target
+            );
+        }
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
