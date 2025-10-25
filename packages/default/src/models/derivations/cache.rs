@@ -101,6 +101,12 @@ impl Derivation {
             path.to_string()
         };
 
+        let roots_dir = std::path::Path::new("/var/lib/crystal-forge/gcroots");
+        tokio::fs::create_dir_all(roots_dir).await.ok();
+
+        let push_root = roots_dir.join(format!("push-{}.root", store_path.replace('/', '_')));
+        let push_root_str = push_root.to_string_lossy().to_string();
+
         // Get command and args from config
         let cache_cmd = match cache_config.cache_command(&store_path) {
             Some(cmd) => cmd,
@@ -286,6 +292,11 @@ impl Derivation {
         let stdout = String::from_utf8_lossy(&output.stdout);
         if !stdout.trim().is_empty() {
             info!("📤 {} output: {}", effective_command, stdout.trim());
+        }
+
+        if let Err(e) = tokio::fs::remove_file(&push_root).await {
+            // Not fatal; just log
+            debug!("could not remove GC root {}: {}", push_root.display(), e);
         }
         info!("✅ Successfully pushed {} to cache", store_path);
         Ok(())

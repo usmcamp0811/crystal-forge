@@ -27,18 +27,41 @@ impl Derivation {
             bail!("Expected .drv path, got: {}", drv_path);
         }
 
+        // before constructing the command:
+        let roots_dir = Path::new("/var/lib/crystal-forge/gcroots");
+        tokio::fs::create_dir_all(roots_dir).await.ok(); // best-effort
+
+        // one root per build; name it however you like:
+        let root_path = roots_dir.join(format!("{}.root", drv_path.replace('/', '_')));
+        let root_path_str = root_path.to_string_lossy().to_string();
+
         // Build the command
         let mut cmd = if build_config.should_use_systemd() {
             info!("  → Using systemd-run for {}", drv_path);
             let mut scoped = Command::new("systemd-run");
             scoped.args(["--scope", "--collect", "--quiet"]);
             apply_systemd_props_for_scope(build_config, &mut scoped);
-            scoped.args(["--", "nix-store", "--realise", drv_path]);
+            // IMPORTANT: add-root + indirect before the drv
+            scoped.args([
+                "--",
+                "nix-store",
+                "--realise",
+                "--add-root",
+                &root_path_str,
+                "--indirect",
+                drv_path,
+            ]);
             scoped
         } else {
             info!("  → Using direct nix-store for {}", drv_path);
             let mut direct = Command::new("nix-store");
-            direct.args(["--realise", drv_path]);
+            direct.args([
+                "--realise",
+                "--add-root",
+                &root_path_str,
+                "--indirect",
+                drv_path,
+            ]);
             direct
         };
 
