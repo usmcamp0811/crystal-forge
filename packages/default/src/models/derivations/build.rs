@@ -3,6 +3,7 @@ use super::utils::*;
 use crate::models::config::BuildConfig;
 use anyhow::{Result, anyhow, bail};
 use sqlx::PgPool;
+use std::path::Path;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -32,7 +33,7 @@ impl Derivation {
         tokio::fs::create_dir_all(roots_dir).await.ok(); // best-effort
 
         // one root per build; name it however you like:
-        let root_path = roots_dir.join(format!("{}.root", drv_path.replace('/', '_')));
+        let root_path = roots_dir.join(format!("{}.root", drv_path.replace("/", "_")));
         let root_path_str = root_path.to_string_lossy().to_string();
 
         // Build the command

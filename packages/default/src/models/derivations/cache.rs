@@ -3,8 +3,9 @@ use super::utils::*;
 use crate::models::config::{BuildConfig, CacheConfig};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
+use std::path::Path;
 use tokio::time::{Duration, sleep};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 impl Derivation {
     pub async fn push_to_cache_with_retry(
@@ -101,17 +102,32 @@ impl Derivation {
             path.to_string()
         };
 
+        // --- Ensure a GC root exists during push (prevents GC races) --------------------------
         let roots_dir = std::path::Path::new("/var/lib/crystal-forge/gcroots");
-        tokio::fs::create_dir_all(roots_dir).await.ok();
+        // Safe to drop if your service guarantees this exists:
+        let _ = tokio::fs::create_dir_all(roots_dir).await;
 
-        let push_root = roots_dir.join(format!("push-{}.root", store_path.replace('/', '_')));
+        let push_root = roots_dir.join(format!(
+            "push-{}.root",
+            store_path.trim_start_matches('/').replace("/", "_")
+        ));
         let push_root_str = push_root.to_string_lossy().to_string();
+
+        // Best-effort: create an indirect root on the output we’re about to push
+        // nix-store --add-root <link> --indirect <store_path>
+        {
+            let mut addroot = tokio::process::Command::new("nix-store");
+            addroot.args(["--add-root", &push_root_str, "--indirect", &store_path]);
+            let _ = addroot.status().await;
+        }
 
         // Get command and args from config
         let cache_cmd = match cache_config.cache_command(&store_path) {
             Some(cmd) => cmd,
             None => {
                 warn!("⚠️ No cache push configuration found, skipping cache push");
+                // Clean up the temporary root since we didn't push
+                let _ = tokio::fs::remove_file(&push_root).await;
                 return Ok(());
             }
         };
@@ -139,10 +155,7 @@ impl Derivation {
                 effective_args.push(store_path.clone());
             }
 
-            // Helpful: log environment presence and file-based config once
             debug_attic_environment();
-
-            // One-time login (per-process), persisted under /var/lib/crystal-forge
             ensure_attic_login(&remote, &endpoint, &token).await?;
 
             info!(
@@ -168,11 +181,7 @@ impl Derivation {
             // Preflight: repo visibility
             {
                 let mut info_cmd = tokio::process::Command::new("attic");
-                info_cmd.args([
-                    "cache",
-                    "info",
-                    &effective_args[1], /* e.g. local:test */
-                ]);
+                info_cmd.args(["cache", "info", &effective_args[1]]); // e.g. local:repo
                 info_cmd.env("HOME", "/var/lib/crystal-forge");
                 info_cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                 apply_cache_env_to_command(&mut info_cmd);
@@ -206,13 +215,10 @@ impl Derivation {
                 {
                     warn!("🔐 Attic push returned 401; clearing login cache and retrying once…");
                     clear_attic_logged(&remote);
-
-                    // Re-login with current env
                     let endpoint = std::env::var("ATTIC_SERVER_URL")?;
                     let token = std::env::var("ATTIC_TOKEN")?;
                     ensure_attic_login(&remote, &endpoint, &token).await?;
 
-                    // Retry push
                     let mut cmd2 = tokio::process::Command::new("attic");
                     cmd2.args(&effective_args);
                     cmd2.env("HOME", "/var/lib/crystal-forge");
@@ -228,6 +234,8 @@ impl Derivation {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 error!("❌ attic (direct) failed: {}", stderr.trim());
+                // Clean up the temporary root even on failure (we’ll re-root on next attempt)
+                let _ = tokio::fs::remove_file(&push_root).await;
                 anyhow::bail!("attic failed (direct): {}", stderr.trim());
             }
 
@@ -236,9 +244,13 @@ impl Derivation {
                 info!("📤 attic output: {}", stdout.trim());
             }
             info!("✅ Successfully pushed {} to cache (attic)", store_path);
+
+            // Remove GC root after successful push
+            let _ = tokio::fs::remove_file(&push_root).await;
+
             return Ok(());
         }
-        // --- End Attic special-case ----------------------------------------------------------
+        // --- End Attic special-case ------------------------------------------------------------
 
         // Non-Attic tools (e.g. `nix copy --to ...`)
         if build_config.should_use_systemd() {
@@ -262,6 +274,7 @@ impl Derivation {
                     effective_command,
                     stderr.trim()
                 );
+                let _ = tokio::fs::remove_file(&push_root).await;
                 anyhow::bail!("{} failed (scoped): {}", effective_command, stderr.trim());
             }
 
@@ -270,6 +283,8 @@ impl Derivation {
                 info!("📤 {} output: {}", effective_command, stdout.trim());
             }
             info!("✅ Successfully pushed {} to cache (scoped)", store_path);
+
+            let _ = tokio::fs::remove_file(&push_root).await;
             return Ok(());
         }
 
@@ -286,6 +301,7 @@ impl Derivation {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("❌ {} failed: {}", effective_command, stderr.trim());
+            let _ = tokio::fs::remove_file(&push_root).await;
             anyhow::bail!("{} failed: {}", effective_command, stderr.trim());
         }
 
@@ -293,12 +309,11 @@ impl Derivation {
         if !stdout.trim().is_empty() {
             info!("📤 {} output: {}", effective_command, stdout.trim());
         }
-
-        if let Err(e) = tokio::fs::remove_file(&push_root).await {
-            // Not fatal; just log
-            debug!("could not remove GC root {}: {}", push_root.display(), e);
-        }
         info!("✅ Successfully pushed {} to cache", store_path);
+
+        // Remove the GC root after successful push
+        let _ = tokio::fs::remove_file(&push_root).await;
+
         Ok(())
     }
 
