@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET \n            status_id = $1,                -- BuildInProgress (8)\n            started_at = NOW(),\n            attempt_count = COALESCE(attempt_count, 0) + 1\n        WHERE id = $2\n          AND status_id IN ($3, $4)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b06f5a3fb807802decf73baae8ec737dce79f93597d56f1b1e63ea26e3fa4270"
+}

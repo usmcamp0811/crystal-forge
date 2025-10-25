@@ -257,7 +257,7 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             store_path
         FROM derivations
         WHERE derivation_type = 'nixos'
-          AND status_id = $1        -- DryRunComplete (ready to build)
+          AND status_id IN ($1, $2)
           AND (attempt_count < 5 OR attempt_count IS NULL)
           AND NOT EXISTS (
               SELECT 1 FROM build_reservations 
@@ -269,6 +269,7 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
         LIMIT 1
         "#,
         EvaluationStatus::DryRunComplete.as_id(), // 5
+        EvaluationStatus::BuildPending.as_id(),   // 7
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -309,11 +310,12 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
             started_at = NOW(),
             attempt_count = COALESCE(attempt_count, 0) + 1
         WHERE id = $2
-          AND status_id = $3               -- still DryRunComplete
+          AND status_id IN ($3, $4)
         "#,
         EvaluationStatus::BuildInProgress.as_id(), // 8
         derivation.id,
         EvaluationStatus::DryRunComplete.as_id(), // 5
+        EvaluationStatus::BuildPending.as_id(),   // 7
     )
     .execute(&mut *tx)
     .await?;
