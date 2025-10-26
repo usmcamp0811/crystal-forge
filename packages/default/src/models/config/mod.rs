@@ -102,6 +102,9 @@ impl Default for CrystalForgeConfig {
 }
 
 impl CrystalForgeConfig {
+    pub fn get_server_config(&self) -> &ServerConfig {
+        &self.server
+    }
     /// Gets build config as reference
     pub fn get_build_config(&self) -> &BuildConfig {
         &self.build

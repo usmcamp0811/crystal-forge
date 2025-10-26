@@ -114,6 +114,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                     }
                 };
                 let build_config = cfg.get_build_config();
+                let server_config = cfg.get_server_config();
 
                 // Set up deployment policies - check CF agent for all systems
                 // Using non-strict mode to collect data without failing evaluations
@@ -142,6 +143,7 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                     &commit.git_commit_hash,
                     "all", // Evaluate all systems
                     &build_config,
+                    &server_config,
                     &policies, // Check deployment policies
                 )
                 .await

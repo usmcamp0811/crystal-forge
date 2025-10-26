@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 use crate::models::commits::Commit;
-use crate::models::config::BuildConfig;
+use crate::models::config::{BuildConfig, ServerConfig};
 use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
@@ -46,6 +46,7 @@ pub async fn evaluate_with_nix_eval_jobs(
     commit_hash: &str,
     target_system: &str,
     build_config: &BuildConfig,
+    server_config: &ServerConfig,
     policies: &[DeploymentPolicy],
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
@@ -78,11 +79,14 @@ pub async fn evaluate_with_nix_eval_jobs(
         &nix_expr,
         "--meta", // CRITICAL: Include meta so we get policies in output!
         "--workers",
-        &num_cpus::get().to_string(),
+        &server_config.eval_workers.to_string(),
         "--max-memory-size",
-        "4096",
+        &server_config.eval_max_memory_mb.to_string(),
     ]);
 
+    if server_config.eval_check_cache {
+        cmd.arg("--check-cache-status");
+    }
     build_config.apply_to_command(&mut cmd);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
