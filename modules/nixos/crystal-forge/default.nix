@@ -34,9 +34,9 @@
       server = {
         host = cfg.server.host;
         port = cfg.server.port;
-        evalWorkers = cfg.server.evalWorkers;
-        evalMaxMemoryMb = cfg.server.evalMaxMemoryMb;
-        evalCheckCache = cfg.server.evalCheckCache;
+        eval_workers = cfg.server.eval_workers;
+        eval_max_memory_mb = cfg.server.eval_max_memory_mb;
+        eval_check_cache = cfg.server.eval_check_cache;
       };
     }
     // lib.optionalAttrs cfg.client.enable {
@@ -987,7 +987,7 @@ in {
         description = "Server port";
       };
 
-      evalWorkers = lib.mkOption {
+      eval_workers = lib.mkOption {
         type = lib.types.int;
         default = 4;
         description = lib.mdDoc ''
@@ -999,7 +999,7 @@ in {
         '';
       };
 
-      evalMaxMemoryMb = lib.mkOption {
+      eval_max_memory_mb = lib.mkOption {
         type = lib.types.int;
         default = 4096;
         description = lib.mdDoc ''
@@ -1012,7 +1012,7 @@ in {
         '';
       };
 
-      evalCheckCache = lib.mkOption {
+      eval_check_cache = lib.mkOption {
         type = lib.types.bool;
         default = true;
         description = lib.mdDoc ''
