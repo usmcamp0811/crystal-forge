@@ -148,6 +148,7 @@
           parallel_uploads = cfg.cache.parallel_uploads;
           max_retries = cfg.cache.max_retries;
           retry_delay_seconds = cfg.cache.retry_delay_seconds;
+          force_repush = cfg.cache.force_repush;
         }
         // lib.optionalAttrs (cfg.cache.push_to != null) {
           push_to = cfg.cache.push_to;
