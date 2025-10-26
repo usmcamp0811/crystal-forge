@@ -53,7 +53,26 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
         FROM commits c
         LEFT JOIN derivations d ON c.id = d.commit_id
         WHERE d.commit_id IS NULL
-        AND c.attempt_count < 5
+        AND c.evaluation_status = 'pending'
+        AND COALESCE(c.evaluation_attempt_count, 0) < 5
+        AND (
+            c.evaluation_started_at IS NULL
+            OR (
+                -- Attempts 1-3: retry after 1 minute
+                COALESCE(c.evaluation_attempt_count, 0) < 3 
+                AND c.evaluation_started_at < NOW() - INTERVAL '1 minute'
+            )
+            OR (
+                -- Attempt 4: retry after 1 hour
+                c.evaluation_attempt_count = 3
+                AND c.evaluation_started_at < NOW() - INTERVAL '1 hour'
+            )
+            OR (
+                -- Attempt 5: retry after 2 hours
+                c.evaluation_attempt_count = 4
+                AND c.evaluation_started_at < NOW() - INTERVAL '2 hours'
+            )
+        )
         ORDER BY c.commit_timestamp DESC
         "#
     )
@@ -231,4 +250,3 @@ pub async fn mark_commit_evaluation_failed(
 
     Ok(())
 }
-

@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT c.id, c.flake_id, c.git_commit_hash, c.commit_timestamp, c.attempt_count\n        FROM commits c\n        LEFT JOIN derivations d ON c.id = d.commit_id\n        WHERE d.commit_id IS NULL\n        AND c.evaluation_status = 'pending'\n        AND COALESCE(c.evaluation_attempt_count, 0) < 5\n        AND (\n            c.evaluation_started_at IS NULL\n            OR (\n                -- Attempts 1-3: retry after 1 minute\n                COALESCE(c.evaluation_attempt_count, 0) < 3 \n                AND c.evaluation_started_at < NOW() - INTERVAL '1 minute'\n            )\n            OR (\n                -- Attempt 4: retry after 1 hour\n                c.evaluation_attempt_count = 3\n                AND c.evaluation_started_at < NOW() - INTERVAL '1 hour'\n            )\n            OR (\n                -- Attempt 5: retry after 2 hours\n                c.evaluation_attempt_count = 4\n                AND c.evaluation_started_at < NOW() - INTERVAL '2 hours'\n            )\n        )\n        ORDER BY c.commit_timestamp DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "flake_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "git_commit_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "commit_timestamp",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "attempt_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "b83420eec3797aad077e745788dca75486d15dab8c00ae598f9fa7ca3baeb535"
+}
