@@ -32,6 +32,8 @@ pub struct CacheConfig {
     pub poll_interval: Duration,
     #[serde(default = "CacheConfig::default_push_timeout_seconds")]
     pub push_timeout_seconds: u64,
+    #[serde(default)]
+    pub force_repush: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -85,24 +87,30 @@ impl CacheConfig {
 
     fn attic_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let cache_name = self.attic_cache_name.as_ref()?;
+
+        let mut args = vec!["push".to_string()];
+
+        if self.force_repush {
+            args.push("--force".to_string());
+        }
+
+        args.extend([cache_name.clone(), store_path.to_string()]);
+
         Some(CacheCommand {
             command: "attic".to_string(),
-            args: vec![
-                "push".to_string(),
-                cache_name.clone(),
-                store_path.to_string(),
-            ],
+            args,
         })
     }
 
     fn s3_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
-        let mut args = vec![
-            "copy".to_string(),
-            "--to".to_string(),
-            push_to.clone(),
-            store_path.to_string(),
-        ];
+        let mut args = vec!["copy".to_string(), "--to".to_string(), push_to.clone()];
+
+        if self.force_repush {
+            args.push("--refresh".to_string());
+        }
+
+        args.push(store_path.to_string());
 
         if let Some(key_path) = &self.signing_key {
             args.extend(["--sign-key".to_string(), key_path.clone()]);
@@ -116,12 +124,13 @@ impl CacheConfig {
 
     fn nix_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
-        let mut args = vec![
-            "copy".to_string(),
-            "--to".to_string(),
-            push_to.clone(),
-            store_path.to_string(),
-        ];
+        let mut args = vec!["copy".to_string(), "--to".to_string(), push_to.clone()];
+
+        if self.force_repush {
+            args.push("--refresh".to_string());
+        }
+
+        args.push(store_path.to_string());
 
         if let Some(key_path) = &self.signing_key {
             args.extend(["--sign-key".to_string(), key_path.clone()]);
@@ -168,6 +177,7 @@ impl Default for CacheConfig {
             retry_delay_seconds: 5,
             poll_interval: Self::default_poll_interval(),
             push_timeout_seconds: Self::default_push_timeout_seconds(),
+            force_repush: false,
         }
     }
 }
