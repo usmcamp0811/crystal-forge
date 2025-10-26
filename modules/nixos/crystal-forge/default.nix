@@ -846,6 +846,11 @@ in {
         default = 5;
         description = "Delay between cache push attempts in seconds";
       };
+      force_repush = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Force re-push to cache even if it thinks it's already there.";
+      };
     };
     deployment = {
       max_deployment_age_minutes = lib.mkOption {
