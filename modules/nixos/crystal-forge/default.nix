@@ -1485,6 +1485,16 @@ in {
         HOME = "/var/lib/crystal-forge-agent";
         XDG_CACHE_HOME = "/var/lib/crystal-forge-agent/.cache";
         NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-agent";
+
+        NIX_CONFIG = ''
+          experimental-features = nix-command flakes
+          ${lib.optionalString (cfg.deployment.cache_url != null) ''
+            substituters = ${cfg.deployment.cache_url}
+          ''}
+          ${lib.optionalString (cfg.deployment.cache_public_key != null) ''
+            trusted-public-keys = ${cfg.deployment.cache_public_key}
+          ''}
+        '';
       };
 
       serviceConfig = {
