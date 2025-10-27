@@ -1488,7 +1488,7 @@ in {
       ];
       environment = {
         RUST_LOG = cfg.log_level;
-        CRYSTAL_FORGE_CONFIG = "/var/lib/crystal-forge-agent";
+        CRYSTAL_FORGE_CONFIG = "/var/lib/crystal-forge-agent/config.toml";
         # CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
         # CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
         # CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
