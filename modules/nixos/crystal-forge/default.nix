@@ -1488,9 +1488,9 @@ in {
       ];
       environment = {
         RUST_LOG = cfg.log_level;
-        CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
-        CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
-        CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
+        # CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
+        # CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
+        # CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
         # make nix/git caches writable for the agent
         HOME = "/var/lib/crystal-forge-agent";
         XDG_CACHE_HOME = "/var/lib/crystal-forge-agent/.cache";
