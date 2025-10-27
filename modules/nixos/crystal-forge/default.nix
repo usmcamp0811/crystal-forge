@@ -182,13 +182,13 @@
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
   generatedConfigPath = "/var/lib/crystal-forge/config.toml";
 
-  serverConfigPath = "/var/lib/crystal-forge/config.toml";
-  agentConfigPath = "/var/lib/crystal-forge-agent/config.toml";
+  serverConfigPath = "/var/lib/crystal-forge";
+  agentConfigPath = "/var/lib/crystal-forge-agent";
 
   makeConfigScript = destPath:
     pkgs.writeShellScript "generate-crystal-forge-config-${lib.replaceStrings ["/" "."] ["-" "-"] destPath}" ''
       set -euo pipefail
-      generatedConfigPath="${destPath}"
+      generatedConfigPath="${destPath}/config.toml"
 
       mkdir -p "$(dirname "$generatedConfigPath")"
       cp "${rawConfigFile}" "$generatedConfigPath"
@@ -225,7 +225,7 @@
       ''}
 
       ${lib.optionalString (cfg.auth.ssh_key_path == null && (cfg.build.enable || cfg.server.enable)) ''
-        SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
+        SSH_KEY_PATH="${destPath}/.ssh/id_ed25519"
         if [ ! -f "$SSH_KEY_PATH" ]; then
           echo "Generating SSH key for Crystal Forge Git authentication..."
           ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
@@ -237,7 +237,7 @@
           cat "$SSH_KEY_PATH.pub"
         fi
 
-        ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "$generatedConfigPath"
+        ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "${destPath}/.ssh/id_ed25519"' "$generatedConfigPath"
       ''}
 
       chmod 600 "$generatedConfigPath"
