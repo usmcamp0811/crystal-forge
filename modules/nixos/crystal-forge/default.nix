@@ -182,59 +182,69 @@
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
   generatedConfigPath = "/var/lib/crystal-forge/config.toml";
 
-  configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
-    set -euo pipefail
-    mkdir -p "$(dirname "${generatedConfigPath}")"
-    cp "${rawConfigFile}" "${generatedConfigPath}"
+  serverConfigPath = "/var/lib/crystal-forge/config.toml";
+  agentConfigPath = "/var/lib/crystal-forge-agent/config.toml";
 
-    ${lib.optionalString (cfg.database.passwordFile != null) ''
-      if [ -f "${cfg.database.passwordFile}" ]; then
-        PASSWORD=$(cat "${cfg.database.passwordFile}")
-        ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|$PASSWORD|" "${generatedConfigPath}"
-      else
-        echo "ERROR: Password file not found: ${cfg.database.passwordFile}" >&2
-        exit 1
-      fi
-    ''}
+  makeConfigScript = destPath:
+    pkgs.writeShellScript "generate-crystal-forge-config-${lib.replaceStrings ["/" "."] ["-" "-"] destPath}" ''
+      set -euo pipefail
+      generatedConfigPath="${destPath}"
 
-    ${lib.optionalString (cfg.cache.cache_type == "Attic") ''
-      if [ -f "${cfg.env-file}" ]; then
-        echo "Loading Attic token from ${cfg.env-file}..."
-        source ${cfg.env-file}
-        if [ -n "$ATTIC_TOKEN" ]; then
-          echo "Injecting dynamic ATTIC_TOKEN into config..."
-          if grep -q "attic_token" "${generatedConfigPath}"; then
-            ${pkgs.gnused}/bin/sed -i "s|attic_token = .*|attic_token = \"$ATTIC_TOKEN\"|" "${generatedConfigPath}"
-          else
-            ${pkgs.gnused}/bin/sed -i '/^\[cache\]/a attic_token = "'"$ATTIC_TOKEN"'"' "${generatedConfigPath}"
-          fi
-          echo "✅ Attic token injected successfully"
+      mkdir -p "$(dirname "$generatedConfigPath")"
+      cp "${rawConfigFile}" "$generatedConfigPath"
+
+      ${lib.optionalString (cfg.database.passwordFile != null) ''
+        if [ -f "${cfg.database.passwordFile}" ]; then
+          PASSWORD=$(cat "${cfg.database.passwordFile}")
+          ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|$PASSWORD|" "$generatedConfigPath"
         else
-          echo "⚠️  ATTIC_TOKEN not found in ${cfg.env-file}"
+          echo "ERROR: Password file not found: ${cfg.database.passwordFile}" >&2
+          exit 1
         fi
-      else
-        echo "⚠️  ${cfg.env-file} not found - using static attic_token from config"
-      fi
-    ''}
+      ''}
 
-    ${lib.optionalString (cfg.auth.ssh_key_path == null && (cfg.build.enable || cfg.server.enable)) ''
-      SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
-      if [ ! -f "$SSH_KEY_PATH" ]; then
-        echo "Generating SSH key for Crystal Forge Git authentication..."
-        ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
-        chown crystal-forge:crystal-forge "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub"
-        chmod 600 "$SSH_KEY_PATH"
-        chmod 644 "$SSH_KEY_PATH.pub"
-        echo "SSH key generated at $SSH_KEY_PATH"
-        echo "Public key for Git repository setup:"
-        cat "$SSH_KEY_PATH.pub"
-      fi
+      ${lib.optionalString (cfg.cache.cache_type == "Attic") ''
+        if [ -f "${cfg.env-file}" ]; then
+          echo "Loading Attic token from ${cfg.env-file}..."
+          # shellcheck disable=SC1090
+          source ${cfg.env-file}
+          if [ -n "$ATTIC_TOKEN" ]; then
+            echo "Injecting dynamic ATTIC_TOKEN into config..."
+            if grep -q "attic_token" "$generatedConfigPath"; then
+              ${pkgs.gnused}/bin/sed -i 's|attic_token = .*|attic_token = "'"$ATTIC_TOKEN"'"|' "$generatedConfigPath"
+            else
+              ${pkgs.gnused}/bin/sed -i '/^\[cache\]/a attic_token = "'"$ATTIC_TOKEN"'"' "$generatedConfigPath"
+            fi
+            echo "✅ Attic token injected successfully"
+          else
+            echo "⚠️  ATTIC_TOKEN not found in ${cfg.env-file}"
+          fi
+        else
+          echo "⚠️  ${cfg.env-file} not found - using static attic_token from config"
+        fi
+      ''}
 
-      ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "${generatedConfigPath}"
-    ''}
+      ${lib.optionalString (cfg.auth.ssh_key_path == null && (cfg.build.enable || cfg.server.enable)) ''
+        SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
+        if [ ! -f "$SSH_KEY_PATH" ]; then
+          echo "Generating SSH key for Crystal Forge Git authentication..."
+          ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
+          chown crystal-forge:crystal-forge "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub"
+          chmod 600 "$SSH_KEY_PATH"
+          chmod 644 "$SSH_KEY_PATH.pub"
+          echo "SSH key generated at $SSH_KEY_PATH"
+          echo "Public key for Git repository setup:"
+          cat "$SSH_KEY_PATH.pub"
+        fi
 
-    chmod 600 "${generatedConfigPath}"
-  '';
+        ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "$generatedConfigPath"
+      ''}
+
+      chmod 600 "$generatedConfigPath"
+    '';
+
+  configScriptServer = makeConfigScript serverConfigPath;
+  configScriptAgent = makeConfigScript agentConfigPath;
 
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
@@ -1266,7 +1276,7 @@ in {
 
       preStart = ''
         mkdir -p /run/crystal-forge
-        ${configScript}
+        ${configScriptServer}
         mkdir -p /var/lib/crystal-forge/.config/attic
 
         # Ensure proper ownership - do this AFTER creating all directories
@@ -1400,7 +1410,7 @@ in {
 
       preStart = ''
         mkdir -p /run/crystal-forge
-        ${configScript}
+        ${configScriptServer}
         mkdir -p /var/lib/crystal-forge/.config/attic
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
@@ -1496,6 +1506,10 @@ in {
           ''}
         '';
       };
+      preStart = ''
+        mkdir -p /var/lib/crystal-forge-agent
+        ${configScriptAgent}
+      '';
 
       serviceConfig = {
         Type = "exec";

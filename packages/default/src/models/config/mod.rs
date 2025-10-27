@@ -115,6 +115,11 @@ impl CrystalForgeConfig {
         &self.vulnix
     }
 
+    /// Get deployment config as reference
+    pub fn get_deployment_config(&self) -> &DeploymentConfig {
+        &self.deployment
+    }
+
     /// Gets cache config as reference
     pub fn get_cache_config(&self) -> &CacheConfig {
         &self.cache
