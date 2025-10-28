@@ -120,13 +120,7 @@ impl CacheConfig {
 
     fn s3_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
-        // nix copy --recursive --to <URL> [--refresh] [--compression ...] <store_path>
-        let mut args = vec![
-            "copy".to_string(),
-            "--recursive".to_string(),
-            "--to".to_string(),
-            push_to.clone(),
-        ];
+        let mut args = vec!["copy".to_string(), "--to".to_string(), push_to.clone()];
 
         if self.force_repush {
             args.push("--refresh".to_string());
@@ -135,12 +129,9 @@ impl CacheConfig {
             args.extend(["--compression".to_string(), compression.clone()]);
         }
 
-        // (Optional) keep your parallel flag if you rely on it; it's benign if unsupported.
         args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
-
         args.push(store_path.to_string());
 
-        // IMPORTANT: do NOT add any signing flags here. Pre-sign via `sign_command()` or nix.conf.
         Some(CacheCommand {
             command: "nix".to_string(),
             args,
@@ -149,12 +140,7 @@ impl CacheConfig {
 
     fn nix_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
-        let mut args = vec![
-            "copy".to_string(),
-            "--recursive".to_string(),
-            "--to".to_string(),
-            push_to.clone(),
-        ];
+        let mut args = vec!["copy".to_string(), "--to".to_string(), push_to.clone()];
 
         if self.force_repush {
             args.push("--refresh".to_string());
@@ -165,7 +151,6 @@ impl CacheConfig {
         args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
         args.push(store_path.to_string());
 
-        // No signing flags here either.
         Some(CacheCommand {
             command: "nix".to_string(),
             args,
