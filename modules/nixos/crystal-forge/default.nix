@@ -180,7 +180,6 @@
   baseConfig = stripNulls baseConfigRaw;
 
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
-  generatedConfigPath = "/var/lib/crystal-forge/config.toml";
 
   serverConfigPath = "/var/lib/crystal-forge/config.toml";
   agentConfigPath = "/var/lib/crystal-forge-agent/config.toml";
@@ -247,13 +246,13 @@
   configScriptAgent = makeConfigScript agentConfigPath;
 
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
-    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
     exec ${pkgs.crystal-forge.server}/bin/server "$@"
   '';
 
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
     set -euo pipefail
-    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
     export TMPDIR="/var/lib/crystal-forge/tmp"
     export HOME="/var/lib/crystal-forge"
 
@@ -270,7 +269,7 @@
   '';
 
   agentScript = pkgs.writeShellScript "crystal-forge-agent" ''
-    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    export CRYSTAL_FORGE_CONFIG="${agentConfigPath}"
     exec ${pkgs.crystal-forge.agent}/bin/agent "$@"
   '';
 in {
@@ -285,7 +284,7 @@ in {
 
     configPath = lib.mkOption {
       type = lib.types.path;
-      default = generatedConfigPath;
+      default = serverConfigPath;
       readOnly = true;
       description = "Path to the generated config.toml file";
     };
