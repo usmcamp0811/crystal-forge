@@ -250,9 +250,12 @@ impl AgentDeploymentManager {
                 }
                 None => {
                     let elapsed = start.elapsed().as_secs();
+                    let hours = elapsed / 3600;
+                    let minutes = (elapsed % 3600) / 60;
+                    let seconds = elapsed % 60;
                     info!(
-                        "Still copying {} from cache... ({}s elapsed)",
-                        store_path, elapsed
+                        "Still copying {} from cache... ({}h {}m {}s elapsed)",
+                        store_path, hours, minutes, seconds
                     );
                     std::thread::sleep(std::time::Duration::from_secs(30));
                 }
