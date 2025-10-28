@@ -1491,7 +1491,6 @@ in {
         # CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
         # CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
 
-        CRYSTAL_FORGE_CONFIG = "/var/lib/crystal-forge-agent/config.toml";
         # make nix/git caches writable for the agent
         HOME = "/var/lib/crystal-forge-agent";
         XDG_CACHE_HOME = "/var/lib/crystal-forge-agent/.cache";
