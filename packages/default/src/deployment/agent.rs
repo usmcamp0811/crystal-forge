@@ -212,7 +212,6 @@ impl AgentDeploymentManager {
         // Build nix copy command
         let mut copy_args = vec!["copy", "--from", cache_url, store_path];
 
-        let public_key_str;
         // Build nix copy command
         let mut copy_args = vec!["copy", "--from", cache_url, store_path];
 
@@ -226,7 +225,6 @@ impl AgentDeploymentManager {
                 "false"
             },
         ]);
-        public_key_str = public_key.clone();
         debug!("Using cache with signature verification");
 
         if let Some(ref public_key) = self.config.cache_public_key {
