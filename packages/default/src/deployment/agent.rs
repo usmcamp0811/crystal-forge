@@ -213,23 +213,29 @@ impl AgentDeploymentManager {
         let mut copy_args = vec!["copy", "--from", cache_url, store_path];
 
         let public_key_str;
+        // Build nix copy command
+        let mut copy_args = vec!["copy", "--from", cache_url, store_path];
+
+        // Always set require-sigs according to config
+        copy_args.extend_from_slice(&[
+            "--option",
+            "require-sigs",
+            if self.config.require_sigs {
+                "true"
+            } else {
+                "false"
+            },
+        ]);
+        public_key_str = public_key.clone();
+        debug!("Using cache with signature verification");
+
         if let Some(ref public_key) = self.config.cache_public_key {
-            public_key_str = public_key.clone();
-            copy_args.extend_from_slice(&[
-                "--option",
-                "trusted-public-keys",
-                &public_key_str,
-                "--option",
-                "http-connections",
-                "50",
-                "--option",
-                "require-sigs",
-                "true",
-            ]);
-            debug!("Using cache with signature verification");
-        } else {
-            warn!("No cache public key configured, skipping signature verification");
-            copy_args.extend_from_slice(&["--option", "require-sigs", "false"]);
+            copy_args.extend_from_slice(&["--option", "trusted-public-keys", public_key]);
+            debug!("Passing cache public key to nix copy");
+        } else if self.config.require_sigs {
+            warn!(
+                "require_sigs=true but no cache_public_key provided; relying on system nix.conf trusted-public-keys."
+            );
         }
 
         // Step 1: Copy from cache

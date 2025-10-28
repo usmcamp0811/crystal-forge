@@ -54,6 +54,7 @@
           fallback_to_local_build = cfg.deployment.fallback_to_local_build;
           deployment_timeout_minutes = cfg.deployment.deployment_timeout_minutes;
           deployment_poll_interval = cfg.deployment.deployment_poll_interval;
+          require_sigs = cfg.deployment.require_sigs;
         }
         // lib.optionalAttrs (cfg.deployment.cache_url != null) {
           cache_url = cfg.deployment.cache_url;
@@ -897,6 +898,11 @@ in {
         type = lib.types.str;
         default = "15m";
         description = "Interval between deployment polling checks";
+      };
+      require_sigs = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Check sigs before deployment";
       };
     };
     systems = lib.mkOption {
