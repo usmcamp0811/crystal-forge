@@ -1,3 +1,4 @@
+// src/cache/config.rs
 use crate::models::config::duration_serde;
 use serde::Deserialize;
 use std::time::Duration;
@@ -71,7 +72,24 @@ impl CacheConfig {
         600 // 10 minutes
     }
 
-    /// Returns the command and arguments for cache operations
+    /// Optional signing step. If `signing_key` is set, run this BEFORE `cache_command`.
+    /// Equivalent to: nix store sign --recursive --key-file <key> <store_path>
+    pub fn sign_command(&self, store_path: &str) -> Option<CacheCommand> {
+        let key_path = self.signing_key.as_ref()?;
+        Some(CacheCommand {
+            command: "nix".to_string(),
+            args: vec![
+                "store".to_string(),
+                "sign".to_string(),
+                "--recursive".to_string(),
+                "--key-file".to_string(),
+                key_path.clone(),
+                store_path.to_string(),
+            ],
+        })
+    }
+
+    /// Returns the command and arguments for cache operations (the COPY step).
     pub fn cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         match self.cache_type {
             CacheType::S3 => self.s3_cache_command(store_path),
@@ -80,7 +98,7 @@ impl CacheConfig {
         }
     }
 
-    /// Legacy method for backward compatibility - now just returns args
+    /// Legacy: still returns args only.
     pub fn copy_command_args(&self, store_path: &str) -> Option<Vec<String>> {
         self.cache_command(store_path).map(|cmd| cmd.args)
     }
@@ -89,11 +107,9 @@ impl CacheConfig {
         let cache_name = self.attic_cache_name.as_ref()?;
 
         let mut args = vec!["push".to_string()];
-
         if self.force_repush {
             args.push("--force".to_string());
         }
-
         args.extend([cache_name.clone(), store_path.to_string()]);
 
         Some(CacheCommand {
@@ -104,18 +120,27 @@ impl CacheConfig {
 
     fn s3_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
-        let mut args = vec!["copy".to_string(), "--to".to_string(), push_to.clone()];
+        // nix copy --recursive --to <URL> [--refresh] [--compression ...] <store_path>
+        let mut args = vec![
+            "copy".to_string(),
+            "--recursive".to_string(),
+            "--to".to_string(),
+            push_to.clone(),
+        ];
 
         if self.force_repush {
             args.push("--refresh".to_string());
         }
+        if let Some(compression) = &self.compression {
+            args.extend(["--compression".to_string(), compression.clone()]);
+        }
+
+        // (Optional) keep your parallel flag if you rely on it; it's benign if unsupported.
+        args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
 
         args.push(store_path.to_string());
 
-        if let Some(key_path) = &self.signing_key {
-            args.extend(["--sign-key".to_string(), key_path.clone()]);
-        }
-
+        // IMPORTANT: do NOT add any signing flags here. Pre-sign via `sign_command()` or nix.conf.
         Some(CacheCommand {
             command: "nix".to_string(),
             args,
@@ -124,24 +149,23 @@ impl CacheConfig {
 
     fn nix_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
-        let mut args = vec!["copy".to_string(), "--to".to_string(), push_to.clone()];
+        let mut args = vec![
+            "copy".to_string(),
+            "--recursive".to_string(),
+            "--to".to_string(),
+            push_to.clone(),
+        ];
 
         if self.force_repush {
             args.push("--refresh".to_string());
         }
-
-        args.push(store_path.to_string());
-
-        if let Some(key_path) = &self.signing_key {
-            args.extend(["--sign-key".to_string(), key_path.clone()]);
-        }
-
         if let Some(compression) = &self.compression {
             args.extend(["--compression".to_string(), compression.clone()]);
         }
-
         args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
+        args.push(store_path.to_string());
 
+        // No signing flags here either.
         Some(CacheCommand {
             command: "nix".to_string(),
             args,
