@@ -234,22 +234,29 @@ impl AgentDeploymentManager {
 
         // Step 1: Copy from cache
         info!("Copying {} from cache...", store_path);
-        let copy_output = Command::new("nix")
+        let mut child = Command::new("nix")
             .args(&copy_args)
-            .output()
-            .context("Failed to execute nix copy")?;
+            .spawn()
+            .context("Failed to spawn nix copy")?;
 
-        if !copy_output.status.success() {
-            let stdout = String::from_utf8_lossy(&copy_output.stdout);
-            let stderr = String::from_utf8_lossy(&copy_output.stderr);
-            error!("nix copy failed stdout: {}", stdout);
-            error!("nix copy failed stderr: {}", stderr);
-            anyhow::bail!(
-                "nix copy failed with exit code {:?}\nstdout: {}\nstderr: {}",
-                copy_output.status.code(),
-                stdout.trim(),
-                stderr.trim()
-            );
+        let start = std::time::Instant::now();
+        loop {
+            match child.try_wait()? {
+                Some(status) => {
+                    if !status.success() {
+                        anyhow::bail!("nix copy failed with exit code {:?}", status.code(),);
+                    }
+                    break;
+                }
+                None => {
+                    let elapsed = start.elapsed().as_secs();
+                    info!(
+                        "Still copying {} from cache... ({}s elapsed)",
+                        store_path, elapsed
+                    );
+                    std::thread::sleep(std::time::Duration::from_secs(30));
+                }
+            }
         }
 
         info!("Successfully copied {} from cache", store_path);
