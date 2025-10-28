@@ -440,8 +440,9 @@ pub async fn run_cache_push_loop(pool: PgPool) {
             // No work to do - wait the full interval
             cache_config.poll_interval
         } else {
-            // Successfully processed jobs - minimal delay, keep pushing!
-            std::time::Duration::from_millis(100)
+            // Successfully processed jobs - short delay before checking for more work
+            // Changed from 100ms to 2s to avoid excessive database queries
+            std::time::Duration::from_secs(2)
         };
 
         debug!(

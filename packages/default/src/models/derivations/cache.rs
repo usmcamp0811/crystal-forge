@@ -182,6 +182,7 @@ impl Derivation {
             {
                 let mut info_cmd = tokio::process::Command::new("attic");
                 info_cmd.args(["cache", "info", &effective_args[1]]); // e.g. local:repo
+                info_cmd.kill_on_drop(true);
                 info_cmd.env("HOME", "/var/lib/crystal-forge");
                 info_cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                 apply_cache_env_to_command(&mut info_cmd);
@@ -261,12 +262,17 @@ impl Derivation {
             scoped
                 .arg("--")
                 .arg(&effective_command)
-                .args(&effective_args);
+                .args(&effective_args)
+                .kill_on_drop(true);
 
-            let output = scoped
-                .output()
+            let mut child = scoped
+                .spawn()
+                .context("Failed to spawn scoped cache command")?;
+            let output = child
+                .wait_with_output()
                 .await
-                .context("Failed to execute scoped cache command")?;
+                .context("Failed to wait for scoped cache command")?;
+
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 error!(
