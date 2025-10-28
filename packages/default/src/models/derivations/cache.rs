@@ -132,7 +132,6 @@ impl Derivation {
                     warn!("⚠️ Failed to spawn nix-store for GC root: {}", e);
                 }
             }
-            let _ = addroot.status().await;
         }
 
         // Get command and args from config
@@ -299,6 +298,12 @@ impl Derivation {
                 .arg(&effective_command)
                 .args(&effective_args)
                 .kill_on_drop(true);
+
+            info!(
+                "🔧 Scoped command: systemd-run --scope --collect --quiet -- {} {}",
+                effective_command,
+                effective_args.join(" ")
+            );
 
             let mut child = scoped
                 .spawn()
