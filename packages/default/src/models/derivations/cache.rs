@@ -202,9 +202,14 @@ impl Derivation {
             cmd.args(&effective_args);
             cmd.env("HOME", "/var/lib/crystal-forge");
             cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+            cmd.kill_on_drop(true);
             apply_cache_env_to_command(&mut cmd);
 
-            let mut output = cmd.output().await.context("Failed to run 'attic push'")?;
+            let mut child = cmd.spawn().context("Failed to spawn 'attic push'")?;
+            let mut output = child
+                .wait_with_output()
+                .await
+                .context("Failed to wait for 'attic push'")?;
 
             // ---- If unauthorized, redo login once and retry
             if !output.status.success() {
@@ -224,11 +229,15 @@ impl Derivation {
                     cmd2.args(&effective_args);
                     cmd2.env("HOME", "/var/lib/crystal-forge");
                     cmd2.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+                    cmd2.kill_on_drop(true);
                     apply_cache_env_to_command(&mut cmd2);
-                    output = cmd2
-                        .output()
+                    let mut child2 = cmd2
+                        .spawn()
+                        .context("Failed to spawn 'attic push' (retry)")?;
+                    output = child2
+                        .wait_with_output()
                         .await
-                        .context("Failed to run 'attic push' (retry)")?;
+                        .context("Failed to wait for 'attic push' (retry)")?;
                 }
             }
 
@@ -296,14 +305,15 @@ impl Derivation {
 
         // Direct execution for non-Attic
         let mut cmd = Command::new(&effective_command);
-        cmd.args(&effective_args);
+        cmd.args(&effective_args).kill_on_drop(true);
         build_config.apply_to_command(&mut cmd);
         apply_cache_env_to_command(&mut cmd);
 
-        let output = cmd
-            .output()
+        let mut child = cmd.spawn().context("Failed to spawn cache command")?;
+        let output = child
+            .wait_with_output()
             .await
-            .context("Failed to execute cache command")?;
+            .context("Failed to wait for cache command")?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("❌ {} failed: {}", effective_command, stderr.trim());
@@ -364,11 +374,15 @@ async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow
     // Ensure credentials are persisted under the crystal-forge account:
     cmd.env("HOME", "/var/lib/crystal-forge");
     cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
-
+    cmd.kill_on_drop(true);
     // If you also want AWS/S3 env available for any follow-up calls attic might make:
     apply_cache_env_to_command(&mut cmd);
 
-    let out = cmd.output().await.context("failed to run 'attic login'")?;
+    let mut child = cmd.spawn().context("Failed to spawn 'attic login'")?;
+    let out = child
+        .wait_with_output()
+        .await
+        .context("Failed to wait for 'attic login'")?;
     if !out.status.success() {
         let se = String::from_utf8_lossy(&out.stderr);
         // Treat "already exists/already configured" as success
