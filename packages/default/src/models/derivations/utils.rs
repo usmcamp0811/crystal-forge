@@ -145,6 +145,13 @@ pub fn apply_systemd_props_for_scope(build: &BuildConfig, cmd: &mut tokio::proce
 
 // Fixed apply_cache_env function - only use --setenv for systemd scopes
 pub fn apply_cache_env(scoped: &mut Command) {
+    info!(
+        "🌍 Environment vars passed to scoped command: AWS_ACCESS_KEY_ID={}, AWS_SECRET_ACCESS_KEY={}",
+        std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "NOT SET".to_string()),
+        std::env::var("AWS_SECRET_ACCESS_KEY")
+            .map(|_| "***SET***")
+            .unwrap_or_else(|_| "NOT SET".to_string())
+    );
     for &key in CACHE_ENV_ALLOWLIST {
         if let Ok(val) = std::env::var(key) {
             // For systemd scopes, only use --setenv, not .env()

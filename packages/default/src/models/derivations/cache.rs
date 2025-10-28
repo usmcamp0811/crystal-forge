@@ -118,6 +118,20 @@ impl Derivation {
         {
             let mut addroot = tokio::process::Command::new("nix-store");
             addroot.args(["--add-root", &push_root_str, "--indirect", &store_path]);
+            match addroot.output().await {
+                Ok(out) if out.status.success() => {
+                    debug!("✅ Created GC root: {}", push_root_str);
+                }
+                Ok(out) => {
+                    warn!(
+                        "⚠️ Failed to create GC root (non-critical): {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                }
+                Err(e) => {
+                    warn!("⚠️ Failed to spawn nix-store for GC root: {}", e);
+                }
+            }
             let _ = addroot.status().await;
         }
 
@@ -135,6 +149,18 @@ impl Derivation {
         let effective_command = cache_cmd.command.clone();
         let mut effective_args = cache_cmd.args.clone();
 
+        if effective_command.is_empty() {
+            anyhow::bail!("Cache command is empty");
+        }
+        if effective_args.is_empty() {
+            anyhow::bail!("Cache args are empty");
+        }
+
+        info!(
+            "📋 Cache command: {} with {} args",
+            effective_command,
+            effective_args.len()
+        );
         // --- Special handling for Attic -------------------------------------------------------
         if effective_command == "attic"
             && effective_args.first().map(|s| s.as_str()) == Some("push")
