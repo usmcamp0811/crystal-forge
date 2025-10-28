@@ -182,7 +182,13 @@ pub async fn mark_cache_push_in_progress(pool: &PgPool, job_id: i32) -> Result<(
     sqlx::query!(
         r#"
         UPDATE cache_push_jobs 
-        SET status = 'in_progress', started_at = NOW(), attempts = attempts + 1
+        SET 
+            status = 'in_progress', 
+            started_at = NOW(), 
+            attempts = attempts + 1,
+            completed_at = NULL,
+            error_message = NULL,
+            retry_after = NULL
         WHERE id = $1
         "#,
         job_id
@@ -239,27 +245,67 @@ pub async fn mark_cache_push_completed(
     Ok(())
 }
 
-/// Mark cache push job as failed
+/// Mark cache push job as failed with exponential backoff
 pub async fn mark_cache_push_failed(pool: &PgPool, job_id: i32, error_message: &str) -> Result<()> {
-    sqlx::query!(
-        r#"
-        UPDATE cache_push_jobs 
-        SET 
-            status = 'failed',
-            completed_at = NOW(),
-            error_message = $2
-        WHERE id = $1
-        "#,
-        job_id,
-        error_message
-    )
-    .execute(pool)
-    .await?;
+    // Get current attempt count to calculate retry delay
+    let attempts =
+        sqlx::query_scalar!("SELECT attempts FROM cache_push_jobs WHERE id = $1", job_id)
+            .fetch_one(pool)
+            .await?;
 
-    debug!(
-        "Marked cache push job {} as failed: {}",
-        job_id, error_message
-    );
+    // Exponential backoff: 2min, 4min, 8min, 16min, 32min
+    // After 5 attempts, mark as permanently failed
+    let max_attempts = 5;
+
+    if attempts < max_attempts {
+        // Calculate backoff: 2^attempts minutes
+        let backoff_minutes = 2_i32.pow(attempts as u32);
+
+        sqlx::query!(
+            r#"
+            UPDATE cache_push_jobs 
+            SET 
+                status = 'failed',
+                completed_at = NOW(),
+                error_message = $2,
+                retry_after = NOW() + ($3 || ' minutes')::INTERVAL
+            WHERE id = $1
+            "#,
+            job_id,
+            error_message,
+            backoff_minutes.to_string()
+        )
+        .execute(pool)
+        .await?;
+
+        debug!(
+            "Marked cache push job {} as failed (attempt {}/{}), will retry after {} minutes: {}",
+            job_id, attempts, max_attempts, backoff_minutes, error_message
+        );
+    } else {
+        // Permanent failure - don't set retry_after
+        sqlx::query!(
+            r#"
+            UPDATE cache_push_jobs 
+            SET 
+                status = 'permanently_failed',
+                completed_at = NOW(),
+                error_message = $2,
+                retry_after = NULL
+            WHERE id = $1
+            "#,
+            job_id,
+            error_message
+        )
+        .execute(pool)
+        .await?;
+
+        warn!(
+            "Marked cache push job {} as permanently failed after {} attempts: {}",
+            job_id, attempts, error_message
+        );
+    }
+
     Ok(())
 }
 
@@ -280,7 +326,7 @@ pub async fn mark_derivation_cache_pushed(pool: &PgPool, derivation_id: i32) -> 
     Ok(())
 }
 
-/// Get pending cache push jobs
+/// Get pending cache push jobs, including failed jobs ready for retry
 pub async fn get_pending_cache_push_jobs(
     pool: &PgPool,
     limit: Option<i32>,
@@ -293,8 +339,16 @@ pub async fn get_pending_cache_push_jobs(
             completed_at, attempts, error_message, push_size_bytes, 
             push_duration_ms, cache_destination
         FROM cache_push_jobs
-        WHERE status = 'pending'
-        ORDER BY scheduled_at ASC
+        WHERE 
+            (status = 'pending')
+            OR 
+            (status = 'failed' AND retry_after IS NOT NULL AND retry_after <= NOW())
+        ORDER BY 
+            CASE 
+                WHEN status = 'pending' THEN 0
+                WHEN status = 'failed' THEN 1
+            END,
+            scheduled_at ASC
         LIMIT $1
         "#,
         limit.unwrap_or(10) as i64
@@ -302,21 +356,29 @@ pub async fn get_pending_cache_push_jobs(
     .fetch_all(pool)
     .await?;
 
-    debug!("Found {} pending cache push jobs", jobs.len());
+    debug!(
+        "Found {} cache push jobs ready to process (pending + retryable)",
+        jobs.len()
+    );
     Ok(jobs)
 }
 
 pub async fn cleanup_stale_cache_push_jobs(pool: &PgPool, timeout_minutes: i32) -> Result<()> {
+    // Only clean up jobs that are truly stuck in 'in_progress' state
+    // Don't touch 'failed' jobs that are waiting for retry
     let result = sqlx::query(
         r#"
         UPDATE cache_push_jobs 
         SET 
             status = 'failed',
             error_message = 'Job timeout - stuck in progress',
-            completed_at = NOW()
+            completed_at = NOW(),
+            retry_after = CASE 
+                WHEN attempts < 5 THEN NOW() + (POW(2, attempts) || ' minutes')::INTERVAL
+                ELSE NULL
+            END
         WHERE status = 'in_progress'
             AND started_at < NOW() - ($1 || ' minutes')::INTERVAL
-            AND attempts < 5
         "#,
     )
     .bind(timeout_minutes)
@@ -325,7 +387,7 @@ pub async fn cleanup_stale_cache_push_jobs(pool: &PgPool, timeout_minutes: i32) 
 
     if result.rows_affected() > 0 {
         warn!(
-            "🧹 Cleaned up {} stale cache push jobs",
+            "🧹 Cleaned up {} stale cache push jobs stuck in progress",
             result.rows_affected()
         );
     }
