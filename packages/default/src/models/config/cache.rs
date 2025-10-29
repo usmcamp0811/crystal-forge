@@ -128,7 +128,7 @@ impl CacheConfig {
             args.extend(["--compression".to_string(), compression.clone()]);
         }
 
-        args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
+        // args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
         args.push(store_path.to_string());
 
         Some(CacheCommand {
@@ -147,7 +147,7 @@ impl CacheConfig {
         if let Some(compression) = &self.compression {
             args.extend(["--compression".to_string(), compression.clone()]);
         }
-        args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
+        // args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
         args.push(store_path.to_string());
 
         Some(CacheCommand {
