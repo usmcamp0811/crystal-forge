@@ -81,7 +81,6 @@ impl CacheConfig {
             args: vec![
                 "store".to_string(),
                 "sign".to_string(),
-                "--recursive".to_string(),
                 "--key-file".to_string(),
                 key_path.clone(),
                 store_path.to_string(),
