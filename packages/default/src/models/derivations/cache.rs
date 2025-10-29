@@ -116,8 +116,11 @@ impl Derivation {
         // Best-effort: create an indirect root on the output we’re about to push
         // nix-store --add-root <link> --indirect <store_path>
         {
+            info!("🔧 Creating GC root for: {}", store_path);
+
             let mut addroot = tokio::process::Command::new("nix-store");
             addroot.args(["--add-root", &push_root_str, "--indirect", &store_path]);
+
             match addroot.output().await {
                 Ok(out) if out.status.success() => {
                     debug!("✅ Created GC root: {}", push_root_str);
@@ -126,6 +129,11 @@ impl Derivation {
                     warn!(
                         "⚠️ Failed to create GC root (non-critical): {}",
                         String::from_utf8_lossy(&out.stderr).trim()
+                    );
+                    // Log the command that failed
+                    warn!(
+                        "   Command was: nix-store --add-root {} --indirect {}",
+                        push_root_str, store_path
                     );
                 }
                 Err(e) => {
@@ -290,7 +298,7 @@ impl Derivation {
         // Non-Attic tools (e.g. `nix copy --to ...`)
         if build_config.should_use_systemd() {
             let mut scoped = Command::new("systemd-run");
-            scoped.args(["--scope", "--collect", "--quiet"]);
+            scoped.args(["--scope", "--collect"]);
             apply_systemd_props_for_scope(build_config, &mut scoped);
             apply_cache_env(&mut scoped);
             scoped
@@ -300,7 +308,7 @@ impl Derivation {
                 .kill_on_drop(true);
 
             info!(
-                "🔧 Scoped command: systemd-run --scope --collect --quiet -- {} {}",
+                "🔧 Scoped command: systemd-run --scope --collect -- {} {}",
                 effective_command,
                 effective_args.join(" ")
             );
