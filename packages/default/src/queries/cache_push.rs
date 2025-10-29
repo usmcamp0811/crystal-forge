@@ -1,3 +1,4 @@
+use crate::builder::remove_gc_root;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::{FromRow, PgPool};
@@ -391,22 +392,6 @@ pub async fn cleanup_stale_cache_push_jobs(pool: &PgPool, timeout_minutes: i32) 
             "🧹 Cleaned up {} stale cache push jobs stuck in progress",
             result.rows_affected()
         );
-    }
-
-    Ok(())
-}
-
-/// Remove GC root after successful cache push
-async fn remove_gc_root(derivation_id: i32) -> Result<()> {
-    let gc_root_dir = "/var/cache/crystal-forge/gc-roots";
-    let gc_root_path = format!("{}/derivation-{}", gc_root_dir, derivation_id);
-
-    if let Err(e) = tokio::fs::remove_file(&gc_root_path).await {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            warn!("Failed to remove GC root {}: {}", gc_root_path, e);
-        }
-    } else {
-        debug!("Removed GC root: {}", gc_root_path);
     }
 
     Ok(())

@@ -837,7 +837,7 @@ pub async fn get_gc_root_path(derivation_id: i32) -> String {
 }
 
 /// Create a GC root to prevent garbage collection until cache push
-async fn create_gc_root(store_path: &str, derivation_id: i32) -> Result<()> {
+pub async fn create_gc_root(store_path: &str, derivation_id: i32) -> Result<()> {
     let gc_root_path = get_gc_root_path(derivation_id).await;
 
     // Create symlink to store path
@@ -849,5 +849,20 @@ async fn create_gc_root(store_path: &str, derivation_id: i32) -> Result<()> {
     }
 
     debug!("Created GC root: {} -> {}", gc_root_path, store_path);
+    Ok(())
+}
+
+/// Remove GC root after successful cache push
+pub async fn remove_gc_root(derivation_id: i32) -> Result<()> {
+    let gc_root_path = get_gc_root_path(derivation_id).await;
+
+    if let Err(e) = tokio::fs::remove_file(&gc_root_path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!("Failed to remove GC root {}: {}", gc_root_path, e);
+        }
+    } else {
+        debug!("Removed GC root: {}", gc_root_path);
+    }
+
     Ok(())
 }
