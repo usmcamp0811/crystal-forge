@@ -41,18 +41,18 @@ pub async fn get_derivations_needing_cache_push_for_dest(
             GROUP BY derivation_id
         ),
         newest_nixos_systems AS (
-            SELECT DISTINCT d.id as nixos_id, d.completed_at as nixos_completed_at
+            SELECT DISTINCT d.id as nixos_id, d.completed_at as nixos_completed_at, c.commit_timestamp as commit_timestamp
             FROM derivations d
+            JOIN commits c on d.commit_id = c.id
             WHERE d.derivation_type = 'nixos'
                 AND d.status_id = $2
-                AND d.completed_at IS NOT NULL
-            ORDER BY d.completed_at DESC
+            ORDER BY c.commit_timestamp DESC, nixos_completed_at DESC
             LIMIT 20
         ),
         prioritized_derivations AS (
             SELECT 
                 d.id,
-                MAX(nns.nixos_completed_at) as newest_nixos_parent
+                MAX(nns.commit_timestamp) as newest_nixos_parent
             FROM derivations d
             LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
             LEFT JOIN newest_nixos_systems nns ON nns.nixos_id = dd.derivation_id
