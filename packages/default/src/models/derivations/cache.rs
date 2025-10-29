@@ -152,7 +152,6 @@ impl Derivation {
             }
         };
 
-        // ADD THIS SIGNING STEP HERE:
         if let Some(sign_cmd) = cache_config.sign_command(&store_path) {
             info!("🔐 Signing {} before pushing...", store_path);
 
