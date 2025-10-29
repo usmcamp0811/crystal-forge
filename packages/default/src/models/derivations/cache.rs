@@ -147,11 +147,32 @@ impl Derivation {
             Some(cmd) => cmd,
             None => {
                 warn!("⚠️ No cache push configuration found, skipping cache push");
-                // Clean up the temporary root since we didn't push
                 let _ = tokio::fs::remove_file(&push_root).await;
                 return Ok(());
             }
         };
+
+        // ADD THIS SIGNING STEP HERE:
+        if let Some(sign_cmd) = cache_config.sign_command(&store_path) {
+            info!("🔐 Signing {} before pushing...", store_path);
+
+            let mut sign_process = Command::new(&sign_cmd.command);
+            sign_process.args(&sign_cmd.args).kill_on_drop(true);
+
+            let sign_output = sign_process
+                .output()
+                .await
+                .context("Failed to execute sign command")?;
+
+            if !sign_output.status.success() {
+                let stderr = String::from_utf8_lossy(&sign_output.stderr);
+                error!("❌ Failed to sign store path: {}", stderr.trim());
+                let _ = tokio::fs::remove_file(&push_root).await;
+                anyhow::bail!("Failed to sign store path: {}", stderr.trim());
+            }
+
+            info!("✅ Successfully signed {}", store_path);
+        }
 
         let effective_command = cache_cmd.command.clone();
         let mut effective_args = cache_cmd.args.clone();
