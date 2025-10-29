@@ -333,7 +333,7 @@ impl Derivation {
         // --- End Attic special-case ------------------------------------------------------------
 
         // Non-Attic tools (e.g. `nix copy --to ...`)
-        if build_config.should_use_systemd() {
+        if false {
             let mut scoped = Command::new("systemd-run");
             scoped.args(["--scope", "--collect"]);
             apply_systemd_props_for_scope(build_config, &mut scoped);
