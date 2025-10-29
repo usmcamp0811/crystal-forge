@@ -1,5 +1,6 @@
 use super::Derivation;
 use super::utils::*;
+use crate::builder::get_gc_root_path;
 use crate::models::config::{BuildConfig, CacheConfig};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
@@ -102,16 +103,7 @@ impl Derivation {
             path.to_string()
         };
 
-        // --- Ensure a GC root exists during push (prevents GC races) --------------------------
-        let roots_dir = std::path::Path::new("/var/lib/crystal-forge/gcroots");
-        // Safe to drop if your service guarantees this exists:
-        let _ = tokio::fs::create_dir_all(roots_dir).await;
-
-        let push_root = roots_dir.join(format!(
-            "push-{}.root",
-            store_path.trim_start_matches('/').replace("/", "_")
-        ));
-        let push_root_str = push_root.to_string_lossy().to_string();
+        let gc_root_path = get_gc_root_path(self.id).await;
 
         // Best-effort: create an indirect root on the output we’re about to push
         // nix-store --add-root <link> --indirect <store_path>
@@ -124,13 +116,13 @@ impl Derivation {
                 "--realise",
                 &store_path,
                 "--add-root",
-                &push_root_str,
+                &gc_root_path,
                 "--indirect",
             ]);
 
             match addroot.output().await {
                 Ok(out) if out.status.success() => {
-                    debug!("✅ Created GC root: {}", push_root_str);
+                    debug!("✅ Created GC root: {}", gc_root_path);
                 }
                 Ok(out) => {
                     warn!(
@@ -149,7 +141,6 @@ impl Derivation {
             Some(cmd) => cmd,
             None => {
                 warn!("⚠️ No cache push configuration found, skipping cache push");
-                let _ = tokio::fs::remove_file(&push_root).await;
                 return Ok(());
             }
         };
@@ -168,7 +159,6 @@ impl Derivation {
             if !sign_output.status.success() {
                 let stderr = String::from_utf8_lossy(&sign_output.stderr);
                 error!("❌ Failed to sign store path: {}", stderr.trim());
-                let _ = tokio::fs::remove_file(&push_root).await;
                 anyhow::bail!("Failed to sign store path: {}", stderr.trim());
             }
 
@@ -314,8 +304,6 @@ impl Derivation {
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 error!("❌ attic (direct) failed: {}", stderr.trim());
-                // Clean up the temporary root even on failure (we’ll re-root on next attempt)
-                let _ = tokio::fs::remove_file(&push_root).await;
                 anyhow::bail!("attic failed (direct): {}", stderr.trim());
             }
 
@@ -326,7 +314,7 @@ impl Derivation {
             info!("✅ Successfully pushed {} to cache (attic)", store_path);
 
             // Remove GC root after successful push
-            let _ = tokio::fs::remove_file(&push_root).await;
+            let _ = tokio::fs::remove_file(&gc_root_path).await;
 
             return Ok(());
         }
@@ -365,7 +353,6 @@ impl Derivation {
                     effective_command,
                     stderr.trim()
                 );
-                let _ = tokio::fs::remove_file(&push_root).await;
                 anyhow::bail!("{} failed (scoped): {}", effective_command, stderr.trim());
             }
 
@@ -375,7 +362,7 @@ impl Derivation {
             }
             info!("✅ Successfully pushed {} to cache (scoped)", store_path);
 
-            let _ = tokio::fs::remove_file(&push_root).await;
+            let _ = tokio::fs::remove_file(&gc_root_path).await;
             return Ok(());
         }
 
@@ -393,7 +380,6 @@ impl Derivation {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             error!("❌ {} failed: {}", effective_command, stderr.trim());
-            let _ = tokio::fs::remove_file(&push_root).await;
             anyhow::bail!("{} failed: {}", effective_command, stderr.trim());
         }
 
@@ -404,7 +390,7 @@ impl Derivation {
         info!("✅ Successfully pushed {} to cache", store_path);
 
         // Remove the GC root after successful push
-        let _ = tokio::fs::remove_file(&push_root).await;
+        let _ = tokio::fs::remove_file(&gc_root_path).await;
 
         Ok(())
     }
