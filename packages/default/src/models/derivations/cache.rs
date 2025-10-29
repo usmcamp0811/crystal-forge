@@ -186,9 +186,9 @@ impl Derivation {
         }
 
         info!(
-            "📋 Cache command: {} with {} args",
+            "📋 Cache command: {} {}",
             effective_command,
-            effective_args.len()
+            effective_args.join(" ")
         );
         // --- Special handling for Attic -------------------------------------------------------
         if effective_command == "attic"
