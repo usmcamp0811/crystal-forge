@@ -1,5 +1,6 @@
 use super::Derivation;
 use super::utils::*;
+use crate::builder::get_gc_root_path;
 use crate::models::config::BuildConfig;
 use anyhow::{Result, anyhow, bail};
 use sqlx::PgPool;
@@ -28,13 +29,7 @@ impl Derivation {
             bail!("Expected .drv path, got: {}", drv_path);
         }
 
-        // before constructing the command:
-        let roots_dir = Path::new("/var/lib/crystal-forge/gcroots");
-        tokio::fs::create_dir_all(roots_dir).await.ok(); // best-effort
-
-        // one root per build; name it however you like:
-        let root_path = roots_dir.join(format!("{}.root", drv_path.replace("/", "_")));
-        let root_path_str = root_path.to_string_lossy().to_string();
+        let gc_root_path = get_gc_root_path(self.id).await;
 
         // Build the command
         let mut cmd = if build_config.should_use_systemd() {
@@ -48,7 +43,7 @@ impl Derivation {
                 "nix-store",
                 "--realise",
                 "--add-root",
-                &root_path_str,
+                &gc_root_path,
                 "--indirect",
                 drv_path,
             ]);
@@ -59,7 +54,7 @@ impl Derivation {
             direct.args([
                 "--realise",
                 "--add-root",
-                &root_path_str,
+                &gc_root_path,
                 "--indirect",
                 drv_path,
             ]);

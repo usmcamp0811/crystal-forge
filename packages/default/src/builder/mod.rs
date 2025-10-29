@@ -828,14 +828,17 @@ async fn worker_heartbeat_loop(worker_uuid: String, pool: PgPool) {
     }
 }
 
+pub async fn get_gc_root_path(derivation_id: i32) -> String {
+    let gc_root_dir = "/var/cache/crystal-forge/gc-roots";
+    tokio::fs::create_dir_all(gc_root_dir)
+        .await
+        .expect("failed to create GC root directory");
+    format!("{}/derivation-{}", gc_root_dir, derivation_id)
+}
+
 /// Create a GC root to prevent garbage collection until cache push
 async fn create_gc_root(store_path: &str, derivation_id: i32) -> Result<()> {
-    let gc_root_dir = "/var/cache/crystal-forge/gc-roots";
-
-    // Ensure directory exists
-    tokio::fs::create_dir_all(gc_root_dir).await?;
-
-    let gc_root_path = format!("{}/derivation-{}", gc_root_dir, derivation_id);
+    let gc_root_path = get_gc_root_path(derivation_id).await;
 
     // Create symlink to store path
     if let Err(e) = tokio::fs::symlink(store_path, &gc_root_path).await {

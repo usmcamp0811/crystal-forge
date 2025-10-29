@@ -398,10 +398,8 @@ pub async fn cleanup_stale_cache_push_jobs(pool: &PgPool, timeout_minutes: i32) 
 
 /// Remove GC root after successful cache push
 async fn remove_gc_root(derivation_id: i32) -> Result<()> {
-    let gc_root_path = format!(
-        "/var/cache/crystal-forge/gc-roots/derivation-{}",
-        derivation_id
-    );
+    let gc_root_dir = "/var/cache/crystal-forge/gc-roots";
+    let gc_root_path = format!("{}/derivation-{}", gc_root_dir, derivation_id);
 
     if let Err(e) = tokio::fs::remove_file(&gc_root_path).await {
         if e.kind() != std::io::ErrorKind::NotFound {
