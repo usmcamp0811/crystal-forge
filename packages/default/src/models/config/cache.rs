@@ -1,7 +1,7 @@
-// src/cache/config.rs
 use crate::models::config::duration_serde;
 use serde::Deserialize;
 use std::time::Duration;
+
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct CacheConfig {
@@ -44,13 +44,6 @@ pub enum CacheType {
     Http,
     #[default]
     Nix,
-}
-
-#[derive(Debug, Clone)]
-pub struct CachePushJob {
-    pub derivation_id: i32,
-    pub derivation_name: String,
-    pub store_path: String,
 }
 
 #[derive(Debug, Clone)]

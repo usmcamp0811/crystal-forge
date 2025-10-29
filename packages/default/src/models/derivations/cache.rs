@@ -394,29 +394,6 @@ impl Derivation {
 
         Ok(())
     }
-
-    // Evaluates and optionally pushes to cache in one go
-    // pub async fn evaluate_and_push_to_cache(
-    //     &mut self,
-    //     pool: &PgPool,
-    //     build_config: &BuildConfig,
-    //     cache_config: &CacheConfig,
-    // ) -> Result<String> {
-    //     let store_path: String = self.evaluate_and_build(pool, build_config).await?;
-    //
-    //     // Only push to cache if we did a full build (not a dry-run)
-    //     if cache_config.push_after_build {
-    //         if let Err(e) = self
-    //             .push_to_cache(&store_path, cache_config, build_config)
-    //             .await
-    //         {
-    //             warn!("⚠️ Cache push failed but continuing: {}", e);
-    //             // Don't fail the whole operation if cache push fails
-    //         }
-    //     }
-    //
-    //     Ok(store_path)
-    // }
 }
 
 /// Log into Attic so the remote is available to the client.

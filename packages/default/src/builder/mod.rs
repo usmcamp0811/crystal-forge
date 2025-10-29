@@ -2,6 +2,7 @@ use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::build_reservations;
+use crate::queries::cache_push::CachePushJob;
 use crate::queries::cache_push::{
     cleanup_stale_cache_push_jobs, get_pending_cache_push_jobs, mark_cache_push_completed,
     mark_cache_push_failed, mark_cache_push_in_progress,
@@ -10,17 +11,21 @@ use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
     save_scan_results,
 };
+use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::derivations::{
     EvaluationStatus, handle_derivation_failure, mark_target_build_complete,
     update_derivation_status,
 };
 use crate::queries::derivations::{batch_queue_cache_jobs, reset_derivation_for_rebuild};
 use crate::vulnix::vulnix_runner::VulnixRunner;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::FutureExt;
 use sqlx::PgPool;
+use std::sync::Arc;
 use tokio::fs;
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
+use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
 /// Runs the continuous build loop with multiple workers
@@ -357,102 +362,142 @@ pub async fn run_cve_scan_loop(pool: PgPool) {
 
 /// Runs the periodic cache push loop with robust error handling
 pub async fn run_cache_push_loop(pool: PgPool) {
-    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
-        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
-        CrystalForgeConfig::default()
-    });
-    let cache_config = cfg.get_cache_config();
-    let build_config = cfg.get_build_config();
+    let cfg = CrystalForgeConfig::load().unwrap_or_default();
+    let cache_cfg = cfg.get_cache_config();
+    let build_cfg = cfg.get_build_config();
 
-    if cache_config.push_to.is_none() {
-        info!("📤 Cache push loop disabled - no cache destination configured");
+    if cache_cfg.push_to.is_none() {
+        info!("📤 Cache push loop disabled (no cache destination)");
         return;
     }
 
-    info!(
-        "🔄 Starting Cache Push loop (every {}s)...",
-        cache_config.poll_interval.as_secs()
-    );
-    debug!(
-        "🔧 Cache config: push_to={:?}, cache_type={:?}",
-        cache_config.push_to, cache_config.cache_type
-    );
+    let tick = cache_cfg.poll_interval;
+    let batch = 10;
+    let max_parallel = cache_cfg.parallel_uploads.max(1) as usize;
+    let sem = Arc::new(Semaphore::new(max_parallel));
 
-    let mut iteration = 0;
-    let mut consecutive_failures = 0;
+    info!(
+        "🚚 cache-push loop: every {:?}, batch {}, parallel {}",
+        tick, batch, max_parallel
+    );
 
     loop {
-        iteration += 1;
-        debug!("📤 Cache push loop iteration {} starting", iteration);
-
-        // Batch queue any missing cache jobs first
-        if let Some(destination) = cache_config.push_to.as_deref() {
-            if let Err(e) = batch_queue_cache_jobs(&pool, destination).await {
-                warn!("Failed to batch queue cache jobs: {}", e);
-            }
+        // TODO: Make timeout configurable
+        // Reclaim stuck jobs
+        if let Err(e) = cleanup_stale_cache_push_jobs(&pool, 60).await {
+            warn!("cleanup_stale_cache_push_jobs: {e:#}");
         }
 
-        let cycle_timeout =
-            std::time::Duration::from_secs(cache_config.push_timeout_seconds.max(300));
-
-        let processed_jobs = match tokio::time::timeout(
-            cycle_timeout,
-            process_cache_pushes_safe(&pool, &cache_config, &build_config),
+        // Pull a batch
+        let jobs = match tokio::time::timeout(
+            Duration::from_secs(30),
+            get_pending_cache_push_jobs(&pool, Some(batch)),
         )
         .await
         {
-            Ok(Ok(count)) => {
-                // Success - reset failure counter
-                consecutive_failures = 0;
-                debug!("📤 Cache push cycle completed successfully");
-                count
+            Ok(Ok(j)) if !j.is_empty() => j,
+            Ok(Ok(_)) => {
+                debug!("no cache-push work; sleeping {:?}", tick);
+                tokio::time::sleep(tick).await;
+                continue;
             }
             Ok(Err(e)) => {
-                error!("❌ Error in cache push cycle: {e}");
-                consecutive_failures += 1;
-                0
+                error!("get_pending_cache_push_jobs failed: {e:#}");
+                tokio::time::sleep(tick).await;
+                continue;
             }
             Err(_) => {
-                error!(
-                    "⏱️ Cache push cycle timed out after {}s",
-                    cycle_timeout.as_secs()
-                );
-                consecutive_failures += 1;
-                0
+                error!("get_pending_cache_push_jobs timed out");
+                tokio::time::sleep(tick).await;
+                continue;
             }
         };
 
-        // Smart delay based on work done and failures
-        let delay = if consecutive_failures > 0 {
-            // Has failures - use graduated backoff
-            if consecutive_failures < 3 {
-                cache_config.poll_interval * 2
-            } else if consecutive_failures < 10 {
-                std::time::Duration::from_secs(30)
-            } else {
-                warn!(
-                    "🟡 {} consecutive failures in cache push loop",
-                    consecutive_failures
-                );
-                std::time::Duration::from_secs(60)
-            }
-        } else if processed_jobs == 0 {
-            // No work to do - wait the full interval
-            cache_config.poll_interval
-        } else {
-            // Successfully processed jobs - short delay before checking for more work
-            // Changed from 100ms to 2s to avoid excessive database queries
-            std::time::Duration::from_secs(2)
-        };
+        info!("📤 Processing {} cache push job(s)…", jobs.len());
 
-        debug!(
-            "📤 Cache push loop iteration {} complete, sleeping for {}ms (processed {} jobs)",
-            iteration,
-            delay.as_millis(),
-            processed_jobs
-        );
-        sleep(delay).await;
+        // Bounded parallelism
+        let mut tasks = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let permit = sem.clone().acquire_owned().await.unwrap();
+            let pool = pool.clone();
+            let cache_cfg = cache_cfg.clone();
+            let build_cfg = build_cfg.clone();
+
+            tasks.push(tokio::spawn(async move {
+                let _permit = permit;
+                if let Err(e) = process_one_job(&pool, &cache_cfg, &build_cfg, job).await {
+                    error!("cache-push job errored: {e:#}");
+                }
+            }));
+        }
+
+        for t in tasks {
+            let _ = t.await;
+        }
+
+        // Short nap before next poll
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+async fn process_one_job(
+    pool: &PgPool,
+    cache_cfg: &CacheConfig,
+    build_cfg: &BuildConfig,
+    job: CachePushJob,
+) -> Result<()> {
+    // Mark in-progress (bumps attempts & clears retry_after)
+    mark_cache_push_in_progress(pool, job.id).await?;
+
+    // Resolve the derivation & store path
+    let derivation = get_derivation_by_id(pool, job.derivation_id)
+        .await
+        .context("fetch derivation")?;
+
+    // Prefer job.store_path; else pull from derivation row; if it’s a .drv, your impl resolves it.
+    let path = if let Some(p) = job.store_path.clone() {
+        p
+    } else if let Some(sp) = derivation.store_path.clone() {
+        sp
+    } else if let Some(dp) = derivation.derivation_path.clone() {
+        dp
+    } else {
+        anyhow::bail!(
+            "no store/derivation path available for derivation {}",
+            job.derivation_id
+        );
+    };
+
+    // Quick existence check (best-effort; skip if path clearly bogus)
+    if path.starts_with("/nix/store/") && !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        warn!("store path not found: {path}");
+        mark_cache_push_failed(pool, job.id, &format!("Store path missing: {path}")).await?;
+        return Ok(());
+    }
+
+    // Push using your **existing** implementation on Derivation
+    let started = Instant::now();
+    match derivation
+        .push_to_cache_with_retry(&path, cache_cfg, build_cfg)
+        .await
+    {
+        Ok(()) => {
+            let duration_ms = started.elapsed().as_millis().clamp(0, i32::MAX as u128) as i32;
+            // Optional: estimate size (best-effort); set to None if you don’t care.
+            let size_bytes = None;
+            mark_cache_push_completed(pool, job.id, size_bytes, Some(duration_ms)).await?;
+            info!(
+                "✅ cache-pushed derivation {} (job {})",
+                derivation.derivation_name, job.id
+            );
+        }
+        Err(e) => {
+            mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
+            // Don’t propagate; the loop keeps running.
+        }
+    }
+
+    Ok(())
 }
 
 /// Process derivations that need CVE scanning
