@@ -118,8 +118,15 @@ impl Derivation {
         {
             info!("🔧 Creating GC root for: {}", store_path);
 
+            // Use nix-store --realise which also creates an indirect root
             let mut addroot = tokio::process::Command::new("nix-store");
-            addroot.args(["--add-root", &push_root_str, "--indirect", &store_path]);
+            addroot.args([
+                "--realise",
+                &store_path,
+                "--add-root",
+                &push_root_str,
+                "--indirect",
+            ]);
 
             match addroot.output().await {
                 Ok(out) if out.status.success() => {
@@ -129,11 +136,6 @@ impl Derivation {
                     warn!(
                         "⚠️ Failed to create GC root (non-critical): {}",
                         String::from_utf8_lossy(&out.stderr).trim()
-                    );
-                    // Log the command that failed
-                    warn!(
-                        "   Command was: nix-store --add-root {} --indirect {}",
-                        push_root_str, store_path
                     );
                 }
                 Err(e) => {
@@ -294,6 +296,21 @@ impl Derivation {
                 }
             }
 
+            info!("📊 Command exit status: {:?}", output.status);
+            info!("📊 Stdout length: {} bytes", output.stdout.len());
+            info!("📊 Stderr length: {} bytes", output.stderr.len());
+            if !output.stdout.is_empty() {
+                info!(
+                    "📊 Stdout: {}",
+                    String::from_utf8_lossy(&output.stdout).trim()
+                );
+            }
+            if !output.stderr.is_empty() {
+                info!(
+                    "📊 Stderr: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 error!("❌ attic (direct) failed: {}", stderr.trim());
