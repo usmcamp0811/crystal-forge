@@ -78,6 +78,7 @@ pub async fn get_derivations_needing_cache_push_for_dest(
         ORDER BY 
             CASE WHEN d.derivation_type = 'nixos' THEN 1 ELSE 0 END,
             pd.newest_nixos_parent DESC NULLS LAST,
+            d.commit_id DESC,
             d.completed_at ASC NULLS LAST
         LIMIT $1
     "#;
