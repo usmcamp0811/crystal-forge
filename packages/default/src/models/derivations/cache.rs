@@ -1,10 +1,10 @@
 use super::Derivation;
 use super::utils::*;
-use crate::builder::get_gc_root_path;
 use crate::models::config::{BuildConfig, CacheConfig};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
-use std::path::Path;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
@@ -39,7 +39,7 @@ impl Derivation {
                         || err_msg.contains("no substituter that can build it")
                         || err_msg.contains("don't know how to build these paths")
                     {
-                        error!("❌ Terminal cache push error, not retrying: {}", e);
+                        error!("Terminal cache push error, not retrying: {}", e);
                         return Err(e);
                     }
                     // Exponential backoff: 5s, 10s, 20s, 40s, 80s
@@ -91,95 +91,30 @@ impl Derivation {
         use tokio::process::Command;
 
         if !cache_config.should_push(&self.derivation_name) {
-            info!("⭐️ Skipping cache push for {}", self.derivation_name);
+            info!("Skipping cache push for {}", self.derivation_name);
             return Ok(());
         }
 
         // Resolve .drv -> store path if needed
         let store_path = if path.ends_with(".drv") {
-            info!("🔍 Resolving derivation path to store path: {}", path);
+            info!("Resolving derivation path to store path: {}", path);
             Self::resolve_drv_to_store_path(path).await?
         } else {
             path.to_string()
         };
 
-        let gc_root_path = get_gc_root_path(self.id).await;
-
-        // Best-effort: create an indirect root on the output we’re about to push
-        // nix-store --add-root <link> --indirect <store_path>
-        {
-            info!("🔧 Creating GC root for: {}", store_path);
-
-            // Use nix-store --realise which also creates an indirect root
-            let mut addroot = tokio::process::Command::new("nix-store");
-            addroot.args([
-                "--realise",
-                &store_path,
-                "--add-root",
-                &gc_root_path,
-                "--indirect",
-            ]);
-
-            match addroot.output().await {
-                Ok(out) if out.status.success() => {
-                    debug!("✅ Created GC root: {}", gc_root_path);
-                }
-                Ok(out) => {
-                    warn!(
-                        "⚠️ Failed to create GC root (non-critical): {}",
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    );
-                }
-                Err(e) => {
-                    warn!("⚠️ Failed to spawn nix-store for GC root: {}", e);
-                }
-            }
-        }
-
         // Get command and args from config
         let cache_cmd = match cache_config.cache_command(&store_path) {
             Some(cmd) => cmd,
             None => {
-                warn!("⚠️ No cache push configuration found, skipping cache push");
+                warn!("No cache push configuration found, skipping cache push");
                 return Ok(());
             }
         };
 
-        if let Some(sign_cmd) = cache_config.sign_command(&store_path) {
-            info!("🔐 Signing {} before pushing...", store_path);
-
-            let mut sign_process = Command::new(&sign_cmd.command);
-            sign_process.args(&sign_cmd.args).kill_on_drop(true);
-
-            let sign_output = sign_process
-                .output()
-                .await
-                .context("Failed to execute sign command")?;
-
-            if !sign_output.status.success() {
-                let stderr = String::from_utf8_lossy(&sign_output.stderr);
-                error!("❌ Failed to sign store path: {}", stderr.trim());
-                anyhow::bail!("Failed to sign store path: {}", stderr.trim());
-            }
-
-            info!("✅ Successfully signed {}", store_path);
-        }
-
         let effective_command = cache_cmd.command.clone();
         let mut effective_args = cache_cmd.args.clone();
 
-        if effective_command.is_empty() {
-            anyhow::bail!("Cache command is empty");
-        }
-        if effective_args.is_empty() {
-            anyhow::bail!("Cache args are empty");
-        }
-
-        info!(
-            "📋 Cache command: {} {}",
-            effective_command,
-            effective_args.join(" ")
-        );
         // --- Special handling for Attic -------------------------------------------------------
         if effective_command == "attic"
             && effective_args.first().map(|s| s.as_str()) == Some("push")
@@ -200,11 +135,14 @@ impl Derivation {
                 effective_args.push(store_path.clone());
             }
 
+            // Helpful: log environment presence and file-based config once
             debug_attic_environment();
+
+            // One-time login (per-process), persisted under /var/lib/crystal-forge
             ensure_attic_login(&remote, &endpoint, &token).await?;
 
             info!(
-                "📤 Pushing {} to cache... ({} {})",
+                "Pushing {} to cache... ({} {})",
                 store_path,
                 effective_command,
                 effective_args.join(" ")
@@ -226,8 +164,11 @@ impl Derivation {
             // Preflight: repo visibility
             {
                 let mut info_cmd = tokio::process::Command::new("attic");
-                info_cmd.args(["cache", "info", &effective_args[1]]); // e.g. local:repo
-                info_cmd.kill_on_drop(true);
+                info_cmd.args([
+                    "cache",
+                    "info",
+                    &effective_args[1], /* e.g. local:test */
+                ]);
                 info_cmd.env("HOME", "/var/lib/crystal-forge");
                 info_cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                 apply_cache_env_to_command(&mut info_cmd);
@@ -242,158 +183,157 @@ impl Derivation {
                 }
             }
 
-            // ---- First attempt ----
+            // ---- First attempt (streaming) ----
             let mut cmd = tokio::process::Command::new("attic");
             cmd.args(&effective_args);
             cmd.env("HOME", "/var/lib/crystal-forge");
             cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
-            cmd.kill_on_drop(true);
             apply_cache_env_to_command(&mut cmd);
 
-            let mut child = cmd.spawn().context("Failed to spawn 'attic push'")?;
-            let mut output = child
-                .wait_with_output()
-                .await
-                .context("Failed to wait for 'attic push'")?;
+            let success = run_cache_command_streaming(cmd, "attic push (first attempt)").await?;
 
-            // ---- If unauthorized, redo login once and retry
-            if !output.status.success() {
+            if !success {
+                // Re-run to get error details for retry logic
+                let mut cmd_check = tokio::process::Command::new("attic");
+                cmd_check.args(&effective_args);
+                cmd_check.env("HOME", "/var/lib/crystal-forge");
+                cmd_check.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+                apply_cache_env_to_command(&mut cmd_check);
+                let output = cmd_check
+                    .output()
+                    .await
+                    .context("Failed to run 'attic push'")?;
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let trimmed = stderr.trim();
+
+                // ---- If unauthorized, redo login once and retry
                 if trimmed.contains("Unauthorized")
                     || trimmed.contains("401")
                     || trimmed.contains("invalid token")
                 {
-                    warn!("🔐 Attic push returned 401; clearing login cache and retrying once…");
+                    warn!("Attic push returned 401; clearing login cache and retrying once...");
                     clear_attic_logged(&remote);
+
+                    // Re-login with current env
                     let endpoint = std::env::var("ATTIC_SERVER_URL")?;
                     let token = std::env::var("ATTIC_TOKEN")?;
                     ensure_attic_login(&remote, &endpoint, &token).await?;
 
+                    // Retry push with streaming
                     let mut cmd2 = tokio::process::Command::new("attic");
                     cmd2.args(&effective_args);
                     cmd2.env("HOME", "/var/lib/crystal-forge");
                     cmd2.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
-                    cmd2.kill_on_drop(true);
                     apply_cache_env_to_command(&mut cmd2);
-                    let mut child2 = cmd2
-                        .spawn()
-                        .context("Failed to spawn 'attic push' (retry)")?;
-                    output = child2
-                        .wait_with_output()
-                        .await
-                        .context("Failed to wait for 'attic push' (retry)")?;
+                    let retry_success =
+                        run_cache_command_streaming(cmd2, "attic push (retry after 401)").await?;
+                    if retry_success {
+                        info!(
+                            "Successfully pushed {} to cache (attic, after retry)",
+                            store_path
+                        );
+                        return Ok(());
+                    }
+                }
+
+                // If we get here, there was an error
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!("attic (direct) failed: {}", stderr.trim());
+                    anyhow::bail!("attic failed (direct): {}", stderr.trim());
                 }
             }
 
-            info!("📊 Command exit status: {:?}", output.status);
-            info!("📊 Stdout length: {} bytes", output.stdout.len());
-            info!("📊 Stderr length: {} bytes", output.stderr.len());
-            if !output.stdout.is_empty() {
-                info!(
-                    "📊 Stdout: {}",
-                    String::from_utf8_lossy(&output.stdout).trim()
-                );
-            }
-            if !output.stderr.is_empty() {
-                info!(
-                    "📊 Stderr: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                );
-            }
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!("❌ attic (direct) failed: {}", stderr.trim());
-                anyhow::bail!("attic failed (direct): {}", stderr.trim());
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.trim().is_empty() {
-                info!("📤 attic output: {}", stdout.trim());
-            }
-            info!("✅ Successfully pushed {} to cache (attic)", store_path);
-
-            // Remove GC root after successful push
-            let _ = tokio::fs::remove_file(&gc_root_path).await;
-
+            info!("Successfully pushed {} to cache (attic)", store_path);
             return Ok(());
         }
-        // --- End Attic special-case ------------------------------------------------------------
+        // --- End Attic special-case ----------------------------------------------------------
 
         // Non-Attic tools (e.g. `nix copy --to ...`)
-        if false {
+        if build_config.should_use_systemd() {
             let mut scoped = Command::new("systemd-run");
-            scoped.args(["--scope", "--collect"]);
+            scoped.args(["--scope", "--collect", "--quiet"]);
             apply_systemd_props_for_scope(build_config, &mut scoped);
             apply_cache_env(&mut scoped);
             scoped
                 .arg("--")
                 .arg(&effective_command)
-                .args(&effective_args)
-                .kill_on_drop(true);
+                .args(&effective_args);
 
-            info!(
-                "🔧 Scoped command: systemd-run --scope --collect -- {} {}",
-                effective_command,
-                effective_args.join(" ")
-            );
-
-            let mut child = scoped
-                .spawn()
-                .context("Failed to spawn scoped cache command")?;
-            let output = child
-                .wait_with_output()
-                .await
-                .context("Failed to wait for scoped cache command")?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(
-                    "❌ {} (scoped) failed: {}",
-                    effective_command,
-                    stderr.trim()
-                );
-                anyhow::bail!("{} failed (scoped): {}", effective_command, stderr.trim());
+            let success =
+                run_cache_command_streaming(scoped, &format!("{} (scoped)", effective_command))
+                    .await?;
+            if !success {
+                anyhow::bail!("{} failed (scoped)", effective_command);
             }
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.trim().is_empty() {
-                info!("📤 {} output: {}", effective_command, stdout.trim());
-            }
-            info!("✅ Successfully pushed {} to cache (scoped)", store_path);
-
-            let _ = tokio::fs::remove_file(&gc_root_path).await;
+            info!("Successfully pushed {} to cache (scoped)", store_path);
             return Ok(());
         }
 
         // Direct execution for non-Attic
         let mut cmd = Command::new(&effective_command);
-        cmd.args(&effective_args).kill_on_drop(true);
+        cmd.args(&effective_args);
         build_config.apply_to_command(&mut cmd);
         apply_cache_env_to_command(&mut cmd);
 
-        let mut child = cmd.spawn().context("Failed to spawn cache command")?;
-        let output = child
-            .wait_with_output()
-            .await
-            .context("Failed to wait for cache command")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("❌ {} failed: {}", effective_command, stderr.trim());
-            anyhow::bail!("{} failed: {}", effective_command, stderr.trim());
+        let success = run_cache_command_streaming(cmd, &effective_command).await?;
+        if !success {
+            anyhow::bail!("{} failed", effective_command);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !stdout.trim().is_empty() {
-            info!("📤 {} output: {}", effective_command, stdout.trim());
-        }
-        info!("✅ Successfully pushed {} to cache", store_path);
-
-        // Remove the GC root after successful push
-        let _ = tokio::fs::remove_file(&gc_root_path).await;
-
+        info!("Successfully pushed {} to cache", store_path);
         Ok(())
     }
+}
+
+/// Run a command and stream its output to debug logs
+async fn run_cache_command_streaming(
+    mut cmd: tokio::process::Command,
+    command_name: &str,
+) -> Result<bool> {
+    info!("  Spawning cache command: {}", command_name);
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("Failed to spawn cache command")?;
+
+    let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    loop {
+        tokio::select! {
+            line_result = stdout_reader.next_line() => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        info!("cache stdout: {}", line);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        error!("Error reading stdout: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            line_result = stderr_reader.next_line() => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        debug!("cache stderr: {}", line);
+                    }
+                    Ok(None) => {},
+                    Err(e) => {
+                        error!("Error reading stderr: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await?;
+    Ok(status.success())
 }
 
 /// Log into Attic so the remote is available to the client.
@@ -407,26 +347,22 @@ async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow
         return Ok(());
     }
 
-    tracing::info!("🔐 Attic login for remote '{remote}' at {endpoint}");
+    tracing::info!("Attic login for remote '{remote}' at {endpoint}");
     let mut cmd = tokio::process::Command::new("attic");
     cmd.args(["login", remote, endpoint, token]);
     // Ensure credentials are persisted under the crystal-forge account:
     cmd.env("HOME", "/var/lib/crystal-forge");
     cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
-    cmd.kill_on_drop(true);
+
     // If you also want AWS/S3 env available for any follow-up calls attic might make:
     apply_cache_env_to_command(&mut cmd);
 
-    let mut child = cmd.spawn().context("Failed to spawn 'attic login'")?;
-    let out = child
-        .wait_with_output()
-        .await
-        .context("Failed to wait for 'attic login'")?;
+    let out = cmd.output().await.context("failed to run 'attic login'")?;
     if !out.status.success() {
         let se = String::from_utf8_lossy(&out.stderr);
         // Treat "already exists/already configured" as success
         if se.contains("exist") || se.contains("Already") || se.contains("already") {
-            tracing::info!("ℹ️ Attic remote '{remote}' already configured");
+            tracing::info!("Attic remote '{remote}' already configured");
             mark_attic_logged(remote);
             return Ok(());
         }
