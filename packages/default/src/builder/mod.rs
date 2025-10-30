@@ -25,6 +25,7 @@ use std::sync::Arc;
 use tokio::fs;
 use tokio::sync::Semaphore;
 use tokio::time::sleep;
+use tokio::time::timeout;
 use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
 
@@ -359,84 +360,183 @@ pub async fn run_cve_scan_loop(pool: PgPool) {
         sleep(vulnix_config.poll_interval).await;
     }
 }
+pub async fn run_cache_push_workers(pool: PgPool) {
+    let cfg = CrystalForgeConfig::load().unwrap_or_default();
+    let cache_cfg = cfg.get_cache_config();
+
+    if cache_cfg.push_to.is_none() {
+        info!("📤 Cache push disabled (no destination configured)");
+        return;
+    }
+
+    let build_cfg = cfg.get_build_config();
+    let worker_count = cache_cfg.parallel_uploads.max(1) as usize;
+
+    info!("🚚 starting {} cache-push worker(s)…", worker_count);
+
+    // (Optional) one tiny background task to reclaim stuck jobs
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = cleanup_stale_cache_push_jobs(&pool, 60).await {
+                    warn!("cleanup_stale_cache_push_jobs: {e:#}");
+                }
+                sleep(Duration::from_secs(30)).await;
+            }
+        });
+    }
+
+    let mut handles = Vec::with_capacity(worker_count);
+    for worker_id in 0..worker_count {
+        let pool = pool.clone();
+        let cache_cfg = cache_cfg.clone();
+        let build_cfg = build_cfg.clone();
+
+        // Pre-register worker status (reuse build status list, or make a dedicated one)
+        {
+            let mut statuses = get_build_status().write().await;
+            statuses.push(WorkerStatus {
+                worker_id: 10_000 + worker_id, // offset so they don’t collide with build workers
+                current_task: None,
+                started_at: None,
+                state: WorkerState::Idle,
+            });
+        }
+
+        handles.push(tokio::spawn(async move {
+            cache_worker(worker_id, pool, cache_cfg, build_cfg).await;
+        }));
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
+}
 
 /// Runs the periodic cache push loop with robust error handling
 pub async fn run_cache_push_loop(pool: PgPool) {
     let cfg = CrystalForgeConfig::load().unwrap_or_default();
     let cache_cfg = cfg.get_cache_config();
-    let build_cfg = cfg.get_build_config();
 
     if cache_cfg.push_to.is_none() {
-        info!("📤 Cache push loop disabled (no cache destination)");
+        info!("📤 Cache push disabled (no destination configured)");
         return;
     }
 
-    let tick = cache_cfg.poll_interval;
-    let batch = 10;
-    let max_parallel = cache_cfg.parallel_uploads.max(1) as usize;
-    let sem = Arc::new(Semaphore::new(max_parallel));
+    let build_cfg = cfg.get_build_config();
+    let worker_count = cache_cfg.parallel_uploads.max(1) as usize;
 
-    info!(
-        "🚚 cache-push loop: every {:?}, batch {}, parallel {}",
-        tick, batch, max_parallel
-    );
+    info!("🚚 starting {} cache-push worker(s)…", worker_count);
 
-    loop {
-        // TODO: Make timeout configurable
-        // Reclaim stuck jobs
-        if let Err(e) = cleanup_stale_cache_push_jobs(&pool, 60).await {
-            warn!("cleanup_stale_cache_push_jobs: {e:#}");
+    // (Optional) one tiny background task to reclaim stuck jobs
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = cleanup_stale_cache_push_jobs(&pool, 60).await {
+                    warn!("cleanup_stale_cache_push_jobs: {e:#}");
+                }
+                sleep(Duration::from_secs(30)).await;
+            }
+        });
+    }
+
+    let mut handles = Vec::with_capacity(worker_count);
+    for worker_id in 0..worker_count {
+        let pool = pool.clone();
+        let cache_cfg = cache_cfg.clone();
+        let build_cfg = build_cfg.clone();
+
+        // Pre-register worker status (reuse build status list, or make a dedicated one)
+        {
+            let mut statuses = get_build_status().write().await;
+            statuses.push(WorkerStatus {
+                worker_id: 10_000 + worker_id, // offset so they don’t collide with build workers
+                current_task: None,
+                started_at: None,
+                state: WorkerState::Idle,
+            });
         }
 
-        // Pull a batch
-        let jobs = match tokio::time::timeout(
+        handles.push(tokio::spawn(async move {
+            cache_worker(worker_id, pool, cache_cfg, build_cfg).await;
+        }));
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
+}
+
+async fn cache_worker(
+    worker_id: usize,
+    pool: PgPool,
+    cache_cfg: CacheConfig,
+    build_cfg: BuildConfig,
+) {
+    let status_id = 10_000 + worker_id;
+    let tick = cache_cfg.poll_interval;
+
+    info!("🚚 cache-worker {worker_id} started (tick {tick:?})");
+
+    loop {
+        // update status: looking for work
+        {
+            let mut s = get_build_status().write().await;
+            if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
+                ws.state = WorkerState::Working;
+                ws.current_task = Some("claiming cache job".into());
+                ws.started_at = Some(std::time::Instant::now());
+            }
+        }
+
+        // small DB timeout so a wedged DB doesn’t pin the worker forever
+        let jobs = match timeout(
             Duration::from_secs(30),
-            get_pending_cache_push_jobs(&pool, Some(batch)),
+            get_pending_cache_push_jobs(&pool, Some(1)),
         )
         .await
         {
-            Ok(Ok(j)) if !j.is_empty() => j,
-            Ok(Ok(_)) => {
-                debug!("no cache-push work; sleeping {:?}", tick);
-                tokio::time::sleep(tick).await;
-                continue;
-            }
+            Ok(Ok(mut v)) => v.pop(),
             Ok(Err(e)) => {
-                error!("get_pending_cache_push_jobs failed: {e:#}");
-                tokio::time::sleep(tick).await;
-                continue;
+                error!("cache-worker {worker_id}: get_pending_cache_push_jobs failed: {e:#}");
+                None
             }
             Err(_) => {
-                error!("get_pending_cache_push_jobs timed out");
-                tokio::time::sleep(tick).await;
-                continue;
+                error!("cache-worker {worker_id}: get_pending_cache_push_jobs timed out");
+                None
             }
         };
 
-        info!("📤 Processing {} cache push job(s)…", jobs.len());
-
-        // Bounded parallelism
-        let mut tasks = Vec::with_capacity(jobs.len());
-        for job in jobs {
-            let permit = sem.clone().acquire_owned().await.unwrap();
-            let pool = pool.clone();
-            let cache_cfg = cache_cfg.clone();
-            let build_cfg = build_cfg.clone();
-
-            tasks.push(tokio::spawn(async move {
-                let _permit = permit;
-                if let Err(e) = process_one_job(&pool, &cache_cfg, &build_cfg, job).await {
-                    error!("cache-push job errored: {e:#}");
+        let Some(job) = jobs else {
+            // no work → idle + sleep
+            {
+                let mut s = get_build_status().write().await;
+                if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
+                    ws.state = WorkerState::Idle;
+                    ws.current_task = None;
+                    ws.started_at = None;
                 }
-            }));
+            }
+            debug!("cache-worker {worker_id}: idle");
+            sleep(tick).await;
+            continue;
+        };
+
+        // mark job in-progress and do the push
+        if let Err(e) = mark_cache_push_in_progress(&pool, job.id).await {
+            warn!("cache-worker {worker_id}: failed to mark in-progress: {e:#}");
+            // brief backoff; another worker can pick it up later
+            sleep(Duration::from_secs(2)).await;
+            continue;
         }
 
-        for t in tasks {
-            let _ = t.await;
+        if let Err(e) =
+            process_one_job(&pool, &cache_cfg, &build_cfg, job, worker_id, status_id).await
+        {
+            error!("cache-worker {worker_id}: job failed: {e:#}");
         }
-
-        // Short nap before next poll
-        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
 
@@ -445,55 +545,70 @@ async fn process_one_job(
     cache_cfg: &CacheConfig,
     build_cfg: &BuildConfig,
     job: CachePushJob,
+    worker_id: usize,
+    status_id: usize,
 ) -> Result<()> {
-    // Mark in-progress (bumps attempts & clears retry_after)
-    mark_cache_push_in_progress(pool, job.id).await?;
+    // update status for visibility
+    {
+        let mut s = get_build_status().write().await;
+        if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
+            ws.state = WorkerState::Working;
+            ws.current_task = Some(format!(
+                "cache-pushing job#{} (derivation #{})",
+                job.id, job.derivation_id
+            ));
+            ws.started_at = Some(std::time::Instant::now());
+        }
+    }
 
-    // Resolve the derivation & store path
     let derivation = get_derivation_by_id(pool, job.derivation_id)
         .await
         .context("fetch derivation")?;
 
-    // Prefer job.store_path; else pull from derivation row; if it’s a .drv, your impl resolves it.
-    let path = if let Some(p) = job.store_path.clone() {
-        p
-    } else if let Some(sp) = derivation.store_path.clone() {
-        sp
-    } else if let Some(dp) = derivation.derivation_path.clone() {
-        dp
-    } else {
-        anyhow::bail!(
-            "no store/derivation path available for derivation {}",
-            job.derivation_id
-        );
-    };
+    // Prefer job.store_path; else fall back to derivation.store_path / derivation_path (your push method handles .drv → store resolution)
+    let path = job
+        .store_path
+        .or_else(|| derivation.store_path.clone())
+        .or_else(|| derivation.derivation_path.clone())
+        .ok_or_else(|| anyhow::anyhow!("no store/derivation path for {}", job.derivation_id))?;
 
-    // Quick existence check (best-effort; skip if path clearly bogus)
+    // Fast path check if it looks like a nix store path and actually exists
     if path.starts_with("/nix/store/") && !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-        warn!("store path not found: {path}");
+        warn!("cache-worker {worker_id}: store path missing: {path}");
         mark_cache_push_failed(pool, job.id, &format!("Store path missing: {path}")).await?;
         return Ok(());
     }
 
-    // Push using your **existing** implementation on Derivation
-    let started = Instant::now();
+    // Do the push using your existing implementation on Derivation
+    let started = std::time::Instant::now();
     match derivation
         .push_to_cache_with_retry(&path, cache_cfg, build_cfg)
         .await
     {
         Ok(()) => {
-            let duration_ms = started.elapsed().as_millis().clamp(0, i32::MAX as u128) as i32;
-            // Optional: estimate size (best-effort); set to None if you don’t care.
-            let size_bytes = None;
-            mark_cache_push_completed(pool, job.id, size_bytes, Some(duration_ms)).await?;
+            let duration_ms = (started.elapsed().as_millis() as i32).max(0);
+            mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;
             info!(
-                "✅ cache-pushed derivation {} (job {})",
+                "✅ cache-worker {worker_id}: pushed {} (job {})",
                 derivation.derivation_name, job.id
             );
         }
         Err(e) => {
             mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
-            // Don’t propagate; the loop keeps running.
+            warn!(
+                "❌ cache-worker {worker_id}: push failed for {} (job {}): {e}",
+                derivation.derivation_name, job.id
+            );
+        }
+    }
+
+    // back to idle; the outer loop will look for more work
+    {
+        let mut s = get_build_status().write().await;
+        if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
+            ws.state = WorkerState::Idle;
+            ws.current_task = None;
+            ws.started_at = None;
         }
     }
 
