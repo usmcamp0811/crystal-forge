@@ -103,6 +103,12 @@ impl Derivation {
             path.to_string()
         };
 
+        // Verify signed if required
+        if let Err(e) = self.verify_signed(&cache_config).await {
+            warn!("Signature verification failed for {}: {}", store_path, e);
+            // Decide: fail or continue?
+            // You could make this strict or lenient based on config
+        }
         // Get command and args from config
         let cache_cmd = match cache_config.cache_command(&store_path) {
             Some(cmd) => cmd,

@@ -36,6 +36,7 @@ pub async fn run_build_loop(pool: PgPool) {
         CrystalForgeConfig::default()
     });
     let build_config = cfg.get_build_config();
+    let cache_config = cfg.get_cache_config();
     let num_workers = build_config.max_concurrent_derivations;
 
     info!("🏗 Starting {} continuous build workers...", num_workers);
@@ -70,10 +71,11 @@ pub async fn run_build_loop(pool: PgPool) {
     for worker_id in 0..num_workers {
         let pool = pool.clone();
         let build_config = build_config.clone();
+        let cache_config = cache_config.clone();
         let worker_uuid = format!("{}-worker-{}", hostname, worker_id);
 
         let handle = tokio::spawn(async move {
-            build_worker(worker_id, worker_uuid, pool, build_config).await;
+            build_worker(worker_id, worker_uuid, pool, build_config, cache_config).await;
         });
         handles.push(handle);
     }
@@ -150,6 +152,7 @@ async fn build_worker(
     worker_uuid: String,
     pool: PgPool,
     build_config: BuildConfig,
+    cache_config: CacheConfig,
 ) {
     update_worker_status(
         worker_id,
@@ -237,12 +240,24 @@ async fn build_worker(
                     Ok(Ok(store_path)) => {
                         let duration = start.elapsed();
                         info!(
-                            "✅ Worker {} completed {} in {:.1}s: {}",
+                            "✅ worker {} completed {} in {:.1}s: {}",
                             worker_id,
                             task_description,
                             duration.as_secs_f64(),
                             store_path
                         );
+
+                        // update derivation with store_path for signing
+                        derivation.store_path = Some(store_path.clone());
+
+                        // sign before cache push
+                        if let Err(e) = derivation.sign(&cache_config).await {
+                            warn!(
+                                "⚠️ signing failed for {}, continuing anyway: {}",
+                                task_description, e
+                            );
+                            // non-fatal - we can still push to cache unsigned
+                        }
 
                         if let Err(e) = mark_build_complete_and_release(
                             &pool,
@@ -252,7 +267,7 @@ async fn build_worker(
                         )
                         .await
                         {
-                            error!("Failed to mark build complete: {}", e);
+                            error!("failed to mark build complete: {}", e);
                         }
                     }
 

@@ -2,6 +2,8 @@ use super::Derivation;
 use super::utils::*;
 use crate::builder::get_gc_root_path;
 use crate::models::config::BuildConfig;
+use crate::models::config::CacheConfig;
+use anyhow::Context;
 use anyhow::{Result, anyhow, bail};
 use sqlx::PgPool;
 use std::path::Path;
@@ -86,6 +88,117 @@ impl Derivation {
                 Err(e)
             }
         }
+    }
+
+    /// Sign a store path recursively with streaming output
+    pub async fn sign(&self, cache_config: &CacheConfig) -> Result<()> {
+        let store_path = self
+            .store_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Derivation {} missing store_path", self.id))?;
+
+        let sign_cmd = match cache_config.sign_command(store_path) {
+            Some(cmd) => cmd,
+            None => {
+                debug!("No signing key configured, skipping sign");
+                return Ok(());
+            }
+        };
+
+        info!("Signing store path: {}", store_path);
+
+        let mut cmd = Command::new(&sign_cmd.command);
+        cmd.args(&sign_cmd.args);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let success = Self::run_streaming_command(&mut cmd, "nix store sign").await?;
+
+        if success {
+            info!("Successfully signed {}", store_path);
+            Ok(())
+        } else {
+            bail!("Failed to sign store path: {}", store_path)
+        }
+    }
+    /// Generic streaming command runner for non-build operations
+    pub async fn run_streaming_command(cmd: &mut Command, operation_name: &str) -> Result<bool> {
+        info!("  → Spawning {}", operation_name);
+
+        let mut child = cmd.spawn().context("Failed to spawn command")?;
+
+        let stdout = child.stdout.take().expect("Failed to capture stdout");
+        let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
+
+        loop {
+            tokio::select! {
+                line_result = stdout_reader.next_line() => {
+                    match line_result {
+                        Ok(Some(line)) => {
+                            info!("{} stdout: {}", operation_name, line);
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            error!("Error reading stdout: {}", e);
+                            break;
+                        }
+                    }
+                }
+
+                line_result = stderr_reader.next_line() => {
+                    match line_result {
+                        Ok(Some(line)) => {
+                            debug!("{} stderr: {}", operation_name, line);
+                        }
+                        Ok(None) => {},
+                        Err(e) => {
+                            error!("Error reading stderr: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().await?;
+        Ok(status.success())
+    }
+
+    /// Verify a store path is signed (if signing is configured)
+    pub async fn verify_signed(&self, cache_config: &CacheConfig) -> Result<()> {
+        // Only check if signing is configured
+        if cache_config.signing_key.is_none() {
+            debug!("Signing not configured, skipping verification");
+            return Ok(());
+        }
+
+        let store_path = self
+            .store_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Derivation {} missing store_path", self.id))?;
+
+        let output = Command::new("nix")
+            .args(["store", "info", store_path, "--json"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            bail!("Failed to verify signatures for {}", store_path);
+        }
+
+        // Check if path has valid signatures (you might parse JSON here)
+        let info = String::from_utf8_lossy(&output.stdout);
+        if !info.contains("signatures") {
+            warn!(
+                "Path {} has no signatures, but signing is configured",
+                store_path
+            );
+            // Decide: fail or warn?
+            // bail!("Path is not signed");  // <- strict mode
+        }
+
+        Ok(())
     }
 
     /// Run a build command with streaming output and periodic database updates
