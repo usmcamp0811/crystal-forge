@@ -1133,7 +1133,7 @@ in {
         CPUQuota =
           lib.mkIf (cfg.build.systemd_cpu_quota != null)
           (toString cfg.build.systemd_cpu_quota + "%");
-        TasksMax = "200"; # Keep this as a reasonable default
+        TasksMax = "infinity"; # Keep this as a reasonable default
       };
     };
 
@@ -1265,6 +1265,7 @@ in {
           # disable registry and per-user nix.conf for deterministic evals
           NIX_REGISTRY = "/dev/null";
           NIX_CONFIG_DIR = "/dev/null";
+          GC_MARKERS = "1";
         }
         # Add Attic-specific environment variables if using Attic cache
         (lib.mkIf (cfg.cache.cache_type == "Attic") {
@@ -1348,6 +1349,11 @@ in {
           ProtectKernelTunables = true;
           ProtectKernelModules = true;
           ProtectControlGroups = true;
+
+          TasksMax = "infinity";
+          LimitNPROC = "infinity";
+          LimitNOFILE = 1048576;
+          OOMPolicy = "continue";
 
           ReadWritePaths = [
             "/var/lib/crystal-forge"
