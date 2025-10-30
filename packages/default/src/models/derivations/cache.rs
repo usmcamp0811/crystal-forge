@@ -1,11 +1,12 @@
 use super::Derivation;
+use std::process::Stdio;
 use super::utils::*;
 use crate::models::config::{BuildConfig, CacheConfig};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
-use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{Duration, sleep};
+use anyhow::bail;
 use tracing::{debug, error, info, warn};
 
 impl Derivation {
@@ -103,12 +104,6 @@ impl Derivation {
             path.to_string()
         };
 
-        // Verify signed if required
-        if let Err(e) = self.verify_signed(&cache_config).await {
-            warn!("Signature verification failed for {}: {}", store_path, e);
-            // Decide: fail or continue?
-            // You could make this strict or lenient based on config
-        }
         // Get command and args from config
         let cache_cmd = match cache_config.cache_command(&store_path) {
             Some(cmd) => cmd,
@@ -196,7 +191,11 @@ impl Derivation {
             cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
             apply_cache_env_to_command(&mut cmd);
 
-            let success = run_cache_command_streaming(cmd, "attic push (first attempt)").await?;
+            let success = run_cache_command_streaming(
+                cmd,
+                "attic push (first attempt)",
+            )
+            .await?;
 
             if !success {
                 // Re-run to get error details for retry logic
@@ -205,13 +204,10 @@ impl Derivation {
                 cmd_check.env("HOME", "/var/lib/crystal-forge");
                 cmd_check.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                 apply_cache_env_to_command(&mut cmd_check);
-                let output = cmd_check
-                    .output()
-                    .await
-                    .context("Failed to run 'attic push'")?;
+                let output = cmd_check.output().await.context("Failed to run 'attic push'")?;
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let trimmed = stderr.trim();
-
+                
                 // ---- If unauthorized, redo login once and retry
                 if trimmed.contains("Unauthorized")
                     || trimmed.contains("401")
@@ -231,13 +227,13 @@ impl Derivation {
                     cmd2.env("HOME", "/var/lib/crystal-forge");
                     cmd2.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                     apply_cache_env_to_command(&mut cmd2);
-                    let retry_success =
-                        run_cache_command_streaming(cmd2, "attic push (retry after 401)").await?;
+                    let retry_success = run_cache_command_streaming(
+                        cmd2,
+                        "attic push (retry after 401)",
+                    )
+                    .await?;
                     if retry_success {
-                        info!(
-                            "Successfully pushed {} to cache (attic, after retry)",
-                            store_path
-                        );
+                        info!("Successfully pushed {} to cache (attic, after retry)", store_path);
                         return Ok(());
                     }
                 }
@@ -266,9 +262,7 @@ impl Derivation {
                 .arg(&effective_command)
                 .args(&effective_args);
 
-            let success =
-                run_cache_command_streaming(scoped, &format!("{} (scoped)", effective_command))
-                    .await?;
+            let success = run_cache_command_streaming(scoped, &format!("{} (scoped)", effective_command)).await?;
             if !success {
                 anyhow::bail!("{} failed (scoped)", effective_command);
             }
@@ -298,7 +292,7 @@ async fn run_cache_command_streaming(
     mut cmd: tokio::process::Command,
     command_name: &str,
 ) -> Result<bool> {
-    info!("  Spawning cache command: {}", command_name);
+    info!("  → Spawning cache command: {}", command_name);
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().context("Failed to spawn cache command")?;
@@ -309,29 +303,41 @@ async fn run_cache_command_streaming(
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
 
+    let timeout_duration = Duration::from_secs(300); // 5 min timeout per read
+
     loop {
         tokio::select! {
-            line_result = stdout_reader.next_line() => {
+            line_result = tokio::time::timeout(timeout_duration, stdout_reader.next_line()) => {
                 match line_result {
-                    Ok(Some(line)) => {
+                    Ok(Ok(Some(line))) => {
                         info!("cache stdout: {}", line);
                     }
-                    Ok(None) => break,
-                    Err(e) => {
-                        error!("Error reading stdout: {}", e);
+                    Ok(Ok(None)) => break,
+                    Ok(Err(e)) => {
+                        error!("Error reading cache stdout: {}", e);
                         break;
+                    }
+                    Err(_timeout) => {
+                        error!("cache command hung - no stdout for 5 minutes");
+                        let _ = child.kill().await;
+                        bail!("Cache push command hung (no output for 5 minutes)");
                     }
                 }
             }
 
-            line_result = stderr_reader.next_line() => {
+            line_result = tokio::time::timeout(timeout_duration, stderr_reader.next_line()) => {
                 match line_result {
-                    Ok(Some(line)) => {
+                    Ok(Ok(Some(line))) => {
                         debug!("cache stderr: {}", line);
                     }
-                    Ok(None) => {},
-                    Err(e) => {
-                        error!("Error reading stderr: {}", e);
+                    Ok(Ok(None)) => {},
+                    Ok(Err(e)) => {
+                        error!("Error reading cache stderr: {}", e);
+                    }
+                    Err(_timeout) => {
+                        error!("cache command hung - no stderr for 5 minutes");
+                        let _ = child.kill().await;
+                        bail!("Cache push command hung (no output for 5 minutes)");
                     }
                 }
             }
