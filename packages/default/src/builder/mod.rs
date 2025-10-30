@@ -554,8 +554,11 @@ async fn process_one_job(
         if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
             ws.state = WorkerState::Working;
             ws.current_task = Some(format!(
-                "cache-pushing job#{} (derivation #{})",
-                job.id, job.derivation_id
+                "cache-pushing job#{} (derivation @ {})",
+                job.id,
+                job.store_path
+                    .as_deref()
+                    .unwrap_or(&job.derivation_id.to_string())
             ));
             ws.started_at = Some(std::time::Instant::now());
         }
@@ -581,10 +584,7 @@ async fn process_one_job(
 
     // Do the push using your existing implementation on Derivation
     let started = std::time::Instant::now();
-    match derivation
-        .push_to_cache_with_retry(&path, cache_cfg, build_cfg)
-        .await
-    {
+    match derivation.push_to_cache(&path, cache_cfg, build_cfg).await {
         Ok(()) => {
             let duration_ms = (started.elapsed().as_millis() as i32).max(0);
             mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;

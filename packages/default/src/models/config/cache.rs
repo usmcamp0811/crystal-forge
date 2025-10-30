@@ -2,7 +2,6 @@ use crate::models::config::duration_serde;
 use serde::Deserialize;
 use std::time::Duration;
 
-
 #[derive(Clone, Debug, Deserialize)]
 pub struct CacheConfig {
     #[serde(default)]
@@ -54,7 +53,7 @@ pub struct CacheCommand {
 
 impl CacheConfig {
     fn default_parallel_uploads() -> u32 {
-        4
+        1
     }
 
     fn default_poll_interval() -> Duration {
