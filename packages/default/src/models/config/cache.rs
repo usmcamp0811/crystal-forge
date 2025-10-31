@@ -30,6 +30,9 @@ pub struct CacheConfig {
         with = "duration_serde"
     )]
     pub poll_interval: Duration,
+    /// Timeout for each cache push attempt in seconds (default: 3600 = 1 hour)
+    /// For large systems (40GB+), consider 7200 (2h) or more
+    /// This is the overall timeout per attempt, not per-read timeout
     #[serde(default = "CacheConfig::default_push_timeout_seconds")]
     pub push_timeout_seconds: u64,
     #[serde(default)]
@@ -61,7 +64,7 @@ impl CacheConfig {
     }
 
     fn default_push_timeout_seconds() -> u64 {
-        600 // 10 minutes
+        3600 // 1 hour - large systems (40GB+) need more time. Increase to 7200+ if needed.
     }
 
     /// Optional signing step. If `signing_key` is set, run this BEFORE `cache_command`.

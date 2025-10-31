@@ -212,9 +212,6 @@ impl AgentDeploymentManager {
         // Build nix copy command
         let mut copy_args = vec!["copy", "--from", cache_url, store_path];
 
-        // Build nix copy command
-        let mut copy_args = vec!["copy", "--from", cache_url, store_path];
-
         // Always set require-sigs according to config
         copy_args.extend_from_slice(&[
             "--option",
@@ -236,37 +233,104 @@ impl AgentDeploymentManager {
             );
         }
 
-        // Step 1: Copy from cache
+        // Step 1: Copy from cache with timeout
         info!("Copying {} from cache...", store_path);
-        let mut child = Command::new("nix")
-            .args(&copy_args)
-            .spawn()
-            .context("Failed to spawn nix copy")?;
+        
+        // Use tokio Command for async operation with timeout
+        use tokio::process::Command as TokioCommand;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use std::process::Stdio;
+        
+        let copy_timeout = self.config.deployment_timeout_minutes * 60; // Default 2 hours
+        
+        let copy_result = tokio::time::timeout(
+            std::time::Duration::from_secs(copy_timeout),
+            async {
+                let mut child = TokioCommand::new("nix")
+                    .args(&copy_args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn nix copy")?;
 
-        let start = std::time::Instant::now();
-        loop {
-            match child.try_wait()? {
-                Some(status) => {
-                    if !status.success() {
-                        anyhow::bail!("nix copy failed with exit code {:?}", status.code(),);
+                let stdout = child.stdout.take().expect("Failed to capture stdout");
+                let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+                let mut stdout_reader = BufReader::new(stdout).lines();
+                let mut stderr_reader = BufReader::new(stderr).lines();
+
+                let start = std::time::Instant::now();
+                let mut last_output = std::time::Instant::now();
+                let mut progress_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+
+                loop {
+                    tokio::select! {
+                        line_result = stdout_reader.next_line() => {
+                            match line_result {
+                                Ok(Some(line)) => {
+                                    last_output = std::time::Instant::now();
+                                    info!("nix copy stdout: {}", line);
+                                }
+                                Ok(None) => break,
+                                Err(e) => {
+                                    error!("Error reading stdout: {}", e);
+                                    break;
+                                }
+                            }
+                        }
+
+                        line_result = stderr_reader.next_line() => {
+                            match line_result {
+                                Ok(Some(line)) => {
+                                    last_output = std::time::Instant::now();
+                                    debug!("nix copy stderr: {}", line);
+                                }
+                                Ok(None) => {},
+                                Err(e) => {
+                                    error!("Error reading stderr: {}", e);
+                                }
+                            }
+                        }
+
+                        _ = progress_interval.tick() => {
+                            let elapsed = start.elapsed().as_secs();
+                            let idle_time = last_output.elapsed().as_secs();
+                            let hours = elapsed / 3600;
+                            let minutes = (elapsed % 3600) / 60;
+                            let seconds = elapsed % 60;
+                            info!(
+                                "Still copying {} from cache... ({}h {}m {}s elapsed, {}s since last output)",
+                                store_path, hours, minutes, seconds, idle_time
+                            );
+                        }
                     }
-                    break;
                 }
-                None => {
-                    let elapsed = start.elapsed().as_secs();
-                    let hours = elapsed / 3600;
-                    let minutes = (elapsed % 3600) / 60;
-                    let seconds = elapsed % 60;
-                    info!(
-                        "Still copying {} from cache... ({}h {}m {}s elapsed)",
-                        store_path, hours, minutes, seconds
-                    );
-                    std::thread::sleep(std::time::Duration::from_secs(30));
+
+                let status = child.wait().await?;
+                if !status.success() {
+                    anyhow::bail!("nix copy failed with exit code {:?}", status.code());
                 }
+                
+                Ok::<(), anyhow::Error>(())
+            }
+        ).await;
+
+        match copy_result {
+            Ok(Ok(())) => {
+                info!("Successfully copied {} from cache", store_path);
+            }
+            Ok(Err(e)) => {
+                return Err(e);
+            }
+            Err(_timeout) => {
+                anyhow::bail!(
+                    "Cache copy timed out after {} seconds ({}h {}m). Consider increasing cache_copy_timeout_seconds.",
+                    copy_timeout,
+                    copy_timeout / 3600,
+                    (copy_timeout % 3600) / 60
+                );
             }
         }
-
-        info!("Successfully copied {} from cache", store_path);
 
         // Step 2: Activate the configuration using systemd-run
         let switch_script = format!("{}/bin/switch-to-configuration", store_path);
