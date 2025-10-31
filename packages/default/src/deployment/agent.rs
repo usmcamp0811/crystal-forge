@@ -243,6 +243,8 @@ impl AgentDeploymentManager {
         
         let copy_timeout = self.config.deployment_timeout_minutes * 60; // Default 2 hours
         
+        debug!("Executing: nix {}", shell_join(&copy_args));
+
         let copy_result = tokio::time::timeout(
             std::time::Duration::from_secs(copy_timeout),
             async {
@@ -335,17 +337,22 @@ impl AgentDeploymentManager {
         // Step 2: Activate the configuration using systemd-run
         let switch_script = format!("{}/bin/switch-to-configuration", store_path);
 
+        let run_args = [
+            "--unit", &unit_name,
+            "--no-block",
+            "--same-dir",
+            "--collect",
+            "--",
+            &switch_script,
+            "switch",
+        ];
+
+        // 🔎 DEBUG: show the exact systemd-run switch command
+        debug!("Executing: systemd-run {}", shell_join(&run_args));
+
+        // run as before...
         let output = Command::new("systemd-run")
-            .args(&[
-                "--unit",
-                &unit_name,
-                "--no-block",
-                "--same-dir",
-                "--collect",
-                "--",
-                &switch_script,
-                "switch",
-            ])
+            .args(&run_args)
             .output()
             .context("Failed to execute systemd-run with switch-to-configuration")?;
 
@@ -478,4 +485,19 @@ impl AgentDeploymentManager {
     pub fn update_current_target(&mut self, target: Option<String>) {
         self.current_target = target;
     }
+}
+
+fn shell_quote(s: &str) -> String {
+    // Simple POSIX single-quote: ' -> '\''  (ends, escaped quote, resumes)
+    if s.is_empty() { return "''".to_string(); }
+    if s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./:@".contains(&b)) {
+        // Fast path: no quoting needed for common arg chars
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn shell_join(args: &[&str]) -> String {
+    args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
 }
