@@ -401,6 +401,27 @@ pub async fn run_cache_push_workers(pool: PgPool) {
             }
         });
     }
+    {
+        let pool = pool.clone();
+        let destination = cache_cfg.push_to.clone().unwrap(); // Safe because we checked above
+        tokio::spawn(async move {
+            info!("📤 Starting cache job creation loop (every 30s)...");
+            loop {
+                match batch_queue_cache_jobs(&pool, &destination).await {
+                    Ok(count) if count > 0 => {
+                        info!("📤 Created {} new cache push jobs", count);
+                    }
+                    Ok(_) => {
+                        debug!("No new cache push jobs needed");
+                    }
+                    Err(e) => {
+                        warn!("Failed to batch queue cache jobs: {}", e);
+                    }
+                }
+                sleep(Duration::from_secs(30)).await;
+            }
+        });
+    }
 
     let mut handles = Vec::with_capacity(worker_count);
     for worker_id in 0..worker_count {
