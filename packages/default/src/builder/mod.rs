@@ -3,6 +3,7 @@ use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::build_reservations;
 use crate::queries::cache_push::CachePushJob;
+use crate::queries::cache_push::create_cache_push_job;
 use crate::queries::cache_push::{
     cleanup_stale_cache_push_jobs, get_pending_cache_push_jobs, mark_cache_push_completed,
     mark_cache_push_failed, mark_cache_push_in_progress,
@@ -257,6 +258,28 @@ async fn build_worker(
                                 task_description, e
                             );
                             // non-fatal - we can still push to cache unsigned
+                        }
+
+                        // TODO: Include the name of the server that built the derivation
+                        if let Some(ref store_path) = derivation.store_path {
+                            if let Err(e) = create_cache_push_job(
+                                &pool,
+                                derivation.id,
+                                store_path,                      // &String coerces to &str
+                                cache_config.push_to.as_deref(), // Option<String> -> Option<&str>
+                            )
+                            .await
+                            {
+                                warn!(
+                                    "⚠️ cache queue failed for {}, continuing anyway: {}",
+                                    task_description, e
+                                );
+                            }
+                        } else {
+                            warn!(
+                                "⚠️ skipping cache queue for {}: missing store_path on derivation {}",
+                                task_description, derivation.id
+                            );
                         }
 
                         if let Err(e) = mark_build_complete_and_release(
