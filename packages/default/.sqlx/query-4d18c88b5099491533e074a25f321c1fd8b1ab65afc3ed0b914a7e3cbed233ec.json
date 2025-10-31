@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            id, derivation_id, status, store_path, scheduled_at, started_at, \n            completed_at, attempts, error_message, push_size_bytes, \n            push_duration_ms, cache_destination\n        FROM cache_push_jobs\n        WHERE \n            (status = 'pending')\n            OR \n            (status = 'failed' AND retry_after IS NOT NULL AND retry_after <= NOW())\n        ORDER BY \n            CASE \n                WHEN status = 'pending' THEN 0\n                WHEN status = 'failed' THEN 1\n            END,\n            scheduled_at ASC\n        LIMIT $1\n        ",
+  "query": "\n        SELECT \n            cpj.id, cpj.derivation_id, cpj.status, cpj.store_path, cpj.scheduled_at, cpj.started_at, \n            cpj.completed_at, cpj.attempts, cpj.error_message, cpj.push_size_bytes, \n            cpj.push_duration_ms, cpj.cache_destination\n        FROM cache_push_jobs cpj\n        JOIN derivations d ON d.id = cpj.derivation_id\n        JOIN commits c ON c.id = d.commit_id\n        WHERE \n            (cpj.status = 'pending')\n            OR \n            (cpj.status = 'failed' AND cpj.retry_after IS NOT NULL AND cpj.retry_after <= NOW())\n        ORDER BY \n            CASE \n                WHEN cpj.status = 'pending' THEN 0\n                WHEN cpj.status = 'failed' THEN 1\n            END,\n            c.commit_timestamp DESC,\n            d.completed_at ASC NULLS LAST\n        LIMIT $1\n        ",
   "describe": {
     "columns": [
       {
@@ -84,5 +84,5 @@
       true
     ]
   },
-  "hash": "89dc47efdcd6f494a4af5d323ccbdaf75a2a62da14e7e66869f9752f8afae872"
+  "hash": "4d18c88b5099491533e074a25f321c1fd8b1ab65afc3ed0b914a7e3cbed233ec"
 }
