@@ -31,34 +31,6 @@ pub async fn get_derivations_needing_cache_push_for_dest(
     use crate::queries::derivations::EvaluationStatus;
 
     let sql = r#"
-        WITH job_status AS (
-            SELECT 
-                derivation_id,
-                MAX(CASE WHEN status IN ('completed', 'in_progress') THEN 1 ELSE 0 END) as has_active,
-                MAX(CASE WHEN status = 'failed' AND attempts < $4 THEN 1 ELSE 0 END) as has_retryable,
-                COUNT(*) as job_count
-            FROM cache_push_jobs
-            WHERE cache_destination = $3
-            GROUP BY derivation_id
-        ),
-        newest_nixos_systems AS (
-            SELECT DISTINCT d.id as nixos_id, d.completed_at as nixos_completed_at, c.commit_timestamp as commit_timestamp
-            FROM derivations d
-            JOIN commits c on d.commit_id = c.id
-            WHERE d.derivation_type = 'nixos'
-                AND d.status_id = $2
-            ORDER BY c.commit_timestamp DESC, nixos_completed_at DESC
-            LIMIT 20
-        ),
-        prioritized_derivations AS (
-            SELECT 
-                d.id,
-                MAX(nns.commit_timestamp) as newest_nixos_parent
-            FROM derivations d
-            LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
-            LEFT JOIN newest_nixos_systems nns ON nns.nixos_id = dd.derivation_id
-            GROUP BY d.id
-        )
         SELECT
             d.id, d.commit_id, d.derivation_type, d.derivation_name,
             d.derivation_path, d.derivation_target, d.scheduled_at,
@@ -67,20 +39,12 @@ pub async fn get_derivations_needing_cache_push_for_dest(
             d.version, d.status_id, d.build_elapsed_seconds,
             d.build_current_target, d.build_last_activity_seconds,
             d.build_last_heartbeat, d.cf_agent_enabled, d.store_path
-        FROM derivations d
-        LEFT JOIN job_status js ON js.derivation_id = d.id
-        LEFT JOIN prioritized_derivations pd ON pd.id = d.id
-        WHERE d.status_id = $2
-            AND d.store_path IS NOT NULL
-            AND (
-                js.derivation_id IS NULL
-                OR (js.has_active = 0 AND js.has_retryable = 1)
-            )
-        ORDER BY 
-            CASE WHEN d.derivation_type = 'nixos' THEN 1 ELSE 0 END,
-            pd.newest_nixos_parent DESC NULLS LAST,
-            d.commit_id DESC,
-            d.completed_at ASC NULLS LAST
+        FROM view_cache_push_queue v
+        JOIN derivations d ON d.id = v.id
+        WHERE (v.cache_destination = $3 OR v.cache_destination IS NULL)
+            AND v.derivation_status_id = $2
+            AND v.push_status IN ('no_job', 'retryable')
+            AND (v.current_max_attempts IS NULL OR v.current_max_attempts < $4)
         LIMIT $1
     "#;
 
@@ -329,6 +293,7 @@ pub async fn mark_derivation_cache_pushed(pool: &PgPool, derivation_id: i32) -> 
 }
 
 /// Get pending cache push jobs, including failed jobs ready for retry
+/// Prioritizes jobs from newest commits first
 pub async fn get_pending_cache_push_jobs(
     pool: &PgPool,
     limit: Option<i32>,
@@ -337,20 +302,23 @@ pub async fn get_pending_cache_push_jobs(
         CachePushJob,
         r#"
         SELECT 
-            id, derivation_id, status, store_path, scheduled_at, started_at, 
-            completed_at, attempts, error_message, push_size_bytes, 
-            push_duration_ms, cache_destination
-        FROM cache_push_jobs
+            cpj.id, cpj.derivation_id, cpj.status, cpj.store_path, cpj.scheduled_at, cpj.started_at, 
+            cpj.completed_at, cpj.attempts, cpj.error_message, cpj.push_size_bytes, 
+            cpj.push_duration_ms, cpj.cache_destination
+        FROM cache_push_jobs cpj
+        JOIN derivations d ON d.id = cpj.derivation_id
+        JOIN commits c ON c.id = d.commit_id
         WHERE 
-            (status = 'pending')
+            (cpj.status = 'pending')
             OR 
-            (status = 'failed' AND retry_after IS NOT NULL AND retry_after <= NOW())
+            (cpj.status = 'failed' AND cpj.retry_after IS NOT NULL AND cpj.retry_after <= NOW())
         ORDER BY 
             CASE 
-                WHEN status = 'pending' THEN 0
-                WHEN status = 'failed' THEN 1
+                WHEN cpj.status = 'pending' THEN 0
+                WHEN cpj.status = 'failed' THEN 1
             END,
-            scheduled_at ASC
+            c.commit_timestamp DESC,
+            d.completed_at ASC NULLS LAST
         LIMIT $1
         "#,
         limit.unwrap_or(10) as i64

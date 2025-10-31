@@ -21,7 +21,8 @@ impl Derivation {
         let base_delay = cache_config.retry_delay_seconds;
 
         while attempts < max_attempts {
-            // Add timeout wrapper - default 10 minutes per attempt
+            // Timeout per attempt
+            // For large systems (40GB+), increase push_timeout_seconds to 3600 (1 hour) or more
             let timeout_duration = Duration::from_secs(cache_config.push_timeout_seconds);
 
             match tokio::time::timeout(
@@ -317,41 +318,31 @@ async fn run_cache_command_streaming(
     let mut stdout_reader = BufReader::new(stdout).lines();
     let mut stderr_reader = BufReader::new(stderr).lines();
 
-    let timeout_duration = Duration::from_secs(300); // 5 min timeout per read
-
+    // No per-read timeout! Large cache pushes (40GB+) can take a long time between outputs
+    // We rely on the overall timeout in push_to_cache_with_retry instead
     loop {
         tokio::select! {
-            line_result = tokio::time::timeout(timeout_duration, stdout_reader.next_line()) => {
+            line_result = stdout_reader.next_line() => {
                 match line_result {
-                    Ok(Ok(Some(line))) => {
+                    Ok(Some(line)) => {
                         info!("cache stdout: {}", line);
                     }
-                    Ok(Ok(None)) => break,
-                    Ok(Err(e)) => {
+                    Ok(None) => break,
+                    Err(e) => {
                         error!("Error reading cache stdout: {}", e);
                         break;
-                    }
-                    Err(_timeout) => {
-                        error!("cache command hung - no stdout for 5 minutes");
-                        let _ = child.kill().await;
-                        bail!("Cache push command hung (no output for 5 minutes)");
                     }
                 }
             }
 
-            line_result = tokio::time::timeout(timeout_duration, stderr_reader.next_line()) => {
+            line_result = stderr_reader.next_line() => {
                 match line_result {
-                    Ok(Ok(Some(line))) => {
+                    Ok(Some(line)) => {
                         debug!("cache stderr: {}", line);
                     }
-                    Ok(Ok(None)) => {},
-                    Ok(Err(e)) => {
+                    Ok(None) => {},
+                    Err(e) => {
                         error!("Error reading cache stderr: {}", e);
-                    }
-                    Err(_timeout) => {
-                        error!("cache command hung - no stderr for 5 minutes");
-                        let _ = child.kill().await;
-                        bail!("Cache push command hung (no output for 5 minutes)");
                     }
                 }
             }
