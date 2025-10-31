@@ -37,6 +37,7 @@ pub struct CacheConfig {
     pub push_timeout_seconds: u64,
     #[serde(default)]
     pub force_repush: bool,
+    pub require_sigs: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -76,6 +77,7 @@ impl CacheConfig {
             args: vec![
                 "store".to_string(),
                 "sign".to_string(),
+                "--recursive".to_string(), // CRITICAL: Sign entire closure
                 "--key-file".to_string(),
                 key_path.clone(),
                 store_path.to_string(),
@@ -181,6 +183,7 @@ impl Default for CacheConfig {
             poll_interval: Self::default_poll_interval(),
             push_timeout_seconds: Self::default_push_timeout_seconds(),
             force_repush: false,
+            require_sigs: true,
         }
     }
 }

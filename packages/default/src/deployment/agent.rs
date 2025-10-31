@@ -403,7 +403,7 @@ impl AgentDeploymentManager {
                 &public_key_str,
                 "--option",
                 "require-sigs",
-                "true",
+                if self.config.require_sigs { "true" } else { "false" },
             ]);
             debug!("Using cache with signature verification");
         } else {
