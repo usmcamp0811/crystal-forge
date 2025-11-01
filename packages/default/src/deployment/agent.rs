@@ -209,25 +209,63 @@ impl AgentDeploymentManager {
             .as_secs();
         let unit_name = format!("crystal-forge-deploy-{}", timestamp);
 
-        // Build nix copy command
-        let mut copy_args = vec!["copy", "--from", cache_url, store_path];
+        // Detect if we're using Attic cache (contains "attic" in the URL)
+        let is_attic = cache_url.contains("attic");
+        
+        let (command, copy_args_vec) = if is_attic {
+            // For Attic: use nix-store --realize with http2 disabled
+            info!("Detected Attic cache, using nix-store with http2 disabled");
+            let mut args = vec![
+                "--realize".to_string(),
+                store_path.to_string(),
+                "--option".to_string(), "http2".to_string(), "false".to_string(),
+                "--option".to_string(), "substituters".to_string(), cache_url.to_string(),
+                "--option".to_string(), "require-sigs".to_string(), 
+                if self.config.require_sigs { "true".to_string() } else { "false".to_string() },
+            ];
+            
+            if let Some(ref public_key) = self.config.cache_public_key {
+                args.extend_from_slice(&[
+                    "--option".to_string(), 
+                    "trusted-public-keys".to_string(), 
+                    public_key.clone()
+                ]);
+                debug!("Using cache with signature verification");
+            }
+            
+            ("nix-store", args)
+        } else {
+            // For S3/other caches: use nix copy
+            info!("Using standard nix copy for cache");
+            let mut args = vec![
+                "copy".to_string(), 
+                "--from".to_string(), 
+                cache_url.to_string(), 
+                store_path.to_string()
+            ];
+            
+            args.extend_from_slice(&[
+                "--option".to_string(),
+                "require-sigs".to_string(),
+                if self.config.require_sigs { "true".to_string() } else { "false".to_string() },
+            ]);
+            debug!("Using cache with signature verification");
 
-        // Always set require-sigs according to config
-        copy_args.extend_from_slice(&[
-            "--option",
-            "require-sigs",
-            if self.config.require_sigs {
-                "true"
-            } else {
-                "false"
-            },
-        ]);
-        debug!("Using cache with signature verification");
+            if let Some(ref public_key) = self.config.cache_public_key {
+                args.extend_from_slice(&[
+                    "--option".to_string(), 
+                    "trusted-public-keys".to_string(), 
+                    public_key.clone()
+                ]);
+                debug!("Passing cache public key to nix copy");
+            }
+            
+            ("nix", args)
+        };
 
-        if let Some(ref public_key) = self.config.cache_public_key {
-            copy_args.extend_from_slice(&["--option", "trusted-public-keys", public_key]);
-            debug!("Passing cache public key to nix copy");
-        } else if self.config.require_sigs {
+        let copy_args = copy_args_vec;
+        
+        if self.config.cache_public_key.is_none() && self.config.require_sigs {
             warn!(
                 "require_sigs=true but no cache_public_key provided; relying on system nix.conf trusted-public-keys."
             );
@@ -241,14 +279,14 @@ impl AgentDeploymentManager {
         use tokio::io::{AsyncBufReadExt, BufReader};
         use std::process::Stdio;
         
-        let copy_timeout = self.config.deployment_timeout_minutes * 60; // Default 2 hours
+        let copy_timeout = self.config.deployment_timeout_minutes * 60;
         
-        debug!("Executing: nix {}", shell_join(&copy_args));
+        debug!("Executing: {} {}", command, shell_join(&copy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>()));
 
         let copy_result = tokio::time::timeout(
             std::time::Duration::from_secs(copy_timeout),
             async {
-                let mut child = TokioCommand::new("nix")
+                let mut child = TokioCommand::new(command)
                     .args(&copy_args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -271,7 +309,7 @@ impl AgentDeploymentManager {
                             match line_result {
                                 Ok(Some(line)) => {
                                     last_output = std::time::Instant::now();
-                                    info!("nix copy stdout: {}", line);
+                                    info!("{} stdout: {}", command, line);
                                 }
                                 Ok(None) => break,
                                 Err(e) => {
@@ -285,7 +323,7 @@ impl AgentDeploymentManager {
                             match line_result {
                                 Ok(Some(line)) => {
                                     last_output = std::time::Instant::now();
-                                    debug!("nix copy stderr: {}", line);
+                                    debug!("{} stderr: {}", command, line);
                                 }
                                 Ok(None) => {},
                                 Err(e) => {
@@ -310,7 +348,7 @@ impl AgentDeploymentManager {
 
                 let status = child.wait().await?;
                 if !status.success() {
-                    anyhow::bail!("nix copy failed with exit code {:?}", status.code());
+                    anyhow::bail!("{} failed with exit code {:?}", command, status.code());
                 }
                 
                 Ok::<(), anyhow::Error>(())
@@ -326,7 +364,7 @@ impl AgentDeploymentManager {
             }
             Err(_timeout) => {
                 anyhow::bail!(
-                    "Cache copy timed out after {} seconds ({}h {}m). Consider increasing cache_copy_timeout_seconds.",
+                    "Cache copy timed out after {} seconds ({}h {}m). Consider increasing deployment_timeout_minutes.",
                     copy_timeout,
                     copy_timeout / 3600,
                     (copy_timeout % 3600) / 60
