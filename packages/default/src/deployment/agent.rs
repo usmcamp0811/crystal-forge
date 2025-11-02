@@ -169,20 +169,7 @@ impl AgentDeploymentManager {
         let unit_name = format!("crystal-forge-deploy-{}", timestamp);
 
         // Determine the binary cache URL based on cache type
-        let binary_cache_url = match self.config.cache_type {
-            CacheType::Attic => {
-                // For Attic: append cache name to base URL
-                if let Some(cache_name) = &self.config.attic_cache_name {
-                    format!("{}/{}", cache_url, cache_name)
-                } else {
-                    anyhow::bail!("Attic cache configured but attic_cache_name is missing");
-                }
-            }
-            _ => {
-                // For S3/Nix/Http, use cache_url as-is
-                cache_url.to_string()
-            }
-        };
+        let binary_cache_url = cache_url.to_string();
 
         // Step 1: Copy from cache using nix copy --from with timeout
         info!("Copying {} from cache...", store_path);
