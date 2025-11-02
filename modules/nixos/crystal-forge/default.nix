@@ -151,7 +151,7 @@
           retry_delay_seconds = cfg.cache.retry_delay_seconds;
           force_repush = cfg.cache.force_repush;
           require_sigs = cfg.deployment.require_sigs;
-          attic_ignore_upsream_cache_filter = cfg.cache.attic_ignore_upsream_cache_filter;
+          attic_ignore_upstream_cache_filter = cfg.cache.attic_ignore_upstream_cache_filter;
           attic_jobs = cfg.cache.attic_jobs;
         }
         // lib.optionalAttrs (cfg.cache.push_to != null) {
