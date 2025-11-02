@@ -14,7 +14,7 @@ pub struct CacheConfig {
     pub compression: Option<String>,
     pub push_filter: Option<Vec<String>>,
     #[serde(default = "CacheConfig::default_parallel_uploads")]
-    pub parallel_uploads: u32,
+    pub parallel_uploads: u32, // TODO: do some docs or something this is only for s3 uploads otherwise we use attics jobs
     // S3-specific
     pub s3_region: Option<String>,
     pub s3_profile: Option<String>,
@@ -22,6 +22,7 @@ pub struct CacheConfig {
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
     pub attic_ignore_upsream_cache_filter: bool,
+    pub attic_jobs: u32, // parallel upload method in attic
     // Retry configuration
     #[serde(default)]
     pub max_retries: u32,
@@ -105,9 +106,11 @@ impl CacheConfig {
         let cache_name = self.attic_cache_name.as_ref()?;
 
         let mut args = vec!["push".to_string()];
-        if self.force_repush {
-            args.push("--force".to_string());
+        if self.attic_ignore_upsream_cache_filter {
+            args.push("--ignore-upstream-cache-filter".to_string());
         }
+
+        args.extend(["--jobs".to_string(), self.attic_jobs.to_string()]);
         args.extend([cache_name.clone(), store_path.to_string()]);
 
         Some(CacheCommand {
@@ -181,6 +184,7 @@ impl Default for CacheConfig {
             attic_token: None,
             attic_cache_name: None,
             attic_ignore_upsream_cache_filter: true,
+            attic_jobs: 5, // the same as the attic default
             max_retries: 3,
             retry_delay_seconds: 5,
             poll_interval: Self::default_poll_interval(),

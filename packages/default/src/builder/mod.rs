@@ -1,4 +1,5 @@
 use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
+use crate::models::config::CacheType;
 use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::build_reservations;
@@ -483,8 +484,13 @@ pub async fn run_cache_push_loop(pool: PgPool) {
         return;
     }
 
+    let worker_count = match cache_cfg.cache_type {
+        CacheType::S3 => cache_cfg.parallel_uploads.max(1) as usize,
+        CacheType::Attic => 1,
+        CacheType::Http | CacheType::Nix => cache_cfg.parallel_uploads.max(1) as usize,
+    };
+
     let build_cfg = cfg.get_build_config();
-    let worker_count = cache_cfg.parallel_uploads.max(1) as usize;
 
     info!("🚚 starting {} cache-push worker(s)…", worker_count);
 

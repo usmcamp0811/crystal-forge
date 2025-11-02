@@ -192,7 +192,16 @@ impl AgentDeploymentManager {
         const BASE_RETRY_DELAY: Duration = Duration::from_secs(5);
 
         for attempt in 1..=MAX_RETRIES {
-            match self.copy_from_cache(cache_url, store_path).await {
+            // Progressive retry strategies:
+            // Attempt 1: normal copy
+            // Attempt 2: add --refresh to bypass stale cache metadata
+            // Attempt 3: clear local nix cache directory, then retry
+            let use_refresh = attempt == 2;
+
+            match self
+                .copy_from_cache(cache_url, store_path, use_refresh)
+                .await
+            {
                 Ok(()) => {
                     info!(
                         "Successfully copied {} from cache on attempt {}",
@@ -208,6 +217,14 @@ impl AgentDeploymentManager {
                         e,
                         retry_delay.as_secs_f64()
                     );
+
+                    // After second failure, clear nix cache before third attempt
+                    if attempt == 2 {
+                        if let Err(cache_err) = self.clear_nix_cache().await {
+                            warn!("Failed to clear nix cache: {}", cache_err);
+                        }
+                    }
+
                     tokio::time::sleep(retry_delay).await;
                 }
                 Err(e) => {
@@ -226,7 +243,38 @@ impl AgentDeploymentManager {
         ))
     }
 
-    async fn copy_from_cache(&self, cache_url: &str, store_path: &str) -> Result<()> {
+    async fn clear_nix_cache(&self) -> Result<()> {
+        // Try to determine the cache directory intelligently
+        let cache_dir = if let Ok(home) = std::env::var("HOME") {
+            format!("{}/.cache/nix", home)
+        } else {
+            // Fallback to common service user location
+            "/var/lib/crystal-forge-agent/.cache/nix".to_string()
+        };
+
+        info!("Attempting to clear nix cache directory: {}", cache_dir);
+
+        if std::path::Path::new(&cache_dir).exists() {
+            tokio::fs::remove_dir_all(&cache_dir)
+                .await
+                .context(format!(
+                    "Failed to remove nix cache directory: {}",
+                    cache_dir
+                ))?;
+            info!("Successfully cleared nix cache directory: {}", cache_dir);
+        } else {
+            debug!("Nix cache directory does not exist: {}", cache_dir);
+        }
+
+        Ok(())
+    }
+
+    async fn copy_from_cache(
+        &self,
+        cache_url: &str,
+        store_path: &str,
+        refresh: bool,
+    ) -> Result<()> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
         use tokio::process::Command as TokioCommand;
@@ -238,6 +286,12 @@ impl AgentDeploymentManager {
             "--from".to_string(),
             cache_url.to_string(),
         ];
+
+        // Add --refresh flag to bypass stale local cache metadata
+        if refresh {
+            info!("Using --refresh flag to bypass stale local cache metadata");
+            copy_args.push("--refresh".to_string());
+        }
 
         // Disable HTTP/2 for Attic to avoid framing errors
         if matches!(self.config.cache_type, CacheType::Attic) {
