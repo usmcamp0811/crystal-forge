@@ -21,6 +21,7 @@ pub struct CacheConfig {
     // Attic-specific
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
+    pub attic_ignore_upsream_cache_filter: bool,
     // Retry configuration
     #[serde(default)]
     pub max_retries: u32,
@@ -179,6 +180,7 @@ impl Default for CacheConfig {
             s3_profile: None,
             attic_token: None,
             attic_cache_name: None,
+            attic_ignore_upsream_cache_filter: true,
             max_retries: 3,
             retry_delay_seconds: 5,
             poll_interval: Self::default_poll_interval(),
