@@ -121,6 +121,7 @@ impl AgentDeploymentManager {
     }
 
     async fn execute_deployment(&self, target: &str) -> Result<DeploymentResult> {
+        // TODO: This can be merged with deploy_store_path_from_Cache
         let _permit = self.deployment_lock.acquire().await?;
 
         info!("Starting deployment execution for: {}", target);
@@ -135,36 +136,15 @@ impl AgentDeploymentManager {
             );
         }
 
-        if self.config.dry_run_first && !is_store_path {
-            self.execute_dry_run(target)
-                .await
-                .context("Dry run failed")?;
-        }
-
         let start_time = std::time::Instant::now();
 
         let result = if is_store_path {
             // Store paths: ALWAYS deploy from cache
             let cache_url = self.config.cache_url.as_ref().unwrap(); // Safe because we checked above
             self.deploy_store_path_from_cache(target, cache_url).await?
-        } else if let Some(ref cache_url) = self.config.cache_url {
-            // Flake URLs: Try cache first, optionally fall back to local build
-            match self.deploy_flake_from_cache(target, cache_url).await {
-                Ok(r) => r,
-                Err(e) if self.config.fallback_to_local_build => {
-                    warn!(
-                        "Cache deployment failed, falling back to local build: {}",
-                        e
-                    );
-                    self.deploy_flake_local_build(target).await?
-                }
-                Err(e) => return Err(e),
-            }
-        } else {
-            // Flake URLs without cache: local build only
-            self.deploy_flake_local_build(target).await?
+        } else { 
+            anyhow::bail!("This is not a store path we don't know how to handle it! Target: {}", target);
         };
-
         let duration = start_time.elapsed();
         info!(
             "Deployment completed in {:.2} seconds",
@@ -172,29 +152,6 @@ impl AgentDeploymentManager {
         );
 
         Ok(result)
-    }
-
-    async fn execute_dry_run(&self, target: &str) -> Result<()> {
-        info!("Executing dry-run for flake target: {}", target);
-
-        let output = Command::new("nixos-rebuild")
-            .args(&["dry-run", "--flake", target])
-            .output()
-            .context("Failed to execute nixos-rebuild dry-run")?;
-
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "Dry-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
-                output.status.code(),
-                stdout.trim(),
-                stderr.trim()
-            );
-        }
-
-        debug!("Dry-run completed successfully");
-        Ok(())
     }
 
     async fn deploy_store_path_from_cache(
@@ -393,115 +350,6 @@ impl AgentDeploymentManager {
             .args(&run_args)
             .output()
             .context("Failed to execute systemd-run with switch-to-configuration")?;
-
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("systemd-run failed stdout: {}", stdout);
-            error!("systemd-run failed stderr: {}", stderr);
-            anyhow::bail!(
-                "systemd-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
-                output.status.code(),
-                stdout.trim(),
-                stderr.trim()
-            );
-        }
-
-        info!("Deployment detached to systemd unit: {}", unit_name);
-        Ok(DeploymentResult::Started { unit_name })
-    }
-
-    async fn deploy_flake_from_cache(
-        &self,
-        target: &str,
-        cache_url: &str,
-    ) -> Result<DeploymentResult> {
-        info!("Deploying flake from cache (legacy method): {}", target);
-
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-        let unit_name = format!("crystal-forge-deploy-{}", timestamp);
-
-        let mut args = vec![
-            "--unit",
-            &unit_name,
-            "--no-block",
-            "--same-dir",
-            "--collect",
-            "--",
-            "nixos-rebuild",
-            "switch",
-            "--flake",
-            target,
-            "--option",
-            "substituters",
-            cache_url,
-        ];
-
-        let public_key_str;
-        if let Some(ref public_key) = self.config.cache_public_key {
-            public_key_str = public_key.clone();
-            args.extend_from_slice(&[
-                "--option",
-                "trusted-public-keys",
-                &public_key_str,
-                "--option",
-                "require-sigs",
-                if self.config.require_sigs { "true" } else { "false" },
-            ]);
-            debug!("Using cache with signature verification");
-        } else {
-            warn!("No cache public key configured, skipping signature verification");
-            args.extend_from_slice(&["--option", "require-sigs", "false"]);
-        }
-
-        let output = Command::new("systemd-run")
-            .args(&args)
-            .output()
-            .context("Failed to execute systemd-run with nixos-rebuild")?;
-
-        if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("systemd-run failed stdout: {}", stdout);
-            error!("systemd-run failed stderr: {}", stderr);
-            anyhow::bail!(
-                "systemd-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
-                output.status.code(),
-                stdout.trim(),
-                stderr.trim()
-            );
-        }
-
-        info!("Deployment detached to systemd unit: {}", unit_name);
-        Ok(DeploymentResult::Started { unit_name })
-    }
-
-    /// Local build for flake URLs only
-    async fn deploy_flake_local_build(&self, target: &str) -> Result<DeploymentResult> {
-        info!("Deploying flake with local build: {}", target);
-
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)?
-            .as_secs();
-        let unit_name = format!("crystal-forge-deploy-{}", timestamp);
-
-        let output = Command::new("systemd-run")
-            .args(&[
-                "--unit",
-                &unit_name,
-                "--no-block",
-                "--same-dir",
-                "--collect",
-                "--",
-                "nixos-rebuild",
-                "switch",
-                "--flake",
-                target,
-            ])
-            .output()
-            .context("Failed to execute systemd-run with nixos-rebuild")?;
 
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
