@@ -151,6 +151,7 @@
           retry_delay_seconds = cfg.cache.retry_delay_seconds;
           force_repush = cfg.cache.force_repush;
           require_sigs = cfg.deployment.require_sigs;
+          attic_ignore_upsream_cache_filter = cfg.attic_ignore_upsream_cache_filter;
         }
         // lib.optionalAttrs (cfg.cache.push_to != null) {
           push_to = cfg.cache.push_to;
@@ -841,6 +842,11 @@ in {
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "Attic cache name";
+      };
+      attic_ignore_upsream_cache_filter = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Push full derivation to attic";
       };
       # Retry configuration
       max_retries = lib.mkOption {
