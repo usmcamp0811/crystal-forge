@@ -3,6 +3,7 @@ use crate::models::config::{CacheType, deployment::DeploymentConfig};
 use anyhow::{Context, Result};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
@@ -162,30 +163,93 @@ impl AgentDeploymentManager {
         cache_url: &str,
     ) -> Result<DeploymentResult> {
         info!("Deploying store path from cache: {}", store_path);
+        info!("Cache type: {:?}", self.config.cache_type);
+        info!("Cache URL: {}", cache_url);
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
         let unit_name = format!("crystal-forge-deploy-{}", timestamp);
 
-        // Determine the binary cache URL based on cache type
+        // For all cache types, use cache_url directly
         let binary_cache_url = cache_url.to_string();
 
-        // Step 1: Copy from cache using nix copy --from with timeout
-        info!("Copying {} from cache...", store_path);
+        // Step 1: Copy from cache with retry logic
+        info!("Starting cache copy with retry logic...");
+        self.copy_from_cache_with_retry(&binary_cache_url, store_path)
+            .await?;
 
+        // Step 2: Activate the configuration using systemd-run
+        info!("Activating configuration via systemd-run...");
+        self.activate_configuration(store_path, &unit_name).await?;
+
+        info!("Deployment detached to systemd unit: {}", unit_name);
+        Ok(DeploymentResult::Started { unit_name })
+    }
+
+    async fn copy_from_cache_with_retry(&self, cache_url: &str, store_path: &str) -> Result<()> {
+        const MAX_RETRIES: u32 = 3;
+        const BASE_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.copy_from_cache(cache_url, store_path).await {
+                Ok(()) => {
+                    info!(
+                        "Successfully copied {} from cache on attempt {}",
+                        store_path, attempt
+                    );
+                    return Ok(());
+                }
+                Err(e) if attempt < MAX_RETRIES => {
+                    let retry_delay = BASE_RETRY_DELAY.mul_f64(2_f64.powi((attempt - 1) as i32));
+                    warn!(
+                        "Cache copy attempt {} failed: {}. Retrying in {:.1}s...",
+                        attempt,
+                        e,
+                        retry_delay.as_secs_f64()
+                    );
+                    tokio::time::sleep(retry_delay).await;
+                }
+                Err(e) => {
+                    error!("Cache copy failed after {} attempts: {}", MAX_RETRIES, e);
+                    return Err(e).context(format!(
+                        "Failed to copy {} from cache after {} retries",
+                        store_path, MAX_RETRIES
+                    ));
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!(
+            "Cache copy exhausted all {} retries",
+            MAX_RETRIES
+        ))
+    }
+
+    async fn copy_from_cache(&self, cache_url: &str, store_path: &str) -> Result<()> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
         use tokio::process::Command as TokioCommand;
 
         let copy_timeout = self.config.deployment_timeout_minutes * 60;
 
-        let copy_args = vec![
+        let mut copy_args = vec![
             "copy".to_string(),
             "--from".to_string(),
-            binary_cache_url.clone(),
-            store_path.to_string(),
+            cache_url.to_string(),
         ];
+
+        // Disable HTTP/2 for Attic to avoid framing errors
+        if matches!(self.config.cache_type, CacheType::Attic) {
+            debug!("Disabling HTTP/2 for Attic cache");
+            copy_args.extend(vec![
+                "--option".to_string(),
+                "http2".to_string(),
+                "false".to_string(),
+            ]);
+        }
+
+        copy_args.push(store_path.to_string());
 
         debug!(
             "Executing: nix {}",
@@ -193,24 +257,31 @@ impl AgentDeploymentManager {
         );
 
         let copy_result = tokio::time::timeout(
-            std::time::Duration::from_secs(copy_timeout),
+            Duration::from_secs(copy_timeout),
             async {
                 let mut child = TokioCommand::new("nix")
                     .args(&copy_args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .spawn()
-                    .context("Failed to spawn nix copy")?;
+                    .context("Failed to spawn nix copy command")?;
 
-                let stdout = child.stdout.take().expect("Failed to capture stdout");
-                let stderr = child.stderr.take().expect("Failed to capture stderr");
+                let stdout = child
+                    .stdout
+                    .take()
+                    .context("Failed to capture stdout from nix copy")?;
+                let stderr = child
+                    .stderr
+                    .take()
+                    .context("Failed to capture stderr from nix copy")?;
 
                 let mut stdout_reader = BufReader::new(stdout).lines();
                 let mut stderr_reader = BufReader::new(stderr).lines();
 
                 let start = std::time::Instant::now();
                 let mut last_output = std::time::Instant::now();
-                let mut progress_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                let mut progress_interval = tokio::time::interval(Duration::from_secs(30));
+                let mut error_buffer = String::new();
 
                 loop {
                     tokio::select! {
@@ -233,6 +304,11 @@ impl AgentDeploymentManager {
                                 Ok(Some(line)) => {
                                     last_output = std::time::Instant::now();
                                     debug!("nix copy stderr: {}", line);
+                                    // Capture error lines for better error reporting
+                                    if line.contains("error") {
+                                        error_buffer.push_str(&line);
+                                        error_buffer.push('\n');
+                                    }
                                 }
                                 Ok(None) => {},
                                 Err(e) => {
@@ -257,7 +333,12 @@ impl AgentDeploymentManager {
 
                 let status = child.wait().await?;
                 if !status.success() {
-                    anyhow::bail!("nix copy failed with exit code {:?}", status.code());
+                    let error_msg = if !error_buffer.is_empty() {
+                        format!("nix copy failed: {}", error_buffer)
+                    } else {
+                        format!("nix copy failed with exit code {:?}", status.code())
+                    };
+                    anyhow::bail!(error_msg);
                 }
 
                 Ok::<(), anyhow::Error>(())
@@ -268,26 +349,34 @@ impl AgentDeploymentManager {
         match copy_result {
             Ok(Ok(())) => {
                 info!("Successfully copied {} from cache", store_path);
+                Ok(())
             }
-            Ok(Err(e)) => {
-                return Err(e);
-            }
+            Ok(Err(e)) => Err(e),
             Err(_timeout) => {
                 anyhow::bail!(
-                    "Cache copy timed out after {} seconds ({}h {}m). Consider increasing deployment_timeout_minutes.",
+                    "Cache copy timed out after {} seconds ({}h {}m). Cache may be slow or unreachable. Consider increasing deployment_timeout_minutes.",
                     copy_timeout,
                     copy_timeout / 3600,
                     (copy_timeout % 3600) / 60
                 );
             }
         }
+    }
 
-        // Step 2: Activate the configuration using systemd-run
+    async fn activate_configuration(&self, store_path: &str, unit_name: &str) -> Result<()> {
         let switch_script = format!("{}/bin/switch-to-configuration", store_path);
+
+        // Verify the script exists
+        if !std::path::Path::new(&switch_script).exists() {
+            anyhow::bail!(
+                "switch-to-configuration script not found at: {}. Store path may not be available.",
+                switch_script
+            );
+        }
 
         let run_args = [
             "--unit",
-            &unit_name,
+            unit_name,
             "--no-block",
             "--same-dir",
             "--collect",
@@ -301,7 +390,7 @@ impl AgentDeploymentManager {
         let output = Command::new("systemd-run")
             .args(&run_args)
             .output()
-            .context("Failed to execute systemd-run with switch-to-configuration")?;
+            .context("Failed to spawn systemd-run process")?;
 
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -316,8 +405,7 @@ impl AgentDeploymentManager {
             );
         }
 
-        info!("Deployment detached to systemd unit: {}", unit_name);
-        Ok(DeploymentResult::Started { unit_name })
+        Ok(())
     }
 
     pub fn update_current_target(&mut self, target: Option<String>) {
