@@ -21,8 +21,8 @@ pub struct CacheConfig {
     // Attic-specific
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
-    pub attic_ignore_upsream_cache_filter: bool,
-    pub attic_jobs: u32, // parallel upload method in attic
+    pub attic_ignore_upstream_cache_filter: bool, // Fixed typo: upsream -> upstream
+    pub attic_jobs: u32,                          // parallel upload method in attic
     // Retry configuration
     #[serde(default)]
     pub max_retries: u32,
@@ -105,13 +105,19 @@ impl CacheConfig {
     fn attic_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let cache_name = self.attic_cache_name.as_ref()?;
 
-        let mut args = vec!["push".to_string()];
-        if self.attic_ignore_upsream_cache_filter {
+        // Build args with cache name at args[1] (cache.rs expects this position)
+        // Flags should come after the positional arguments to avoid conflicts
+        let mut args = vec![
+            "push".to_string(),
+            cache_name.clone(),
+            store_path.to_string(),
+        ];
+
+        // Add flags after positional arguments
+        if self.attic_ignore_upstream_cache_filter {
             args.push("--ignore-upstream-cache-filter".to_string());
         }
-
         args.extend(["--jobs".to_string(), self.attic_jobs.to_string()]);
-        args.extend([cache_name.clone(), store_path.to_string()]);
 
         Some(CacheCommand {
             command: "attic".to_string(),
@@ -183,8 +189,8 @@ impl Default for CacheConfig {
             s3_profile: None,
             attic_token: None,
             attic_cache_name: None,
-            attic_ignore_upsream_cache_filter: true,
-            attic_jobs: 5, // the same as the attic default
+            attic_ignore_upstream_cache_filter: true, // Fixed typo
+            attic_jobs: 5,                            // the same as the attic default
             max_retries: 3,
             retry_delay_seconds: 5,
             poll_interval: Self::default_poll_interval(),
