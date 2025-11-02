@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use crystal_forge::deployment::agent::{AgentDeploymentManager, DeploymentResult};
+use crystal_forge::deployment::agent::{AgentDeploymentManager, DeploymentResult, readlink_path};
 use crystal_forge::handlers::agent::heartbeat::LogResponse;
 use crystal_forge::models::config::CrystalForgeConfig;
 use crystal_forge::models::system_states::SystemState;
@@ -37,11 +37,6 @@ async fn main() -> Result<()> {
     // Initialize agent state with deployment manager
     let agent_state = Arc::new(Mutex::new(AgentState::new()?));
     watch_system(agent_state).await
-}
-
-/// Reads a symlink and returns its target as a `PathBuf`.
-fn readlink_path(path: &str) -> Result<PathBuf> {
-    Ok(PathBuf::from(nix::fcntl::readlink(path)?))
 }
 
 fn deriver_drv(path: &OsStr) -> Result<String> {

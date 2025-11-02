@@ -1,11 +1,15 @@
 use crate::handlers::agent::heartbeat::LogResponse;
 use crate::models::config::{CacheType, deployment::DeploymentConfig};
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
+
+// Note: This module requires readlink_path() to be in scope
+// readlink_path should be imported from the agent module where it's defined
 
 /// Result of a deployment operation
 #[derive(Debug, Clone)]
@@ -86,15 +90,8 @@ impl AgentDeploymentManager {
     }
 
     /// Read the actual current system from /run/current-system
-    async fn get_current_system(&self) -> Result<String> {
-        let current_system_path = std::path::Path::new("/run/current-system");
-        
-        if !current_system_path.exists() {
-            anyhow::bail!("/run/current-system does not exist");
-        }
-
-        let target = tokio::fs::read_link(current_system_path)
-            .await
+    fn get_current_system(&self) -> Result<String> {
+        let target = readlink_path("/run/current-system")
             .context("Failed to read /run/current-system symlink")?;
 
         let target_str = target
@@ -120,14 +117,14 @@ impl AgentDeploymentManager {
 
         // Always check the actual running system, not just cached state
         // This handles agent restarts, manual switches, and detached deployments
-        let actual_current = self.get_current_system().await?;
-        
+        let actual_current = self.get_current_system()?;
+
         if actual_current == desired_target {
             debug!("Already on target (verified via /run/current-system), skipping deployment");
             self.current_target = Some(desired_target.to_string());
             return Ok(DeploymentResult::AlreadyOnTarget);
         }
-        
+
         debug!("Current system: {}", actual_current);
         debug!("Desired system: {}", desired_target);
 
@@ -224,7 +221,10 @@ impl AgentDeploymentManager {
             // Attempt 3: clear local nix cache directory, then retry
             let use_refresh = attempt == 2;
 
-            match self.copy_from_cache(cache_url, store_path, use_refresh).await {
+            match self
+                .copy_from_cache(cache_url, store_path, use_refresh)
+                .await
+            {
                 Ok(()) => {
                     info!(
                         "Successfully copied {} from cache on attempt {}",
@@ -280,7 +280,10 @@ impl AgentDeploymentManager {
         if std::path::Path::new(&cache_dir).exists() {
             tokio::fs::remove_dir_all(&cache_dir)
                 .await
-                .context(format!("Failed to remove nix cache directory: {}", cache_dir))?;
+                .context(format!(
+                    "Failed to remove nix cache directory: {}",
+                    cache_dir
+                ))?;
             info!("Successfully cleared nix cache directory: {}", cache_dir);
         } else {
             debug!("Nix cache directory does not exist: {}", cache_dir);
@@ -289,7 +292,12 @@ impl AgentDeploymentManager {
         Ok(())
     }
 
-    async fn copy_from_cache(&self, cache_url: &str, store_path: &str, refresh: bool) -> Result<()> {
+    async fn copy_from_cache(
+        &self,
+        cache_url: &str,
+        store_path: &str,
+        refresh: bool,
+    ) -> Result<()> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
         use tokio::process::Command as TokioCommand;
@@ -502,4 +510,9 @@ fn shell_join(args: &[&str]) -> String {
         .map(|a| shell_quote(a))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Reads a symlink and returns its target as a `PathBuf`.
+pub fn readlink_path(path: &str) -> Result<PathBuf> {
+    Ok(PathBuf::from(nix::fcntl::readlink(path)?))
 }
