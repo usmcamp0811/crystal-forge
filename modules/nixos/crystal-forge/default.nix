@@ -844,7 +844,7 @@ in {
         default = null;
         description = "Attic cache name";
       };
-      attic_ignore_upsream_cache_filter = lib.mkOption {
+      attic_ignore_upstream_cache_filter = lib.mkOption {
         type = lib.types.bool;
         default = true;
         description = "Push full derivation to attic";
