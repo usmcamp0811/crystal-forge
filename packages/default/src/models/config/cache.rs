@@ -1,5 +1,6 @@
 use crate::models::config::duration_serde;
 use serde::Deserialize;
+use serde::Serialize;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -40,7 +41,7 @@ pub struct CacheConfig {
     pub require_sigs: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub enum CacheType {
     S3,
     Attic,

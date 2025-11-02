@@ -1,4 +1,4 @@
-use crate::models::config::duration_serde;
+use crate::models::config::{CacheType, duration_serde};
 use crate::models::deployment_policies::DeploymentPolicy;
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
@@ -22,6 +22,12 @@ pub struct DeploymentConfig {
     #[serde(default)]
     pub policies: Vec<DeploymentPolicy>,
     pub require_sigs: bool,
+
+    /// Cache type (Attic, S3, Nix, Http)
+    #[serde(default)]
+    pub cache_type: CacheType,
+    /// Attic cache name (used when cache_type is Attic)
+    pub attic_cache_name: Option<String>,
 }
 
 impl Default for DeploymentConfig {
@@ -40,6 +46,8 @@ impl Default for DeploymentConfig {
                 DeploymentPolicy::RequireCrystalForgeAgent { strict: false },
             ],
             require_sigs: true,
+            cache_type: CacheType::Nix,
+            attic_cache_name: None,
         }
     }
 }

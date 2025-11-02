@@ -1,5 +1,5 @@
 use crate::handlers::agent::heartbeat::LogResponse;
-use crate::models::config::deployment::DeploymentConfig;
+use crate::models::config::{CacheType, deployment::DeploymentConfig};
 use anyhow::{Context, Result};
 use std::process::Command;
 use std::sync::Arc;
@@ -121,7 +121,6 @@ impl AgentDeploymentManager {
     }
 
     async fn execute_deployment(&self, target: &str) -> Result<DeploymentResult> {
-        // TODO: This can be merged with deploy_store_path_from_Cache
         let _permit = self.deployment_lock.acquire().await?;
 
         info!("Starting deployment execution for: {}", target);
@@ -139,11 +138,14 @@ impl AgentDeploymentManager {
         let start_time = std::time::Instant::now();
 
         let result = if is_store_path {
-            // Store paths: ALWAYS deploy from cache
+            // Store paths: deploy from cache
             let cache_url = self.config.cache_url.as_ref().unwrap(); // Safe because we checked above
             self.deploy_store_path_from_cache(target, cache_url).await?
-        } else { 
-            anyhow::bail!("This is not a store path we don't know how to handle it! Target: {}", target);
+        } else {
+            anyhow::bail!(
+                "This is not a store path we don't know how to handle it! Target: {}",
+                target
+            );
         };
         let duration = start_time.elapsed();
         info!(
@@ -166,84 +168,47 @@ impl AgentDeploymentManager {
             .as_secs();
         let unit_name = format!("crystal-forge-deploy-{}", timestamp);
 
-        // Detect if we're using Attic cache (contains "attic" in the URL)
-        let is_attic = cache_url.contains("attic");
-        
-        let (command, copy_args_vec) = if is_attic {
-            // For Attic: use nix-store --realize with http2 disabled
-            info!("Detected Attic cache, using nix-store with http2 disabled");
-            let mut args = vec![
-                "--realize".to_string(),
-                store_path.to_string(),
-                "--option".to_string(), "http2".to_string(), "false".to_string(),
-                "--option".to_string(), "substituters".to_string(), cache_url.to_string(),
-                "--option".to_string(), "require-sigs".to_string(), 
-                if self.config.require_sigs { "true".to_string() } else { "false".to_string() },
-            ];
-            
-            if let Some(ref public_key) = self.config.cache_public_key {
-                args.extend_from_slice(&[
-                    "--option".to_string(), 
-                    "trusted-public-keys".to_string(), 
-                    public_key.clone()
-                ]);
-                debug!("Using cache with signature verification");
+        // Determine the binary cache URL based on cache type
+        let binary_cache_url = match self.config.cache_type {
+            CacheType::Attic => {
+                // For Attic: append cache name to base URL
+                if let Some(cache_name) = &self.config.attic_cache_name {
+                    format!("{}/{}", cache_url, cache_name)
+                } else {
+                    anyhow::bail!("Attic cache configured but attic_cache_name is missing");
+                }
             }
-            
-            ("nix-store", args)
-        } else {
-            // For S3/other caches: use nix copy
-            info!("Using standard nix copy for cache");
-            let mut args = vec![
-                "copy".to_string(), 
-                "--from".to_string(), 
-                cache_url.to_string(), 
-                store_path.to_string()
-            ];
-            
-            args.extend_from_slice(&[
-                "--option".to_string(),
-                "require-sigs".to_string(),
-                if self.config.require_sigs { "true".to_string() } else { "false".to_string() },
-            ]);
-            debug!("Using cache with signature verification");
-
-            if let Some(ref public_key) = self.config.cache_public_key {
-                args.extend_from_slice(&[
-                    "--option".to_string(), 
-                    "trusted-public-keys".to_string(), 
-                    public_key.clone()
-                ]);
-                debug!("Passing cache public key to nix copy");
+            _ => {
+                // For S3/Nix/Http, use cache_url as-is
+                cache_url.to_string()
             }
-            
-            ("nix", args)
         };
 
-        let copy_args = copy_args_vec;
-        
-        if self.config.cache_public_key.is_none() && self.config.require_sigs {
-            warn!(
-                "require_sigs=true but no cache_public_key provided; relying on system nix.conf trusted-public-keys."
-            );
-        }
-
-        // Step 1: Copy from cache with timeout
+        // Step 1: Copy from cache using nix copy --from with timeout
         info!("Copying {} from cache...", store_path);
-        
-        // Use tokio Command for async operation with timeout
-        use tokio::process::Command as TokioCommand;
-        use tokio::io::{AsyncBufReadExt, BufReader};
+
         use std::process::Stdio;
-        
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::process::Command as TokioCommand;
+
         let copy_timeout = self.config.deployment_timeout_minutes * 60;
-        
-        debug!("Executing: {} {}", command, shell_join(&copy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>()));
+
+        let copy_args = vec![
+            "copy".to_string(),
+            "--from".to_string(),
+            binary_cache_url.clone(),
+            store_path.to_string(),
+        ];
+
+        debug!(
+            "Executing: nix {}",
+            shell_join(&copy_args.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+        );
 
         let copy_result = tokio::time::timeout(
             std::time::Duration::from_secs(copy_timeout),
             async {
-                let mut child = TokioCommand::new(command)
+                let mut child = TokioCommand::new("nix")
                     .args(&copy_args)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
@@ -266,7 +231,7 @@ impl AgentDeploymentManager {
                             match line_result {
                                 Ok(Some(line)) => {
                                     last_output = std::time::Instant::now();
-                                    info!("{} stdout: {}", command, line);
+                                    info!("nix copy stdout: {}", line);
                                 }
                                 Ok(None) => break,
                                 Err(e) => {
@@ -280,7 +245,7 @@ impl AgentDeploymentManager {
                             match line_result {
                                 Ok(Some(line)) => {
                                     last_output = std::time::Instant::now();
-                                    debug!("{} stderr: {}", command, line);
+                                    debug!("nix copy stderr: {}", line);
                                 }
                                 Ok(None) => {},
                                 Err(e) => {
@@ -305,12 +270,13 @@ impl AgentDeploymentManager {
 
                 let status = child.wait().await?;
                 if !status.success() {
-                    anyhow::bail!("{} failed with exit code {:?}", command, status.code());
+                    anyhow::bail!("nix copy failed with exit code {:?}", status.code());
                 }
-                
+
                 Ok::<(), anyhow::Error>(())
-            }
-        ).await;
+            },
+        )
+        .await;
 
         match copy_result {
             Ok(Ok(())) => {
@@ -333,7 +299,8 @@ impl AgentDeploymentManager {
         let switch_script = format!("{}/bin/switch-to-configuration", store_path);
 
         let run_args = [
-            "--unit", &unit_name,
+            "--unit",
+            &unit_name,
             "--no-block",
             "--same-dir",
             "--collect",
@@ -342,10 +309,8 @@ impl AgentDeploymentManager {
             "switch",
         ];
 
-        // 🔎 DEBUG: show the exact systemd-run switch command
         debug!("Executing: systemd-run {}", shell_join(&run_args));
 
-        // run as before...
         let output = Command::new("systemd-run")
             .args(&run_args)
             .output()
@@ -375,8 +340,12 @@ impl AgentDeploymentManager {
 
 fn shell_quote(s: &str) -> String {
     // Simple POSIX single-quote: ' -> '\''  (ends, escaped quote, resumes)
-    if s.is_empty() { return "''".to_string(); }
-    if s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_./:@".contains(&b)) {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    if s.bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b"-_./:@".contains(&b))
+    {
         // Fast path: no quoting needed for common arg chars
         s.to_string()
     } else {
@@ -385,5 +354,8 @@ fn shell_quote(s: &str) -> String {
 }
 
 fn shell_join(args: &[&str]) -> String {
-    args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
+    args.iter()
+        .map(|a| shell_quote(a))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
