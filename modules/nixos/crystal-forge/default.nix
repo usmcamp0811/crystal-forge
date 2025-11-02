@@ -152,6 +152,7 @@
           force_repush = cfg.cache.force_repush;
           require_sigs = cfg.deployment.require_sigs;
           attic_ignore_upsream_cache_filter = cfg.cache.attic_ignore_upsream_cache_filter;
+          attic_jobs = cfg.cache.attic_jobs;
         }
         // lib.optionalAttrs (cfg.cache.push_to != null) {
           push_to = cfg.cache.push_to;
@@ -847,6 +848,11 @@ in {
         type = lib.types.bool;
         default = true;
         description = "Push full derivation to attic";
+      };
+      attic_jobs = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 5;
+        description = "Parallel Attic cache uploads";
       };
       # Retry configuration
       max_retries = lib.mkOption {
