@@ -85,6 +85,26 @@ impl AgentDeploymentManager {
         }
     }
 
+    /// Read the actual current system from /run/current-system
+    async fn get_current_system(&self) -> Result<String> {
+        let current_system_path = std::path::Path::new("/run/current-system");
+        
+        if !current_system_path.exists() {
+            anyhow::bail!("/run/current-system does not exist");
+        }
+
+        let target = tokio::fs::read_link(current_system_path)
+            .await
+            .context("Failed to read /run/current-system symlink")?;
+
+        let target_str = target
+            .to_str()
+            .context("Current system path is not valid UTF-8")?
+            .to_string();
+
+        Ok(target_str)
+    }
+
     pub async fn process_heartbeat_response(
         &mut self,
         response: LogResponse,
@@ -98,12 +118,18 @@ impl AgentDeploymentManager {
 
         info!("Received desired target: {}", desired_target);
 
-        if let Some(ref current) = self.current_target {
-            if current == &desired_target {
-                debug!("Already on target, skipping deployment");
-                return Ok(DeploymentResult::AlreadyOnTarget);
-            }
+        // Always check the actual running system, not just cached state
+        // This handles agent restarts, manual switches, and detached deployments
+        let actual_current = self.get_current_system().await?;
+        
+        if actual_current == desired_target {
+            debug!("Already on target (verified via /run/current-system), skipping deployment");
+            self.current_target = Some(desired_target.to_string());
+            return Ok(DeploymentResult::AlreadyOnTarget);
         }
+        
+        debug!("Current system: {}", actual_current);
+        debug!("Desired system: {}", desired_target);
 
         match self.execute_deployment(&desired_target).await {
             Ok(result) => {
@@ -198,10 +224,7 @@ impl AgentDeploymentManager {
             // Attempt 3: clear local nix cache directory, then retry
             let use_refresh = attempt == 2;
 
-            match self
-                .copy_from_cache(cache_url, store_path, use_refresh)
-                .await
-            {
+            match self.copy_from_cache(cache_url, store_path, use_refresh).await {
                 Ok(()) => {
                     info!(
                         "Successfully copied {} from cache on attempt {}",
@@ -257,10 +280,7 @@ impl AgentDeploymentManager {
         if std::path::Path::new(&cache_dir).exists() {
             tokio::fs::remove_dir_all(&cache_dir)
                 .await
-                .context(format!(
-                    "Failed to remove nix cache directory: {}",
-                    cache_dir
-                ))?;
+                .context(format!("Failed to remove nix cache directory: {}", cache_dir))?;
             info!("Successfully cleared nix cache directory: {}", cache_dir);
         } else {
             debug!("Nix cache directory does not exist: {}", cache_dir);
@@ -269,12 +289,7 @@ impl AgentDeploymentManager {
         Ok(())
     }
 
-    async fn copy_from_cache(
-        &self,
-        cache_url: &str,
-        store_path: &str,
-        refresh: bool,
-    ) -> Result<()> {
+    async fn copy_from_cache(&self, cache_url: &str, store_path: &str, refresh: bool) -> Result<()> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
         use tokio::process::Command as TokioCommand;
