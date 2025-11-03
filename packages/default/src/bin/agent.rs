@@ -117,9 +117,9 @@ fn create_signed_payload(
     let hostname = hostname::get()?.to_string_lossy().into_owned();
 
     // Guarantees a .drv (or returns an error)
-    let drv_path = deriver_drv_with_test_fallback(current_system)?;
 
-    let payload = SystemState::gather(&hostname, context, &drv_path)?;
+    let current_system_str = current_system.to_string_lossy();
+    let payload = SystemState::gather(&hostname, context, current_system_str.as_ref())?;
     let payload_json = serde_json::to_string(&payload)?;
 
     let key_bytes = STANDARD
