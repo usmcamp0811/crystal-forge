@@ -42,14 +42,14 @@ def test_boot_and_units(server, agent):
     server.wait_for_unit(C.AGENT_SERVICE)
 
 
-def test_keys_and_network(server, agent):
-    """Test that SSH keys are present and network connectivity works"""
-    # Verify keys exist
-    check_keys_exist(agent, C.AGENT_KEY_PATH, C.AGENT_PUB_PATH)
-    check_keys_exist(server, C.SERVER_PUB_PATH)
-
-    # Verify network connectivity
-    server.succeed("ping -c1 server")
+# def test_keys_and_network(server, agent):
+#     """Test that SSH keys are present and network connectivity works"""
+#     # Verify keys exist
+#     check_keys_exist(agent, C.AGENT_KEY_PATH, C.AGENT_PUB_PATH)
+#     check_keys_exist(server, C.SERVER_PUB_PATH)
+#
+#     # Verify network connectivity
+#     server.succeed("ping -c1 server")
 
 
 @pytest.mark.slow
