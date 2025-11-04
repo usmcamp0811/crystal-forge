@@ -5,13 +5,22 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from cf_test.vm_helpers import SmokeTestConstants as C
-from cf_test.vm_helpers import (SmokeTestData, check_keys_exist,
-                                check_timer_active, get_system_hash,
-                                run_service_and_verify_success,
-                                verify_db_state, wait_for_agent_acceptance,
-                                wait_for_crystal_forge_ready)
+from cf_test.vm_helpers import (
+    SmokeTestData,
+    check_keys_exist,
+    check_timer_active,
+    get_system_hash,
+    run_service_and_verify_success,
+    verify_db_state,
+    wait_for_agent_acceptance,
+    wait_for_crystal_forge_ready,
+)
 
-pytestmark = [pytest.mark.server, pytest.mark.integration, pytest.mark.agent]
+pytestmark = [
+    pytest.mark.server,
+    pytest.mark.integration,
+    pytest.mark.agent,
+]
 
 
 @pytest.fixture(scope="session")
@@ -28,8 +37,14 @@ def test_boot_and_units(server, agent):
 
     server.wait_for_unit(C.POSTGRES_SERVICE)
     server.wait_for_unit(C.SERVER_SERVICE)
-    agent.wait_for_unit(C.AGENT_SERVICE)
     server.wait_for_unit("multi-user.target")
+
+    # Some VM profiles don't provision an agent VM; the fixture yields None.
+    if agent is None:
+        server.log("Agent VM not provisioned in this profile; skipping agent checks.")
+        pytest.skip("agent VM not available in this test profile")
+
+    agent.wait_for_unit(C.AGENT_SERVICE)
 
 
 def test_keys_and_network(server, agent):
@@ -216,7 +231,7 @@ def test_deployment_policy_manager_auto_latest(cf_client, server, agent):
     # Update the agent system to use this flake and set auto_latest policy
     cf_client.execute_sql(
         """
-        UPDATE systems 
+        UPDATE systems
         SET flake_id = %s, deployment_policy = 'auto_latest', desired_target = NULL
         WHERE hostname = %s
         """,
@@ -585,8 +600,11 @@ def test_agent_deployment_result_enum_coverage(cf_client, server, agent):
         or "error" in agent_logs.lower()
     )
 
+
 @pytest.mark.slow
-def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_client, server, agent):
+def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(
+    cf_client, server, agent
+):
     """Test that agent skips deployment when desired_target resolves to same derivation path as current system"""
     wait_for_crystal_forge_ready(server)
     agent_hostname = agent.succeed("hostname -s").strip()
@@ -595,21 +613,21 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_
 
     # Get the current derivation path that the agent is running
     current_derivation_path = agent.succeed("readlink /run/current-system").strip()
-    
+
     # Create a test scenario where we have the same derivation but from different git hashes
     # This simulates when two different commits/refs point to the same actual build result
-    
+
     # Test 1: Set a desired target that should resolve to the same derivation path
     # In a real scenario, this could happen when:
     # - Two commits have identical content (e.g., merge commits, reverts, etc.)
     # - A tag and branch point to the same commit
     # - Manual testing with the same configuration
     test_target_same_path = f"git+https://example.com/repo?rev=same-content-123#nixosConfigurations.{agent_hostname}.config.system.build.toplevel"
-    
+
     # Mock the scenario by setting up database state that represents a desired target
     # that would resolve to the same derivation path
     now = datetime.now(UTC)
-    
+
     # Create a flake for testing
     flake_id = cf_client.execute_sql(
         """
@@ -617,9 +635,14 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_
         VALUES (%s, %s, true, %s, %s)
         RETURNING id
         """,
-        ("test-same-derivation", "https://example.com/test-same-derivation.git", now, now),
+        (
+            "test-same-derivation",
+            "https://example.com/test-same-derivation.git",
+            now,
+            now,
+        ),
     )[0]["id"]
-    
+
     # Create a commit
     commit_id = cf_client.execute_sql(
         """
@@ -629,7 +652,7 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_
         """,
         (flake_id, "same-content-123", now, now),
     )[0]["id"]
-    
+
     # Create a derivation that has the SAME derivation_path as current system
     # This simulates the case where different git refs produce identical builds
     cf_client.execute_sql(
@@ -654,7 +677,7 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_
             now - timedelta(minutes=5),
         ),
     )
-    
+
     # Set the desired target
     cf_client.execute_sql(
         "UPDATE systems SET desired_target = %s WHERE hostname = %s",
@@ -670,22 +693,27 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_
 
     # Check agent logs - should NOT attempt deployment
     agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
-    
+
     # The agent should recognize it's already on the target and skip deployment
-    assert any(phrase in agent_logs for phrase in [
-        "Already on target",
-        "Same derivation path",
-        "Skipping deployment - already current",
-        "No deployment needed - already on desired target"
-    ]), f"Agent should skip deployment when desired target has same derivation path. Logs: {agent_logs}"
-    
+    assert any(
+        phrase in agent_logs
+        for phrase in [
+            "Already on target",
+            "Same derivation path",
+            "Skipping deployment - already current",
+            "No deployment needed - already on desired target",
+        ]
+    ), f"Agent should skip deployment when desired target has same derivation path. Logs: {agent_logs}"
+
     # Should NOT see deployment attempt messages
-    assert "Starting deployment execution" not in agent_logs, "Agent should not attempt deployment for same derivation path"
-    
+    assert (
+        "Starting deployment execution" not in agent_logs
+    ), "Agent should not attempt deployment for same derivation path"
+
     # Test 2: Change to a different derivation path to verify deployment would still work
     different_derivation_path = "/nix/store/different-hash-system"
     test_target_different = f"git+https://example.com/repo?rev=different-content-456#nixosConfigurations.{agent_hostname}.config.system.build.toplevel"
-    
+
     # Create another commit with different derivation path
     commit_id_different = cf_client.execute_sql(
         """
@@ -693,9 +721,14 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_
         VALUES (%s, %s, 'Different content commit', 'Test Author', 'test@example.com', %s, %s)
         RETURNING id
         """,
-        (flake_id, "different-content-456", now + timedelta(minutes=1), now + timedelta(minutes=1)),
+        (
+            flake_id,
+            "different-content-456",
+            now + timedelta(minutes=1),
+            now + timedelta(minutes=1),
+        ),
     )[0]["id"]
-    
+
     cf_client.execute_sql(
         """
         INSERT INTO derivations (
@@ -718,36 +751,47 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(cf_
             now - timedelta(minutes=1),
         ),
     )
-    
+
     # Update desired target to the different one
     cf_client.execute_sql(
         "UPDATE systems SET desired_target = %s WHERE hostname = %s",
         (test_target_different, agent_hostname),
     )
-    
+
     # Clear logs and trigger heartbeat
     agent.succeed("journalctl --vacuum-time=1s")
     agent.succeed("touch /run/current-system")
     time.sleep(5)
-    
+
     # This time should attempt deployment since derivation paths differ
     agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
-    assert "Starting deployment execution" in agent_logs, "Agent should attempt deployment for different derivation path"
-    
+    assert (
+        "Starting deployment execution" in agent_logs
+    ), "Agent should attempt deployment for different derivation path"
+
     # Clean up test data
-    cf_client.execute_sql("DELETE FROM derivations WHERE commit_id IN (%s, %s)", (commit_id, commit_id_different))
-    cf_client.execute_sql("DELETE FROM commits WHERE id IN (%s, %s)", (commit_id, commit_id_different))
+    cf_client.execute_sql(
+        "DELETE FROM derivations WHERE commit_id IN (%s, %s)",
+        (commit_id, commit_id_different),
+    )
+    cf_client.execute_sql(
+        "DELETE FROM commits WHERE id IN (%s, %s)", (commit_id, commit_id_different)
+    )
     cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
-    cf_client.execute_sql("UPDATE systems SET desired_target = NULL WHERE hostname = %s", (agent_hostname,))
+    cf_client.execute_sql(
+        "UPDATE systems SET desired_target = NULL WHERE hostname = %s",
+        (agent_hostname,),
+    )
+
 
 @pytest.mark.slow
 def test_dry_run_evaluation_robustness(cf_client, server, agent):
     """Test that dry-run evaluations handle malformed flake targets gracefully"""
     wait_for_crystal_forge_ready(server)
-    
+
     # Test 1: Verify dry-run doesn't produce "flake:derivation" errors
     # This tests the fix for the original issue where eval_main_drv_path was returning garbage
-    
+
     # Create a flake with a valid repo URL
     now = datetime.now(UTC)
     flake_id = cf_client.execute_sql(
@@ -758,7 +802,7 @@ def test_dry_run_evaluation_robustness(cf_client, server, agent):
         """,
         ("test-dry-run", "https://gitlab.com/test/dotfiles", now, now),
     )[0]["id"]
-    
+
     # Create a commit
     commit_id = cf_client.execute_sql(
         """
@@ -768,7 +812,7 @@ def test_dry_run_evaluation_robustness(cf_client, server, agent):
         """,
         (flake_id, "abc123def456", now, now),
     )[0]["id"]
-    
+
     # Create a derivation that should trigger dry-run evaluation
     derivation_id = cf_client.execute_sql(
         """
@@ -777,7 +821,7 @@ def test_dry_run_evaluation_robustness(cf_client, server, agent):
             status_id, attempt_count, scheduled_at
         )
         VALUES (
-            %s, 'nixos', 'test-system', 
+            %s, 'nixos', 'test-system',
             'git+https://gitlab.com/test/dotfiles?rev=abc123def456#nixosConfigurations.test-system.config.system.build.toplevel',
             (SELECT id FROM derivation_statuses WHERE name = 'dry-run-pending'),
             0, NOW()
@@ -786,12 +830,13 @@ def test_dry_run_evaluation_robustness(cf_client, server, agent):
         """,
         (commit_id,),
     )[0]["id"]
-    
+
     # Wait for the server to process this derivation
     # The key test is that it should NOT fail with "cannot find flake 'flake:derivation'"
     import time
+
     time.sleep(10)
-    
+
     # Check the derivation status - it should either succeed or fail with a proper error message
     result = cf_client.execute_sql(
         """
@@ -802,12 +847,16 @@ def test_dry_run_evaluation_robustness(cf_client, server, agent):
         """,
         (derivation_id,),
     )[0]
-    
+
     # The critical test: error message should NOT contain "flake:derivation"
     error_msg = result.get("error_message", "")
-    assert "flake:derivation" not in error_msg, f"Dry-run produced malformed flake reference: {error_msg}"
-    assert "cannot find flake 'flake:derivation'" not in error_msg, f"Dry-run evaluation regression detected: {error_msg}"
-    
+    assert (
+        "flake:derivation" not in error_msg
+    ), f"Dry-run produced malformed flake reference: {error_msg}"
+    assert (
+        "cannot find flake 'flake:derivation'" not in error_msg
+    ), f"Dry-run evaluation regression detected: {error_msg}"
+
     # If it failed, it should be a proper Nix evaluation error, not a malformed reference
     if result["status_name"] == "dry-run-failed":
         # These are acceptable failure reasons (repo doesn't exist, etc.)
@@ -816,11 +865,12 @@ def test_dry_run_evaluation_robustness(cf_client, server, agent):
             "error: getting status of",
             "fatal: repository",
             "nix build --dry-run failed",
-            "No such file or directory"
+            "No such file or directory",
         ]
-        assert any(acceptable in error_msg for acceptable in acceptable_errors), \
-            f"Unexpected dry-run failure: {error_msg}"
-    
+        assert any(
+            acceptable in error_msg for acceptable in acceptable_errors
+        ), f"Unexpected dry-run failure: {error_msg}"
+
     # Clean up
     cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
     cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
@@ -831,23 +881,23 @@ def test_dry_run_evaluation_robustness(cf_client, server, agent):
 def test_database_schema_consistency(cf_client, server):
     """Test that database queries include all required columns from the Derivation struct"""
     wait_for_crystal_forge_ready(server)
-    
+
     # Test that cache push queries include cf_agent_enabled field
     # This tests the fix for the "no column found for name: cf_agent_enabled" error
-    
+
     # First, verify the derivations table has the cf_agent_enabled column
     columns = cf_client.execute_sql(
         """
-        SELECT column_name 
-        FROM information_schema.columns 
+        SELECT column_name
+        FROM information_schema.columns
         WHERE table_name = 'derivations' AND column_name = 'cf_agent_enabled'
         """
     )
     assert len(columns) > 0, "derivations table missing cf_agent_enabled column"
-    
+
     # Create a test derivation to ensure cache push queries work
     now = datetime.now(UTC)
-    
+
     # Create required parent records
     flake_id = cf_client.execute_sql(
         """
@@ -857,7 +907,7 @@ def test_database_schema_consistency(cf_client, server):
         """,
         ("test-schema", "https://example.com/test", now, now),
     )[0]["id"]
-    
+
     commit_id = cf_client.execute_sql(
         """
         INSERT INTO commits (flake_id, git_commit_hash, commit_message, author_name, author_email, timestamp, created_at)
@@ -866,7 +916,7 @@ def test_database_schema_consistency(cf_client, server):
         """,
         (flake_id, "schema123", now, now),
     )[0]["id"]
-    
+
     # Create a derivation with build-complete status to trigger cache push logic
     derivation_id = cf_client.execute_sql(
         """
@@ -883,71 +933,77 @@ def test_database_schema_consistency(cf_client, server):
         """,
         (commit_id, now),
     )[0]["id"]
-    
+
     # Wait for cache push logic to potentially process this
     time.sleep(5)
-    
+
     # Check server logs for the specific error we're trying to prevent
     server_logs = server.succeed(
         "journalctl -u crystal-forge-builder.service --no-pager --since '1 minute ago' | grep -i 'cf_agent_enabled' || true"
     )
-    
+
     # Should NOT see the schema error in logs
-    assert "no column found for name: cf_agent_enabled" not in server_logs, \
-        f"Database schema error detected: {server_logs}"
-    
+    assert (
+        "no column found for name: cf_agent_enabled" not in server_logs
+    ), f"Database schema error detected: {server_logs}"
+
     # Clean up
-    cf_client.execute_sql("DELETE FROM cache_push_jobs WHERE derivation_id = %s", (derivation_id,))
+    cf_client.execute_sql(
+        "DELETE FROM cache_push_jobs WHERE derivation_id = %s", (derivation_id,)
+    )
     cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
     cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
     cf_client.execute_sql("DELETE FROM flakes WHERE id = %s", (flake_id,))
 
 
-@pytest.mark.slow 
+@pytest.mark.slow
 def test_vault_agent_configuration_resilience(cf_client, server):
     """Test that Crystal Forge handles vault-agent configuration issues gracefully"""
     wait_for_crystal_forge_ready(server)
-    
+
     # Test that the system can evaluate NixOS configurations even with Attic/vault issues
     # This is a regression test for the "cannot coerce null to a string" error
-    
+
     # Check that the vault-agent service is not causing evaluation failures
     vault_logs = server.succeed(
         "journalctl -u vault-agent-crystal-forge-setup.service --no-pager --since '10 minutes ago' || true"
     )
-    
+
     # Look for the specific error we fixed
-    assert "cannot coerce null to a string" not in vault_logs, \
-        f"Vault agent null coercion error detected: {vault_logs}"
-    
+    assert (
+        "cannot coerce null to a string" not in vault_logs
+    ), f"Vault agent null coercion error detected: {vault_logs}"
+
     # Check Crystal Forge server logs for vault-related evaluation failures
     cf_logs = server.succeed(
         "journalctl -u crystal-forge-server.service --no-pager --since '10 minutes ago' | grep -i 'vault\\|attic' || true"
     )
-    
+
     # Should not see configuration evaluation failures related to vault/attic
     problematic_patterns = [
         "cannot coerce null to a string",
         "while evaluating the option.*attic-env",
         "vault-agent.*failed",
-        "attic.*null"
+        "attic.*null",
     ]
-    
+
     for pattern in problematic_patterns:
-        assert pattern not in cf_logs, f"Vault/Attic configuration issue detected: {cf_logs}"
+        assert (
+            pattern not in cf_logs
+        ), f"Vault/Attic configuration issue detected: {cf_logs}"
 
 
 @pytest.mark.slow
 def test_build_method_consistency(cf_client, server):
     """Test that dry-run and build methods produce consistent results"""
     wait_for_crystal_forge_ready(server)
-    
+
     # Test that switching from nix eval to nix build --dry-run produces better error messages
     # This validates the fix for using proper dry-run evaluation
-    
+
     # Create a scenario that would expose evaluation method differences
     now = datetime.now(UTC)
-    
+
     flake_id = cf_client.execute_sql(
         """
         INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
@@ -956,7 +1012,7 @@ def test_build_method_consistency(cf_client, server):
         """,
         ("test-build-method", "https://example.com/nonexistent", now, now),
     )[0]["id"]
-    
+
     commit_id = cf_client.execute_sql(
         """
         INSERT INTO commits (flake_id, git_commit_hash, commit_message, author_name, author_email, timestamp, created_at)
@@ -965,7 +1021,7 @@ def test_build_method_consistency(cf_client, server):
         """,
         (flake_id, "build123", now, now),
     )[0]["id"]
-    
+
     # Create a derivation that will fail evaluation
     derivation_id = cf_client.execute_sql(
         """
@@ -974,7 +1030,7 @@ def test_build_method_consistency(cf_client, server):
             status_id, attempt_count, scheduled_at
         )
         VALUES (
-            %s, 'nixos', 'test-build-method', 
+            %s, 'nixos', 'test-build-method',
             'https://example.com/nonexistent?rev=build123#nixosConfigurations.test.config.system.build.toplevel',
             (SELECT id FROM derivation_statuses WHERE name = 'dry-run-pending'),
             0, NOW()
@@ -983,10 +1039,10 @@ def test_build_method_consistency(cf_client, server):
         """,
         (commit_id,),
     )[0]["id"]
-    
+
     # Wait for processing
     time.sleep(10)
-    
+
     # Check that error messages are meaningful and don't contain internal implementation details
     result = cf_client.execute_sql(
         """
@@ -997,33 +1053,35 @@ def test_build_method_consistency(cf_client, server):
         """,
         (derivation_id,),
     )[0]
-    
+
     error_msg = result.get("error_message", "")
-    
+
     # Error messages should be user-friendly, not expose internal method details
     problematic_internals = [
         "eval_main_drv_path",
-        "list_immediate_input_drvs", 
+        "list_immediate_input_drvs",
         "derivation show failed",
-        "flake:derivation"
+        "flake:derivation",
     ]
-    
+
     for internal in problematic_internals:
-        assert internal not in error_msg, \
-            f"Error message exposes internal implementation: {error_msg}"
-    
+        assert (
+            internal not in error_msg
+        ), f"Error message exposes internal implementation: {error_msg}"
+
     # If it failed (which it should), error should mention the actual issue
     if result["status_name"] == "dry-run-failed":
         # Should see proper Nix error messages
         expected_error_types = [
             "nix build --dry-run failed",
-            "does not provide attribute", 
+            "does not provide attribute",
             "error: getting status of",
-            "fatal: repository"
+            "fatal: repository",
         ]
-        assert any(expected in error_msg for expected in expected_error_types), \
-            f"Error message doesn't contain expected Nix error: {error_msg}"
-    
+        assert any(
+            expected in error_msg for expected in expected_error_types
+        ), f"Error message doesn't contain expected Nix error: {error_msg}"
+
     # Clean up
     cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
     cf_client.execute_sql("DELETE FROM commits WHERE id = %s", (commit_id,))
@@ -1034,16 +1092,16 @@ def test_build_method_consistency(cf_client, server):
 def test_server_memory_stability_under_evaluation_load(cf_client, server):
     """Test that server memory remains stable during multiple evaluations"""
     wait_for_crystal_forge_ready(server)
-    
+
     # Monitor memory before load test
     initial_memory = server.succeed(
         "ps -o rss= -p $(pgrep crystal-forge-server) | awk '{print $1}'"
     ).strip()
-    
+
     # Create multiple derivations to trigger concurrent evaluation
     now = datetime.now(UTC)
     created_ids = {"flakes": [], "commits": [], "derivations": []}
-    
+
     for i in range(5):  # Create 5 test scenarios
         flake_id = cf_client.execute_sql(
             """
@@ -1054,7 +1112,7 @@ def test_server_memory_stability_under_evaluation_load(cf_client, server):
             (f"test-memory-{i}", f"https://example.com/test-{i}", now, now),
         )[0]["id"]
         created_ids["flakes"].append(flake_id)
-        
+
         commit_id = cf_client.execute_sql(
             """
             INSERT INTO commits (flake_id, git_commit_hash, commit_message, author_name, author_email, timestamp, created_at)
@@ -1064,7 +1122,7 @@ def test_server_memory_stability_under_evaluation_load(cf_client, server):
             (flake_id, f"memory{i}123", f"Memory test {i}", now, now),
         )[0]["id"]
         created_ids["commits"].append(commit_id)
-        
+
         derivation_id = cf_client.execute_sql(
             """
             INSERT INTO derivations (
@@ -1079,33 +1137,34 @@ def test_server_memory_stability_under_evaluation_load(cf_client, server):
             RETURNING id
             """,
             (
-                commit_id, 
+                commit_id,
                 f"test-memory-{i}",
-                f"https://example.com/test-{i}?rev=memory{i}123#nixosConfigurations.test-memory-{i}.config.system.build.toplevel"
+                f"https://example.com/test-{i}?rev=memory{i}123#nixosConfigurations.test-memory-{i}.config.system.build.toplevel",
             ),
         )[0]["id"]
         created_ids["derivations"].append(derivation_id)
-    
+
     # Wait for all evaluations to complete
     time.sleep(30)
-    
+
     # Check final memory usage
     final_memory = server.succeed(
         "ps -o rss= -p $(pgrep crystal-forge-server) | awk '{print $1}'"
     ).strip()
-    
+
     # Memory should not have grown excessively (allow for some growth, but not massive leaks)
     initial_mb = int(initial_memory) / 1024
     final_mb = int(final_memory) / 1024
     memory_growth = final_mb - initial_mb
-    
+
     # Allow up to 100MB growth for the test load, but flag if excessive
-    assert memory_growth < 100, \
-        f"Excessive memory growth detected: {initial_mb:.1f}MB -> {final_mb:.1f}MB (+{memory_growth:.1f}MB)"
-    
+    assert (
+        memory_growth < 100
+    ), f"Excessive memory growth detected: {initial_mb:.1f}MB -> {final_mb:.1f}MB (+{memory_growth:.1f}MB)"
+
     # Check that server is still responsive
     server.succeed("systemctl is-active crystal-forge-server.service")
-    
+
     # Clean up all test data
     for derivation_id in created_ids["derivations"]:
         cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (derivation_id,))
