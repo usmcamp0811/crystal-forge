@@ -2,9 +2,9 @@
 -- PostgreSQL database dump
 --
 
-\restrict XRsveR7SRnWfmc3cEPIyEAAbKpICAn3FszXzBLnig098aZYVKaqtrTapIW7trhr
+\restrict ImQsPNfb2skD1bxA9fwsib0si8NnOwVJo60P68T7nTwvu01VxsJYHvDwmZmZ3bj
 
--- Dumped from database version 16.10
+-- Dumped from database version 17.6
 -- Dumped by pg_dump version 17.6
 
 SET statement_timeout = 0;
@@ -259,11 +259,19 @@ CREATE TABLE public.cache_push_jobs (
     push_size_bytes bigint,
     push_duration_ms integer,
     cache_destination text,
+    retry_after timestamp without time zone,
     CONSTRAINT cache_push_jobs_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'in_progress'::text, 'completed'::text, 'failed'::text])))
 );
 
 
 ALTER TABLE public.cache_push_jobs OWNER TO crystal_forge;
+
+--
+-- Name: COLUMN cache_push_jobs.retry_after; Type: COMMENT; Schema: public; Owner: crystal_forge
+--
+
+COMMENT ON COLUMN public.cache_push_jobs.retry_after IS 'Timestamp when a failed job should be retried. NULL for permanently failed jobs (attempts >= 5) or non-failed jobs.';
+
 
 --
 -- Name: cache_push_jobs_id_seq; Type: SEQUENCE; Schema: public; Owner: crystal_forge
@@ -296,7 +304,13 @@ CREATE TABLE public.commits (
     flake_id integer NOT NULL,
     git_commit_hash text NOT NULL,
     commit_timestamp timestamp with time zone NOT NULL,
-    attempt_count integer DEFAULT 0 NOT NULL
+    attempt_count integer DEFAULT 0 NOT NULL,
+    evaluation_status text DEFAULT 'pending'::text,
+    evaluation_started_at timestamp with time zone,
+    evaluation_completed_at timestamp with time zone,
+    evaluation_attempt_count integer DEFAULT 0,
+    evaluation_error_message text,
+    CONSTRAINT commits_evaluation_status_check CHECK ((evaluation_status = ANY (ARRAY['pending'::text, 'in_progress'::text, 'complete'::text, 'failed'::text])))
 );
 
 
@@ -729,7 +743,7 @@ ALTER TABLE public.scan_packages OWNER TO crystal_forge;
 CREATE TABLE public.system_states (
     id integer NOT NULL,
     hostname text NOT NULL,
-    derivation_path text NOT NULL,
+    store_path text NOT NULL,
     change_reason text NOT NULL,
     os text,
     kernel text,
@@ -779,6 +793,7 @@ CREATE TABLE public.systems (
     updated_at timestamp with time zone DEFAULT CURRENT_TIMESTAMP,
     desired_target text,
     deployment_policy text DEFAULT 'manual'::text,
+    desired_derivation_id integer,
     CONSTRAINT systems_deployment_policy_check CHECK ((deployment_policy = ANY (ARRAY['manual'::text, 'auto_latest'::text, 'pinned'::text])))
 );
 
@@ -945,14 +960,14 @@ CREATE VIEW public.view_buildable_derivations AS
          SELECT r.nixos_id,
             r.nixos_commit_ts,
             count(DISTINCT p.id) AS total_packages,
-            count(DISTINCT p.id) FILTER (WHERE (p.status_id = 6)) AS completed_packages,
+            count(DISTINCT p.id) FILTER (WHERE (p.status_id = 10)) AS completed_packages,
             count(DISTINCT cpj.id) FILTER (WHERE (cpj.status = 'completed'::text)) AS cached_packages,
             count(DISTINCT br.id) AS active_workers
            FROM ((((( SELECT d.id AS nixos_id,
                     c.commit_timestamp AS nixos_commit_ts
                    FROM (public.derivations d
                      JOIN public.commits c ON ((c.id = d.commit_id)))
-                  WHERE ((d.derivation_type = 'nixos'::text) AND (d.status_id = ANY (ARRAY[5, 12])))) r
+                  WHERE ((d.derivation_type = 'nixos'::text) AND (d.status_id = ANY (ARRAY[5, 7])) AND (d.derivation_path IS NOT NULL))) r
              LEFT JOIN public.derivation_dependencies dd ON ((dd.derivation_id = r.nixos_id)))
              LEFT JOIN public.derivations p ON (((p.id = dd.depends_on_id) AND (p.derivation_type = 'package'::text))))
              LEFT JOIN public.cache_push_jobs cpj ON (((cpj.derivation_id = p.id) AND (cpj.status = 'completed'::text))))
@@ -978,7 +993,7 @@ CREATE VIEW public.view_buildable_derivations AS
              JOIN public.derivation_dependencies dd ON ((dd.derivation_id = sp.nixos_id)))
              JOIN public.derivations p ON ((p.id = dd.depends_on_id)))
              LEFT JOIN public.build_reservations br ON ((br.derivation_id = p.id)))
-          WHERE ((p.derivation_type = 'package'::text) AND (p.status_id = ANY (ARRAY[5, 12])) AND (p.attempt_count <= 5) AND (br.id IS NULL))
+          WHERE ((p.derivation_type = 'package'::text) AND (p.status_id = ANY (ARRAY[5, 7])) AND (p.derivation_path IS NOT NULL) AND (p.attempt_count <= 5) AND (br.id IS NULL))
         ), system_candidates AS (
          SELECT d.id,
             d.derivation_name,
@@ -998,7 +1013,7 @@ CREATE VIEW public.view_buildable_derivations AS
            FROM ((system_progress sp
              JOIN public.derivations d ON ((d.id = sp.nixos_id)))
              LEFT JOIN public.build_reservations br ON ((br.derivation_id = d.id)))
-          WHERE ((d.derivation_type = 'nixos'::text) AND (d.status_id = ANY (ARRAY[5, 12])) AND (d.attempt_count <= 5) AND (br.id IS NULL) AND (sp.total_packages = sp.completed_packages))
+          WHERE ((d.derivation_type = 'nixos'::text) AND (d.status_id = ANY (ARRAY[5, 7])) AND (d.derivation_path IS NOT NULL) AND (d.attempt_count <= 5) AND (br.id IS NULL) AND (sp.total_packages = sp.completed_packages))
         )
  SELECT package_candidates.id,
     package_candidates.derivation_name,
@@ -1039,11 +1054,97 @@ UNION ALL
 ALTER VIEW public.view_buildable_derivations OWNER TO crystal_forge;
 
 --
--- Name: VIEW view_buildable_derivations; Type: COMMENT; Schema: public; Owner: crystal_forge
+-- Name: view_cache_push_queue; Type: VIEW; Schema: public; Owner: crystal_forge
 --
 
-COMMENT ON VIEW public.view_buildable_derivations IS 'Shows all derivations ready to be claimed by workers, sorted by priority (newest commits first, smallest systems first within commits)';
+CREATE VIEW public.view_cache_push_queue AS
+ WITH job_status_by_dest AS (
+         SELECT cache_push_jobs.derivation_id,
+            cache_push_jobs.cache_destination,
+            max(
+                CASE
+                    WHEN (cache_push_jobs.status = ANY (ARRAY['completed'::text, 'in_progress'::text])) THEN 1
+                    ELSE 0
+                END) AS has_active,
+            max(
+                CASE
+                    WHEN ((cache_push_jobs.status = 'failed'::text) AND (cache_push_jobs.attempts < 5)) THEN 1
+                    ELSE 0
+                END) AS has_retryable,
+            count(*) AS job_count,
+            max(cache_push_jobs.completed_at) AS last_completed_at,
+            max(cache_push_jobs.attempts) AS max_attempts
+           FROM public.cache_push_jobs
+          GROUP BY cache_push_jobs.derivation_id, cache_push_jobs.cache_destination
+        ), newest_nixos_systems AS (
+         SELECT DISTINCT d_1.id AS nixos_id,
+            d_1.completed_at AS nixos_completed_at,
+            c_1.commit_timestamp
+           FROM (public.derivations d_1
+             JOIN public.commits c_1 ON ((d_1.commit_id = c_1.id)))
+          WHERE ((d_1.derivation_type = 'nixos'::text) AND (d_1.store_path IS NOT NULL))
+          ORDER BY c_1.commit_timestamp DESC, d_1.completed_at DESC
+         LIMIT 20
+        ), prioritized_derivations AS (
+         SELECT d_1.id,
+            max(nns.commit_timestamp) AS newest_nixos_parent
+           FROM ((public.derivations d_1
+             LEFT JOIN public.derivation_dependencies dd ON ((dd.depends_on_id = d_1.id)))
+             LEFT JOIN newest_nixos_systems nns ON ((nns.nixos_id = dd.derivation_id)))
+          GROUP BY d_1.id
+        )
+ SELECT d.id,
+    d.commit_id,
+    d.derivation_type,
+    d.derivation_name,
+    d.pname,
+    d.version,
+    d.store_path,
+    d.completed_at AS build_completed_at,
+    d.status_id AS derivation_status_id,
+    ds.name AS derivation_status,
+    c.git_commit_hash,
+    c.commit_timestamp,
+    pd.newest_nixos_parent,
+    js.cache_destination,
+    js.has_active,
+    js.has_retryable,
+    js.job_count,
+    js.last_completed_at AS last_push_completed_at,
+    js.max_attempts AS current_max_attempts,
+        CASE
+            WHEN (js.derivation_id IS NULL) THEN 'no_job'::text
+            WHEN (js.has_active = 1) THEN 'has_active'::text
+            WHEN (js.has_retryable = 1) THEN 'retryable'::text
+            ELSE 'complete_or_failed'::text
+        END AS push_status,
+    ((
+        CASE
+            WHEN (d.derivation_type = 'nixos'::text) THEN 100
+            ELSE 0
+        END +
+        CASE
+            WHEN (js.derivation_id IS NULL) THEN 50
+            ELSE 0
+        END) +
+        CASE
+            WHEN (js.has_retryable = 1) THEN 25
+            ELSE 0
+        END) AS priority_score
+   FROM ((((public.derivations d
+     JOIN public.commits c ON ((c.id = d.commit_id)))
+     JOIN public.derivation_statuses ds ON ((ds.id = d.status_id)))
+     LEFT JOIN prioritized_derivations pd ON ((pd.id = d.id)))
+     LEFT JOIN job_status_by_dest js ON ((js.derivation_id = d.id)))
+  WHERE (d.store_path IS NOT NULL)
+  ORDER BY
+        CASE
+            WHEN (d.derivation_type = 'nixos'::text) THEN 1
+            ELSE 0
+        END DESC, pd.newest_nixos_parent DESC NULLS LAST, c.commit_timestamp DESC, d.completed_at;
 
+
+ALTER VIEW public.view_cache_push_queue OWNER TO crystal_forge;
 
 --
 -- Name: view_commit_build_status; Type: VIEW; Schema: public; Owner: crystal_forge
@@ -1366,7 +1467,7 @@ ALTER VIEW public.view_compliance_trend_7d OWNER TO crystal_forge;
 CREATE VIEW public.view_system_deployment_status AS
  WITH latest_system_states AS (
          SELECT DISTINCT ON (system_states.hostname) system_states.hostname,
-            system_states.derivation_path,
+            system_states.store_path AS derivation_path,
             system_states."timestamp" AS deployment_time
            FROM public.system_states
           ORDER BY system_states.hostname, system_states."timestamp" DESC
@@ -1507,7 +1608,7 @@ CREATE VIEW public.view_deployment_issues AS
             c.git_commit_hash AS current_commit_hash,
             c.commit_timestamp AS current_commit_time
            FROM ((public.system_states ss
-             JOIN public.derivations d ON (((d.derivation_path = ss.derivation_path) AND (d.derivation_type = 'nixos'::text))))
+             JOIN public.derivations d ON (((d.derivation_path = ss.store_path) AND (d.derivation_type = 'nixos'::text))))
              JOIN public.commits c ON ((d.commit_id = c.id)))
           ORDER BY ss.hostname, ss."timestamp" DESC
         ), latest_available AS (
@@ -1847,6 +1948,166 @@ CREATE VIEW public.view_nixos_derivation_build_queue AS
 ALTER VIEW public.view_nixos_derivation_build_queue OWNER TO crystal_forge;
 
 --
+-- Name: view_nixos_pipeline_latest_with_deploy; Type: VIEW; Schema: public; Owner: crystal_forge
+--
+
+CREATE VIEW public.view_nixos_pipeline_latest_with_deploy AS
+ WITH nixos_latest AS (
+         SELECT DISTINCT ON (d.derivation_name) d.id AS nixos_id,
+            d.derivation_name AS system_name,
+            d.derivation_path AS nixos_drv_path,
+            d.store_path AS nixos_store_path,
+            d.status_id AS nixos_status_id,
+            ds.name AS nixos_status,
+            ds.is_terminal AS nixos_is_terminal,
+            ds.is_success AS nixos_is_success,
+            c.id AS commit_id,
+            c.git_commit_hash,
+            c.commit_timestamp
+           FROM ((public.derivations d
+             LEFT JOIN public.commits c ON ((c.id = d.commit_id)))
+             JOIN public.derivation_statuses ds ON ((ds.id = d.status_id)))
+          WHERE (d.derivation_type = 'nixos'::text)
+          ORDER BY d.derivation_name, c.commit_timestamp DESC NULLS LAST, d.id DESC
+        ), pkg_deps AS (
+         SELECT nl.nixos_id,
+            p.id AS package_id,
+            p.status_id AS package_status_id,
+            p.completed_at AS package_completed_at,
+            p.started_at AS package_started_at,
+            p.attempt_count AS package_attempts,
+            p.derivation_name AS package_name,
+            p.derivation_path AS package_drv_path,
+            p.store_path AS package_store_path,
+            pds.name AS package_status,
+            pds.is_success AS package_is_success
+           FROM (((nixos_latest nl
+             JOIN public.derivation_dependencies dd ON ((dd.derivation_id = nl.nixos_id)))
+             JOIN public.derivations p ON (((p.id = dd.depends_on_id) AND (p.derivation_type = 'package'::text))))
+             LEFT JOIN public.derivation_statuses pds ON ((pds.id = p.status_id)))
+        ), pkg_rollup AS (
+         SELECT pkg_deps.nixos_id,
+            count(*) AS total_packages,
+            count(*) FILTER (WHERE (pkg_deps.package_is_success = true)) AS completed_packages,
+            count(*) FILTER (WHERE ((pkg_deps.package_status)::text = ANY ((ARRAY['build-in-progress'::character varying, 'in-progress'::character varying])::text[]))) AS building_packages,
+            count(*) FILTER (WHERE ((pkg_deps.package_status)::text ~~ '%-failed'::text)) AS failed_packages
+           FROM pkg_deps
+          GROUP BY pkg_deps.nixos_id
+        ), cache_push AS (
+         SELECT nl.nixos_id,
+            count(*) FILTER (WHERE (cpj.status = 'pending'::text)) AS cache_pending,
+            count(*) FILTER (WHERE (cpj.status = 'in_progress'::text)) AS cache_in_progress,
+            count(*) FILTER (WHERE (cpj.status = 'completed'::text)) AS cache_completed,
+            count(*) FILTER (WHERE (cpj.status = 'failed'::text)) AS cache_failed,
+            max(cpj.completed_at) AS last_cache_completed_at
+           FROM ((nixos_latest nl
+             JOIN public.derivation_dependencies dd ON ((dd.derivation_id = nl.nixos_id)))
+             JOIN public.cache_push_jobs cpj ON ((cpj.derivation_id = dd.depends_on_id)))
+          GROUP BY nl.nixos_id
+        ), systems_join AS (
+         SELECT s.hostname,
+            s.id AS systems_id,
+            s.deployment_policy,
+            s.desired_target,
+            s.flake_id,
+            s.derivation AS systems_derivation_ref
+           FROM public.systems s
+          WHERE (s.is_active = true)
+        ), heartbeat_latest AS (
+         SELECT st.hostname,
+            max(ah."timestamp") AS last_agent_heartbeat_at
+           FROM (public.system_states st
+             JOIN public.agent_heartbeats ah ON ((ah.system_state_id = st.id)))
+          GROUP BY st.hostname
+        ), deploy_events AS (
+         SELECT st.hostname,
+            max(st."timestamp") AS last_cf_deployment_at
+           FROM public.system_states st
+          WHERE (st.change_reason = 'cf_deployment'::text)
+          GROUP BY st.hostname
+        ), final AS (
+         SELECT nl.nixos_id,
+            nl.system_name,
+            nl.commit_id,
+            nl.git_commit_hash,
+            nl.commit_timestamp,
+            nl.nixos_status_id,
+            nl.nixos_status,
+            nl.nixos_drv_path,
+            nl.nixos_store_path,
+            COALESCE(pr.total_packages, (0)::bigint) AS total_packages,
+            COALESCE(pr.completed_packages, (0)::bigint) AS completed_packages,
+            COALESCE(pr.building_packages, (0)::bigint) AS building_packages,
+            COALESCE(pr.failed_packages, (0)::bigint) AS failed_packages,
+            GREATEST((((COALESCE(pr.total_packages, (0)::bigint) - COALESCE(pr.completed_packages, (0)::bigint)) - COALESCE(pr.building_packages, (0)::bigint)) - COALESCE(pr.failed_packages, (0)::bigint)), (0)::bigint) AS pending_packages,
+            COALESCE(cp.cache_pending, (0)::bigint) AS cache_pending,
+            COALESCE(cp.cache_in_progress, (0)::bigint) AS cache_in_progress,
+            COALESCE(cp.cache_completed, (0)::bigint) AS cache_completed,
+            COALESCE(cp.cache_failed, (0)::bigint) AS cache_failed,
+            cp.last_cache_completed_at,
+            sj.systems_id,
+            sj.deployment_policy,
+            sj.desired_target,
+            sj.flake_id,
+            sj.systems_derivation_ref,
+            hb.last_agent_heartbeat_at,
+            de.last_cf_deployment_at,
+            ((nl.nixos_drv_path IS NOT NULL) OR ((nl.nixos_status)::text = 'dry-run-complete'::text)) AS dry_run_done,
+            ((COALESCE(pr.total_packages, (0)::bigint) > 0) AND (COALESCE(pr.completed_packages, (0)::bigint) = COALESCE(pr.total_packages, (0)::bigint))) AS all_packages_built,
+            (((COALESCE(pr.total_packages, (0)::bigint) > 0) AND (COALESCE(cp.cache_completed, (0)::bigint) = COALESCE(pr.total_packages, (0)::bigint))) OR ((nl.nixos_status)::text = 'cache-pushed'::text)) AS all_packages_cached_or_system_cached
+           FROM (((((nixos_latest nl
+             LEFT JOIN pkg_rollup pr ON ((pr.nixos_id = nl.nixos_id)))
+             LEFT JOIN cache_push cp ON ((cp.nixos_id = nl.nixos_id)))
+             LEFT JOIN systems_join sj ON ((sj.hostname = nl.system_name)))
+             LEFT JOIN heartbeat_latest hb ON ((hb.hostname = nl.system_name)))
+             LEFT JOIN deploy_events de ON ((de.hostname = nl.system_name)))
+        )
+ SELECT nixos_id,
+    system_name,
+    commit_id,
+    git_commit_hash,
+    commit_timestamp,
+    nixos_status,
+    nixos_drv_path,
+    nixos_store_path,
+    total_packages,
+    completed_packages,
+    building_packages,
+    failed_packages,
+    pending_packages,
+    cache_pending,
+    cache_in_progress,
+    cache_completed,
+    cache_failed,
+    last_cache_completed_at,
+    deployment_policy,
+    desired_target,
+    last_agent_heartbeat_at,
+    last_cf_deployment_at,
+    dry_run_done,
+    all_packages_built,
+    all_packages_cached_or_system_cached,
+        CASE
+            WHEN (NOT dry_run_done) THEN 'dry_run'::text
+            WHEN ((NOT all_packages_built) AND (building_packages > 0)) THEN 'building'::text
+            WHEN (NOT all_packages_built) THEN 'waiting_to_build'::text
+            WHEN ((NOT all_packages_cached_or_system_cached) AND ((cache_in_progress > 0) OR (cache_pending > 0))) THEN 'cache_push'::text
+            WHEN (NOT all_packages_cached_or_system_cached) THEN 'cache_push_pending'::text
+            ELSE 'ready_for_deploy'::text
+        END AS inferred_stage,
+        CASE
+            WHEN ((deployment_policy = 'manual'::text) AND (desired_target IS NULL)) THEN 'awaiting_manual_release'::text
+            WHEN ((deployment_policy = 'auto_latest'::text) AND (desired_target IS NULL)) THEN 'auto_release_expected'::text
+            WHEN ((desired_target IS NOT NULL) AND (last_cf_deployment_at IS NULL)) THEN 'release_signaled_no_apply_seen'::text
+            ELSE NULL::text
+        END AS deploy_hint
+   FROM final
+  ORDER BY commit_timestamp DESC, system_name;
+
+
+ALTER VIEW public.view_nixos_pipeline_latest_with_deploy OWNER TO crystal_forge;
+
+--
 -- Name: view_nixos_system_build_progress; Type: VIEW; Schema: public; Owner: crystal_forge
 --
 
@@ -2121,7 +2382,7 @@ CREATE VIEW public.view_system_deployment_readiness AS
                     ss."timestamp" AS last_deployed
                    FROM ((public.systems s
                      JOIN public.derivations d ON (((s.hostname = d.derivation_name) AND (d.derivation_type = 'nixos'::text))))
-                     JOIN public.system_states ss ON (((d.derivation_path = ss.derivation_path) AND (s.hostname = ss.hostname))))
+                     JOIN public.system_states ss ON (((d.derivation_path = ss.store_path) AND (s.hostname = ss.hostname))))
                   ORDER BY s.hostname, ss."timestamp" DESC) current_deploy ON (((bp.system_name = current_deploy.system_name) AND (bp.commit_id = current_deploy.commit_id))))
         )
  SELECT system_name,
@@ -2658,6 +2919,13 @@ CREATE INDEX idx_build_reservations_worker ON public.build_reservations USING bt
 
 
 --
+-- Name: idx_cache_push_jobs_derivation_destination; Type: INDEX; Schema: public; Owner: crystal_forge
+--
+
+CREATE INDEX idx_cache_push_jobs_derivation_destination ON public.cache_push_jobs USING btree (derivation_id, cache_destination);
+
+
+--
 -- Name: idx_cache_push_jobs_derivation_failed; Type: INDEX; Schema: public; Owner: crystal_forge
 --
 
@@ -2693,6 +2961,20 @@ CREATE UNIQUE INDEX idx_cache_push_jobs_derivation_unique ON public.cache_push_j
 
 
 --
+-- Name: idx_cache_push_jobs_pending; Type: INDEX; Schema: public; Owner: crystal_forge
+--
+
+CREATE INDEX idx_cache_push_jobs_pending ON public.cache_push_jobs USING btree (status, scheduled_at) WHERE (status = 'pending'::text);
+
+
+--
+-- Name: idx_cache_push_jobs_retry; Type: INDEX; Schema: public; Owner: crystal_forge
+--
+
+CREATE INDEX idx_cache_push_jobs_retry ON public.cache_push_jobs USING btree (status, retry_after) WHERE ((status = 'failed'::text) AND (retry_after IS NOT NULL));
+
+
+--
 -- Name: idx_cache_push_jobs_scheduled_at; Type: INDEX; Schema: public; Owner: crystal_forge
 --
 
@@ -2704,6 +2986,13 @@ CREATE INDEX idx_cache_push_jobs_scheduled_at ON public.cache_push_jobs USING bt
 --
 
 CREATE INDEX idx_cache_push_jobs_status ON public.cache_push_jobs USING btree (status);
+
+
+--
+-- Name: idx_commits_evaluation_status; Type: INDEX; Schema: public; Owner: crystal_forge
+--
+
+CREATE INDEX idx_commits_evaluation_status ON public.commits USING btree (evaluation_status, evaluation_started_at);
 
 
 --
@@ -3165,11 +3454,11 @@ ALTER TABLE ONLY public.environments
 
 
 --
--- Name: systems fk_systems_desired_target; Type: FK CONSTRAINT; Schema: public; Owner: crystal_forge
+-- Name: systems fk_systems_desired_derivation; Type: FK CONSTRAINT; Schema: public; Owner: crystal_forge
 --
 
 ALTER TABLE ONLY public.systems
-    ADD CONSTRAINT fk_systems_desired_target FOREIGN KEY (desired_target) REFERENCES public.derivations(derivation_path);
+    ADD CONSTRAINT fk_systems_desired_derivation FOREIGN KEY (desired_derivation_id) REFERENCES public.derivations(id);
 
 
 --
@@ -3237,428 +3526,8 @@ ALTER TABLE ONLY public.derivations
 
 
 --
--- Name: SCHEMA public; Type: ACL; Schema: -; Owner: pg_database_owner
---
-
-GRANT USAGE ON SCHEMA public TO grafana;
-
-
---
--- Name: TABLE _sqlx_migrations; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public._sqlx_migrations TO grafana;
-
-
---
--- Name: TABLE agent_heartbeats; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.agent_heartbeats TO grafana;
-
-
---
--- Name: SEQUENCE agent_heartbeats_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.agent_heartbeats_id_seq TO grafana;
-
-
---
--- Name: TABLE build_reservations; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.build_reservations TO grafana;
-
-
---
--- Name: SEQUENCE build_reservations_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.build_reservations_id_seq TO grafana;
-
-
---
--- Name: TABLE cache_push_jobs; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.cache_push_jobs TO grafana;
-
-
---
--- Name: SEQUENCE cache_push_jobs_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.cache_push_jobs_id_seq TO grafana;
-
-
---
--- Name: TABLE commits; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.commits TO grafana;
-
-
---
--- Name: TABLE compliance_levels; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.compliance_levels TO grafana;
-
-
---
--- Name: SEQUENCE compliance_levels_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.compliance_levels_id_seq TO grafana;
-
-
---
--- Name: TABLE cve_scans; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.cve_scans TO grafana;
-
-
---
--- Name: TABLE cves; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.cves TO grafana;
-
-
---
--- Name: TABLE daily_compliance_snapshots; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.daily_compliance_snapshots TO grafana;
-
-
---
--- Name: TABLE daily_deployment_velocity; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.daily_deployment_velocity TO grafana;
-
-
---
--- Name: TABLE daily_drift_snapshots; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.daily_drift_snapshots TO grafana;
-
-
---
--- Name: TABLE daily_evaluation_health; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.daily_evaluation_health TO grafana;
-
-
---
--- Name: TABLE daily_heartbeat_health; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.daily_heartbeat_health TO grafana;
-
-
---
--- Name: TABLE daily_security_posture; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.daily_security_posture TO grafana;
-
-
---
--- Name: TABLE derivation_dependencies; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.derivation_dependencies TO grafana;
-
-
---
--- Name: TABLE derivation_statuses; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.derivation_statuses TO grafana;
-
-
---
--- Name: TABLE derivations; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.derivations TO grafana;
-
-
---
--- Name: SEQUENCE derivations_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.derivations_id_seq TO grafana;
-
-
---
--- Name: TABLE derivations_with_status; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.derivations_with_status TO grafana;
-
-
---
--- Name: TABLE environments; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.environments TO grafana;
-
-
---
--- Name: TABLE flakes; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.flakes TO grafana;
-
-
---
--- Name: TABLE package_vulnerabilities; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.package_vulnerabilities TO grafana;
-
-
---
--- Name: TABLE risk_profiles; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.risk_profiles TO grafana;
-
-
---
--- Name: SEQUENCE risk_profiles_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.risk_profiles_id_seq TO grafana;
-
-
---
--- Name: TABLE scan_packages; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.scan_packages TO grafana;
-
-
---
--- Name: TABLE system_states; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.system_states TO grafana;
-
-
---
--- Name: TABLE systems; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.systems TO grafana;
-
-
---
--- Name: SEQUENCE tbl_commits_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.tbl_commits_id_seq TO grafana;
-
-
---
--- Name: SEQUENCE tbl_flakes_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.tbl_flakes_id_seq TO grafana;
-
-
---
--- Name: SEQUENCE tbl_system_states_id_seq; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON SEQUENCE public.tbl_system_states_id_seq TO grafana;
-
-
---
--- Name: TABLE users; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.users TO grafana;
-
-
---
--- Name: TABLE view_build_queue_status; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_build_queue_status TO grafana;
-
-
---
--- Name: TABLE view_buildable_derivations; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_buildable_derivations TO grafana;
-
-
---
--- Name: TABLE view_commit_build_status; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_commit_build_status TO grafana;
-
-
---
--- Name: TABLE view_commit_deployment_timeline; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_commit_deployment_timeline TO grafana;
-
-
---
--- Name: TABLE view_commit_nixos_table; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_commit_nixos_table TO grafana;
-
-
---
--- Name: TABLE view_commits_stuck_in_evaluation; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_commits_stuck_in_evaluation TO grafana;
-
-
---
--- Name: TABLE view_compliance_trend_7d; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_compliance_trend_7d TO grafana;
-
-
---
--- Name: TABLE view_system_deployment_status; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_system_deployment_status TO grafana;
-
-
---
--- Name: TABLE view_config_timeline; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_config_timeline TO grafana;
-
-
---
--- Name: TABLE view_cve_trends_7d; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_cve_trends_7d TO grafana;
-
-
---
--- Name: TABLE view_deployment_issues; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_deployment_issues TO grafana;
-
-
---
--- Name: TABLE view_derivation_stats; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_derivation_stats TO grafana;
-
-
---
--- Name: TABLE view_derivation_status_breakdown; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_derivation_status_breakdown TO grafana;
-
-
---
--- Name: TABLE view_flake_recent_commits; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_flake_recent_commits TO grafana;
-
-
---
--- Name: TABLE view_nixos_derivation_build_queue; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_nixos_derivation_build_queue TO grafana;
-
-
---
--- Name: TABLE view_nixos_system_build_progress; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_nixos_system_build_progress TO grafana;
-
-
---
--- Name: TABLE view_security_trend_30d; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_security_trend_30d TO grafana;
-
-
---
--- Name: TABLE view_system_build_progress; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_system_build_progress TO grafana;
-
-
---
--- Name: TABLE view_system_vulnerability_summary; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_system_vulnerability_summary TO grafana;
-
-
---
--- Name: TABLE view_system_deployment_readiness; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_system_deployment_readiness TO grafana;
-
-
---
--- Name: TABLE view_system_heartbeat_status; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_system_heartbeat_status TO grafana;
-
-
---
--- Name: TABLE view_velocity_trend_14d; Type: ACL; Schema: public; Owner: crystal_forge
---
-
-GRANT SELECT ON TABLE public.view_velocity_trend_14d TO grafana;
-
-
---
--- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: public; Owner: postgres
---
-
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON SEQUENCES TO grafana;
-
-
---
--- Name: DEFAULT PRIVILEGES FOR TABLES; Type: DEFAULT ACL; Schema: public; Owner: postgres
---
-
-ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public GRANT SELECT ON TABLES TO grafana;
-
-
---
 -- PostgreSQL database dump complete
 --
 
-\unrestrict XRsveR7SRnWfmc3cEPIyEAAbKpICAn3FszXzBLnig098aZYVKaqtrTapIW7trhr
+\unrestrict ImQsPNfb2skD1bxA9fwsib0si8NnOwVJo60P68T7nTwvu01VxsJYHvDwmZmZ3bj
 
