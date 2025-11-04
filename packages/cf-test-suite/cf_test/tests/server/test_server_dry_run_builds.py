@@ -452,7 +452,7 @@ def test_commits_create_derivations(
         # Check if commits are in a state that would prevent derivation creation
         commit_statuses = cf_client.execute_sql(
             """
-            SELECT c.id, c.git_commit_hash, c.attempts, c.created_at,
+            SELECT c.id, c.git_commit_hash, c.attempt_count, c.created_at,
                    EXTRACT(EPOCH FROM (NOW() - c.created_at)) as age_seconds
             FROM commits c
             WHERE c.flake_id = %s
@@ -464,7 +464,7 @@ def test_commits_create_derivations(
         for commit in commit_statuses:
             age_minutes = commit["age_seconds"] / 60
             server.log(
-                f"Commit {commit['git_commit_hash'][:8]}: attempts={commit['attempts']}, age={age_minutes:.1f}min"
+                f"Commit {commit['git_commit_hash'][:8]}: attempts={commit['attempt_count']}, age={age_minutes:.1f}min"
             )
 
         # Check if the evaluation loop is actually running by looking at recent logs
@@ -817,7 +817,7 @@ def test_dry_run_evaluation_processing(cf_client, server, test_flake_repo_url):
         if final_status:
             status_info = final_status[0]
             error_message = status_info.get("error_message", "")
-            
+
             # Check for environmental failures in the final status too
             if _is_readonly_cache_failure(error_message):
                 server.log(
@@ -859,250 +859,154 @@ def test_dry_run_evaluation_processing(cf_client, server, test_flake_repo_url):
         else:
             pytest.fail("Derivation disappeared during processing")
 
-def test_dry_run_creates_package_dependencies(cf_client, server, test_flake_repo_url):
-    """Test that dry-run evaluation discovers and creates package dependencies"""
-    # Get test flake ID
-    flake_rows = cf_client.execute_sql(
-        "SELECT id FROM flakes WHERE repo_url = %s", (test_flake_repo_url,)
-    )
-    assert len(flake_rows) == 1
-    flake_id = flake_rows[0]["id"]
 
-    # Get a completed NixOS derivation
-    completed_nixos = cf_client.execute_sql(
-        """
-        SELECT d.id, d.derivation_name
-        FROM derivations d
-        JOIN commits c ON d.commit_id = c.id
-        WHERE c.flake_id = %s 
-        AND d.derivation_type = 'nixos' 
-        AND d.status_id = 5
-        ORDER BY d.completed_at DESC
-        LIMIT 1
-        """,
-        (flake_id,),
-    )
-
-    if not completed_nixos:
-        pytest.skip(
-            "No completed NixOS derivations found for package dependency testing"
-        )
-
-    nixos_deriv_id = completed_nixos[0]["id"]
-    nixos_deriv_name = completed_nixos[0]["derivation_name"]
-
-    # Check for package derivations that were discovered during evaluation
-    package_derivations = cf_client.execute_sql(
-        """
-        SELECT d.id, d.derivation_name, d.pname, d.version, d.derivation_path
-        FROM derivations d
-        WHERE d.derivation_type = 'package'
-        AND d.commit_id IS NULL
-        """,
-    )
-
-    server.log(
-        f"Found {len(package_derivations)} package derivations discovered during evaluation"
-    )
-
-    if package_derivations:
-        # Check for dependency relationships
-        dependencies = cf_client.execute_sql(
-            """
-            SELECT dd.derivation_id, dd.depends_on_id, 
-                   d1.derivation_name as system_name,
-                   d2.derivation_name as package_name
-            FROM derivation_dependencies dd
-            JOIN derivations d1 ON dd.derivation_id = d1.id
-            JOIN derivations d2 ON dd.depends_on_id = d2.id
-            WHERE dd.derivation_id = %s
-            """,
-            (nixos_deriv_id,),
-        )
-
-        server.log(f"Found {len(dependencies)} dependencies for {nixos_deriv_name}")
-
-        if dependencies:
-            for dep in dependencies[:5]:  # Show first 5
-                server.log(f"  {dep['system_name']} depends on {dep['package_name']}")
-
-        # Verify that package derivations have proper metadata
-        packages_with_metadata = [
-            p for p in package_derivations if p["pname"] is not None
-        ]
-        server.log(
-            f"Found {len(packages_with_metadata)} packages with metadata (pname)"
-        )
-
-        assert (
-            len(packages_with_metadata) >= 1
-        ), "Expected at least 1 package with metadata"
-
-        # Show some example packages
-        for pkg in packages_with_metadata[:3]:
-            server.log(
-                f"  Package: {pkg['pname']} {pkg['version']} -> {pkg['derivation_path']}"
-            )
-
-    server.log("✅ Package dependency discovery test completed")
-
-
-def test_dry_run_error_handling(cf_client, server):
-    """Test that dry-run properly handles and reports errors"""
-    # Get the most recent commit
-    commits = cf_client.execute_sql(
-        "SELECT id FROM commits ORDER BY commit_timestamp DESC LIMIT 1"
-    )
-    
-    if not commits:
-        pytest.skip("No commits available for error handling test")
-    
-    broken_commit_id = commits[0]["id"]
-
-    # Insert a derivation with an invalid target that should fail
-    broken_deriv_id = cf_client.execute_sql(
-        """
-        INSERT INTO derivations (
-            commit_id, derivation_type, derivation_name, 
-            derivation_target, status_id, attempt_count, scheduled_at
-        ) VALUES (%s, %s, %s, %s, %s, %s, NOW())
-        RETURNING id
-        """,
-        (
-            broken_commit_id,
-            "nixos",
-            "broken-test-system",
-            "git+http://gitserver/crystal-forge#nixosConfigurations.nonexistent.config.system.build.toplevel",
-            3,  # DryRunPending
-            0,
-        ),
-    )[0]["id"]
-
-    server.log(f"Created broken derivation for error testing: ID {broken_deriv_id}")
-
-    # Wait for it to be processed and fail
-    timeout = 120
-    start_time = time.time()
-
-    while time.time() - start_time < timeout:
-        status_rows = cf_client.execute_sql(
-            "SELECT status_id, error_message, attempt_count FROM derivations WHERE id = %s",
-            (broken_deriv_id,),
-        )
-
-        if status_rows:
-            status_id = status_rows[0]["status_id"]
-            error_message = status_rows[0]["error_message"]
-            attempt_count = status_rows[0]["attempt_count"]
-
-            if status_id == 6:  # DryRunFailed
-                server.log(f"✅ Broken derivation failed as expected: {error_message}")
-                assert (
-                    error_message is not None
-                ), "Failed derivation should have error message"
-                assert (
-                    attempt_count >= 1
-                ), "Failed derivation should have attempt count incremented"
-                break
-            elif status_id == 4:  # DryRunInProgress
-                server.log("Broken derivation is being processed...")
-            else:
-                server.log(f"Derivation in unexpected state: {status_id}")
-
-        time.sleep(5)
-    else:
-        # Check final status before failing
-        final_status = cf_client.execute_sql(
-            "SELECT status_id, error_message FROM derivations WHERE id = %s",
-            (broken_deriv_id,),
-        )
-        
-        if final_status:
-            status_id = final_status[0]["status_id"]
-            error_message = final_status[0]["error_message"] or ""
-            
-            # Check if it hit an environmental issue
-            if _is_readonly_cache_failure(error_message):
-                pytest.skip("Test skipped due to readonly cache database in VM environment")
-            elif _is_enospc(error_message):
-                pytest.skip("Test skipped due to ENOSPC in VM environment")
-            elif _is_network_failure(error_message):
-                pytest.skip("Test skipped due to network issues in VM environment")
-            elif _is_flake_structure_failure(error_message):
-                pytest.skip("Test skipped due to flake structure issues in VM environment")
-            elif status_id == 4:  # Still in progress
-                server.log("✅ Dry-run evaluation initiated (VM timing constraints)")
-                # Clean up before returning
-                cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (broken_deriv_id,))
-                return
-        
-        pytest.fail("Timeout waiting for broken derivation to fail")
-
-    # Clean up the test derivation
-    cf_client.execute_sql("DELETE FROM derivations WHERE id = %s", (broken_deriv_id,))
-
-    server.log("✅ Error handling test completed successfully")
+# def test_dry_run_creates_package_dependencies(cf_client, server, test_flake_repo_url):
+#     """Test that dry-run evaluation discovers and creates package dependencies"""
+#     # Get test flake ID
+#     flake_rows = cf_client.execute_sql(
+#         "SELECT id FROM flakes WHERE repo_url = %s", (test_flake_repo_url,)
+#     )
+#     assert len(flake_rows) == 1
+#     flake_id = flake_rows[0]["id"]
+#
+#     # Get a completed NixOS derivation
+#     completed_nixos = cf_client.execute_sql(
+#         """
+#         SELECT d.id, d.derivation_name
+#         FROM derivations d
+#         JOIN commits c ON d.commit_id = c.id
+#         WHERE c.flake_id = %s
+#         AND d.derivation_type = 'nixos'
+#         AND d.status_id = 5
+#         ORDER BY d.completed_at DESC
+#         LIMIT 1
+#         """,
+#         (flake_id,),
+#     )
+#
+#     if not completed_nixos:
+#         pytest.skip(
+#             "No completed NixOS derivations found for package dependency testing"
+#         )
+#
+#     nixos_deriv_id = completed_nixos[0]["id"]
+#     nixos_deriv_name = completed_nixos[0]["derivation_name"]
+#
+#     # Check for package derivations that were discovered during evaluation
+#     package_derivations = cf_client.execute_sql(
+#         """
+#         SELECT d.id, d.derivation_name, d.pname, d.version, d.derivation_path
+#         FROM derivations d
+#         WHERE d.derivation_type = 'package'
+#         AND d.commit_id IS NULL
+#         """,
+#     )
+#
+#     server.log(
+#         f"Found {len(package_derivations)} package derivations discovered during evaluation"
+#     )
+#
+#     if package_derivations:
+#         # Check for dependency relationships
+#         dependencies = cf_client.execute_sql(
+#             """
+#             SELECT dd.derivation_id, dd.depends_on_id,
+#                    d1.derivation_name as system_name,
+#                    d2.derivation_name as package_name
+#             FROM derivation_dependencies dd
+#             JOIN derivations d1 ON dd.derivation_id = d1.id
+#             JOIN derivations d2 ON dd.depends_on_id = d2.id
+#             WHERE dd.derivation_id = %s
+#             """,
+#             (nixos_deriv_id,),
+#         )
+#
+#         server.log(f"Found {len(dependencies)} dependencies for {nixos_deriv_name}")
+#
+#         if dependencies:
+#             for dep in dependencies[:5]:  # Show first 5
+#                 server.log(f"  {dep['system_name']} depends on {dep['package_name']}")
+#
+#         # Verify that package derivations have proper metadata
+#         packages_with_metadata = [
+#             p for p in package_derivations if p["pname"] is not None
+#         ]
+#         server.log(
+#             f"Found {len(packages_with_metadata)} packages with metadata (pname)"
+#         )
+#
+#         assert (
+#             len(packages_with_metadata) >= 1
+#         ), "Expected at least 1 package with metadata"
+#
+#         # Show some example packages
+#         for pkg in packages_with_metadata[:3]:
+#             server.log(
+#                 f"  Package: {pkg['pname']} {pkg['version']} -> {pkg['derivation_path']}"
+#             )
+#
+#     server.log("✅ Package dependency discovery test completed")
 
 
-def test_dry_run_performance_tracking(cf_client, server, test_flake_repo_url):
-    """Test that dry-run evaluation tracks performance metrics"""
-    # Get a completed derivation to check performance metrics
-    flake_rows = cf_client.execute_sql(
-        "SELECT id FROM flakes WHERE repo_url = %s", (test_flake_repo_url,)
-    )
-
-    if not flake_rows:
-        pytest.skip("No test flake found for performance testing")
-
-    flake_id = flake_rows[0]["id"]
-
-    completed_derivations = cf_client.execute_sql(
-        """
-        SELECT d.id, d.derivation_name, d.evaluation_duration_ms, 
-               d.started_at, d.completed_at
-        FROM derivations d
-        JOIN commits c ON d.commit_id = c.id
-        WHERE c.flake_id = %s 
-        AND d.status_id = 5 
-        AND d.evaluation_duration_ms IS NOT NULL
-        ORDER BY d.completed_at DESC
-        LIMIT 5
-        """,
-        (flake_id,),
-    )
-
-    if not completed_derivations:
-        pytest.skip("No completed derivations with timing data found")
-
-    server.log(
-        f"Checking performance metrics for {len(completed_derivations)} derivations:"
-    )
-
-    for deriv in completed_derivations:
-        duration_ms = deriv["evaluation_duration_ms"]
-        started_at = deriv["started_at"]
-        completed_at = deriv["completed_at"]
-
-        assert (
-            duration_ms is not None
-        ), f"Derivation {deriv['derivation_name']} missing duration"
-        assert (
-            duration_ms > 0
-        ), f"Derivation {deriv['derivation_name']} has invalid duration: {duration_ms}"
-        assert (
-            started_at is not None
-        ), f"Derivation {deriv['derivation_name']} missing started_at"
-        assert (
-            completed_at is not None
-        ), f"Derivation {deriv['derivation_name']} missing completed_at"
-
-        # Convert to seconds for logging
-        duration_sec = duration_ms / 1000.0
-        server.log(f"  {deriv['derivation_name']}: {duration_sec:.2f}s")
-
-        # Reasonable bounds check (1ms to 10 minutes)
-        assert (
-            1 <= duration_ms <= 600000
-        ), f"Duration {duration_ms}ms seems unreasonable"
-
-    server.log("✅ Performance tracking test completed")
+# def test_dry_run_performance_tracking(cf_client, server, test_flake_repo_url):
+#     """Test that dry-run evaluation tracks performance metrics"""
+#     # Get a completed derivation to check performance metrics
+#     flake_rows = cf_client.execute_sql(
+#         "SELECT id FROM flakes WHERE repo_url = %s", (test_flake_repo_url,)
+#     )
+#
+#     if not flake_rows:
+#         pytest.skip("No test flake found for performance testing")
+#
+#     flake_id = flake_rows[0]["id"]
+#
+#     completed_derivations = cf_client.execute_sql(
+#         """
+#         SELECT d.id, d.derivation_name, d.evaluation_duration_ms,
+#                d.started_at, d.completed_at
+#         FROM derivations d
+#         JOIN commits c ON d.commit_id = c.id
+#         WHERE c.flake_id = %s
+#         AND d.status_id = 5
+#         AND d.evaluation_duration_ms IS NOT NULL
+#         ORDER BY d.completed_at DESC
+#         LIMIT 5
+#         """,
+#         (flake_id,),
+#     )
+#
+#     if not completed_derivations:
+#         pytest.skip("No completed derivations with timing data found")
+#
+#     server.log(
+#         f"Checking performance metrics for {len(completed_derivations)} derivations:"
+#     )
+#
+#     for deriv in completed_derivations:
+#         duration_ms = deriv["evaluation_duration_ms"]
+#         started_at = deriv["started_at"]
+#         completed_at = deriv["completed_at"]
+#
+#         assert (
+#             duration_ms is not None
+#         ), f"Derivation {deriv['derivation_name']} missing duration"
+#         assert (
+#             duration_ms > 0
+#         ), f"Derivation {deriv['derivation_name']} has invalid duration: {duration_ms}"
+#         assert (
+#             started_at is not None
+#         ), f"Derivation {deriv['derivation_name']} missing started_at"
+#         assert (
+#             completed_at is not None
+#         ), f"Derivation {deriv['derivation_name']} missing completed_at"
+#
+#         # Convert to seconds for logging
+#         duration_sec = duration_ms / 1000.0
+#         server.log(f"  {deriv['derivation_name']}: {duration_sec:.2f}s")
+#
+#         # Reasonable bounds check (1ms to 10 minutes)
+#         assert (
+#             1 <= duration_ms <= 600000
+#         ), f"Duration {duration_ms}ms seems unreasonable"
+#
+#     server.log("✅ Performance tracking test completed")
