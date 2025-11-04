@@ -30,7 +30,7 @@ def _create_base_scenario(
     heartbeat_age_minutes: Optional[int] = 5,
     system_ip: str = "192.168.1.100",
     agent_version: str = "2.0.0",
-    additional_commits: List[Dict[str, Any]] = None,
+    additional_commits: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Base scenario builder that creates the standard flake -> commit -> derivation -> system -> state chain.
@@ -61,7 +61,7 @@ def _create_base_scenario(
         raise ValueError(f"Unknown derivation status: {derivation_status}")
     status_id = status_rows[0]["id"]
 
-    # Insert flake (schema uses 'name', not 'flake_name')
+    # Insert flake
     flake_row = _one_row(
         client,
         """
@@ -90,7 +90,7 @@ def _create_base_scenario(
     commit_id = commit_row["id"]
 
     # Insert additional commits if specified
-    additional_commit_ids = []
+    additional_commit_ids: List[int] = []
     if additional_commits:
         for extra_commit in additional_commits:
             extra_ts = now - timedelta(hours=extra_commit.get("age_hours", 2))
@@ -153,24 +153,24 @@ def _create_base_scenario(
     )
     system_id = system_row["id"]
 
-    # Insert system state
+    # Insert system state (schema no longer has derivation_path)
     state_ts = commit_ts + timedelta(minutes=15)
     state_row = _one_row(
         client,
         """
         INSERT INTO public.system_states (
-            hostname, change_reason, derivation_path, os, kernel,
+            hostname, change_reason, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
             primary_ip_address, nixos_version, agent_compatible, "timestamp"
         )
         VALUES (
-            %s, 'startup', %s, 'NixOS', '6.6.89',
+            %s, 'startup', 'NixOS', '6.6.89',
             32.0, 3600, 'Intel Xeon', 16,
             %s, '25.05', TRUE, %s
         )
         RETURNING id
         """,
-        (hostname, system_drv, system_ip, state_ts),
+        (hostname, system_ip, state_ts),
     )
     state_id = state_row["id"]
 
