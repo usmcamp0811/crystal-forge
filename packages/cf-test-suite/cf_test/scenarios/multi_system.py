@@ -78,16 +78,16 @@ def scenario_flake_time_series(
         [st] = client.execute_sql(
             """
             INSERT INTO public.system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, "timestamp"
             )
-            VALUES (%s, 'startup', %s, 'NixOS', '6.6.89',
+            VALUES (%s, 'startup', 'NixOS', '6.6.89',
                     32.0, 3600, 'Intel Xeon', 16,
                     %s, '25.05', TRUE, %s)
             RETURNING id
             """,
-            (hn, drv, f"10.1.0.{i+10}", now - timedelta(hours=1)),
+            (hn, f"10.1.0.{i+10}", now - timedelta(hours=1)),
         )
         state_id = st["id"]
 
@@ -290,22 +290,21 @@ def scenario_latest_with_two_overdue(
         )
         system_ids.append(sysrow["id"])
 
-        # system_state
+        # system_state (no derivation_path column)
         [st] = client.execute_sql(
             """
             INSERT INTO public.system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason,  os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, "timestamp"
             )
-            VALUES (%s, 'startup', %s, 'NixOS', '6.6.89',
+            VALUES (%s, 'startup', 'NixOS', '6.6.89',
                     32.0, 3600, 'Intel Xeon', 16,
                     %s, '25.05', TRUE, %s)
             RETURNING id
             """,
             (
                 hn,
-                latest["drv"],
                 f"192.168.99.{(len(system_ids) % 250) + 10}",
                 latest["ts"] + timedelta(minutes=15),
             ),
@@ -437,18 +436,18 @@ def scenario_multiple_orphaned_systems(
         )
         system_ids.append(system_row["id"])
 
-        # Create system_state with orphaned derivation_path
+        # Create system_state (no derivation_path column anymore)
         orphaned_path = f"/nix/store/orphaned-{hostname}-{timestamp}.drv"
         state_row = _one_row(
             client,
             """
             INSERT INTO system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, timestamp
             )
             VALUES (
-                %s, 'startup', %s, 'NixOS', '6.6.89',
+                %s, 'startup', 'NixOS', '6.6.89',
                 16.0, 3600, 'Intel Xeon', 8,
                 %s, '25.05', TRUE, %s
             )
@@ -456,12 +455,19 @@ def scenario_multiple_orphaned_systems(
             """,
             (
                 hostname,
-                orphaned_path,
                 f"192.168.1.{200 + i}",
                 now - timedelta(minutes=30 + (i * 10)),  # Staggered deployment times
             ),
         )
         state_ids.append(state_row["id"])
+
+        # To preserve the "orphaned deployment" intent without system_states.derivation_path,
+        # point the system's current derivation at a path that has no matching derivation row.
+        _one_row(
+            client,
+            "UPDATE systems SET derivation = %s WHERE id = %s RETURNING id",
+            (orphaned_path, system_row["id"]),
+        )
 
         # Add heartbeats to make them look active
         heartbeat_row = _one_row(
@@ -648,12 +654,12 @@ def scenario_multi_system_progression_with_failure(
                     client,
                     """
                     INSERT INTO system_states (
-                        hostname, change_reason, derivation_path, os, kernel,
+                        hostname, change_reason, os, kernel,
                         memory_gb, uptime_secs, cpu_brand, cpu_cores,
                         primary_ip_address, nixos_version, agent_compatible, timestamp
                     )
                     VALUES (
-                        %s, 'config_change', %s, 'NixOS', '6.6.89',
+                        %s, 'config_change', 'NixOS', '6.6.89',
                         32.0, 3600, 'Intel Xeon', 16,
                         %s, '25.05', TRUE, %s
                     )
@@ -661,12 +667,18 @@ def scenario_multi_system_progression_with_failure(
                     """,
                     (
                         hostname,
-                        deriv_path,
                         f"192.168.1.{100 + sys_num}",
                         deployment_time,
                     ),
                 )
                 state_ids.append(state_row["id"])
+
+                # Keep systems.derivation aligned with the latest known successful deployment
+                _one_row(
+                    client,
+                    "UPDATE systems SET derivation = %s WHERE id = %s RETURNING id",
+                    (deriv_path, system_row["id"]),
+                )
 
         # Add recent heartbeats to show systems are online but stuck
         heartbeat_row = _one_row(
@@ -692,7 +704,11 @@ def scenario_multi_system_progression_with_failure(
         "agent_heartbeats": [f"id IN ({','.join(map(str, heartbeat_ids))})"],
         "system_states": [f"hostname LIKE '{base_hostname}-%'"],
         "systems": [f"hostname LIKE '{base_hostname}-%'"],
-        "derivations": [f"id IN ({','.join(map(str, derivation_ids))})"],
+        "derivations": (
+            [f"id IN ({','.join(map[str, int], derivation_ids)})"]
+            if False
+            else [f"id IN ({','.join(map(str, derivation_ids))})"]
+        ),
         "commits": [f"id IN ({','.join(map(str, commit_ids))})"],
         "flakes": [f"id = {flake_id}"],
     }
@@ -824,17 +840,17 @@ def scenario_progressive_system_updates(
         )
         system_ids.append(system_row["id"])
 
-        # Create system state showing current deployment
+        # Create system state showing current deployment (no derivation_path column)
         state_row = _one_row(
             client,
             """
             INSERT INTO system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, timestamp
             )
             VALUES (
-                %s, 'config_change', %s, 'NixOS', '6.6.89',
+                %s, 'config_change', 'NixOS', '6.6.89',
                 16.0, 7200, 'Intel Xeon', 8,
                 %s, '25.05', TRUE, %s
             )
@@ -842,7 +858,6 @@ def scenario_progressive_system_updates(
             """,
             (
                 hostname,
-                f"/nix/store/{current_commit['hash']}-nixos-system-{hostname}.drv",
                 f"192.168.1.{150 + len(system_ids)}",
                 current_commit["time"] + timedelta(minutes=45),
             ),
