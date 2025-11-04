@@ -64,7 +64,7 @@ def test_agent_accept_and_db_state(cf_client, server, agent):
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
     # Now get the system hash after the database fix has run
-    system_hash = get_system_hash(agent)
+    system_hash = get_system_hash(server)
     change_reason = "startup"
 
     # Log agent status for debugging
@@ -216,11 +216,11 @@ def test_deployment_policy_manager_auto_latest(cf_client, server, agent):
     # Create flake for the agent system
     flake_id = cf_client.execute_sql(
         """
-        INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
-        VALUES (%s, %s, true, %s, %s)
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
         RETURNING id
         """,
-        ("test-auto-latest", "https://example.com/test-auto-latest.git", now, now),
+        ("test-auto-latest", "https://example.com/test-auto-latest.git"),
     )[0]["id"]
 
     # Update the agent system to use this flake and set auto_latest policy
@@ -626,15 +626,13 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(
     # Create a flake for testing
     flake_id = cf_client.execute_sql(
         """
-        INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
-        VALUES (%s, %s, true, %s, %s)
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
         RETURNING id
         """,
         (
             "test-same-derivation",
             "https://example.com/test-same-derivation.git",
-            now,
-            now,
         ),
     )[0]["id"]
 
@@ -791,11 +789,11 @@ def test_dry_run_evaluation_robustness(cf_client, server, agent):
     now = datetime.now(UTC)
     flake_id = cf_client.execute_sql(
         """
-        INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
-        VALUES (%s, %s, true, %s, %s)
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
         RETURNING id
         """,
-        ("test-dry-run", "https://gitlab.com/test/dotfiles", now, now),
+        ("test-dry-run", "https://gitlab.com/test/dotfiles"),
     )[0]["id"]
 
     # Create a commit
@@ -896,11 +894,11 @@ def test_database_schema_consistency(cf_client, server):
     # Create required parent records
     flake_id = cf_client.execute_sql(
         """
-        INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
-        VALUES (%s, %s, true, %s, %s)
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
         RETURNING id
         """,
-        ("test-schema", "https://example.com/test", now, now),
+        ("test-schema", "https://example.com/test"),
     )[0]["id"]
 
     commit_id = cf_client.execute_sql(
@@ -1001,11 +999,11 @@ def test_build_method_consistency(cf_client, server):
 
     flake_id = cf_client.execute_sql(
         """
-        INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
-        VALUES (%s, %s, true, %s, %s)
+        INSERT INTO flakes (name, repo_url)
+        VALUES (%s, %s)
         RETURNING id
         """,
-        ("test-build-method", "https://example.com/nonexistent", now, now),
+        ("test-build-method", "https://example.com/nonexistent"),
     )[0]["id"]
 
     commit_id = cf_client.execute_sql(
@@ -1100,11 +1098,11 @@ def test_server_memory_stability_under_evaluation_load(cf_client, server):
     for i in range(5):  # Create 5 test scenarios
         flake_id = cf_client.execute_sql(
             """
-            INSERT INTO flakes (name, repo_url, is_watched, created_at, updated_at)
-            VALUES (%s, %s, true, %s, %s)
+            INSERT INTO flakes (name, repo_url)
+            VALUES (%s, %s)
             RETURNING id
             """,
-            (f"test-memory-{i}", f"https://example.com/test-{i}", now, now),
+            (f"test-memory-{i}", f"https://example.com/test-{i}"),
         )[0]["id"]
         created_ids["flakes"].append(flake_id)
 

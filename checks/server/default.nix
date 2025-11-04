@@ -113,7 +113,7 @@ in
           log_level = "debug";
           client = {
             enable = true;
-            server_host = "server";
+            server_host = "localhost";
             server_port = 3000;
             private_key = "/etc/agent.key";
           };
@@ -166,7 +166,7 @@ in
           # Test system configuration
           systems = [
             {
-              hostname = "cf-test-sys";
+              hostname = "server";
               public_key = lib.strings.trim (builtins.readFile "${pubPath}/agent.pub");
               environment = "test";
               flake_name = "test-flake";
@@ -256,6 +256,15 @@ in
       }
 
       # Run dry-run specific tests
+
+      # exit_code = pytest.main([
+      #     "-vvvv",          # very verbose
+      #     "--tb=short",     # concise tracebacks
+      #     "-s",             # allow print() output
+      #     "-ra",            # show summary of all failures, skips, etc.
+      #     "-m", "server",   # run tests marked 'server'
+      #     "--pyargs", "cf_test",
+      # ])
       exit_code = pytest.main([
           "-vvvv",
           "--tb=short",

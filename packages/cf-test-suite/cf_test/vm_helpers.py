@@ -39,16 +39,10 @@ def check_service_active(machine, service_name: str) -> bool:
 
 
 def get_system_hash(machine) -> str:
-    """Get the system derivation path from /run/current-system"""
-    # Fallback for test environments where deriver might not work initially
+    """Get the system store path from /run/current-system"""
+    # /run/current-system points to the store path (without .drv)
     current_system = machine.succeed("readlink /run/current-system").strip()
-    # Try to find a matching .drv file as fallback
-    drv_files = machine.succeed(
-        "find /nix/store -name '*nixos-system*agent*.drv' -type f | head -1"
-    ).strip()
-    if drv_files:
-        return drv_files
-    return f"{current_system}.drv"  # Last resort fallback
+    return current_system
 
 
 def check_keys_exist(machine, *key_paths: str) -> None:
@@ -101,7 +95,7 @@ def verify_db_state(
     """Verify database contains expected system state"""
     # Use direct DB connection instead of VM shell commands
     rows = cf_client.execute_sql(
-        "SELECT hostname, derivation_path, change_reason FROM system_states"
+        "SELECT hostname, store_path, change_reason FROM system_states"
     )
 
     machine.log(f"Final DB state: {len(rows)} rows found")
@@ -110,7 +104,7 @@ def verify_db_state(
 
     hostnames = [row["hostname"] for row in rows]
     reasons = [row["change_reason"] for row in rows]
-    derivation_paths = [row["derivation_path"] for row in rows]
+    store_paths = [row["store_path"] for row in rows]
 
     assert (
         expected_hostname in hostnames
@@ -119,8 +113,8 @@ def verify_db_state(
         expected_reason in reasons
     ), f"Change reason {expected_reason} not found in DB. Found: {reasons}"
     assert any(
-        expected_hash in path for path in derivation_paths
-    ), f"System hash {expected_hash} not found in {derivation_paths}"
+        expected_hash in path for path in store_paths
+    ), f"System hash {expected_hash} not found in {store_paths}"
 
 
 def verify_flake_in_db(cf_client, machine, repo_url: str) -> None:

@@ -141,7 +141,9 @@ def _create_base_scenario(
     )
     system_id = system_row["id"]
 
-    # system_state  **CHANGED: derivation_path -> store_path**
+    # system_state - use store_path (built output, no .drv)
+    # Store paths are the output of builds, derivation paths are the .drv files
+    store_path = system_drv.replace('.drv', '') if system_drv.endswith('.drv') else system_drv
     state_ts = commit_ts + timedelta(minutes=15)
     state_row = _one_row(
         client,
@@ -158,7 +160,7 @@ def _create_base_scenario(
         )
         RETURNING id
         """,
-        (hostname, system_drv, system_ip, state_ts),
+        (hostname, store_path, system_ip, state_ts),
     )
     state_id = state_row["id"]
 

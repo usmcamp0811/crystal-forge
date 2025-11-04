@@ -1559,7 +1559,7 @@ in {
         ReadWritePaths = [
           "/nix/var/nix/profiles"
           "/nix/var/nix/gcroots"
-          "/boot"
+          # "/boot"
           "/var/lib/crystal-forge-agent"
           "/var/cache/crystal-forge-agent"
           "/tmp"
