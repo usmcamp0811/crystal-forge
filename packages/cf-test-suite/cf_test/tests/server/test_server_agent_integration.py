@@ -5,16 +5,11 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from cf_test.vm_helpers import SmokeTestConstants as C
-from cf_test.vm_helpers import (
-    SmokeTestData,
-    check_keys_exist,
-    check_timer_active,
-    get_system_hash,
-    run_service_and_verify_success,
-    verify_db_state,
-    wait_for_agent_acceptance,
-    wait_for_crystal_forge_ready,
-)
+from cf_test.vm_helpers import (SmokeTestData, check_keys_exist,
+                                check_timer_active, get_system_hash,
+                                run_service_and_verify_success,
+                                verify_db_state, wait_for_agent_acceptance,
+                                wait_for_crystal_forge_ready)
 
 pytestmark = [
     pytest.mark.server,
@@ -44,7 +39,7 @@ def test_boot_and_units(server, agent):
         server.log("Agent VM not provisioned in this profile; skipping agent checks.")
         pytest.skip("agent VM not available in this test profile")
 
-    agent.wait_for_unit(C.AGENT_SERVICE)
+    server.wait_for_unit(C.AGENT_SERVICE)
 
 
 def test_keys_and_network(server, agent):
@@ -54,7 +49,7 @@ def test_keys_and_network(server, agent):
     check_keys_exist(server, C.SERVER_PUB_PATH)
 
     # Verify network connectivity
-    agent.succeed("ping -c1 server")
+    server.succeed("ping -c1 server")
 
 
 @pytest.mark.slow
@@ -63,7 +58,7 @@ def test_agent_accept_and_db_state(cf_client, server, agent):
 
     wait_for_crystal_forge_ready(server)
 
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     # Wait for agent acceptance first
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
@@ -73,8 +68,8 @@ def test_agent_accept_and_db_state(cf_client, server, agent):
     change_reason = "startup"
 
     # Log agent status for debugging
-    agent.log("=== agent logs ===")
-    agent.log(agent.succeed(f"journalctl -u {C.AGENT_SERVICE} || true"))
+    server.log("=== agent logs ===")
+    server.log(server.succeed(f"journalctl -u {C.AGENT_SERVICE} || true"))
 
     # Verify database state
     verify_db_state(cf_client, server, agent_hostname, system_hash, change_reason)
@@ -84,7 +79,7 @@ def test_agent_accept_and_db_state(cf_client, server, agent):
 def test_postgres_jobs_timer_and_idempotency(cf_client, server, agent):
     """Test postgres jobs timer and service idempotency"""
     # Verify agent doesn't run postgres (security check)
-    active_services = agent.succeed(
+    active_services = server.succeed(
         "systemctl list-units --type=service --state=active"
     )
     assert "postgresql" not in active_services
@@ -107,19 +102,19 @@ def test_postgres_jobs_timer_and_idempotency(cf_client, server, agent):
 def test_desired_target_response(cf_client, server, agent, smoke_data):
     """Test that the log endpoint returns desired_target for systems"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     # Wait for agent acceptance first
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
     # Test 1: Initially, no desired_target should be set
     # Make an agent heartbeat and check the response
-    response = agent.succeed(
+    response = server.succeed(
         """
         curl -s -X POST http://server:3000/current-system \\
             -H "X-Key-ID: $(hostname -s)" \\
             -H "X-Signature: $(echo '{"hostname":"'$(hostname -s)'","change_reason":"test"}' | \\
-                /etc/agent.key sign | base64 -w0)" \\
+                /etc/server.key sign | base64 -w0)" \\
             -H "Content-Type: application/json" \\
             -d '{"hostname":"'$(hostname -s)'","change_reason":"test"}'
     """
@@ -138,12 +133,12 @@ def test_desired_target_response(cf_client, server, agent, smoke_data):
     )
 
     # Make another agent request and verify the desired_target is returned
-    response = agent.succeed(
+    response = server.succeed(
         """
         curl -s -X POST http://server:3000/current-system \\
             -H "X-Key-ID: $(hostname -s)" \\
             -H "X-Signature: $(echo '{"hostname":"'$(hostname -s)'","change_reason":"test2"}' | \\
-                /etc/agent.key sign | base64 -w0)" \\
+                /etc/server.key sign | base64 -w0)" \\
             -H "Content-Type: application/json" \\
             -d '{"hostname":"'$(hostname -s)'","change_reason":"test2"}'
     """
@@ -160,12 +155,12 @@ def test_desired_target_response(cf_client, server, agent, smoke_data):
         (agent_hostname,),
     )
 
-    response = agent.succeed(
+    response = server.succeed(
         """
         curl -s -X POST http://server:3000/current-system \\
             -H "X-Key-ID: $(hostname -s)" \\
             -H "X-Signature: $(echo '{"hostname":"'$(hostname -s)'","change_reason":"test3"}' | \\
-                /etc/agent.key sign | base64 -w0)" \\
+                /etc/server.key sign | base64 -w0)" \\
             -H "Content-Type: application/json" \\
             -d '{"hostname":"'$(hostname -s)'","change_reason":"test3"}'
     """
@@ -180,7 +175,7 @@ def test_desired_target_response(cf_client, server, agent, smoke_data):
 def test_nixos_module_desired_target_sync(cf_client, server, agent):
     """Test that systems defined in NixOS module configuration sync desired_target to database"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     # This would test the NixOS module sync functionality, but since we're in a test environment,
     # we'll simulate what the sync should do
@@ -210,7 +205,7 @@ def test_nixos_module_desired_target_sync(cf_client, server, agent):
 def test_deployment_policy_manager_auto_latest(cf_client, server, agent):
     """Test that deployment policy manager updates desired_target for auto_latest systems"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     # Wait for agent acceptance first
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
@@ -304,12 +299,12 @@ def test_deployment_policy_manager_auto_latest(cf_client, server, agent):
     )
 
     # Test that agent receives the updated desired_target
-    response = agent.succeed(
+    response = server.succeed(
         """
         curl -s -X POST http://server:3000/current-system \\
             -H "X-Key-ID: $(hostname -s)" \\
             -H "X-Signature: $(echo '{"hostname":"'$(hostname -s)'","change_reason":"policy_test"}' | \\
-                /etc/agent.key sign | base64 -w0)" \\
+                /etc/server.key sign | base64 -w0)" \\
             -H "Content-Type: application/json" \\
             -d '{"hostname":"'$(hostname -s)'","change_reason":"policy_test"}'
         """
@@ -395,7 +390,7 @@ def test_deployment_policy_manager_auto_latest(cf_client, server, agent):
 def test_agent_deployment_attempt_on_desired_target(cf_client, server, agent):
     """Test that agent attempts deployment when desired_target is set"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     # Wait for agent acceptance first
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
@@ -408,10 +403,10 @@ def test_agent_deployment_attempt_on_desired_target(cf_client, server, agent):
     )
 
     # Clear agent logs before test
-    agent.succeed("journalctl --vacuum-time=1s")
+    server.succeed("journalctl --vacuum-time=1s")
 
     # Trigger a heartbeat by touching the current-system symlink
-    agent.succeed("touch /run/current-system")
+    server.succeed("touch /run/current-system")
 
     # Wait for the agent to process the heartbeat and attempt deployment
     import time
@@ -419,7 +414,7 @@ def test_agent_deployment_attempt_on_desired_target(cf_client, server, agent):
     time.sleep(5)
 
     # Check agent logs for deployment attempt
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
 
     # Verify the agent received and processed the desired target
     assert "Received desired target:" in agent_logs
@@ -437,14 +432,14 @@ def test_agent_deployment_attempt_on_desired_target(cf_client, server, agent):
     )
 
     # Clear logs again
-    agent.succeed("journalctl --vacuum-time=1s")
+    server.succeed("journalctl --vacuum-time=1s")
 
     # Trigger another heartbeat
-    agent.succeed("touch /run/current-system")
+    server.succeed("touch /run/current-system")
     time.sleep(5)
 
     # Check that no deployment was attempted
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
     assert (
         "No desired target in heartbeat response" in agent_logs
         or "No deployment needed" in agent_logs
@@ -455,7 +450,7 @@ def test_agent_deployment_attempt_on_desired_target(cf_client, server, agent):
 def test_agent_deployment_already_on_target(cf_client, server, agent):
     """Test that agent skips deployment when already on target"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
@@ -467,23 +462,23 @@ def test_agent_deployment_already_on_target(cf_client, server, agent):
     )
 
     # Clear agent logs
-    agent.succeed("journalctl --vacuum-time=1s")
+    server.succeed("journalctl --vacuum-time=1s")
 
     # First heartbeat should attempt deployment
-    agent.succeed("touch /run/current-system")
+    server.succeed("touch /run/current-system")
     time.sleep(5)
 
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
     assert "Starting deployment execution" in agent_logs
 
     # Clear logs again
-    agent.succeed("journalctl --vacuum-time=1s")
+    server.succeed("journalctl --vacuum-time=1s")
 
     # Second heartbeat should skip deployment (already on target)
-    agent.succeed("touch /run/current-system")
+    server.succeed("touch /run/current-system")
     time.sleep(5)
 
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
     assert "Already on target" in agent_logs or "skipping deployment" in agent_logs
 
 
@@ -491,7 +486,7 @@ def test_agent_deployment_already_on_target(cf_client, server, agent):
 def test_agent_deployment_dry_run_configuration(cf_client, server, agent):
     """Test agent deployment with dry-run configuration"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
@@ -503,11 +498,11 @@ def test_agent_deployment_dry_run_configuration(cf_client, server, agent):
         (test_target, agent_hostname),
     )
 
-    agent.succeed("journalctl --vacuum-time=1s")
-    agent.succeed("touch /run/current-system")
+    server.succeed("journalctl --vacuum-time=1s")
+    server.succeed("touch /run/current-system")
     time.sleep(5)
 
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
 
     # If dry_run_first is enabled, we should see dry-run execution
     # The exact log message depends on the deployment config
@@ -520,7 +515,7 @@ def test_agent_deployment_dry_run_configuration(cf_client, server, agent):
 def test_agent_deployment_state_update_after_success(cf_client, server, agent):
     """Test that agent updates system state after successful deployment"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
@@ -537,8 +532,8 @@ def test_agent_deployment_state_update_after_success(cf_client, server, agent):
         (test_target, agent_hostname),
     )
 
-    agent.succeed("journalctl --vacuum-time=1s")
-    agent.succeed("touch /run/current-system")
+    server.succeed("journalctl --vacuum-time=1s")
+    server.succeed("touch /run/current-system")
 
     # Give more time for deployment attempt and potential state update
     time.sleep(10)
@@ -552,7 +547,7 @@ def test_agent_deployment_state_update_after_success(cf_client, server, agent):
 
     # In a real deployment that succeeds, we'd see a new system state
     # In our VM test, deployment will fail but we should see the attempt logged
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
 
     # Verify deployment was attempted (even if it failed)
     assert "deployment" in agent_logs.lower() and (
@@ -564,7 +559,7 @@ def test_agent_deployment_state_update_after_success(cf_client, server, agent):
 def test_agent_deployment_result_enum_coverage(cf_client, server, agent):
     """Test that agent produces different DeploymentResult enum variants"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
@@ -574,11 +569,11 @@ def test_agent_deployment_result_enum_coverage(cf_client, server, agent):
         (agent_hostname,),
     )
 
-    agent.succeed("journalctl --vacuum-time=1s")
-    agent.succeed("touch /run/current-system")
+    server.succeed("journalctl --vacuum-time=1s")
+    server.succeed("touch /run/current-system")
     time.sleep(3)
 
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
     assert "No deployment needed" in agent_logs or "No desired target" in agent_logs
 
     # Test Failed case (nixos-rebuild will fail in VM)
@@ -588,11 +583,11 @@ def test_agent_deployment_result_enum_coverage(cf_client, server, agent):
         (test_target, agent_hostname),
     )
 
-    agent.succeed("journalctl --vacuum-time=1s")
-    agent.succeed("touch /run/current-system")
+    server.succeed("journalctl --vacuum-time=1s")
+    server.succeed("touch /run/current-system")
     time.sleep(5)
 
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
     # Should see deployment failure due to VM environment limitations
     assert (
         "Deployment failed" in agent_logs
@@ -607,12 +602,12 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(
 ):
     """Test that agent skips deployment when desired_target resolves to same derivation path as current system"""
     wait_for_crystal_forge_ready(server)
-    agent_hostname = agent.succeed("hostname -s").strip()
+    agent_hostname = server.succeed("hostname -s").strip()
 
     wait_for_agent_acceptance(cf_client, server, timeout=C.AGENT_ACCEPTANCE_TIMEOUT)
 
     # Get the current derivation path that the agent is running
-    current_derivation_path = agent.succeed("readlink /run/current-system").strip()
+    current_derivation_path = server.succeed("readlink /run/current-system").strip()
 
     # Create a test scenario where we have the same derivation but from different git hashes
     # This simulates when two different commits/refs point to the same actual build result
@@ -685,14 +680,14 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(
     )
 
     # Clear agent logs before test
-    agent.succeed("journalctl --vacuum-time=1s")
+    server.succeed("journalctl --vacuum-time=1s")
 
     # Trigger a heartbeat
-    agent.succeed("touch /run/current-system")
+    server.succeed("touch /run/current-system")
     time.sleep(5)
 
     # Check agent logs - should NOT attempt deployment
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
 
     # The agent should recognize it's already on the target and skip deployment
     assert any(
@@ -759,12 +754,12 @@ def test_agent_skips_deployment_when_desired_target_has_same_derivation_path(
     )
 
     # Clear logs and trigger heartbeat
-    agent.succeed("journalctl --vacuum-time=1s")
-    agent.succeed("touch /run/current-system")
+    server.succeed("journalctl --vacuum-time=1s")
+    server.succeed("touch /run/current-system")
     time.sleep(5)
 
     # This time should attempt deployment since derivation paths differ
-    agent_logs = agent.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
+    agent_logs = server.succeed(f"journalctl -u {C.AGENT_SERVICE} --no-pager")
     assert (
         "Starting deployment execution" in agent_logs
     ), "Agent should attempt deployment for different derivation path"
@@ -983,7 +978,7 @@ def test_vault_agent_configuration_resilience(cf_client, server):
     problematic_patterns = [
         "cannot coerce null to a string",
         "while evaluating the option.*attic-env",
-        "vault-agent.*failed",
+        "vault-server.*failed",
         "attic.*null",
     ]
 
