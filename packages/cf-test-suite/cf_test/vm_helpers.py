@@ -220,8 +220,8 @@ class SmokeTestConstants:
 
     # Common paths
     AGENT_KEY_PATH = "/etc/agent.key"
-    AGENT_PUB_PATH = "/etc/agent.pub"
-    SERVER_PUB_PATH = "/etc/agent.pub"
+    AGENT_PUB_PATH = "/etc/server.pub"
+    SERVER_PUB_PATH = "/etc/server.pub"
 
     # Timeouts
     BOOT_TIMEOUT = 180
