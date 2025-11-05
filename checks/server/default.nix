@@ -89,6 +89,7 @@ in
           git
           jq
           hello
+          openssl
           curl
           crystal-forge.default
           crystal-forge.cf-test-suite.runTests
@@ -103,8 +104,8 @@ in
         };
 
         environment.etc = {
-          "agent.key".source = "${keyPath}/agent.key";
-          "agent.pub".source = "${pubPath}/agent.pub";
+          "server.key".source = "${keyPath}/agent.key";
+          "server.pub".source = "${pubPath}/agent.pub";
         };
 
         services.crystal-forge = {
@@ -115,7 +116,7 @@ in
             enable = true;
             server_host = "localhost";
             server_port = 3000;
-            private_key = "/etc/agent.key";
+            private_key = "/etc/server.key";
           };
 
           # Database config
