@@ -25,7 +25,7 @@ def scenario_never_seen(
         git_hash=f"never123seen-{timestamp}",
         commit_age_hours=1,
         heartbeat_age_minutes=None,  # No heartbeat = never seen
-        derivation_status="build-complete",
+        derivation_status="build-complete",  # Add this line
     )
 
 
@@ -42,7 +42,7 @@ def scenario_up_to_date(
         commit_age_hours=1,
         heartbeat_age_minutes=2,
         system_ip="192.168.1.100",
-        derivation_status="build-complete",
+        derivation_status="build-complete",  # Use build-complete for successful evaluations
     )
 
 
@@ -63,13 +63,13 @@ def scenario_behind(
         commit_age_hours=48,  # Old commit from 2 days ago
         heartbeat_age_minutes=1,
         system_ip="192.168.1.101",
-        derivation_status="build-complete",
+        derivation_status="build-complete",  # Add this line
         additional_commits=[
             {"hash": "new789commit", "age_hours": 1}  # Newer commit available
         ],
     )
 
-    # Pin the system to the old derivation path
+    # Update system to point to old derivation path
     client.execute_sql(
         "UPDATE public.systems SET derivation = %s WHERE hostname = %s",
         (old_drv, hostname),
@@ -95,32 +95,32 @@ def scenario_flaky_agent(
         commit_age_hours=2,
         heartbeat_age_minutes=None,  # Custom heartbeat pattern
         system_ip="192.168.1.170",
-        derivation_status="build-complete",
     )
 
     system_state_id = base["state_id"]
 
     # Create intermittent heartbeat pattern over 24 hours
+    # Pattern: normal, gap, recovery, gap, normal, gap, current
     heartbeat_pattern = [
-        # Normal operation (24-19h)
+        # Normal operation (24-12 hours ago)
         now - timedelta(hours=24),
         now - timedelta(hours=23),
         now - timedelta(hours=22),
         now - timedelta(hours=21),
         now - timedelta(hours=20),
         now - timedelta(hours=19),
-        # gap 18-12h
-        # brief recovery (12-10h)
+        # 6-hour gap (18-12 hours ago)
+        # Brief recovery (12-10 hours ago)
         now - timedelta(hours=12),
         now - timedelta(hours=11, minutes=30),
-        # gap 10-8h
-        # normal (8-5h)
+        # 2-hour gap (10-8 hours ago)
+        # Normal operation (8-4 hours ago)
         now - timedelta(hours=8),
         now - timedelta(hours=7),
         now - timedelta(hours=6),
         now - timedelta(hours=5),
-        # gap 4-3h
-        # recent recovery
+        # 1-hour gap (4-3 hours ago)
+        # Recent recovery (last 3 hours)
         now - timedelta(hours=3),
         now - timedelta(hours=2, minutes=30),
         now - timedelta(hours=2),
@@ -162,7 +162,7 @@ def scenario_eval_failed(
     old_hash = f"working123-{timestamp}"
     new_hash = f"broken456-{timestamp}"
 
-    # Base scenario with working commit
+    # Create base scenario with working commit
     result = _create_base_scenario(
         client,
         hostname=hostname,
@@ -174,7 +174,7 @@ def scenario_eval_failed(
         heartbeat_age_minutes=3,
     )
 
-    # Newer commit with failed derivation
+    # Insert a newer commit and failed derivation for it
     [new_commit] = client.execute_sql(
         """
         INSERT INTO public.commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
@@ -193,10 +193,10 @@ def scenario_eval_failed(
     client.execute_sql(
         """
         INSERT INTO public.derivations (
-            commit_id, derivation_type, derivation_name, derivation_path,
+            commit_id, derivation_type, derivation_name, derivation_path, store_path,
             status_id, attempt_count, completed_at, error_message
         )
-        VALUES (%s, 'nixos', %s, NULL,
+        VALUES (%s, 'nixos', %s, NULL, NULL,
                 (SELECT id FROM public.derivation_statuses WHERE name='failed'),
                 0, %s, 'Evaluation failed')
         """,
@@ -215,6 +215,7 @@ def scenario_dry_run_failed(
     timestamp = int(time.time())
     hash_val = f"dryrunfailed123-{timestamp}"
 
+    # Create base scenario with dry-run-failed status and high attempt count
     result = _create_base_scenario(
         client,
         hostname=hostname,
@@ -222,11 +223,12 @@ def scenario_dry_run_failed(
         repo_url="https://example.com/dry-run-failed.git",
         git_hash=hash_val,
         commit_age_hours=4,
-        derivation_status="dry-run-failed",
+        derivation_status="dry-run-failed",  # Start with failed status
         derivation_error="Dry run failed after multiple attempts",
         heartbeat_age_minutes=3,
     )
 
+    # Update the derivation to have 5+ attempts to make it terminal
     client.execute_sql(
         """
         UPDATE public.derivations 
@@ -252,7 +254,7 @@ def scenario_offline(
         commit_age_hours=2,
         heartbeat_age_minutes=45,  # cutoff is 30m, so this is offline
         system_ip="192.168.1.102",
-        derivation_status="build-complete",
+        derivation_status="build-complete",  # Add this line
     )
 
 
@@ -263,6 +265,7 @@ def scenario_agent_restart(
 
     now = datetime.now(UTC)
 
+    # Create base system with recent deployment
     base = _create_base_scenario(
         client,
         hostname=hostname,
@@ -272,22 +275,24 @@ def scenario_agent_restart(
         commit_age_hours=6,
         heartbeat_age_minutes=None,  # We'll create custom heartbeats
         system_ip="192.168.1.150",
-        derivation_status="build-complete",
+        derivation_status="build-complete",  # Use build-complete for successful evaluations
     )
 
     system_state_id = base["state_id"]
 
+    # Create heartbeat timeline: active, then gap, then resumed
     heartbeat_times = [
-        now - timedelta(hours=4),
-        now - timedelta(hours=3),
-        now - timedelta(hours=2, minutes=30),
-        now - timedelta(minutes=15),
-        now - timedelta(minutes=5),
+        now - timedelta(hours=4),  # 4 hours ago - normal
+        now - timedelta(hours=3),  # 3 hours ago - normal
+        now - timedelta(hours=2, minutes=30),  # 2.5 hours ago - last before gap
+        # Gap of 2 hours (agent offline)
+        now - timedelta(minutes=15),  # 15 minutes ago - resumed
+        now - timedelta(minutes=5),  # 5 minutes ago - current
     ]
 
     heartbeat_ids = []
     for i, hb_time in enumerate(heartbeat_times):
-        agent_version = "2.1.0" if i >= 3 else "2.0.0"
+        agent_version = "2.1.0" if i >= 3 else "2.0.0"  # Version upgrade during restart
         hb_row = _one_row(
             client,
             """
@@ -315,6 +320,7 @@ def scenario_build_timeout(
     now = datetime.now(UTC)
     commit_ts = now - timedelta(hours=8)  # Commit 8 hours ago
 
+    # Create base scenario
     base = _create_base_scenario(
         client,
         hostname=hostname,
@@ -322,12 +328,13 @@ def scenario_build_timeout(
         repo_url="https://example.com/build-timeout.git",
         git_hash="timeout-789",
         commit_age_hours=8,
-        derivation_status="build-pending",
+        derivation_status="build-pending",  # Initial state
         heartbeat_age_minutes=10,
     )
 
     commit_id = base["commit_id"]
 
+    # Update the main derivation to be stuck building
     client.execute_sql(
         """
         UPDATE derivations 
@@ -339,6 +346,7 @@ def scenario_build_timeout(
         (now - timedelta(hours=6), base["derivation_id"]),
     )
 
+    # Add additional derivations in various stuck states
     stuck_derivations = [
         ("package-1", "build-pending", now - timedelta(hours=4)),
         ("package-2", "build-pending", now - timedelta(hours=7)),
@@ -347,15 +355,16 @@ def scenario_build_timeout(
 
     additional_deriv_ids = []
     for pkg_name, status, started_time in stuck_derivations:
+        deriv_path = f"/nix/store/{pkg_name}-timeout.drv"
         deriv_row = _one_row(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, started_at
             )
             VALUES (
-                %s, 'package', %s, %s,
+                %s, 'package', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = %s),
                 1, %s, %s
             )
@@ -364,7 +373,8 @@ def scenario_build_timeout(
             (
                 commit_id,
                 f"{hostname}-{pkg_name}",
-                f"/nix/store/{pkg_name}-rebuild.drv",
+                deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 status,
                 started_time - timedelta(minutes=10),
                 started_time,
@@ -403,7 +413,7 @@ def scenario_rollback(
     )
     flake_id = flake_row["id"]
 
-    # old commit (stable) -> new commit (problematic)
+    # Create timeline: old commit (stable) -> new commit (problematic) -> rollback to old
     commits_data = [
         (f"old-stable-{timestamp}", now - timedelta(days=7), "build-complete"),
         (f"new-problem-{timestamp}", now - timedelta(hours=6), "build-complete"),
@@ -413,6 +423,7 @@ def scenario_rollback(
     derivation_ids = []
 
     for git_hash, commit_time, status in commits_data:
+        # Create commit
         commit_row = _one_row(
             client,
             """
@@ -424,16 +435,17 @@ def scenario_rollback(
         )
         commit_ids.append(commit_row["id"])
 
+        # Create derivation for each commit
         deriv_path = f"/nix/store/{git_hash[:8]}-nixos-system-{hostname}.drv"
         deriv_row = _one_row(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, completed_at
             )
             VALUES (
-                %s, 'nixos', %s, %s,
+                %s, 'nixos', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = %s),
                 0, %s, %s
             )
@@ -443,6 +455,7 @@ def scenario_rollback(
                 commit_row["id"],
                 hostname,
                 deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 status,
                 commit_time + timedelta(minutes=5),
                 commit_time + timedelta(minutes=15),
@@ -450,7 +463,7 @@ def scenario_rollback(
         )
         derivation_ids.append(deriv_row["id"])
 
-    # system (start on new commit)
+    # Create system pointing to new commit initially
     system_row = _one_row(
         client,
         """
@@ -466,41 +479,39 @@ def scenario_rollback(
     )
     system_id = system_row["id"]
 
-    # states: deployed new, then rollback to old (no derivation_path column)
+    # Create system state timeline: deployed new, then rolled back to old
     state_timeline = [
-        (now - timedelta(hours=5), "config_change"),  # deploy new
-        (now - timedelta(minutes=30), "config_change"),  # rollback to old
+        (now - timedelta(hours=5), commits_data[1][0], "config_change"),  # Deploy new
+        (
+            now - timedelta(minutes=30),
+            commits_data[0][0],
+            "config_change",
+        ),  # Rollback to old
     ]
 
     state_ids = []
-    for idx, (state_time, reason) in enumerate(state_timeline):
-        st = _one_row(
+    for state_time, git_hash, reason in state_timeline:
+        deriv_path = f"/nix/store/{git_hash[:8]}-nixos-system-{hostname}.drv"
+        state_row = _one_row(
             client,
             """
             INSERT INTO system_states (
-                hostname, change_reason, os, kernel,
+                hostname, change_reason, store_path, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, timestamp
             )
             VALUES (
-                %s, %s, 'NixOS', '6.6.89',
+                %s, %s, %s, 'NixOS', '6.6.89',
                 32.0, 7200, 'Intel Xeon', 16,
                 '192.168.1.160', '25.05', TRUE, %s
             )
             RETURNING id
             """,
-            (hostname, reason, state_time),
+            (hostname, reason, deriv_path, state_time),
         )
-        state_ids.append(st["id"])
+        state_ids.append(state_row["id"])
 
-    # reflect final rollback in systems.derivation (point to old commit)
-    _one_row(
-        client,
-        "UPDATE systems SET derivation = %s WHERE id = %s RETURNING id",
-        (f"/nix/store/{commits_data[0][0][:8]}-nixos-system-{hostname}.drv", system_id),
-    )
-
-    # recent heartbeat
+    # Add recent heartbeats
     heartbeat_row = _one_row(
         client,
         """
@@ -539,6 +550,7 @@ def scenario_partial_rebuild(
 
     now = datetime.now(UTC)
 
+    # Create base scenario
     base = _create_base_scenario(
         client,
         hostname=hostname,
@@ -546,12 +558,13 @@ def scenario_partial_rebuild(
         repo_url="https://example.com/partial-rebuild.git",
         git_hash="partial-456",
         commit_age_hours=12,
-        derivation_status="build-complete",
+        derivation_status="build-complete",  # Main derivation succeeds
         heartbeat_age_minutes=8,
     )
 
     commit_id = base["commit_id"]
 
+    # Add packages with mixed success/failure/retry pattern
     package_scenarios = [
         ("pkg-success", "build-complete", 1, now - timedelta(hours=11)),
         ("pkg-failed-once", "build-failed", 2, now - timedelta(hours=10)),
@@ -562,16 +575,17 @@ def scenario_partial_rebuild(
 
     package_deriv_ids = []
     for pkg_name, final_status, attempts, last_attempt_time in package_scenarios:
+        deriv_path = f"/nix/store/{pkg_name}-rebuild.drv"
         deriv_row = _one_row(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, started_at, completed_at,
                 error_message
             )
             VALUES (
-                %s, 'package', %s, %s,
+                %s, 'package', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = %s),
                 %s, %s, %s, %s, %s
             )
@@ -580,7 +594,8 @@ def scenario_partial_rebuild(
             (
                 commit_id,
                 f"{hostname}-{pkg_name}",
-                f"/nix/store/{pkg_name}-rebuild.drv",
+                deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 final_status,
                 attempts,
                 now - timedelta(hours=12),
@@ -614,20 +629,20 @@ def scenario_compliance_drift(
 
     now = datetime.now(UTC)
 
-    # old deployment (45 days behind)
+    # Create old deployment (45 days behind)
     old_deployment = _create_base_scenario(
         client,
         hostname=hostname,
         flake_name="compliance-drift-test",
         repo_url="https://example.com/compliance-drift.git",
         git_hash="ancient-commit-123",
-        commit_age_hours=24 * 45,
-        heartbeat_age_minutes=12,
+        commit_age_hours=24 * 45,  # 45 days old
+        heartbeat_age_minutes=12,  # System is online but old
     )
 
     flake_id = old_deployment["flake_id"]
 
-    # many newer commits
+    # Create many newer commits (simulate active development)
     recent_commits = []
     for days_ago in [30, 20, 15, 10, 7, 3, 1]:
         commit_time = now - timedelta(days=days_ago)
@@ -646,15 +661,17 @@ def scenario_compliance_drift(
         )
         recent_commits.append(commit_row["id"])
 
+        # Create successful derivations for recent commits
+        deriv_path = f"/nix/store/newer-{days_ago}d-{hostname}.drv"
         _one_row(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, completed_at
             )
             VALUES (
-                %s, 'nixos', %s, %s,
+                %s, 'nixos', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
                 0, %s, %s
             )
@@ -662,12 +679,14 @@ def scenario_compliance_drift(
             (
                 commit_row["id"],
                 f"{hostname}-newer-build",
-                f"/nix/store/newer-{days_ago}d-{hostname}.drv",
+                deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 commit_time + timedelta(minutes=10),
                 commit_time + timedelta(minutes=25),
             ),
         )
 
+    # Update cleanup to include new commits
     cleanup_patterns = old_deployment["cleanup"].copy()
     cleanup_patterns["commits"].append(f"id IN ({','.join(map(str, recent_commits))})")
     cleanup_patterns["derivations"].append(
@@ -681,20 +700,93 @@ def scenario_compliance_drift(
     }
 
 
+def scenario_flaky_agent(
+    client: CFTestClient, hostname: str = "test-flaky-agent"
+) -> Dict[str, Any]:
+    """System with intermittent heartbeat gaps (unreliable network)"""
+
+    now = datetime.now(UTC)
+
+    # Create base system
+    base = _create_base_scenario(
+        client,
+        hostname=hostname,
+        flake_name="flaky-agent-test",
+        repo_url="https://example.com/flaky-agent.git",
+        git_hash="flaky-789",
+        commit_age_hours=2,
+        heartbeat_age_minutes=None,  # Custom heartbeat pattern
+        system_ip="192.168.1.170",
+        derivation_status="build-complete",  # Use build-complete for successful builds
+    )
+
+    system_state_id = base["state_id"]
+
+    # Create intermittent heartbeat pattern over 24 hours
+    # Pattern: normal, gap, recovery, gap, normal, gap, current
+    heartbeat_pattern = [
+        # Normal operation (24-12 hours ago)
+        now - timedelta(hours=24),
+        now - timedelta(hours=23),
+        now - timedelta(hours=22),
+        now - timedelta(hours=21),
+        now - timedelta(hours=20),
+        now - timedelta(hours=19),
+        # 6-hour gap (18-12 hours ago)
+        # Brief recovery (12-10 hours ago)
+        now - timedelta(hours=12),
+        now - timedelta(hours=11, minutes=30),
+        # 2-hour gap (10-8 hours ago)
+        # Normal operation (8-4 hours ago)
+        now - timedelta(hours=8),
+        now - timedelta(hours=7),
+        now - timedelta(hours=6),
+        now - timedelta(hours=5),
+        # 1-hour gap (4-3 hours ago)
+        # Recent recovery (last 3 hours)
+        now - timedelta(hours=3),
+        now - timedelta(hours=2, minutes=30),
+        now - timedelta(hours=2),
+        now - timedelta(hours=1, minutes=30),
+        now - timedelta(hours=1),
+        now - timedelta(minutes=30),
+        now - timedelta(minutes=5),
+    ]
+
+    heartbeat_ids = []
+    for i, hb_time in enumerate(heartbeat_pattern):
+        hb_row = _one_row(
+            client,
+            """
+            INSERT INTO agent_heartbeats (system_state_id, timestamp, agent_version, agent_build_hash)
+            VALUES (%s, %s, '2.0.1', 'flaky-build')
+            RETURNING id
+            """,
+            (system_state_id, hb_time),
+        )
+        heartbeat_ids.append(hb_row["id"])
+
+    cleanup_patterns = base["cleanup"].copy()
+    cleanup_patterns["agent_heartbeats"] = [
+        f"id IN ({','.join(map(str, heartbeat_ids))})"
+    ]
+
+    return {**base, "heartbeat_ids": heartbeat_ids}
+
+
 def scenario_orphaned_deployments(
     client: "CFTestClient", hostname: str = "test-orphaned-deploy"
 ) -> Dict[str, Any]:
     """
     Create a commit with a successful evaluation, but record a system_state whose
-    deployment does NOT match any known derivation (simulate an orphaned deploy).
+    derivation_path does NOT exist in the derivations table (simulating an orphaned deployment).
     """
-
     import time
 
     now = datetime.now(UTC)
     timestamp = int(time.time())
 
-    # flake
+    # Flake
     flake_row = _one_row(
         client,
         """
@@ -707,7 +799,7 @@ def scenario_orphaned_deployments(
     )
     flake_id = flake_row["id"]
 
-    # commit
+    # Commit (counted by the view)
     commit_row = _one_row(
         client,
         """
@@ -719,17 +811,17 @@ def scenario_orphaned_deployments(
     )
     commit_id = commit_row["id"]
 
-    # successful derivation for view to see
-    tracked_path = f"/nix/store/tracked-derivation-{timestamp}.drv"
+    # Successful derivation for the commit (so evaluations look complete)
+    deriv_path = f"/nix/store/tracked-derivation-{timestamp}.drv"
     deriv_row = _one_row(
         client,
         """
         INSERT INTO derivations (
-            commit_id, derivation_type, derivation_name, derivation_path,
+            commit_id, derivation_type, derivation_name, derivation_path, store_path,
             status_id, attempt_count, scheduled_at, completed_at
         )
         VALUES (
-            %s, 'nixos', %s, %s,
+            %s, 'nixos', %s, %s, %s,
             (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
             0, %s, %s
         )
@@ -738,14 +830,15 @@ def scenario_orphaned_deployments(
         (
             commit_id,
             f"{hostname}-tracked",
-            tracked_path,
+            deriv_path,
+            deriv_path,  # Use same path as store_path for tests
             now - timedelta(hours=1, minutes=50),
             now - timedelta(hours=1, minutes=40),
         ),
     )
     derivation_id = deriv_row["id"]
 
-    # system
+    # System (pointing at flake; "derivation" field here is not joined by the view)
     system_row = _one_row(
         client,
         """
@@ -757,36 +850,28 @@ def scenario_orphaned_deployments(
     )
     system_id = system_row["id"]
 
-    # system_state (no derivation_path column anymore)
+    # System state with an ORPHANED derivation_path (this breaks the deployment link)
+    orphaned_deriv_path = f"/nix/store/orphaned-manual-deployment-{timestamp}.drv"
     state_row = _one_row(
         client,
         """
         INSERT INTO system_states (
-            hostname, change_reason, os, kernel,
+            hostname, change_reason, store_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
             primary_ip_address, nixos_version, agent_compatible, timestamp
         )
         VALUES (
-            %s, 'config_change', 'NixOS', '6.6.89',
+            %s, 'config_change', %s, 'NixOS', '6.6.89',
             32.0, 7200, 'Intel Xeon', 16,
             '192.168.1.200', '25.05', TRUE, %s
         )
         RETURNING id
         """,
-        (hostname, now - timedelta(hours=1)),
+        (hostname, orphaned_deriv_path, now - timedelta(hours=1)),
     )
     state_id = state_row["id"]
 
-    # mark the system as having an orphaned deployment by pointing systems.derivation
-    # at a path that doesn't exist in derivations
-    orphaned_deriv_path = f"/nix/store/orphaned-manual-deployment-{timestamp}.drv"
-    _one_row(
-        client,
-        "UPDATE systems SET derivation = %s WHERE id = %s RETURNING id",
-        (orphaned_deriv_path, system_id),
-    )
-
-    # heartbeat
+    # Heartbeat so the system looks alive
     heartbeat_row = _one_row(
         client,
         """
@@ -815,7 +900,7 @@ def scenario_orphaned_deployments(
         "state_id": state_id,
         "heartbeat_id": heartbeat_row["id"],
         "orphaned_derivation_path": orphaned_deriv_path,
-        "tracked_derivation_path": tracked_path,
+        "tracked_derivation_path": deriv_path,
         "cleanup": cleanup_patterns,
         "cleanup_fn": _cleanup_fn(client, cleanup_patterns),
     }

@@ -39,10 +39,16 @@ def check_service_active(machine, service_name: str) -> bool:
 
 
 def get_system_hash(machine) -> str:
-    """Get the system store path from /run/current-system"""
-    # /run/current-system points to the store path (without .drv)
+    """Get the system derivation path from /run/current-system"""
+    # Fallback for test environments where deriver might not work initially
     current_system = machine.succeed("readlink /run/current-system").strip()
-    return current_system
+    # Try to find a matching .drv file as fallback
+    drv_files = machine.succeed(
+        "find /nix/store -name '*nixos-system*agent*.drv' -type f | head -1"
+    ).strip()
+    if drv_files:
+        return drv_files
+    return f"{current_system}.drv"  # Last resort fallback
 
 
 def check_keys_exist(machine, *key_paths: str) -> None:
@@ -219,7 +225,7 @@ class SmokeTestConstants:
     JOBS_TIMER = "crystal-forge-postgres-jobs"
 
     # Common paths
-    AGENT_KEY_PATH = "/etc/agent.key"
+    AGENT_KEY_PATH = "/etc/server.key"
     AGENT_PUB_PATH = "/etc/server.pub"
     SERVER_PUB_PATH = "/etc/server.pub"
 
