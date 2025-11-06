@@ -88,5 +88,42 @@
       echo "✅ migrations applied"
     '';
   };
+
+  agent = pkgs.stdenv.mkDerivation {
+    pname = "agent";
+    version = pkgs.crystal-forge.default.version;
+    src = pkgs.crystal-forge.default;
+    installPhase = ''
+      mkdir -p $out/bin
+      cp ${crystal-forge}/bin/agent $out/bin/agent
+      cp ${crystal-forge}/bin/cf-keygen $out/bin/cf-keygen
+    '';
+  };
+
+  server = pkgs.stdenv.mkDerivation {
+    pname = "server";
+    version = pkgs.crystal-forge.default.version;
+    src = pkgs.crystal-forge.default;
+    installPhase = ''
+      mkdir -p $out/bin
+      cp ${pkgs.crystal-forge.default}/bin/server $out/bin/server
+      cp ${pkgs.crystal-forge.default}/bin/cf-keygen $out/bin/cf-keygen
+      cp ${pkgs.crystal-forge.default}/bin/builder $out/bin/builder
+    '';
+  };
+
+  cf-keygen = pkgs.writeShellApplication {
+    name = "cf-keygen";
+    text = "${crystal-forge}/bin/cf-keygen \"$@\"";
+  };
+  test-agent = pkgs.writeShellApplication {
+    name = "test-agent";
+    text = "${crystal-forge}/bin/test-agent \"$@\"";
+  };
+
+  builder = pkgs.writeShellApplication {
+    name = "builder";
+    text = "${crystal-forge}/bin/builder \"$@\"";
+  };
 in
-  crystal-forge // {inherit srcHash migrate;}
+  crystal-forge // {inherit agent server builder cf-keygen test-agent srcHash migrate;}
