@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 /// Represents an active build reservation
 #[derive(Debug, FromRow)]
@@ -219,15 +219,17 @@ pub async fn get_next_buildable_derivation(
     Ok(row)
 }
 
-/// Atomically claim the next derivation to build
-pub async fn claim_next_derivation(
-    pool: &PgPool,
-    worker_id: &str,
-    wait_for_cache_push: bool,
-) -> Result<Option<Derivation>> {
+/// Claim the next derivation that needs building
+///
+/// FIXED: Only claims derivations with status = 5 (DryRunComplete)
+/// This ensures we only build derivations that are ready, not ones that are:
+/// - Still being evaluated (DryRunPending, DryRunInProgress)
+/// - Already building (BuildInProgress)
+/// - Failed (DryRunFailed, BuildFailed)
+pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Option<Derivation>> {
     let mut tx = pool.begin().await?;
 
-    // Get the next buildable derivation
+    // 1) Use the view query directly within the transaction to get correct ordering
     let buildable = sqlx::query_as!(
         BuildableDerivation,
         r#"
@@ -248,17 +250,9 @@ pub async fn claim_next_derivation(
             build_type as "build_type!",
             queue_position
         FROM view_buildable_derivations
-        WHERE 
-            CASE 
-                WHEN build_type = 'system' AND $1 = true THEN 
-                    cached_packages = total_packages
-                ELSE true
-            END
         ORDER BY queue_position
         LIMIT 1
-        FOR UPDATE SKIP LOCKED
-        "#,
-        wait_for_cache_push
+        "#
     )
     .fetch_optional(&mut *tx)
     .await?;
@@ -268,64 +262,68 @@ pub async fn claim_next_derivation(
         return Ok(None);
     };
 
-    // Create reservation
-    let nixos_id = if buildable.build_type == "package" {
-        buildable.nixos_id // Already an Option<i32>, don't wrap it again
-    } else {
-        None
-    };
-
-    sqlx::query!(
+    // 2) Atomically try to reserve it
+    let reserved = sqlx::query!(
         r#"
         INSERT INTO build_reservations (worker_id, derivation_id, nixos_derivation_id)
         VALUES ($1, $2, $3)
+        ON CONFLICT (derivation_id) DO NOTHING
+        RETURNING derivation_id
         "#,
         worker_id,
         buildable.id,
-        nixos_id
+        buildable.nixos_id,
     )
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    // Mark derivation as in-progress
-    sqlx::query!(
+    if reserved.is_none() {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
+    // 3) Update status to BuildInProgress
+    let updated = sqlx::query!(
         r#"
         UPDATE derivations
-        SET status_id = $1, started_at = NOW()
+        SET 
+            status_id = $1,
+            started_at = NOW(),
+            attempt_count = COALESCE(attempt_count, 0) + 1
         WHERE id = $2
+          AND status_id IN ($3, $4)
         "#,
         EvaluationStatus::BuildInProgress.as_id(),
-        buildable.id
+        buildable.id,
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::BuildPending.as_id(),
     )
     .execute(&mut *tx)
     .await?;
 
-    // Fetch full derivation
+    if updated.rows_affected() != 1 {
+        sqlx::query!(
+            r#"DELETE FROM build_reservations WHERE derivation_id = $1"#,
+            buildable.id
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.rollback().await?;
+        return Ok(None);
+    }
+
+    // 4) Fetch the full Derivation record
     let derivation = sqlx::query_as!(
         Derivation,
         r#"
         SELECT 
-            id,
-            commit_id,
+            id, commit_id,
             derivation_type as "derivation_type: crate::models::derivations::DerivationType",
-            derivation_name,
-            derivation_path,
-            derivation_target,
-            scheduled_at,
-            completed_at,
-            started_at,
-            attempt_count,
-            evaluation_duration_ms,
-            error_message,
-            pname,
-            version,
-            status_id,
-            build_elapsed_seconds,
-            build_current_target,
-            build_last_activity_seconds,
-            build_last_heartbeat,
-            cf_agent_enabled,
-            store_path
+            derivation_name, derivation_path, derivation_target,
+            scheduled_at, completed_at, started_at, attempt_count,
+            evaluation_duration_ms, error_message, pname, version, status_id,
+            build_elapsed_seconds, build_current_target, build_last_activity_seconds,
+            build_last_heartbeat, cf_agent_enabled, store_path
         FROM derivations
         WHERE id = $1
         "#,
@@ -337,8 +335,8 @@ pub async fn claim_next_derivation(
     tx.commit().await?;
 
     info!(
-        "Worker {} claimed derivation {} ({})",
-        worker_id, derivation.id, derivation.derivation_name
+        "Worker {} claimed derivation {} ({}) - attempt {}/5",
+        worker_id, derivation.id, derivation.derivation_name, derivation.attempt_count
     );
 
     Ok(Some(derivation))

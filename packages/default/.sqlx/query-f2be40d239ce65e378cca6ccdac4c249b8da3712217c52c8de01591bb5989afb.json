@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n                INSERT INTO derivations (\n                    commit_id,\n                    derivation_type, \n                    derivation_name, \n                    derivation_path, \n                    pname, \n                    version, \n                    status_id, \n                    attempt_count\n                )\n                VALUES ($1, $2, $3, $4, $5, $6, $7, 0)\n                ON CONFLICT (derivation_path) DO UPDATE SET\n                    derivation_name = EXCLUDED.derivation_name,\n                    pname = EXCLUDED.pname,\n                    version = EXCLUDED.version\n                RETURNING \n                    id,\n                    commit_id,\n                    derivation_type as \"derivation_type: DerivationType\",\n                    derivation_name,\n                    derivation_path,\n                    derivation_target,\n                    scheduled_at,\n                    completed_at,\n                    started_at,\n                    attempt_count,\n                    evaluation_duration_ms,\n                    error_message,\n                    pname,\n                    version,\n                    status_id,\n                    build_elapsed_seconds,\n                    build_current_target,\n                    build_last_activity_seconds,\n                    build_last_heartbeat,\n                    cf_agent_enabled,\n                    store_path\n                ",
+  "query": "\n        SELECT\n            d.id,\n            d.commit_id,\n            d.derivation_type as \"derivation_type: DerivationType\",\n            d.derivation_name,\n            d.derivation_path,\n            d.derivation_target,\n            d.scheduled_at,\n            d.completed_at,\n            d.started_at,\n            d.attempt_count,\n            d.evaluation_duration_ms,\n            d.error_message,\n            d.pname,\n            d.version,\n            d.status_id,\n            d.build_elapsed_seconds,\n            d.build_current_target,\n            d.build_last_activity_seconds,\n            d.build_last_heartbeat,\n            d.cf_agent_enabled,\n            d.store_path\n        FROM derivations d\n        INNER JOIN view_buildable_derivations vbd ON d.id = vbd.id\n        ORDER BY vbd.queue_position\n        ",
   "describe": {
     "columns": [
       {
@@ -110,15 +110,7 @@
       }
     ],
     "parameters": {
-      "Left": [
-        "Int4",
-        "Text",
-        "Text",
-        "Text",
-        "Varchar",
-        "Varchar",
-        "Int4"
-      ]
+      "Left": []
     },
     "nullable": [
       false,
@@ -144,5 +136,5 @@
       true
     ]
   },
-  "hash": "b2c5f372130334a048cf6674e890319d3d368193c82035a17cee69a3b6594cd2"
+  "hash": "f2be40d239ce65e378cca6ccdac4c249b8da3712217c52c8de01591bb5989afb"
 }

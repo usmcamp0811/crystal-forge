@@ -36,6 +36,7 @@ pub async fn update_desired_target(
     hostname: &str,
     desired_target: Option<&str>,
 ) -> Result<()> {
+    // TODO: Update systems table to have desired store path instead of desired target or have both
     sqlx::query(
         r#"
         UPDATE systems 

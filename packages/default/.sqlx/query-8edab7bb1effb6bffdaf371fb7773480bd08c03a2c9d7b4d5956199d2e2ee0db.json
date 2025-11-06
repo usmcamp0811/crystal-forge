@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE derivations\n                SET \n                    status_id = $1,           -- DryRunComplete (5)\n                    derivation_path = $2,     -- Store the .drv path!\n                    completed_at = NOW()\n                WHERE id = $3\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8edab7bb1effb6bffdaf371fb7773480bd08c03a2c9d7b4d5956199d2e2ee0db"
+}

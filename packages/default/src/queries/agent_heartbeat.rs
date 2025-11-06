@@ -1,5 +1,5 @@
 use crate::models::agent_heartbeats::AgentHeartbeat;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use sqlx::PgPool;
 
 pub async fn insert_agent_heartbeat(pool: &PgPool, heartbeat: &AgentHeartbeat) -> Result<()> {

@@ -1,24 +1,16 @@
 use crate::handlers::agent_request::{
     CFState, authenticate_agent_request, deserialize_system_state_versioned,
 };
-use crate::models::{
-    agent_heartbeats::AgentHeartbeat,
-    system_states::{SystemState, SystemStateV1},
-};
+use crate::models::agent_heartbeats::AgentHeartbeat;
 use crate::queries::systems::get_desired_target_by_hostname;
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
-use anyhow::Result;
 use axum::response::Response;
 use axum::{
     body::Bytes,
-    extract::FromRef,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use base64::engine::Engine;
-use base64::engine::general_purpose;
-use ed25519_dalek::Signature;
 use serde::Deserialize;
 use serde::Serialize;
 use sqlx::PgPool;

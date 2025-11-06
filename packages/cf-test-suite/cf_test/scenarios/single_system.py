@@ -193,10 +193,10 @@ def scenario_eval_failed(
     client.execute_sql(
         """
         INSERT INTO public.derivations (
-            commit_id, derivation_type, derivation_name, derivation_path,
+            commit_id, derivation_type, derivation_name, derivation_path, store_path,
             status_id, attempt_count, completed_at, error_message
         )
-        VALUES (%s, 'nixos', %s, NULL,
+        VALUES (%s, 'nixos', %s, NULL, NULL,
                 (SELECT id FROM public.derivation_statuses WHERE name='failed'),
                 0, %s, 'Evaluation failed')
         """,
@@ -355,15 +355,16 @@ def scenario_build_timeout(
 
     additional_deriv_ids = []
     for pkg_name, status, started_time in stuck_derivations:
+        deriv_path = f"/nix/store/{pkg_name}-timeout.drv"
         deriv_row = _one_row(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, started_at
             )
             VALUES (
-                %s, 'package', %s, %s,
+                %s, 'package', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = %s),
                 1, %s, %s
             )
@@ -372,7 +373,8 @@ def scenario_build_timeout(
             (
                 commit_id,
                 f"{hostname}-{pkg_name}",
-                f"/nix/store/{pkg_name}-timeout.drv",
+                deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 status,
                 started_time - timedelta(minutes=10),
                 started_time,
@@ -439,11 +441,11 @@ def scenario_rollback(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, completed_at
             )
             VALUES (
-                %s, 'nixos', %s, %s,
+                %s, 'nixos', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = %s),
                 0, %s, %s
             )
@@ -453,6 +455,7 @@ def scenario_rollback(
                 commit_row["id"],
                 hostname,
                 deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 status,
                 commit_time + timedelta(minutes=5),
                 commit_time + timedelta(minutes=15),
@@ -493,7 +496,7 @@ def scenario_rollback(
             client,
             """
             INSERT INTO system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason, store_path, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, timestamp
             )
@@ -572,16 +575,17 @@ def scenario_partial_rebuild(
 
     package_deriv_ids = []
     for pkg_name, final_status, attempts, last_attempt_time in package_scenarios:
+        deriv_path = f"/nix/store/{pkg_name}-rebuild.drv"
         deriv_row = _one_row(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, started_at, completed_at,
                 error_message
             )
             VALUES (
-                %s, 'package', %s, %s,
+                %s, 'package', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = %s),
                 %s, %s, %s, %s, %s
             )
@@ -590,7 +594,8 @@ def scenario_partial_rebuild(
             (
                 commit_id,
                 f"{hostname}-{pkg_name}",
-                f"/nix/store/{pkg_name}-rebuild.drv",
+                deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 final_status,
                 attempts,
                 now - timedelta(hours=12),
@@ -657,15 +662,16 @@ def scenario_compliance_drift(
         recent_commits.append(commit_row["id"])
 
         # Create successful derivations for recent commits
+        deriv_path = f"/nix/store/newer-{days_ago}d-{hostname}.drv"
         _one_row(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, completed_at
             )
             VALUES (
-                %s, 'nixos', %s, %s,
+                %s, 'nixos', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
                 0, %s, %s
             )
@@ -673,7 +679,8 @@ def scenario_compliance_drift(
             (
                 commit_row["id"],
                 f"{hostname}-newer-build",
-                f"/nix/store/newer-{days_ago}d-{hostname}.drv",
+                deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 commit_time + timedelta(minutes=10),
                 commit_time + timedelta(minutes=25),
             ),
@@ -810,11 +817,11 @@ def scenario_orphaned_deployments(
         client,
         """
         INSERT INTO derivations (
-            commit_id, derivation_type, derivation_name, derivation_path,
+            commit_id, derivation_type, derivation_name, derivation_path, store_path,
             status_id, attempt_count, scheduled_at, completed_at
         )
         VALUES (
-            %s, 'nixos', %s, %s,
+            %s, 'nixos', %s, %s, %s,
             (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
             0, %s, %s
         )
@@ -824,6 +831,7 @@ def scenario_orphaned_deployments(
             commit_id,
             f"{hostname}-tracked",
             deriv_path,
+            deriv_path,  # Use same path as store_path for tests
             now - timedelta(hours=1, minutes=50),
             now - timedelta(hours=1, minutes=40),
         ),
@@ -848,7 +856,7 @@ def scenario_orphaned_deployments(
         client,
         """
         INSERT INTO system_states (
-            hostname, change_reason, derivation_path, os, kernel,
+            hostname, change_reason, store_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
             primary_ip_address, nixos_version, agent_compatible, timestamp
         )

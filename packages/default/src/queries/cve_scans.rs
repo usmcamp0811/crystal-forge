@@ -5,6 +5,7 @@ use anyhow::Result;
 use bigdecimal::BigDecimal;
 use bigdecimal::FromPrimitive;
 use sqlx::PgPool;
+use tracing::debug;
 use uuid::Uuid;
 
 /// Get derivations that need CVE scanning
@@ -247,6 +248,10 @@ pub async fn save_scan_results(
 
     // Insert packages and vulnerabilities found during scan
     for entry in vulnix_results {
+        debug!(
+            "CVE Scan Entry - name: '{}', pname: {:?}, version: {:?}, derivation: '{}', affected_by: {:?}",
+            entry.name, entry.pname, entry.version, entry.derivation, entry.affected_by
+        );
         // Insert package as a derivation with type 'package' and NULL commit_id
         let package_derivation_id = sqlx::query!(
             r#"
@@ -271,7 +276,7 @@ pub async fn save_scan_results(
             "#,
             None::<i32>, // commit_id is NULL for packages
             "package",
-            entry.derivation, // Use derivation path as name to ensure uniqueness
+            entry.name,       // Use derivation path as name to ensure uniqueness
             entry.derivation, // This is the derivation path from vulnix
             None::<String>,   // derivation_target is NULL for packages discovered during scanning
             entry.pname,

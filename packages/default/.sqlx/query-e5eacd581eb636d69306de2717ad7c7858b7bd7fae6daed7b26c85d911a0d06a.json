@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE commits\n        SET \n            evaluation_status = CASE \n                WHEN COALESCE(evaluation_attempt_count, 0) >= 5 THEN 'failed'\n                ELSE 'pending'\n            END,\n            evaluation_error_message = $2\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e5eacd581eb636d69306de2717ad7c7858b7bd7fae6daed7b26c85d911a0d06a"
+}

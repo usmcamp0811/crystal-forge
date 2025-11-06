@@ -1,12 +1,11 @@
 use super::Derivation;
 use super::utils::*;
 use crate::models::config::{BuildConfig, CacheConfig};
+use anyhow::bail;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
-use std::collections::HashSet;
-use std::sync::Mutex;
-use std::sync::OnceLock;
-use tokio::process::Command;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
@@ -19,26 +18,65 @@ impl Derivation {
     ) -> Result<()> {
         let mut attempts = 0;
         let max_attempts = cache_config.max_retries + 1;
+        let base_delay = cache_config.retry_delay_seconds;
 
         while attempts < max_attempts {
-            match self
-                .push_to_cache(store_path, cache_config, build_config)
-                .await
+            // Timeout per attempt
+            // For large systems (40GB+), increase push_timeout_seconds to 3600 (1 hour) or more
+            let timeout_duration = Duration::from_secs(cache_config.push_timeout_seconds);
+
+            match tokio::time::timeout(
+                timeout_duration,
+                self.push_to_cache(store_path, cache_config, build_config),
+            )
+            .await
             {
-                Ok(()) => return Ok(()),
-                Err(e) if attempts < max_attempts - 1 => {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(e)) if attempts < max_attempts - 1 => {
+                    let err_msg = e.to_string();
+                    // Terminal errors - don't retry
+                    if err_msg.contains("SSL connect error")
+                        || err_msg.contains("certificate verify failed")
+                        || err_msg.contains("Name or service not known")
+                        || err_msg.contains("no substituter that can build it")
+                        || err_msg.contains("don't know how to build these paths")
+                    {
+                        error!("Terminal cache push error, not retrying: {}", e);
+                        return Err(e);
+                    }
+                    // Exponential backoff: 5s, 10s, 20s, 40s, 80s
+                    let delay_secs = base_delay * (2_u64.pow(attempts as u32));
                     warn!(
-                        "Cache push attempt {} failed: {}, retrying...",
+                        "Cache push attempt {} failed: {}, retrying in {}s...",
                         attempts + 1,
-                        e
+                        e,
+                        delay_secs
                     );
-                    sleep(Duration::from_secs(cache_config.retry_delay_seconds)).await;
+                    sleep(Duration::from_secs(delay_secs)).await;
                     attempts += 1;
                 }
-                Err(e) => return Err(e),
+                Ok(Err(e)) => return Err(e),
+                Err(_timeout) => {
+                    if attempts < max_attempts - 1 {
+                        let delay_secs = base_delay * (2_u64.pow(attempts as u32));
+                        warn!(
+                            "Cache push attempt {} timed out after {}s, retrying in {}s...",
+                            attempts + 1,
+                            timeout_duration.as_secs(),
+                            delay_secs
+                        );
+                        sleep(Duration::from_secs(delay_secs)).await;
+                        attempts += 1;
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "Cache push timed out after {} attempts ({}s each)",
+                            max_attempts,
+                            timeout_duration.as_secs()
+                        ));
+                    }
+                }
             }
         }
-
         unreachable!()
     }
 
@@ -55,13 +93,13 @@ impl Derivation {
         use tokio::process::Command;
 
         if !cache_config.should_push(&self.derivation_name) {
-            info!("⭐️ Skipping cache push for {}", self.derivation_name);
+            info!("Skipping cache push for {}", self.derivation_name);
             return Ok(());
         }
 
         // Resolve .drv -> store path if needed
         let store_path = if path.ends_with(".drv") {
-            info!("🔍 Resolving derivation path to store path: {}", path);
+            info!("Resolving derivation path to store path: {}", path);
             Self::resolve_drv_to_store_path(path).await?
         } else {
             path.to_string()
@@ -71,12 +109,12 @@ impl Derivation {
         let cache_cmd = match cache_config.cache_command(&store_path) {
             Some(cmd) => cmd,
             None => {
-                warn!("⚠️ No cache push configuration found, skipping cache push");
+                warn!("No cache push configuration found, skipping cache push");
                 return Ok(());
             }
         };
 
-        let mut effective_command = cache_cmd.command.clone();
+        let effective_command = cache_cmd.command.clone();
         let mut effective_args = cache_cmd.args.clone();
 
         // --- Special handling for Attic -------------------------------------------------------
@@ -106,7 +144,7 @@ impl Derivation {
             ensure_attic_login(&remote, &endpoint, &token).await?;
 
             info!(
-                "📤 Pushing {} to cache... ({} {})",
+                "Pushing {} to cache... ({} {})",
                 store_path,
                 effective_command,
                 effective_args.join(" ")
@@ -147,24 +185,36 @@ impl Derivation {
                 }
             }
 
-            // ---- First attempt ----
+            // ---- First attempt (streaming) ----
             let mut cmd = tokio::process::Command::new("attic");
             cmd.args(&effective_args);
+            cmd.arg("-vv"); // Add verbose output for streaming
             cmd.env("HOME", "/var/lib/crystal-forge");
             cmd.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
             apply_cache_env_to_command(&mut cmd);
 
-            let mut output = cmd.output().await.context("Failed to run 'attic push'")?;
+            let success = run_cache_command_streaming(cmd, "attic push (first attempt)").await?;
 
-            // ---- If unauthorized, redo login once and retry
-            if !output.status.success() {
+            if !success {
+                // Re-run to get error details for retry logic
+                let mut cmd_check = tokio::process::Command::new("attic");
+                cmd_check.args(&effective_args);
+                cmd_check.env("HOME", "/var/lib/crystal-forge");
+                cmd_check.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
+                apply_cache_env_to_command(&mut cmd_check);
+                let output = cmd_check
+                    .output()
+                    .await
+                    .context("Failed to run 'attic push'")?;
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 let trimmed = stderr.trim();
+
+                // ---- If unauthorized, redo login once and retry
                 if trimmed.contains("Unauthorized")
                     || trimmed.contains("401")
                     || trimmed.contains("invalid token")
                 {
-                    warn!("🔐 Attic push returned 401; clearing login cache and retrying once…");
+                    warn!("Attic push returned 401; clearing login cache and retrying once...");
                     clear_attic_logged(&remote);
 
                     // Re-login with current env
@@ -172,30 +222,33 @@ impl Derivation {
                     let token = std::env::var("ATTIC_TOKEN")?;
                     ensure_attic_login(&remote, &endpoint, &token).await?;
 
-                    // Retry push
+                    // Retry push with streaming
                     let mut cmd2 = tokio::process::Command::new("attic");
                     cmd2.args(&effective_args);
+                    cmd2.arg("-vv"); // Add verbose output for streaming
                     cmd2.env("HOME", "/var/lib/crystal-forge");
                     cmd2.env("XDG_CONFIG_HOME", "/var/lib/crystal-forge/.config");
                     apply_cache_env_to_command(&mut cmd2);
-                    output = cmd2
-                        .output()
-                        .await
-                        .context("Failed to run 'attic push' (retry)")?;
+                    let retry_success =
+                        run_cache_command_streaming(cmd2, "attic push (retry after 401)").await?;
+                    if retry_success {
+                        info!(
+                            "Successfully pushed {} to cache (attic, after retry)",
+                            store_path
+                        );
+                        return Ok(());
+                    }
+                }
+
+                // If we get here, there was an error
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    error!("attic (direct) failed: {}", stderr.trim());
+                    anyhow::bail!("attic failed (direct): {}", stderr.trim());
                 }
             }
 
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!("❌ attic (direct) failed: {}", stderr.trim());
-                anyhow::bail!("attic failed (direct): {}", stderr.trim());
-            }
-
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.trim().is_empty() {
-                info!("📤 attic output: {}", stdout.trim());
-            }
-            info!("✅ Successfully pushed {} to cache (attic)", store_path);
+            info!("Successfully pushed {} to cache (attic)", store_path);
             return Ok(());
         }
         // --- End Attic special-case ----------------------------------------------------------
@@ -211,77 +264,93 @@ impl Derivation {
                 .arg(&effective_command)
                 .args(&effective_args);
 
-            let output = scoped
-                .output()
-                .await
-                .context("Failed to execute scoped cache command")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                error!(
-                    "❌ {} (scoped) failed: {}",
-                    effective_command,
-                    stderr.trim()
-                );
-                anyhow::bail!("{} failed (scoped): {}", effective_command, stderr.trim());
+            // Add verbosity for nix commands
+            if effective_command == "nix" {
+                scoped.arg("-v");
             }
 
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            if !stdout.trim().is_empty() {
-                info!("📤 {} output: {}", effective_command, stdout.trim());
+            let success =
+                run_cache_command_streaming(scoped, &format!("{} (scoped)", effective_command))
+                    .await?;
+            if !success {
+                anyhow::bail!("{} failed (scoped)", effective_command);
             }
-            info!("✅ Successfully pushed {} to cache (scoped)", store_path);
+
+            info!("Successfully pushed {} to cache (scoped)", store_path);
             return Ok(());
         }
 
         // Direct execution for non-Attic
         let mut cmd = Command::new(&effective_command);
         cmd.args(&effective_args);
+
+        // Add verbosity for nix commands
+        if effective_command == "nix" {
+            cmd.arg("-v");
+        }
+
         build_config.apply_to_command(&mut cmd);
         apply_cache_env_to_command(&mut cmd);
 
-        let output = cmd
-            .output()
-            .await
-            .context("Failed to execute cache command")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("❌ {} failed: {}", effective_command, stderr.trim());
-            anyhow::bail!("{} failed: {}", effective_command, stderr.trim());
+        let success = run_cache_command_streaming(cmd, &effective_command).await?;
+        if !success {
+            anyhow::bail!("{} failed", effective_command);
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !stdout.trim().is_empty() {
-            info!("📤 {} output: {}", effective_command, stdout.trim());
-        }
-        info!("✅ Successfully pushed {} to cache", store_path);
+        info!("Successfully pushed {} to cache", store_path);
         Ok(())
     }
+}
 
-    /// Evaluates and optionally pushes to cache in one go
-    pub async fn evaluate_and_push_to_cache(
-        &mut self,
-        pool: &PgPool,
-        full_build: bool,
-        build_config: &BuildConfig,
-        cache_config: &CacheConfig,
-    ) -> Result<String> {
-        let store_path: String = self
-            .evaluate_and_build(pool, full_build, build_config)
-            .await?;
+/// Run a command and stream its output to debug logs
+async fn run_cache_command_streaming(
+    mut cmd: tokio::process::Command,
+    command_name: &str,
+) -> Result<bool> {
+    info!("  → Spawning cache command: {}", command_name);
 
-        // Only push to cache if we did a full build (not a dry-run)
-        if full_build && cache_config.push_after_build {
-            if let Err(e) = self
-                .push_to_cache(&store_path, cache_config, build_config)
-                .await
-            {
-                warn!("⚠️ Cache push failed but continuing: {}", e);
-                // Don't fail the whole operation if cache push fails
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().context("Failed to spawn cache command")?;
+
+    let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    // No per-read timeout! Large cache pushes (40GB+) can take a long time between outputs
+    // We rely on the overall timeout in push_to_cache_with_retry instead
+    loop {
+        tokio::select! {
+            line_result = stdout_reader.next_line() => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        info!("cache stdout: {}", line);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        error!("Error reading cache stdout: {}", e);
+                        break;
+                    }
+                }
+            }
+
+            line_result = stderr_reader.next_line() => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        debug!("cache stderr: {}", line);
+                    }
+                    Ok(None) => {},
+                    Err(e) => {
+                        error!("Error reading cache stderr: {}", e);
+                    }
+                }
             }
         }
-
-        Ok(store_path)
     }
+
+    let status = child.wait().await?;
+    Ok(status.success())
 }
 
 /// Log into Attic so the remote is available to the client.
@@ -295,7 +364,7 @@ async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow
         return Ok(());
     }
 
-    tracing::info!("🔐 Attic login for remote '{remote}' at {endpoint}");
+    tracing::info!("Attic login for remote '{remote}' at {endpoint}");
     let mut cmd = tokio::process::Command::new("attic");
     cmd.args(["login", remote, endpoint, token]);
     // Ensure credentials are persisted under the crystal-forge account:
@@ -310,7 +379,7 @@ async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow
         let se = String::from_utf8_lossy(&out.stderr);
         // Treat "already exists/already configured" as success
         if se.contains("exist") || se.contains("Already") || se.contains("already") {
-            tracing::info!("ℹ️ Attic remote '{remote}' already configured");
+            tracing::info!("Attic remote '{remote}' already configured");
             mark_attic_logged(remote);
             return Ok(());
         }
