@@ -274,7 +274,7 @@
 
   agentScript = pkgs.writeShellScript "crystal-forge-agent" ''
     export CRYSTAL_FORGE_CONFIG="${agentConfigPath}"
-    exec ${pkgs.crystal-forge.agent}/bin/agent "$@"
+    exec ${pkgs.crystal-forge.default.agent}/bin/agent "$@"
   '';
 in {
   options.services.crystal-forge = {
