@@ -1,5 +1,10 @@
 <p align="center">
-  <img src="../docs/cf-logo-white-text.png" alt="Crystal Forge" width="300"/>
+  <picture>
+    <!-- Dark mode -->
+    <source srcset="../docs/cf-logo-white-text.png" media="(prefers-color-scheme: dark)">
+    <!-- Light mode -->
+    <img src="../docs/cf-logo-transparent.png" alt="Crystal Forge" width="300">
+  </picture>
 </p>
 
 <p align="center">
