@@ -111,7 +111,6 @@
       cp ${pkgs.crystal-forge.default}/bin/builder $out/bin/builder
     '';
   };
-
   cf-keygen = pkgs.writeShellApplication {
     name = "cf-keygen";
     text = "${crystal-forge}/bin/cf-keygen \"$@\"";
@@ -120,7 +119,6 @@
     name = "test-agent";
     text = "${crystal-forge}/bin/test-agent \"$@\"";
   };
-
   builder = pkgs.writeShellApplication {
     name = "builder";
     text = "${crystal-forge}/bin/builder \"$@\"";
