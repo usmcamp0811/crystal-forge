@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
-import sys
 from typing import Any, Dict
 
 from .. import CFTestClient  # package-level client
@@ -11,7 +10,7 @@ from . import multi_system, single_system  # ensure scenarios are imported
 
 
 def _discover_scenarios():
-    out = {}
+    out: Dict[str, Any] = {}
     for mod in (single_system, multi_system):
         for name, obj in vars(mod).items():
             if name.startswith("scenario_") and callable(obj):
@@ -21,8 +20,9 @@ def _discover_scenarios():
 
 def _coerce_arg(val: str):
     # minimal string→type coercion
-    if val.lower() in {"true", "false"}:
-        return val.lower() == "true"
+    low = val.lower()
+    if low in {"true", "false"}:
+        return low == "true"
     for caster in (int, float):
         try:
             return caster(val)
@@ -38,9 +38,8 @@ def _filter_kwargs(fn, ns):
 
 
 def scenarios_main(argv=None):
-    from . import CFTestClient  # uses package client
-
     scenarios = _discover_scenarios()
+
     parser = argparse.ArgumentParser(prog="cf-scenarios", add_help=True)
     parser.add_argument(
         "-s",
@@ -81,7 +80,7 @@ def scenarios_main(argv=None):
 
     # build kwargs
     kwargs = vars(args).copy()
-    params = {}
+    params: Dict[str, Any] = {}
     for kv in args.param:
         if "=" not in kv:
             parser.error(f"--param must be key=value, got: {kv}")

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE commits\n        SET \n            evaluation_status = 'complete',\n            evaluation_completed_at = NOW(),\n            evaluation_error_message = NULL\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f90d33e229e7096ce9323ff50ae53382da87c92b37e0bf636571d9215a3f6a0a"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET \n            status_id = $1,  -- BuildPending (7)\n            scheduled_at = COALESCE(scheduled_at, NOW())\n        WHERE status_id = $2  -- DryRunComplete (5)\n        AND derivation_type = 'nixos'\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b62c63653a9756469e26ac8250efa9bb028f412503a764deae740b8721e61746"
+}

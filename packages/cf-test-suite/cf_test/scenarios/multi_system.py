@@ -78,7 +78,7 @@ def scenario_flake_time_series(
         [st] = client.execute_sql(
             """
             INSERT INTO public.system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason, store_path, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, "timestamp"
             )
@@ -255,15 +255,16 @@ def scenario_latest_with_two_overdue(
         client.execute_sql(
             """
             INSERT INTO public.derivations (
-              commit_id, derivation_type, derivation_name, derivation_path,
+              commit_id, derivation_type, derivation_name, derivation_path, store_path,
               status_id, attempt_count, scheduled_at, completed_at
             )
-            VALUES (%s, 'nixos', %s, %s, %s, 0, %s, %s)
+            VALUES (%s, 'nixos', %s, %s, %s, %s, 0, %s, %s)
             """,
             (
                 cr["id"],
                 f"{flake_name}-build-{i+1:02d}",
                 drv_path,
+                drv_path,  # Use same path as store_path for tests
                 complete_status_id,
                 ts + timedelta(minutes=5),
                 ts + timedelta(minutes=10),
@@ -294,7 +295,7 @@ def scenario_latest_with_two_overdue(
         [st] = client.execute_sql(
             """
             INSERT INTO public.system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason, store_path, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, "timestamp"
             )
@@ -396,15 +397,16 @@ def scenario_multiple_orphaned_systems(
         commit_ids.append(commit_row["id"])
 
         # Create derivation for each commit
+        deriv_path = f"/nix/store/tracked-{timestamp}-{i}.drv"
         _one_row(
             client,
             """
             INSERT INTO derivations (
-                commit_id, derivation_type, derivation_name, derivation_path,
+                commit_id, derivation_type, derivation_name, derivation_path, store_path,
                 status_id, attempt_count, scheduled_at, completed_at
             )
             VALUES (
-                %s, 'nixos', %s, %s,
+                %s, 'nixos', %s, %s, %s,
                 (SELECT id FROM derivation_statuses WHERE name = 'dry-run-complete'),
                 0, %s, %s
             )
@@ -412,7 +414,8 @@ def scenario_multiple_orphaned_systems(
             (
                 commit_row["id"],
                 f"tracked-build-{i}",
-                f"/nix/store/tracked-{timestamp}-{i}.drv",
+                deriv_path,
+                deriv_path,  # Use same path as store_path for tests
                 commit_time + timedelta(minutes=10),
                 commit_time + timedelta(minutes=20),
             ),
@@ -443,7 +446,7 @@ def scenario_multiple_orphaned_systems(
             client,
             """
             INSERT INTO system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason, store_path, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, timestamp
             )
@@ -561,11 +564,11 @@ def scenario_multi_system_progression_with_failure(
                     client,
                     """
                     INSERT INTO derivations (
-                        commit_id, derivation_type, derivation_name, derivation_path,
+                        commit_id, derivation_type, derivation_name, derivation_path, store_path,
                         status_id, attempt_count, scheduled_at, completed_at
                     )
                     VALUES (
-                        %s, 'nixos', %s, %s,
+                        %s, 'nixos', %s, %s, %s,
                         (SELECT id FROM derivation_statuses WHERE name = 'dry-run-complete'),
                         0, %s, %s
                     )
@@ -575,6 +578,7 @@ def scenario_multi_system_progression_with_failure(
                         commit_row["id"],
                         hostname,
                         deriv_path,
+                        deriv_path,  # Use same path as store_path for tests
                         commit_time + timedelta(minutes=10),
                         commit_time + timedelta(minutes=20),
                     ),
@@ -589,11 +593,11 @@ def scenario_multi_system_progression_with_failure(
                     client,
                     """
                     INSERT INTO derivations (
-                        commit_id, derivation_type, derivation_name, derivation_path,
+                        commit_id, derivation_type, derivation_name, derivation_path, store_path,
                         status_id, attempt_count, scheduled_at, completed_at, error_message
                     )
                     VALUES (
-                        %s, 'nixos', %s, NULL,
+                        %s, 'nixos', %s, NULL, NULL,
                         (SELECT id FROM derivation_statuses WHERE name = 'failed'),
                         2, %s, %s, 'Build failed: dependency conflict'
                     )
@@ -648,7 +652,7 @@ def scenario_multi_system_progression_with_failure(
                     client,
                     """
                     INSERT INTO system_states (
-                        hostname, change_reason, derivation_path, os, kernel,
+                        hostname, change_reason, store_path, os, kernel,
                         memory_gb, uptime_secs, cpu_brand, cpu_cores,
                         primary_ip_address, nixos_version, agent_compatible, timestamp
                     )
@@ -788,11 +792,11 @@ def scenario_progressive_system_updates(
                 client,
                 """
                 INSERT INTO derivations (
-                    commit_id, derivation_type, derivation_name, derivation_path,
+                    commit_id, derivation_type, derivation_name, derivation_path, store_path,
                     status_id, attempt_count, scheduled_at, completed_at
                 )
                 VALUES (
-                    %s, 'nixos', %s, %s,
+                    %s, 'nixos', %s, %s, %s,
                     (SELECT id FROM derivation_statuses WHERE name = 'build-complete'),
                     0, %s, %s
                 )
@@ -802,6 +806,7 @@ def scenario_progressive_system_updates(
                     commit["id"],
                     hostname,
                     deriv_path,
+                    deriv_path,  # Use same path as store_path for tests
                     commit["time"] + timedelta(minutes=10),
                     commit["time"] + timedelta(minutes=20),
                 ),
@@ -829,7 +834,7 @@ def scenario_progressive_system_updates(
             client,
             """
             INSERT INTO system_states (
-                hostname, change_reason, derivation_path, os, kernel,
+                hostname, change_reason, store_path, os, kernel,
                 memory_gb, uptime_secs, cpu_brand, cpu_cores,
                 primary_ip_address, nixos_version, agent_compatible, timestamp
             )

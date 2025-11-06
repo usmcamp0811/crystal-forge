@@ -13,9 +13,7 @@ use crystal_forge::{
         webhook::webhook_handler,
     },
     models::config::CrystalForgeConfig,
-    queries::{
-        commits::get_commits_pending_evaluation, derivations::reset_non_terminal_derivations,
-    },
+    queries::derivations::reset_non_terminal_derivations,
     server::memory_monitor_task,
     server::spawn_background_tasks,
 };
@@ -23,8 +21,7 @@ use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
 
-use tokio::time::{Duration, interval};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]

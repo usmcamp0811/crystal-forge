@@ -1,6 +1,62 @@
+Crystal Forge
 Copyright © 2025 Matthew Camp
 
-This software and all associated source code are proprietary and confidential.  
-Unauthorized use, reproduction, modification, or distribution of any portion of this software is strictly prohibited without the express prior written consent of the author.
+Crystal Forge is free software: you can redistribute it and/or modify it under the terms of the
+GNU Affero General Public License, version 3, as published by the Free Software Foundation.
 
-For licensing requests or inquiries, please contact: crystal-forge@aicampground.com
+You are not required to take any special action to accept the license, and you do not need to
+notify anyone that you have chosen to use Crystal Forge under this license.
+
+Crystal Forge is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with Crystal Forge. If not, see <https://www.gnu.org/licenses/>.
+
+---
+
+### Our Interpretation of the GNU Affero General Public License v3
+
+We believe this license provides the best balance between freedom for users and protection for contributors.  
+Below is our non-binding interpretation of how we apply the AGPLv3 to Crystal Forge.  
+(Quoted terms correspond to defined terms in the license itself.)
+
+1. **Source and Attribution**  
+   You must always provide the source code, copyright, and license
+   information for Crystal Forge whenever you "convey" any part of it,
+   whether verbatim or modified.
+
+2. **Intended Use and Aggregation**  
+   Crystal Forge was developed independently and without knowledge of
+   your work. Therefore, it should generally be considered a separate
+   work when combined with your own software, unless you have modified
+   it directly.
+
+   a. If you have *not* "modified", "adapted", or "extended" Crystal Forge,  
+      your work is an "aggregate" and not subject to this license.
+
+   b. If you *have* modified, adapted, or extended Crystal Forge,
+      those modifications are considered a work "based on" Crystal Forge
+      and must remain licensed under the AGPLv3.
+
+3. **Compatibility with Other Licenses**  
+   You may freely use Crystal Forge in projects licensed under:
+   - the GNU General Public License version 2, or  
+   - the GNU Lesser General Public License version 2.1,  
+   as these licenses treat Crystal Forge as part of an "aggregate work."
+
+4. **Community and Contact**  
+   We welcome all questions and discussions regarding licensing.
+   You may contact us at <crystal-forge-support@aicampground.com> or reach the
+   Free Software Foundation at <licensing@fsf.org> for guidance.
+
+You can also connect with our community and obtain support through our forum:
+<https://crystalforge.us>
+
+---
+
+We hope our interpretation of the AGPLv3 aligns with your own values
+and that Crystal Forge proves useful, secure, and empowering for your projects.
+Thank you for using and supporting open software.

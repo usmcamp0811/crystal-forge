@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM derivations\n        WHERE derivation_path IS NULL\n          AND status_id IN (3, 4)  -- Only delete pending/in-progress\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "49bc79ed811009c06b02a4900ffbd4a0cecb8ebf24928639e7c77e8f4f4b4a87"
+}

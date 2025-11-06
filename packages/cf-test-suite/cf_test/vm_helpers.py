@@ -101,7 +101,7 @@ def verify_db_state(
     """Verify database contains expected system state"""
     # Use direct DB connection instead of VM shell commands
     rows = cf_client.execute_sql(
-        "SELECT hostname, derivation_path, change_reason FROM system_states"
+        "SELECT hostname, store_path, change_reason FROM system_states"
     )
 
     machine.log(f"Final DB state: {len(rows)} rows found")
@@ -110,7 +110,7 @@ def verify_db_state(
 
     hostnames = [row["hostname"] for row in rows]
     reasons = [row["change_reason"] for row in rows]
-    derivation_paths = [row["derivation_path"] for row in rows]
+    store_paths = [row["store_path"] for row in rows]
 
     assert (
         expected_hostname in hostnames
@@ -119,8 +119,8 @@ def verify_db_state(
         expected_reason in reasons
     ), f"Change reason {expected_reason} not found in DB. Found: {reasons}"
     assert any(
-        expected_hash in path for path in derivation_paths
-    ), f"System hash {expected_hash} not found in {derivation_paths}"
+        expected_hash in path for path in store_paths
+    ), f"System hash {expected_hash} not found in {store_paths}"
 
 
 def verify_flake_in_db(cf_client, machine, repo_url: str) -> None:
@@ -225,9 +225,9 @@ class SmokeTestConstants:
     JOBS_TIMER = "crystal-forge-postgres-jobs"
 
     # Common paths
-    AGENT_KEY_PATH = "/etc/agent.key"
-    AGENT_PUB_PATH = "/etc/agent.pub"
-    SERVER_PUB_PATH = "/etc/agent.pub"
+    AGENT_KEY_PATH = "/etc/server.key"
+    AGENT_PUB_PATH = "/etc/server.pub"
+    SERVER_PUB_PATH = "/etc/server.pub"
 
     # Timeouts
     BOOT_TIMEOUT = 180

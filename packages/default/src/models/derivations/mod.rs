@@ -11,7 +11,6 @@ pub mod utils;
 
 // Re-export everything for backward compatibility
 pub use build::*;
-pub use cache::*;
 pub use eval::*;
 pub use utils::*;
 

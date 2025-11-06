@@ -1,15 +1,7 @@
-use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
-use crate::models::derivations::{Derivation, DerivationType};
-use crate::vulnix::vulnix_runner::VulnixRunner;
-use anyhow::Result;
-use anyhow::bail;
-use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use tokio::fs;
 use tokio::sync::RwLock;
-use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::info;
 
 #[derive(Debug, Clone)]
 pub struct WorkerStatus {
@@ -19,7 +11,7 @@ pub struct WorkerStatus {
     pub state: WorkerState,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum WorkerState {
     Idle,
     Working,
@@ -30,6 +22,11 @@ pub enum WorkerState {
 pub static BUILD_WORKER_STATUS: OnceLock<Arc<RwLock<Vec<WorkerStatus>>>> = OnceLock::new();
 pub static CVE_SCAN_STATUS: OnceLock<Arc<RwLock<Option<WorkerStatus>>>> = OnceLock::new();
 pub static CACHE_PUSH_STATUS: OnceLock<Arc<RwLock<Option<WorkerStatus>>>> = OnceLock::new();
+pub static DRY_RUN_WORKER_STATUS: OnceLock<Arc<RwLock<Vec<WorkerStatus>>>> = OnceLock::new();
+
+pub fn get_dry_run_status() -> &'static Arc<RwLock<Vec<WorkerStatus>>> {
+    DRY_RUN_WORKER_STATUS.get_or_init(|| Arc::new(RwLock::new(Vec::new())))
+}
 
 pub fn get_build_status() -> &'static Arc<RwLock<Vec<WorkerStatus>>> {
     BUILD_WORKER_STATUS.get_or_init(|| Arc::new(RwLock::new(Vec::new())))
@@ -45,10 +42,31 @@ pub fn get_cache_status() -> &'static Arc<RwLock<Option<WorkerStatus>>> {
 
 pub async fn log_builder_worker_status() {
     let build_workers = get_build_status().read().await;
+    let dry_run_workers = get_dry_run_status().read().await;
     let cve_status = get_cve_status().read().await;
     let cache_status = get_cache_status().read().await;
 
     info!("=== Worker Status ===");
+
+    // Dry run workers
+    info!("Dry Run Workers ({} total):", dry_run_workers.len());
+    for worker in dry_run_workers.iter() {
+        match &worker.current_task {
+            Some(task) => {
+                let elapsed = worker
+                    .started_at
+                    .map(|t| t.elapsed().as_secs())
+                    .unwrap_or(0);
+                info!(
+                    "  Worker {}: {:?} - {} ({}s)",
+                    worker.worker_id, worker.state, task, elapsed
+                );
+            }
+            None => {
+                info!("  Worker {}: {:?}", worker.worker_id, worker.state);
+            }
+        }
+    }
 
     // Build workers
     info!("Build Workers ({} total):", build_workers.len());

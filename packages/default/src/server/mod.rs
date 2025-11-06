@@ -1,29 +1,27 @@
-use crate::flake::commits::sync_all_watched_flakes_commits;
-
 use crate::deployment::spawn_deployment_policy_manager;
+use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
-use crate::models::config::VulnixConfig;
+use crate::models::commits::Commit;
 use crate::models::config::{CrystalForgeConfig, FlakeConfig};
-use crate::queries::cve_scans::{get_targets_needing_cve_scan, mark_cve_scan_failed};
-use crate::queries::derivations::{
-    get_pending_dry_run_derivations, handle_derivation_failure, increment_derivation_attempt_count,
-    insert_derivation_with_target, mark_derivation_dry_run_in_progress,
-    mark_target_dry_run_complete, mark_target_failed, reset_non_terminal_derivations,
-    update_derivation_path, update_scheduled_at,
-};
+use crate::models::deployment_policies::DeploymentPolicy;
+use crate::models::evaluate_with_policies::evaluate_with_nix_eval_jobs;
+use crate::models::flakes::Flake;
+// NOTE: removed increment_commit_list_attempt_count – we now rely on the new evaluation_* fields
 use crate::queries::flakes::get_all_flakes_from_db;
-use crate::vulnix::vulnix_runner::VulnixRunner;
 use anyhow::Result;
-use futures::stream;
-use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::time::interval;
-
 use sqlx::PgPool;
-use tokio::time::{Duration, sleep};
+use tokio::time;
+use tokio::time::Duration;
+use tokio::time::Instant;
+use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
-use crate::flake::eval::list_nixos_configurations_from_commit;
-use crate::queries::commits::get_commits_pending_evaluation;
+// ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
+use crate::queries::commits::{
+    get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
+    mark_commit_evaluation_started, reset_stuck_commit_evaluations,
+};
+use crate::queries::derivations::cleanup_partial_derivations;
 
 pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     let flake_pool = pool.clone();
@@ -39,15 +37,8 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
         commit_pool,
         flake_config.commit_evaluation_interval,
     ));
-    tokio::spawn(run_derivation_evaluation_loop(
-        target_pool,
-        flake_config.build_processing_interval,
-    ));
 
-    tokio::spawn(spawn_deployment_policy_manager(
-        cfg,
-        deployment_pool,
-    ));
+    tokio::spawn(spawn_deployment_policy_manager(cfg, deployment_pool));
 }
 
 /// Runs the periodic flake polling loop to check for new commits
@@ -68,30 +59,32 @@ async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
 }
 
 /// Runs the periodic commit evaluation check loop
-async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
+pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
     info!(
         "🔁 Starting periodic commit evaluation check loop (every {:?})...",
         interval
     );
+
+    // ⬇️ cleanup any stranded 'in_progress' from previous runs
+    if let Err(e) = reset_stuck_commit_evaluations(&pool).await {
+        error!("❌ Failed to reset stuck commit evaluations: {}", e);
+    }
+
+    if let Err(e) = cleanup_partial_derivations(&pool).await {
+        error!("❌ Failed to reset partial derivations: {}", e);
+    }
+
+    // `PgPool` is cheap to clone; keep an owned copy in the task.
+    let pool = pool.clone();
+
+    // Use an interval ticker to avoid accumulating sleep drift.
+    let mut ticker = time::interval_at(Instant::now() + interval, interval);
+
     loop {
         if let Err(e) = process_pending_commits(&pool).await {
             error!("❌ Error in commit evaluation cycle: {e}");
         }
-        tokio::time::sleep(interval).await;
-    }
-}
-
-/// Runs the periodic evaluation target resolution loop  
-async fn run_derivation_evaluation_loop(pool: PgPool, interval: Duration) {
-    info!(
-        "🔍 Starting periodic evaluation target check loop (every {:?})...",
-        interval
-    );
-    loop {
-        if let Err(e) = process_pending_derivations(&pool).await {
-            error!("❌ Error in target evaluation cycle: {e}");
-        }
-        tokio::time::sleep(interval).await;
+        ticker.tick().await;
     }
 }
 
@@ -100,126 +93,119 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
             for commit in pending_commits {
-                let target_type = "nixos";
-                match list_nixos_configurations_from_commit(&pool, &commit).await {
-                    Ok(nixos_targets) => {
+                // Get flake info
+                let flake = match commit.get_flake(&pool).await {
+                    Ok(flake) => flake,
+                    Err(e) => {
+                        error!(
+                            "❌ Failed to get flake for commit {}: {}",
+                            commit.git_commit_hash, e
+                        );
+                        continue;
+                    }
+                };
+
+                // Load Crystal Forge config to get build settings
+                let cfg = match CrystalForgeConfig::load() {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        error!("❌ Failed to load config: {}", e);
+                        continue;
+                    }
+                };
+                let build_config = cfg.get_build_config();
+                let server_config = cfg.get_server_config();
+
+                // Set up deployment policies - check CF agent for all systems
+                // Using non-strict mode to collect data without failing evaluations
+                let policies = vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: false }];
+
+                // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
+                if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
+                    error!(
+                        "❌ Could not mark commit {} evaluation started: {}",
+                        commit.git_commit_hash, e
+                    );
+                    continue;
+                }
+
+                // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations
+                // This will:
+                // 1. Evaluate all systems in parallel
+                // 2. Check deployment policies (CF agent status) for each system
+                // 3. Store policy results in database (cf_agent_enabled column)
+                // 4. Insert/update derivation records
+                match evaluate_with_nix_eval_jobs(
+                    pool,
+                    &commit,
+                    &flake,
+                    &flake.repo_url,
+                    &commit.git_commit_hash,
+                    "all", // Evaluate all systems
+                    &build_config,
+                    &server_config,
+                    &policies, // Check deployment policies
+                )
+                .await
+                {
+                    Ok((results, policy_checks)) => {
+                        // ⬇️ mark COMPLETE
+                        if let Err(e) = mark_commit_evaluation_complete(pool, commit.id).await {
+                            error!(
+                                "❌ Failed to mark commit {} evaluation complete: {}",
+                                commit.git_commit_hash, e
+                            );
+                        }
+
+                        let total = results.len();
+                        let with_agent = policy_checks
+                            .iter()
+                            .filter(|check| check.cf_agent_enabled == Some(true))
+                            .count();
+
                         info!(
-                            "📂 Commit {} has {} nixos targets",
-                            commit.git_commit_hash,
-                            nixos_targets.len()
+                            "✅ Evaluated {} NixOS configurations for commit {}",
+                            total, commit.git_commit_hash
+                        );
+                        info!(
+                            "   CF agent: {}/{} systems enabled ({:.1}%)",
+                            with_agent,
+                            policy_checks.len(),
+                            if policy_checks.len() > 0 {
+                                (with_agent as f64 / policy_checks.len() as f64) * 100.0
+                            } else {
+                                0.0
+                            }
                         );
 
-                        // Get flake info to build the derivation target
-                        let flake = match commit.get_flake(&pool).await {
-                            Ok(flake) => flake,
-                            Err(e) => {
-                                error!(
-                                    "❌ Failed to get flake for commit {}: {}",
-                                    commit.git_commit_hash, e
-                                );
-                                continue;
-                            }
-                        };
-
-                        for derivation_name in nixos_targets {
-                            // Build the complete flake target string
-                            let derivation_target = build_flake_target_string(
-                                &flake.repo_url,
-                                &commit.git_commit_hash,
-                                &derivation_name,
-                            );
-
-                            match insert_derivation_with_target(
-                                &pool,
-                                Some(&commit),
-                                &derivation_name,
-                                target_type,
-                                Some(&derivation_target),
-                            )
-                            .await
-                            {
-                                Ok(_) => info!(
-                                    "✅ Inserted NixOS derivation: {} (commit {}) with target: {}",
-                                    derivation_name, commit.git_commit_hash, derivation_target
-                                ),
-                                Err(e) => {
-                                    error!(
-                                        "❌ Failed to insert NixOS derivation for {}: {}",
-                                        derivation_name, e
-                                    )
-                                }
+                        // Log any policy warnings
+                        for check in policy_checks.iter().filter(|c| !c.meets_requirements) {
+                            for warning in &check.warnings {
+                                warn!("⚠️  {}: {}", check.system_name, warning);
                             }
                         }
                     }
-                    Err(e) => error!(
-                        "❌ Failed to list nixos configs for commit {}: {}",
-                        commit.git_commit_hash, e
-                    ),
+                    Err(e) => {
+                        error!(
+                            "❌ Failed to evaluate commit {}: {}",
+                            commit.git_commit_hash, e
+                        );
+
+                        // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
+                        // depending on attempt limit inside your SQL)
+                        if let Err(mark_err) =
+                            mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await
+                        {
+                            error!(
+                                "❌ Failed to mark commit {} evaluation failed: {}",
+                                commit.git_commit_hash, mark_err
+                            );
+                        }
+                    }
                 }
             }
         }
         Err(e) => error!("❌ Failed to get pending commits: {e}"),
-    }
-    Ok(())
-}
-
-/// Helper function to build flake target string
-fn build_flake_target_string(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
-    let is_path = std::path::Path::new(repo_url).exists();
-
-    if is_path {
-        format!("{repo_url}#nixosConfigurations.{system_name}.config.system.build.toplevel")
-    } else if repo_url.starts_with("git+") {
-        format!(
-            "{repo_url}?rev={commit_hash}#nixosConfigurations.{system_name}.config.system.build.toplevel"
-        )
-    } else {
-        format!(
-            "git+{repo_url}?rev={commit_hash}#nixosConfigurations.{system_name}.config.system.build.toplevel"
-        )
-    }
-}
-
-async fn process_pending_derivations(pool: &PgPool) -> Result<()> {
-    update_scheduled_at(pool).await?;
-    match get_pending_dry_run_derivations(pool).await {
-        Ok(pending_targets) => {
-            info!("📦 Found {} pending targets", pending_targets.len());
-            let concurrency_limit = 10; // adjust as needed
-            stream::iter(pending_targets.into_iter().map(|mut target| {
-                let pool = pool.clone();
-                async move {
-                    if let Err(e) = mark_derivation_dry_run_in_progress(&pool, target.id).await {
-                        error!("❌ Failed to mark target in-progress: {e}");
-                        return;
-                    }
-
-                    // Use the new evaluate_and_build method instead of resolve_derivation_path
-                    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
-                        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
-                        CrystalForgeConfig::default()
-                    });
-                    let build_config = cfg.get_build_config();
-
-                    match target.evaluate_and_build(&pool, false, &build_config).await {
-                        Ok(_derivation_path) => {
-                            // The evaluate_and_build already updated the status, path, and store_path
-                            info!("✅ Completed dry-run for: {}", target.derivation_name);
-                        }
-                        Err(e) => {
-                            if let Err(handle_err) =
-                                handle_derivation_failure(&pool, &target, "dry-run", &e).await
-                            {
-                                error!("❌ Failed to handle derivation failure: {handle_err}");
-                            }
-                        }
-                    }
-                }
-            }))
-            .for_each_concurrent(concurrency_limit, |fut| fut)
-            .await;
-        }
-        Err(e) => error!("❌ Failed to get pending targets: {e}"),
     }
     Ok(())
 }

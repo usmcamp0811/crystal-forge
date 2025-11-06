@@ -1,680 +1,393 @@
 use super::Derivation;
 use super::utils::*;
+use crate::builder::get_gc_root_path;
 use crate::models::config::BuildConfig;
-use crate::models::derivations::parse_derivation_paths;
-use crate::models::derivations::resolve_drv_to_store_path_static;
-use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
+use crate::models::config::CacheConfig;
+use anyhow::Context;
+use anyhow::{Result, anyhow, bail};
 use sqlx::PgPool;
-use std::option::Option;
 use std::path::Path;
-use std::process::{Output, Stdio};
+use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::time::{Duration, Instant, interval};
 use tracing::{debug, error, info, warn};
 
-#[derive(Debug, Clone)]
-pub struct EvaluationResult {
-    pub main_derivation_path: String,
-    pub dependency_derivation_paths: Vec<String>,
-    pub cf_agent_enabled: bool,
-    pub store_path: String,
-}
-
 impl Derivation {
-    /// High-level function that handles both NixOS and Package derivations
-    pub async fn evaluate_and_build(
-        &mut self,
-        pool: &PgPool,
-        full_build: bool,
-        build_config: &BuildConfig,
-    ) -> Result<String> {
-        match self.derivation_type {
-            crate::models::derivations::DerivationType::NixOS => {
-                let commit_id = self.commit_id.ok_or_else(|| {
-                    anyhow::anyhow!("Cannot build NixOS derivation without commit_id")
-                })?;
-
-                let commit = crate::queries::commits::get_commit_by_id(pool, commit_id).await?;
-                let flake = crate::queries::flakes::get_flake_by_id(pool, commit.flake_id).await?;
-                let flake_target = self
-                    .build_flake_target_string(&flake, &commit, true)
-                    .await?;
-
-                if full_build {
-                    self.evaluate_and_build_nixos(pool, &flake_target, build_config)
-                        .await
-                } else {
-                    self.evaluate_nixos_dry_run(pool, &flake_target, build_config)
-                        .await
-                }
-            }
-            crate::models::derivations::DerivationType::Package => {
-                let drv_path = self
-                    .derivation_path
-                    .as_ref()
-                    .ok_or_else(|| anyhow::anyhow!("Package derivation missing derivation_path"))?;
-
-                if full_build {
-                    self.build_derivation_from_path(pool, drv_path, build_config)
-                        .await
-                } else {
-                    Ok(drv_path.clone())
-                }
-            }
-        }
-    }
-
-    async fn evaluate_and_build_nixos(
-        &self,
-        pool: &PgPool,
-        flake_target: &str,
-        build_config: &BuildConfig,
-    ) -> Result<String> {
-        // Phase 1: Evaluate
-        let eval_result = Self::dry_run_derivation_path(flake_target, build_config).await?;
-
-        // Insert dependencies into database
-        if !eval_result.dependency_derivation_paths.is_empty() {
-            crate::queries::derivations::discover_and_insert_packages(
-                pool,
-                self.id,
-                &eval_result
-                    .dependency_derivation_paths
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>(),
+    /// Main entry point for building a derivation
+    /// Works for both NixOS and Package derivations using the derivation_path from database
+    pub async fn build(&mut self, pool: &PgPool, build_config: &BuildConfig) -> Result<String> {
+        // Both types use derivation_path from database (populated during dry-run phase)
+        let drv_path = self.derivation_path.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{:?} derivation missing derivation_path",
+                self.derivation_type
             )
-            .await?;
-        }
+        })?;
 
-        // Phase 2: Build if needed
-        if eval_result.main_derivation_path.ends_with(".drv") {
-            self.build_derivation_from_path(pool, &eval_result.main_derivation_path, build_config)
-                .await
-        } else {
-            Ok(eval_result.main_derivation_path)
-        }
-    }
-
-    async fn evaluate_nixos_dry_run(
-        &mut self,
-        pool: &PgPool,
-        flake_target: &str,
-        build_config: &BuildConfig,
-    ) -> Result<String> {
-        let eval_result = Self::dry_run_derivation_path(flake_target, build_config).await?;
-
-        let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
-            Ok(enabled) => enabled,
-            Err(e) => {
-                warn!("Could not determine Crystal Forge agent status: {}", e);
-                false
-            }
-        };
-
-        self.cf_agent_enabled = Some(cf_agent_enabled);
-
-        // Insert dependencies into database
-        if !eval_result.dependency_derivation_paths.is_empty() {
-            crate::queries::derivations::discover_and_insert_packages(
-                pool,
-                self.id,
-                &eval_result
-                    .dependency_derivation_paths
-                    .iter()
-                    .map(|s| s.as_str())
-                    .collect::<Vec<_>>(),
-            )
-            .await?;
-        }
-
-        // Update status and derivation_path
-        crate::queries::derivations::update_derivation_status(
-            pool,
-            self.id,
-            crate::queries::derivations::EvaluationStatus::DryRunComplete,
-            Some(&eval_result.main_derivation_path),
-            None,
-            Some(&eval_result.store_path),
-        )
-        .await?;
-
-        // Update cf_agent_enabled
-        crate::queries::derivations::update_cf_agent_enabled(pool, self.id, cf_agent_enabled)
-            .await?;
-
-        Ok(eval_result.main_derivation_path)
-    }
-
-    /// Phase 2: Build a derivation from its .drv path
-    pub async fn build_derivation_from_path(
-        &self,
-        pool: &PgPool,
-        drv_path: &str,
-        build_config: &BuildConfig,
-    ) -> Result<String> {
         info!("🔨 Building derivation: {}", drv_path);
 
         if !drv_path.ends_with(".drv") {
             bail!("Expected .drv path, got: {}", drv_path);
         }
 
+        let gc_root_path = get_gc_root_path(self.id).await;
+
+        // Build the command
         let mut cmd = if build_config.should_use_systemd() {
+            info!("  → Using systemd-run for {}", drv_path);
             let mut scoped = Command::new("systemd-run");
             scoped.args(["--scope", "--collect", "--quiet"]);
             apply_systemd_props_for_scope(build_config, &mut scoped);
-            scoped.args(["--", "nix-store", "--realise", drv_path]);
+            // IMPORTANT: add-root + indirect before the drv
+            scoped.args([
+                "--",
+                "nix-store",
+                "--realise",
+                "--add-root",
+                &gc_root_path,
+                "--indirect",
+                drv_path,
+            ]);
             scoped
         } else {
+            info!("  → Using direct nix-store for {}", drv_path);
             let mut direct = Command::new("nix-store");
-            direct.args(["--realise", drv_path]);
+            direct.args([
+                "--realise",
+                "--add-root",
+                &gc_root_path,
+                "--indirect",
+                drv_path,
+            ]);
             direct
         };
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
         build_config.apply_to_command(&mut cmd);
 
+        info!("  → About to spawn command for {}", drv_path);
+
+        // Try to run with systemd
         match Self::run_streaming_build(cmd, drv_path, self.id, pool).await {
-            Ok(output_path) => Ok(output_path),
+            Ok(output_path) => {
+                info!("✅ Build succeeded: {}", output_path);
+                Ok(output_path)
+            }
             Err(e) if build_config.should_use_systemd() && Self::is_systemd_error(&e) => {
                 warn!(
-                    "⚠️ Systemd scope creation failed, falling back to direct execution: {}",
+                    "⚠️  Systemd scope creation failed, falling back to direct execution: {}",
                     e
                 );
                 self.build_with_direct_nix_store(pool, drv_path, build_config)
                     .await
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                error!("❌ Build failed for {}: {}", drv_path, e);
+                error!("   Error details: {:?}", e);
+                Err(e)
+            }
         }
     }
 
-    /// Phase 1: Evaluate and discover all derivation paths (dry-run only)
-    pub async fn dry_run_derivation_path(
-        flake_target: &str,
-        build_config: &BuildConfig,
-    ) -> Result<EvaluationResult> {
-        info!("🔍 Evaluating derivation paths for: {}", flake_target);
-        let mut cmd = Command::new("nix");
-        cmd.args(["build", "--dry-run", flake_target]);
-        build_config.apply_to_command(&mut cmd);
-        let output = cmd.output().await?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!(
-                "nix build --dry-run failed for target '{}': {}",
-                flake_target,
-                stderr.trim()
-            );
-        }
-        // Debug: log both stdout and stderr
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    /// Sign a store path recursively with streaming output
+    pub async fn sign(&self, cache_config: &CacheConfig) -> Result<()> {
+        let store_path = self
+            .store_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Derivation {} missing store_path", self.id))?;
 
-        debug!(
-            "nix build --dry-run stdout for {}: '{}'",
-            flake_target, stdout
-        );
-        debug!(
-            "nix build --dry-run stderr for {}: '{}'",
-            flake_target, stderr
-        );
-
-        // Use the working parse_derivation_paths function
-        let (main_drv, deps) = parse_derivation_paths(&stderr, flake_target)?;
-
-        // Get the store path by querying what the derivation would produce
-        let store_path = resolve_drv_to_store_path_static(&main_drv).await?;
-
-        // Handle CF agent check gracefully - don't let it fail the whole evaluation
-        let cf_agent_enabled = match is_cf_agent_enabled(flake_target, build_config).await {
-            Ok(enabled) => enabled,
-            Err(e) => {
-                warn!("Could not determine Crystal Forge agent status: {}", e);
-                false // Default to false if we can't determine
+        let sign_cmd = match cache_config.sign_command(store_path) {
+            Some(cmd) => cmd,
+            None => {
+                debug!("No signing key configured, skipping sign");
+                return Ok(());
             }
         };
 
-        info!("🔍 main drv: {main_drv}");
-        info!("🔍 store path: {store_path}");
-        info!("🔍 {} immediate input drvs", deps.len());
+        info!("Signing store path: {}", store_path);
 
-        Ok(EvaluationResult {
-            main_derivation_path: main_drv,
-            dependency_derivation_paths: deps,
-            cf_agent_enabled,
-            store_path,
-        })
-    }
+        let mut cmd = Command::new(&sign_cmd.command);
+        cmd.args(&sign_cmd.args);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    /// Execute command with systemd fallback pattern
-    async fn execute_with_systemd_fallback<F>(
-        build_config: &BuildConfig,
-        systemd_cmd_builder: F,
-        fallback_args: &[&str],
-        operation_name: &str,
-    ) -> Result<Output>
-    where
-        F: FnOnce() -> Command,
-    {
-        if !build_config.should_use_systemd() {
-            info!(
-                "📋 Systemd disabled in config, using direct execution for {}",
-                operation_name
-            );
-            return Self::run_direct_command(fallback_args, build_config).await;
+        let success = Self::run_streaming_command(&mut cmd, "nix store sign").await?;
+
+        if success {
+            info!("Successfully signed {}", store_path);
+            Ok(())
+        } else {
+            bail!("Failed to sign store path: {}", store_path)
         }
+    }
+    /// Generic streaming command runner for non-build operations
+    pub async fn run_streaming_command(cmd: &mut Command, operation_name: &str) -> Result<bool> {
+        info!("  → Spawning {}", operation_name);
 
-        let mut cmd = systemd_cmd_builder();
-        build_config.apply_to_command(&mut cmd);
+        let mut child = cmd.spawn().context("Failed to spawn command")?;
 
-        match cmd.output().await {
-            Ok(output) if output.status.success() => Ok(output),
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if Self::is_systemd_error_str(&stderr) {
-                    warn!(
-                        "⚠️ Systemd {} failed, falling back to direct execution",
-                        operation_name
-                    );
-                    Self::run_direct_command(fallback_args, build_config).await
-                } else {
-                    Ok(output)
+        let stdout = child.stdout.take().expect("Failed to capture stdout");
+        let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
+
+        loop {
+            tokio::select! {
+                line_result = stdout_reader.next_line() => {
+                    match line_result {
+                        Ok(Some(line)) => {
+                            info!("{} stdout: {}", operation_name, line);
+                        }
+                        Ok(None) => break,
+                        Err(e) => {
+                            error!("Error reading stdout: {}", e);
+                            break;
+                        }
+                    }
+                }
+
+                line_result = stderr_reader.next_line() => {
+                    match line_result {
+                        Ok(Some(line)) => {
+                            debug!("{} stderr: {}", operation_name, line);
+                        }
+                        Ok(None) => {},
+                        Err(e) => {
+                            error!("Error reading stderr: {}", e);
+                        }
+                    }
                 }
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                info!(
-                    "📋 systemd-run not available for {}, using direct execution",
-                    operation_name
-                );
-                Self::run_direct_command(fallback_args, build_config).await
-            }
-            Err(e) => {
-                warn!(
-                    "⚠️ systemd-run failed for {}: {}, trying direct execution",
-                    operation_name, e
-                );
-                Self::run_direct_command(fallback_args, build_config).await
-            }
         }
+
+        let status = child.wait().await?;
+        Ok(status.success())
     }
 
-    async fn run_direct_command(args: &[&str], build_config: &BuildConfig) -> Result<Output> {
-        let mut cmd = Command::new(args[0]);
-        cmd.args(&args[1..]);
-        build_config.apply_to_command(&mut cmd);
-        Ok(cmd.output().await?)
+    /// Verify a store path is signed (if signing is configured)
+    pub async fn verify_signed(&self, cache_config: &CacheConfig) -> Result<()> {
+        // Only check if signing is configured
+        if cache_config.signing_key.is_none() {
+            debug!("Signing not configured, skipping verification");
+            return Ok(());
+        }
+
+        let store_path = self
+            .store_path
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Derivation {} missing store_path", self.id))?;
+
+        let output = Command::new("nix")
+            .args(["store", "info", store_path, "--json"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            bail!("Failed to verify signatures for {}", store_path);
+        }
+
+        // Check if path has valid signatures (you might parse JSON here)
+        let info = String::from_utf8_lossy(&output.stdout);
+        if !info.contains("signatures") {
+            warn!(
+                "Path {} has no signatures, but signing is configured",
+                store_path
+            );
+            // Decide: fail or warn?
+            // bail!("Path is not signed");  // <- strict mode
+        }
+
+        Ok(())
     }
 
-    async fn build_with_direct_nix_store(
-        &self,
-        pool: &PgPool,
-        drv_path: &str,
-        build_config: &BuildConfig,
-    ) -> Result<String> {
-        let mut cmd = Command::new("nix-store");
-        cmd.args(["--realise", drv_path]);
-        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-        build_config.apply_to_command(&mut cmd);
-
-        Self::run_streaming_build(cmd, drv_path, self.id, pool).await
-    }
-
+    /// Run a build command with streaming output and periodic database updates
     async fn run_streaming_build(
         mut cmd: Command,
         drv_path: &str,
         derivation_id: i32,
         pool: &PgPool,
     ) -> Result<String> {
-        use sqlx::Acquire;
-        use tokio::time::timeout;
-
         let start_time = Instant::now();
-        let mut heartbeat = interval(Duration::from_secs(30));
-        heartbeat.tick().await; // Skip first immediate tick
+        info!("  → Spawning build process for {}", drv_path);
 
-        let mut child = cmd.spawn()?;
-        let stdout = child.stdout.take().unwrap();
-        let stderr = child.stderr.take().unwrap();
-        let mut stdout_reader = BufReader::new(stdout).lines();
-        let mut stderr_reader = BufReader::new(stderr).lines();
-        let mut output_lines = Vec::new();
-        let mut last_activity = Instant::now();
-
-        // Prime with drv basename so early heartbeats have a target label
-        let mut current_build_target = Some(
-            Path::new(drv_path)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned(),
-        );
-
-        // Acquire heartbeat connection once, with timeout
-        let mut hb_conn = match timeout(Duration::from_secs(2), pool.acquire()).await {
-            Ok(Ok(conn)) => Some(conn),
-            _ => {
-                warn!("⚠️ Could not acquire heartbeat DB conn quickly, proceeding without it");
-                None
+        let mut child = match cmd.spawn() {
+            Ok(child) => {
+                info!(
+                    "  ✅ Process spawned successfully (PID: {})",
+                    child.id().unwrap_or(0)
+                );
+                child
+            }
+            Err(e) => {
+                error!("  ❌ SPAWN FAILED for {}: {}", drv_path, e);
+                error!("     Error kind: {:?}", e.kind());
+                error!("     OS error: {:?}", e.raw_os_error());
+                return Err(anyhow::anyhow!("Failed to spawn build process: {}", e));
             }
         };
 
-        let mut stdout_done = false;
-        let mut stderr_done = false;
+        let stdout = child.stdout.take().expect("Failed to capture stdout");
+        let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
+
+        let mut heartbeat_interval = interval(Duration::from_secs(5));
+        let mut current_target: Option<String> = None;
+
+        let pool_clone = pool.clone();
+        let mut last_output = Instant::now();
 
         loop {
             tokio::select! {
-                line_result = stdout_reader.next_line(), if !stdout_done => {
-                    match line_result? {
-                        Some(line) => {
-                            last_activity = Instant::now();
-                            debug!("nix stdout: {}", line);
-                            if line.starts_with("/nix/store/") && !line.contains(".drv") {
-                                output_lines.push(line);
+                // Read stdout
+                line_result = stdout_reader.next_line() => {
+                    match line_result {
+                        Ok(Some(line)) => {
+                            last_output = Instant::now();
+                            info!("build stdout: {}", line);
+
+                            // Try to extract current build target from output
+                            if line.contains("building '") || line.contains("copying path '") {
+                                current_target = Some(line.clone());
                             }
                         }
-                        None => stdout_done = true,
-                    }
-                }
-                line_result = stderr_reader.next_line(), if !stderr_done => {
-                    match line_result? {
-                        Some(line) => {
-                            last_activity = Instant::now();
-                            current_build_target = Self::parse_build_status(&line, current_build_target);
-                        }
-                        None => stderr_done = true,
-                    }
-                }
-                _ = heartbeat.tick() => {
-                    Self::log_build_progress(start_time, last_activity, &current_build_target);
-
-                    // Best-effort heartbeat: don't block the build if DB is slow
-                    if let Some(ref mut conn) = hb_conn {
-                        if let Ok(Ok(_)) = timeout(
-                            Duration::from_secs(2),
-                            crate::queries::derivations::update_derivation_build_status(
-                                &mut **conn,
-                                derivation_id,
-                                start_time.elapsed().as_secs() as i32,
-                                current_build_target.as_deref(),
-                                last_activity.elapsed().as_secs() as i32,
-                            )
-                        ).await {
-                            // Heartbeat succeeded
-                        } else {
-                            warn!("⚠️ Heartbeat update skipped (timeout or conn lost)");
+                        Ok(None) => break,
+                        Err(e) => {
+                            error!("Error reading stdout: {}", e);
+                            break;
                         }
                     }
                 }
-            }
 
-            // Exit only when BOTH streams are done
-            if stdout_done && stderr_done {
-                break;
+                // Read stderr
+                line_result = stderr_reader.next_line() => {
+                    match line_result {
+                        Ok(Some(line)) => {
+                            last_output = Instant::now();
+                            debug!("build stderr: {}", line);
+
+                            // Try to extract current build target from error output
+                            if line.contains("building '") || line.contains("copying path '") {
+                                current_target = Some(line.clone());
+                            }
+                        }
+                        Ok(None) => {},
+                        Err(e) => {
+                            error!("Error reading stderr: {}", e);
+                        }
+                    }
+                }
+
+                // Periodic heartbeat updates to database
+                _ = heartbeat_interval.tick() => {
+                    let elapsed = start_time.elapsed().as_secs() as i32;
+                    let last_activity = last_output.elapsed().as_secs() as i32;
+
+                    if let Err(e) = Self::update_build_heartbeat(
+                        &pool_clone,
+                        derivation_id,
+                        elapsed,
+                        current_target.as_deref(),
+                        last_activity,
+                    ).await {
+                        warn!("Failed to update build heartbeat: {}", e);
+                    }
+                }
             }
         }
 
+        // Wait for the process to complete
         let status = child.wait().await?;
+
         if !status.success() {
-            bail!(
-                "nix-store --realise failed with exit code: {}",
-                status.code().unwrap_or(-1)
-            );
+            let exit_code = status.code().unwrap_or(-1);
+            bail!("Build failed for {} with exit code {}", drv_path, exit_code);
         }
 
-        let output_path = output_lines
-            .into_iter()
-            .find(|line| !line.contains(".drv"))
-            .ok_or_else(|| anyhow!("No output path found in nix-store output"))?;
-
-        let elapsed = start_time.elapsed();
-        info!(
-            "✅ Built derivation {} -> {} (took {}m {}s)",
-            drv_path,
-            output_path,
-            elapsed.as_secs() / 60,
-            elapsed.as_secs() % 60
-        );
-
-        let _ =
-            crate::queries::derivations::clear_derivation_build_status(pool, derivation_id).await;
-
-        Ok(output_path)
+        // Get the output store path
+        let store_path = Self::resolve_store_path_from_drv(drv_path).await?;
+        Ok(store_path)
     }
 
-    fn parse_build_status(line: &str, current: Option<String>) -> Option<String> {
-        if line.contains("building '") {
-            // New target announced
-            Self::extract_quoted_target(line, "building '")
-        } else if line.contains("built '") {
-            // Target finished; keep last-known so progress log isn't blank between targets
-            if let Some(t) = Self::extract_quoted_target(line, "built '") {
-                info!("✅ Completed building: {}", t);
-            }
-            current
-        } else if line.contains("downloading '") || line.contains("fetching ") {
-            debug!("📥 {}", line);
-            current
-        } else if line.contains("error:") || line.contains("failed") {
-            error!("❌ Build error: {}", line);
-            current
-        } else {
-            current
-        }
+    /// Update the database with build progress information
+    async fn update_build_heartbeat(
+        pool: &PgPool,
+        derivation_id: i32,
+        elapsed_seconds: i32,
+        current_target: Option<&str>,
+        last_activity_seconds: i32,
+    ) -> Result<()> {
+        sqlx::query!(
+            r#"
+            UPDATE derivations
+            SET 
+                build_elapsed_seconds = $1,
+                build_current_target = $2,
+                build_last_activity_seconds = $3,
+                build_last_heartbeat = NOW()
+            WHERE id = $4
+            "#,
+            elapsed_seconds,
+            current_target,
+            last_activity_seconds,
+            derivation_id
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
     }
 
-    fn extract_quoted_target(line: &str, prefix: &str) -> Option<String> {
-        if let Some(start) = line.find(prefix) {
-            let start_pos = start + prefix.len();
-            if let Some(end) = line[start_pos..].find("'") {
-                let target = line[start_pos..start_pos + end].to_string();
-                info!("🔨 Started building: {}", target);
-                return Some(target);
-            }
-        }
-        None
-    }
-
-    fn log_build_progress(
-        start_time: Instant,
-        last_activity: Instant,
-        current_build_target: &Option<String>,
-    ) {
-        let elapsed = start_time.elapsed();
-        let mins = elapsed.as_secs() / 60;
-        let secs = elapsed.as_secs() % 60;
-        let last_activity_secs = last_activity.elapsed().as_secs();
-
-        match current_build_target {
-            Some(target) => {
-                info!(
-                    "⏳ Still building {}: {}m {}s elapsed, last activity {}s ago",
-                    target, mins, secs, last_activity_secs
-                );
-            }
-            None => {
-                info!(
-                    "⏳ Build in progress: {}m {}s elapsed, last activity {}s ago",
-                    mins, secs, last_activity_secs
-                );
-            }
-        }
-    }
-
-    fn is_systemd_error(e: &anyhow::Error) -> bool {
-        Self::is_systemd_error_str(&e.to_string())
-    }
-
-    fn is_systemd_error_str(error_msg: &str) -> bool {
-        error_msg.contains("Failed to connect to user scope bus")
-            || error_msg.contains("DBUS_SESSION_BUS_ADDRESS")
-            || error_msg.contains("XDG_RUNTIME_DIR")
-            || error_msg.contains("Failed to create scope")
-            || error_msg.contains("Interactive authentication required")
-            || error_msg.contains("systemd")
-    }
-
-    /// Helper to build the flake target string
-    async fn build_flake_target_string(
+    /// Fallback: build directly without systemd isolation
+    async fn build_with_direct_nix_store(
         &self,
-        flake: &crate::models::flakes::Flake,
-        commit: &crate::models::commits::Commit,
-        include_build_toplevel: bool,
+        pool: &PgPool,
+        drv_path: &str,
+        build_config: &BuildConfig,
     ) -> Result<String> {
-        let system = &self.derivation_name;
-        let flake_ref = if Path::new(&flake.repo_url).exists() {
-            let abs = std::fs::canonicalize(&flake.repo_url)
-                .with_context(|| format!("canonicalize {}", flake.repo_url))?;
-            format!(
-                "git+file://{}?rev={}",
-                abs.display(),
-                commit.git_commit_hash
-            )
-        } else if flake.repo_url.starts_with("git+") {
-            if flake.repo_url.contains("?rev=") {
-                flake.repo_url.clone()
-            } else {
-                format!("{}?rev={}", flake.repo_url, commit.git_commit_hash)
-            }
-        } else {
-            let separator = if flake.repo_url.contains('?') {
-                "&"
-            } else {
-                "?"
-            };
-            format!(
-                "git+{}{separator}rev={}",
-                flake.repo_url, commit.git_commit_hash
-            )
-        };
-        if include_build_toplevel {
-            Ok(format!(
-                "{flake_ref}#nixosConfigurations.{system}.config.system.build.toplevel"
-            ))
-        } else {
-            Ok(format!("{flake_ref}#nixosConfigurations.{system}"))
-        }
-    }
-}
+        info!(
+            "🔨 Building with direct nix-store (no systemd): {}",
+            drv_path
+        );
 
-/// Check if this derivation has Crystal Forge agent enabled
-pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig) -> Result<bool> {
-    // Test environment check
-    if std::env::var("CF_TEST_ENVIRONMENT").is_ok() || flake_target.contains("cf-test-sys") {
-        return Ok(true);
+        let mut cmd = Command::new("nix-store");
+        cmd.args(["--realise", drv_path]);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        build_config.apply_to_command(&mut cmd);
+
+        Self::run_streaming_build(cmd, drv_path, self.id, pool).await
     }
 
-    // Extract the system name from the flake target
-    let system_name = flake_target
-        .split('#')
-        .nth(1)
-        .and_then(|s| s.split('.').nth(1))
-        .unwrap_or("unknown");
+    /// Resolve a .drv path to its output store path
+    async fn resolve_store_path_from_drv(drv_path: &str) -> Result<String> {
+        let output = Command::new("nix-store")
+            .args(["--query", "--outputs", drv_path])
+            .output()
+            .await?;
 
-    // Extract the flake URL (before the #)
-    let flake_url = flake_target.split('#').next().unwrap_or(flake_target);
-
-    // Use a simpler evaluation that's less likely to fail
-    let eval_expr = format!(
-        "let flake = builtins.getFlake \"{}\"; cfg = flake.nixosConfigurations.{}.config.services.crystal-forge or {{}}; in {{ enable = cfg.enable or false; client_enable = cfg.client.enable or false; }}",
-        flake_url, system_name
-    );
-
-    let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--json", "--expr", &eval_expr]);
-    build_config.apply_to_command(&mut cmd);
-
-    match cmd.output().await {
-        Ok(output) if output.status.success() => {
-            let json_str = String::from_utf8_lossy(&output.stdout);
-            match serde_json::from_str::<serde_json::Value>(&json_str) {
-                Ok(json) => {
-                    let cf_enabled = json
-                        .get("enable")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    let cf_client_enabled = json
-                        .get("client_enable")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    Ok(cf_enabled && cf_client_enabled)
-                }
-                Err(e) => {
-                    warn!("Failed to parse CF agent status JSON: {}", e);
-                    Ok(false)
-                }
-            }
-        }
-        Ok(output) => {
+        if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!("CF agent evaluation failed: {}", stderr);
-            Ok(false)
+            bail!("Failed to get store path for {}: {}", drv_path, stderr);
         }
-        Err(e) => {
-            warn!("Failed to run CF agent evaluation: {}", e);
-            Ok(false)
+
+        let store_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        if store_path.is_empty() {
+            bail!("Got empty store path for {}", drv_path);
         }
-    }
-}
 
-async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
-    let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--json", &format!("{flake_target}.drvPath")]);
-    build_config.apply_to_command(&mut cmd);
-
-    let out = cmd.output().await?;
-    if !out.status.success() {
-        bail!(
-            "nix eval failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        Ok(store_path)
     }
 
-    // Parse JSON output instead of raw text
-    let json_output = String::from_utf8_lossy(&out.stdout);
-    let drv_path: String =
-        serde_json::from_str(json_output.trim()).context("Failed to parse derivation path JSON")?;
-    Ok(drv_path)
-}
-
-async fn list_immediate_input_drvs(
-    drv_path: &str,
-    build_config: &BuildConfig,
-) -> Result<Vec<String>> {
-    let systemd_cmd = || {
-        let mut cmd = build_config.systemd_scoped_cmd_base();
-        cmd.args(["nix", "derivation", "show", drv_path]);
-        cmd
-    };
-
-    let output = Derivation::execute_with_systemd_fallback(
-        build_config,
-        systemd_cmd,
-        &["nix", "derivation", "show", drv_path],
-        "derivation show",
-    )
-    .await?;
-
-    if !output.status.success() {
-        bail!(
-            "nix derivation show failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+    /// Check if an error is a systemd-specific error (for fallback logic)
+    fn is_systemd_error(error: &anyhow::Error) -> bool {
+        let error_str = error.to_string().to_lowercase();
+        error_str.contains("systemd")
+            || error_str.contains("dbus")
+            || error_str.contains("scope")
+            || error_str.contains("failed to create")
     }
-
-    let v: Value = serde_json::from_slice(&output.stdout)?;
-    let obj = v
-        .as_object()
-        .and_then(|m| m.get(drv_path))
-        .and_then(|x| x.as_object())
-        .ok_or_else(|| anyhow!("bad JSON from nix derivation show"))?;
-
-    let deps = obj
-        .get("inputDrvs")
-        .and_then(|x| x.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_else(Vec::new);
-
-    Ok(deps)
 }

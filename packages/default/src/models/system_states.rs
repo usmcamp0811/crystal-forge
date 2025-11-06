@@ -57,7 +57,7 @@ pub struct SystemStateV1 {
     pub hostname: String,
     pub context: String,
     pub timestamp: Option<DateTime<Utc>>,
-    pub derivation_path: Option<String>,
+    pub store_path: Option<String>,
     pub os: Option<String>,
     pub kernel: Option<String>,
     pub memory_gb: Option<f64>,
@@ -92,7 +92,7 @@ pub struct SystemState {
     pub timestamp: Option<DateTime<Utc>>,
 
     // ───── System Info ─────
-    pub derivation_path: Option<String>,
+    pub store_path: Option<String>,
     pub os: Option<String>,
     pub kernel: Option<String>,
     pub memory_gb: Option<f64>,
@@ -149,7 +149,7 @@ impl SystemState {
             timestamp: v1.timestamp,
 
             // ───── System Info ─────
-            derivation_path: v1.derivation_path,
+            store_path: v1.store_path,
             os: v1.os,
             kernel: v1.kernel,
             memory_gb: v1.memory_gb,
@@ -207,7 +207,7 @@ impl SystemState {
     pub fn gather_from_args(
         hostname: &str,
         change_reason: &str,
-        derivation_path: &str,
+        store_path: &str,
         timestamp_override: Option<DateTime<Utc>>,
         // Optional overrides for testing different scenarios
         os_override: Option<&str>,
@@ -220,7 +220,7 @@ impl SystemState {
             id: None,
             timestamp: timestamp_override.or_else(|| Some(Utc::now())),
             hostname: hostname.to_string(),
-            derivation_path: Some(derivation_path.to_string()),
+            store_path: Some(store_path.to_string()),
             change_reason: change_reason.to_string(),
 
             // Use overrides or sensible test defaults
@@ -268,7 +268,7 @@ impl SystemState {
         })
     }
 
-    pub fn gather(hostname: &str, change_reason: &str, derivation_path: &str) -> Result<Self> {
+    pub fn gather(hostname: &str, change_reason: &str, store_path: &str) -> Result<Self> {
         let mut sys = System::new_all();
         sys.refresh_all();
 
@@ -343,7 +343,7 @@ impl SystemState {
             id: None,
             timestamp: Some(Utc::now()),
             hostname: hostname.to_string(),
-            derivation_path: Some(derivation_path.to_string()),
+            store_path: Some(store_path.to_string()),
             change_reason: change_reason.to_string(),
             os,
             kernel,
@@ -385,7 +385,7 @@ impl fmt::Display for SystemState {
             self.hostname,
             self.change_reason,
             self.hostname,
-            self.derivation_path.as_deref().unwrap_or("unknown"),
+            self.store_path.as_deref().unwrap_or("unknown"),
             self.os.as_deref().unwrap_or("unknown"),
             self.kernel.as_deref().unwrap_or("unknown"),
             self.memory_gb.unwrap_or(0.0),
