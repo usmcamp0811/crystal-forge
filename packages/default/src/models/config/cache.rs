@@ -1,5 +1,6 @@
 use crate::models::config::duration_serde;
 use serde::Deserialize;
+use serde::Serialize;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Deserialize)]
@@ -13,13 +14,15 @@ pub struct CacheConfig {
     pub compression: Option<String>,
     pub push_filter: Option<Vec<String>>,
     #[serde(default = "CacheConfig::default_parallel_uploads")]
-    pub parallel_uploads: u32,
+    pub parallel_uploads: u32, // TODO: do some docs or something this is only for s3 uploads otherwise we use attics jobs
     // S3-specific
     pub s3_region: Option<String>,
     pub s3_profile: Option<String>,
     // Attic-specific
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
+    pub attic_ignore_upstream_cache_filter: bool, // Fixed typo: upsream -> upstream
+    pub attic_jobs: u32,                          // parallel upload method in attic
     // Retry configuration
     #[serde(default)]
     pub max_retries: u32,
@@ -30,22 +33,23 @@ pub struct CacheConfig {
         with = "duration_serde"
     )]
     pub poll_interval: Duration,
+    /// Timeout for each cache push attempt in seconds (default: 3600 = 1 hour)
+    /// For large systems (40GB+), consider 7200 (2h) or more
+    /// This is the overall timeout per attempt, not per-read timeout
+    #[serde(default = "CacheConfig::default_push_timeout_seconds")]
+    pub push_timeout_seconds: u64,
+    #[serde(default)]
+    pub force_repush: bool,
+    pub require_sigs: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, Default)]
+#[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub enum CacheType {
     S3,
     Attic,
     Http,
     #[default]
     Nix,
-}
-
-#[derive(Debug, Clone)]
-pub struct CachePushJob {
-    pub derivation_id: i32,
-    pub derivation_name: String,
-    pub store_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -56,14 +60,35 @@ pub struct CacheCommand {
 
 impl CacheConfig {
     fn default_parallel_uploads() -> u32 {
-        4
+        1
     }
 
     fn default_poll_interval() -> Duration {
         Duration::from_secs(30)
     }
 
-    /// Returns the command and arguments for cache operations
+    fn default_push_timeout_seconds() -> u64 {
+        3600 // 1 hour - large systems (40GB+) need more time. Increase to 7200+ if needed.
+    }
+
+    /// Optional signing step. If `signing_key` is set, run this BEFORE `cache_command`.
+    /// Equivalent to: nix store sign --recursive --key-file <key> <store_path>
+    pub fn sign_command(&self, store_path: &str) -> Option<CacheCommand> {
+        let key_path = self.signing_key.as_ref()?;
+        Some(CacheCommand {
+            command: "nix".to_string(),
+            args: vec![
+                "store".to_string(),
+                "sign".to_string(),
+                "--recursive".to_string(), // CRITICAL: Sign entire closure
+                "--key-file".to_string(),
+                key_path.clone(),
+                store_path.to_string(),
+            ],
+        })
+    }
+
+    /// Returns the command and arguments for cache operations (the COPY step).
     pub fn cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         match self.cache_type {
             CacheType::S3 => self.s3_cache_command(store_path),
@@ -72,35 +97,47 @@ impl CacheConfig {
         }
     }
 
-    /// Legacy method for backward compatibility - now just returns args
+    /// Legacy: still returns args only.
     pub fn copy_command_args(&self, store_path: &str) -> Option<Vec<String>> {
         self.cache_command(store_path).map(|cmd| cmd.args)
     }
 
     fn attic_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let cache_name = self.attic_cache_name.as_ref()?;
+
+        // Build args with cache name at args[1] (cache.rs expects this position)
+        // Flags should come after the positional arguments to avoid conflicts
+        let mut args = vec![
+            "push".to_string(),
+            cache_name.clone(),
+            store_path.to_string(),
+        ];
+
+        // Add flags after positional arguments
+        if self.attic_ignore_upstream_cache_filter {
+            args.push("--ignore-upstream-cache-filter".to_string());
+        }
+        args.extend(["--jobs".to_string(), self.attic_jobs.to_string()]);
+
         Some(CacheCommand {
             command: "attic".to_string(),
-            args: vec![
-                "push".to_string(),
-                cache_name.clone(),
-                store_path.to_string(),
-            ],
+            args,
         })
     }
 
     fn s3_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
-        let mut args = vec![
-            "copy".to_string(),
-            "--to".to_string(),
-            push_to.clone(),
-            store_path.to_string(),
-        ];
+        let mut args = vec!["copy".to_string(), "--to".to_string(), push_to.clone()];
 
-        if let Some(key_path) = &self.signing_key {
-            args.extend(["--sign-key".to_string(), key_path.clone()]);
+        if self.force_repush {
+            args.push("--refresh".to_string());
         }
+        if let Some(compression) = &self.compression {
+            args.extend(["--compression".to_string(), compression.clone()]);
+        }
+
+        // args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
+        args.push(store_path.to_string());
 
         Some(CacheCommand {
             command: "nix".to_string(),
@@ -110,22 +147,16 @@ impl CacheConfig {
 
     fn nix_cache_command(&self, store_path: &str) -> Option<CacheCommand> {
         let push_to = self.push_to.as_ref()?;
-        let mut args = vec![
-            "copy".to_string(),
-            "--to".to_string(),
-            push_to.clone(),
-            store_path.to_string(),
-        ];
+        let mut args = vec!["copy".to_string(), "--to".to_string(), push_to.clone()];
 
-        if let Some(key_path) = &self.signing_key {
-            args.extend(["--sign-key".to_string(), key_path.clone()]);
+        if self.force_repush {
+            args.push("--refresh".to_string());
         }
-
         if let Some(compression) = &self.compression {
             args.extend(["--compression".to_string(), compression.clone()]);
         }
-
-        args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
+        // args.extend(["--parallel".to_string(), self.parallel_uploads.to_string()]);
+        args.push(store_path.to_string());
 
         Some(CacheCommand {
             command: "nix".to_string(),
@@ -158,9 +189,14 @@ impl Default for CacheConfig {
             s3_profile: None,
             attic_token: None,
             attic_cache_name: None,
+            attic_ignore_upstream_cache_filter: true, // Fixed typo
+            attic_jobs: 5,                            // the same as the attic default
             max_retries: 3,
             retry_delay_seconds: 5,
             poll_interval: Self::default_poll_interval(),
+            push_timeout_seconds: Self::default_push_timeout_seconds(),
+            force_repush: false,
+            require_sigs: true,
         }
     }
 }

@@ -1,7 +1,7 @@
 use crate::models::commits::Commit;
 use crate::models::config;
 use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use tracing::{debug, info, warn};
 
@@ -11,107 +11,20 @@ pub async fn fetch_and_insert_latest_commit(
     repo_url: &str,
     branch: &str,
 ) -> Result<Option<String>> {
-    let commit_hash = get_latest_commit_hash(repo_url, branch).await?;
+    let commits = get_commits_with_timestamps(repo_url, branch, Some(1), None).await?;
 
-    insert_commit(pool, &commit_hash, repo_url).await?;
+    let (commit_hash, timestamp) = commits
+        .into_iter()
+        .next()
+        .context("No commits found in repository")?;
+
+    insert_commit(pool, &commit_hash, repo_url, timestamp).await?;
+
     info!(
         "✅ Inserted latest commit {} for repo {}",
         commit_hash, repo_url
     );
     Ok(Some(commit_hash))
-}
-
-/// Get the past N commit hashes from a specific branch in a git repository
-async fn get_recent_commit_hashes(
-    repo_url: &str,
-    branch: &str,
-    limit: usize,
-) -> Result<Vec<String>> {
-    let git_url = normalize_repo_url_for_git(repo_url);
-
-    // Create a temporary directory for the shallow clone
-    let temp_dir = tempfile::tempdir().with_context(|| "Failed to create temporary directory")?;
-    let clone_path = temp_dir.path();
-
-    // Perform shallow clone with the specified depth
-    // In get_commits_since function, add proper error handling
-    let clone_output = tokio::process::Command::new("git")
-        .args(&[
-            "clone",
-            "--depth",
-            "10", // Increase depth for better history
-            "--branch",
-            branch,
-            "--single-branch",
-            &git_url,
-            ".",
-        ])
-        .current_dir(clone_path)
-        .output()
-        .await?;
-
-    if !clone_output.status.success() {
-        let stderr = String::from_utf8_lossy(&clone_output.stderr);
-        return Err(anyhow::anyhow!(
-            "Git clone failed for {}: {}",
-            repo_url,
-            stderr
-        ));
-    }
-
-    // Now get the commit history using git log
-    let log_output = tokio::process::Command::new("git")
-        .args(&[
-            "log",
-            "--format=%H", // Only output commit hashes
-            &format!("--max-count={}", limit),
-        ])
-        .current_dir(clone_path)
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to spawn git log in cloned repository for '{}'",
-                repo_url
-            )
-        })?;
-
-    if !log_output.status.success() {
-        let stderr = String::from_utf8_lossy(&log_output.stderr);
-        let exit_code = log_output.status.code().unwrap_or(-1);
-
-        return Err(anyhow::anyhow!(
-            "git log failed in cloned repository for '{}' branch '{}' (exit code: {})\nError output: {}",
-            repo_url,
-            branch,
-            exit_code,
-            stderr.trim()
-        ));
-    }
-
-    let stdout = String::from_utf8(log_output.stdout)?;
-    let commits: Vec<String> = stdout
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
-        .collect();
-
-    if commits.is_empty() {
-        return Err(anyhow::anyhow!(
-            "No commits found in repository '{}' for branch '{}'",
-            repo_url,
-            branch
-        ));
-    }
-
-    // Temporary directory is automatically cleaned up when temp_dir goes out of scope
-    Ok(commits)
-}
-
-/// Get the latest commit hash from a specific branch in a git repository
-async fn get_latest_commit_hash(repo_url: &str, branch: &str) -> Result<String> {
-    let commits = get_recent_commit_hashes(repo_url, branch, 1).await?;
-    Ok(commits.into_iter().next().unwrap()) // Safe because we know there's at least 1
 }
 
 /// Fetch up to N recent commits from a git repository and insert them into the database
@@ -121,33 +34,18 @@ pub async fn fetch_and_insert_recent_commits(
     branch: &str,
     limit: Option<usize>,
 ) -> Result<Vec<String>> {
-    let limit = limit.unwrap_or(10); // Default to 10 if not specified
-    let commit_hashes = get_recent_commit_hashes(repo_url, branch, limit).await?;
+    let commits = get_commits_with_timestamps(repo_url, branch, limit, None).await?;
 
-    let mut inserted_commits = Vec::new();
-
-    // Insert commits in reverse order (oldest first) so they're in chronological order
-    for commit_hash in commit_hashes.into_iter().rev() {
-        match insert_commit(pool, &commit_hash, repo_url).await {
-            Ok(_) => {
-                debug!("✅ Inserted commit {} for repo {}", commit_hash, repo_url);
-                inserted_commits.push(commit_hash);
-            }
-            Err(e) => {
-                warn!(
-                    "❌ Failed to insert commit {} for repo {}: {}",
-                    commit_hash, repo_url, e
-                );
-            }
+    let mut inserted = Vec::new();
+    for (hash, timestamp) in commits {
+        if let Err(e) = insert_commit(pool, &hash, repo_url, timestamp).await {
+            warn!("Failed to insert commit {}: {}", hash, e);
+        } else {
+            inserted.push(hash);
         }
     }
 
-    info!(
-        "✅ Inserted {} commits for repo {}",
-        inserted_commits.len(),
-        repo_url
-    );
-    Ok(inserted_commits)
+    Ok(inserted)
 }
 
 // TODO: update this to get the last N commits for each flake if we are starting for the first time
@@ -319,53 +217,24 @@ fn normalize_repo_url_for_git(repo_url: &str) -> String {
     }
 }
 
-async fn run_ls_remote(repo_url: &str) -> Result<String> {
-    use tokio::process::Command;
-
-    let git_url = normalize_repo_url_for_git(repo_url);
-    let output = Command::new("git")
-        .args(&["ls-remote", "--heads", "--tags", &git_url])
-        .output()
-        .await
-        .with_context(|| {
-            format!(
-                "Failed to spawn git process for 'git ls-remote --heads --tags {}' (normalized from '{}')",
-                git_url, repo_url
-            )
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let exit_code = output.status.code().unwrap_or(-1);
-
-        return Err(anyhow::anyhow!(
-            "git ls-remote failed for repository '{}' (exit code: {})\nError output: {}",
-            repo_url,
-            exit_code,
-            stderr.trim()
-        ));
-    }
-
-    Ok(String::from_utf8(output.stdout)?)
-}
-
-/// Get all new commit hashes since a given commit on a specific branch
-async fn get_commits_since(
+/// Get commits with timestamps, optionally since a specific commit
+async fn get_commits_with_timestamps(
     repo_url: &str,
     branch: &str,
-    since_commit: &Commit,
-) -> Result<Vec<String>> {
+    limit: Option<usize>,
+    since_commit: Option<&str>,
+) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
     let git_url = normalize_repo_url_for_git(repo_url);
-
-    let temp_dir = tempfile::tempdir()?;
+    let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
 
-    // Clone with shallow depth - should be enough for frequent polling
-    tokio::process::Command::new("git")
+    // Clone
+    let depth = limit.unwrap_or(10).to_string();
+    let clone_output = tokio::process::Command::new("git")
         .args(&[
             "clone",
             "--depth",
-            "5",
+            &depth,
             "--branch",
             branch,
             "--single-branch",
@@ -376,23 +245,56 @@ async fn get_commits_since(
         .output()
         .await?;
 
-    let output = tokio::process::Command::new("git")
-        .args(&[
-            "log",
-            "--format=%H",
-            &format!("{}..HEAD", since_commit.git_commit_hash),
-        ])
+    if !clone_output.status.success() {
+        let stderr = String::from_utf8_lossy(&clone_output.stderr);
+        bail!("Git clone failed for {}: {}", repo_url, stderr);
+    }
+
+    // Build git log args
+    let mut args = vec!["log", "--format=%H|%cI"];
+
+    // Add range if since_commit provided
+    let range;
+    let max_count;
+
+    if let Some(since) = since_commit {
+        range = format!("{}..HEAD", since);
+        args.push(&range);
+    } else if let Some(lim) = limit {
+        max_count = format!("--max-count={}", lim);
+        args.push(&max_count);
+    }
+
+    let log_output = tokio::process::Command::new("git")
+        .args(&args)
         .current_dir(clone_path)
         .output()
-        .await?;
+        .await
+        .context("Failed to spawn git log")?;
 
-    let commits: Vec<String> = String::from_utf8(output.stdout)?
+    if !log_output.status.success() {
+        let stderr = String::from_utf8_lossy(&log_output.stderr);
+        bail!("git log failed: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8(log_output.stdout)?;
+    let commits: Result<Vec<_>> = stdout
         .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let parts: Vec<&str> = line.split('|').collect();
+            if parts.len() != 2 {
+                bail!("Invalid git log format: {}", line);
+            }
+            let hash = parts[0].trim().to_string();
+            let timestamp = chrono::DateTime::parse_from_rfc3339(parts[1].trim())
+                .context("Failed to parse timestamp")?
+                .with_timezone(&chrono::Utc);
+            Ok((hash, timestamp))
+        })
         .collect();
 
-    Ok(commits)
+    commits
 }
 
 /// Fetch and insert all new commits since a given commit hash
@@ -402,39 +304,37 @@ pub async fn fetch_and_insert_commits_since(
     branch: &str,
     since_commit: &Commit,
 ) -> Result<Vec<String>> {
-    let commit_hashes = get_commits_since(repo_url, branch, since_commit).await?;
+    let commits = get_commits_with_timestamps(
+        repo_url,
+        branch,
+        Some(50),
+        Some(&since_commit.git_commit_hash),
+    )
+    .await?;
 
-    if commit_hashes.is_empty() {
+    if commits.is_empty() {
         debug!(
-            "No new commits found since {} for repo {}",
+            "No new commits found since {} for {}",
             since_commit, repo_url
         );
         return Ok(Vec::new());
     }
 
-    let mut inserted_commits = Vec::new();
-
-    // Insert commits in reverse order (oldest first) so they're in chronological order
-    for commit_hash in commit_hashes.into_iter().rev() {
-        match insert_commit(pool, &commit_hash, repo_url).await {
-            Ok(_) => {
-                debug!("✅ Inserted commit {} for repo {}", commit_hash, repo_url);
-                inserted_commits.push(commit_hash);
-            }
-            Err(e) => {
-                warn!(
-                    "❌ Failed to insert commit {} for repo {}: {}",
-                    commit_hash, repo_url, e
-                );
-            }
+    let mut inserted = Vec::new();
+    // Insert in reverse (oldest first) for chronological order
+    for (hash, timestamp) in commits.into_iter().rev() {
+        if let Err(e) = insert_commit(pool, &hash, repo_url, timestamp).await {
+            warn!("Failed to insert commit {}: {}", hash, e);
+        } else {
+            debug!("✅ Inserted commit {} for {}", hash, repo_url);
+            inserted.push(hash);
         }
     }
 
     info!(
-        "✅ Inserted {} new commits since {} for repo {}",
-        inserted_commits.len(),
-        since_commit,
+        "✅ Inserted {} new commits for {}",
+        inserted.len(),
         repo_url
     );
-    Ok(inserted_commits)
+    Ok(inserted)
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        WITH all_nixos_commits AS (\n            SELECT \n                d.id as nixos_deriv_id,\n                d.derivation_name as hostname,\n                c.commit_timestamp,\n                c.id as commit_id\n            FROM derivations d\n            INNER JOIN commits c ON d.commit_id = c.id\n            WHERE d.derivation_type = 'nixos'\n              AND d.status_id IN ($1, $2)\n        )\n        SELECT\n            d.id,\n            d.commit_id,\n            d.derivation_type as \"derivation_type: DerivationType\",\n            d.derivation_name,\n            d.derivation_path,\n            d.derivation_target,\n            d.scheduled_at,\n            d.completed_at,\n            d.started_at,\n            d.attempt_count,\n            d.evaluation_duration_ms,\n            d.error_message,\n            d.pname,\n            d.version,\n            d.status_id,\n            d.build_elapsed_seconds,\n            d.build_current_target,\n            d.build_last_activity_seconds,\n            d.build_last_heartbeat,\n            d.cf_agent_enabled,\n            d.store_path\n        FROM derivations d\n        LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id\n        LEFT JOIN all_nixos_commits n ON dd.derivation_id = n.nixos_deriv_id\n        LEFT JOIN all_nixos_commits anc ON d.id = anc.nixos_deriv_id\n        WHERE d.status_id IN ($1, $2)\n          AND (\n              (d.derivation_type = 'package' AND n.hostname IS NOT NULL)\n              OR\n              (d.derivation_type = 'nixos' AND anc.hostname IS NOT NULL)\n          )\n        ORDER BY \n            CASE \n                WHEN d.derivation_type = 'package' THEN COALESCE(n.hostname, 'zzz_orphan')\n                WHEN d.derivation_type = 'nixos' THEN anc.hostname\n            END ASC,\n            CASE \n                WHEN d.derivation_type = 'package' THEN n.commit_timestamp\n                WHEN d.derivation_type = 'nixos' THEN anc.commit_timestamp\n            END DESC NULLS LAST,\n            CASE \n                WHEN d.derivation_type = 'package' THEN 0\n                WHEN d.derivation_type = 'nixos' THEN 1\n            END ASC,\n            d.id ASC\n        ",
+  "query": "\n        INSERT INTO derivations (\n            commit_id, \n            derivation_type, \n            derivation_name, \n            status_id,\n            attempt_count\n        )\n        VALUES ($1, $2, $3, $4, 0)\n        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) \n        DO UPDATE SET\n            status_id = CASE \n                WHEN derivations.status_id IN ($5, $6) THEN derivations.status_id  -- Keep terminal states\n                ELSE EXCLUDED.status_id  -- Reset non-terminal states to pending-ish\n            END\n        RETURNING \n            id,\n            commit_id,\n            derivation_type as \"derivation_type: DerivationType\",\n            derivation_name,\n            derivation_path,\n            derivation_target,\n            scheduled_at,\n            completed_at,\n            started_at,\n            attempt_count,\n            evaluation_duration_ms,\n            error_message,\n            pname,\n            version,\n            status_id,\n            build_elapsed_seconds,\n            build_current_target,\n            build_last_activity_seconds,\n            build_last_heartbeat,\n            cf_agent_enabled,\n            store_path\n        ",
   "describe": {
     "columns": [
       {
@@ -112,6 +112,10 @@
     "parameters": {
       "Left": [
         "Int4",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
         "Int4"
       ]
     },
@@ -139,5 +143,5 @@
       true
     ]
   },
-  "hash": "129dcf82a2688501c50ae447ebcf138ad19c8dd2ef195a12f05e299c481a6c71"
+  "hash": "7b1f64bdbe5a9ae06c52180b22fdad828b6574149d4e29c00a60e72c5a2264e6"
 }

@@ -23,11 +23,12 @@ def pytest_configure(config: pytest.Config) -> None:
         ("timeout", "Tests with timeout constraints"),
         ("commits", "Commit tracking tests"),
         ("dry_run", "Dry run build tests"),
-        ("commits", "Test Commit tracking and polling"),
         ("server", "Test the Server"),
         ("attic_cache", "Attic cache tests"),
         ("builder", "Builder tests"),
         ("build_pipeline", "Build pipeline tests"),
+        ("reservation_queue", "Build reservation queue tests"),
+        ("vm_internal", "Tests that run inside VMs"),
     ]:
         config.addinivalue_line("markers", f"{mark}: {desc}")
 
@@ -218,7 +219,7 @@ def agent(machines):
 
 @pytest.fixture(scope="session")
 def agents(machines) -> List[Any]:
-    """Ordered list of all agent Machines (agent1, agent2, …)."""
+    """Ordered list of all agent Machines (agent1, agent2, â€¦)."""
     return [m for name, m in sorted(machines.items()) if name.startswith("agent")]
 
 

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            id as \"id!\",\n            derivation_name as \"derivation_name!\",\n            derivation_type as \"derivation_type!\",\n            derivation_path,\n            pname,\n            version,\n            status_id as \"status_id!\",\n            nixos_id,\n            nixos_commit_ts,\n            total_packages,\n            completed_packages,\n            cached_packages,\n            active_workers,\n            build_type as \"build_type!\",\n            queue_position\n        FROM view_buildable_derivations\n        WHERE \n            CASE \n                WHEN build_type = 'system' AND $1 = true THEN \n                    cached_packages = total_packages\n                ELSE true\n            END\n        ORDER BY queue_position\n        LIMIT 1\n        FOR UPDATE SKIP LOCKED\n        ",
+  "query": "\n        SELECT \n            id as \"id!\",\n            derivation_name as \"derivation_name!\",\n            derivation_type as \"derivation_type!\",\n            derivation_path,\n            pname,\n            version,\n            status_id as \"status_id!\",\n            nixos_id,\n            nixos_commit_ts,\n            total_packages,\n            completed_packages,\n            cached_packages,\n            active_workers,\n            build_type as \"build_type!\",\n            queue_position\n        FROM view_buildable_derivations\n        ORDER BY queue_position\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -80,9 +80,7 @@
       }
     ],
     "parameters": {
-      "Left": [
-        "Bool"
-      ]
+      "Left": []
     },
     "nullable": [
       true,
@@ -102,5 +100,5 @@
       true
     ]
   },
-  "hash": "2456045c1c126bba265d4d99e1188584508d038d3a5b39ffbf3009d2cfc4d242"
+  "hash": "8a2d2a7f175a73f8b7cb0f57bcc97a1975b0b76282fe8901a42df65f11fc7cd2"
 }

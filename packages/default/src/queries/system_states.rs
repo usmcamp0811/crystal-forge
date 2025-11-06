@@ -15,7 +15,7 @@ pub async fn insert_system_state(
         r#"INSERT INTO system_states (
             hostname, 
             change_reason,
-            derivation_path,
+            store_path,
             os, 
             kernel,
             memory_gb, 
@@ -45,7 +45,7 @@ pub async fn insert_system_state(
     )
     .bind(&state.hostname)
     .bind(change_reason)
-    .bind(&state.derivation_path)
+    .bind(&state.store_path)
     .bind(&state.os)
     .bind(&state.kernel)
     .bind(state.memory_gb)
@@ -118,10 +118,10 @@ pub async fn get_latest_system_state_id(pool: &PgPool, hostname: &str) -> Result
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use crate::handlers::agent_request::deserialize_system_state_versioned;
     use crate::models::system_states::{SystemState, SystemStateV1};
-    use anyhow::Result;
+
     use chrono::Utc;
 
     #[test]
@@ -130,7 +130,7 @@ mod tests {
             id: None,
             hostname: "test-host".to_string(),
             change_reason: "test-context".to_string(),
-            derivation_path: Some("/nix/store/test".to_string()),
+            store_path: Some("/nix/store/test".to_string()),
             os: Some("NixOS".to_string()),
             kernel: Some("6.1.0".to_string()),
             memory_gb: Some(16.0),
@@ -207,7 +207,7 @@ mod tests {
             id: None,
             hostname: "test-host-v1".to_string(),
             context: "test-context".to_string(),
-            derivation_path: Some("/nix/store/test".to_string()),
+            store_path: Some("/nix/store/test".to_string()),
             os: Some("NixOS".to_string()),
             kernel: Some("6.1.0".to_string()),
             memory_gb: Some(16.0),
@@ -280,7 +280,7 @@ mod tests {
             id: Some(1),
             hostname: "test".to_string(),
             context: "agent-startup".to_string(),
-            derivation_path: None,
+            store_path: None,
             os: Some("NixOS".to_string()),
             kernel: Some("6.1".to_string()),
             memory_gb: Some(8.0),

@@ -32,12 +32,10 @@ use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
 use sqlx::{PgPool, postgres::PgPoolOptions};
-use std::borrow::Cow;
-use std::collections::HashMap;
 use std::env;
 use std::time::Duration;
 use tokio_postgres::NoTls;
-use tracing::{debug, info};
+use tracing::debug;
 
 mod duration_serde {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -104,6 +102,9 @@ impl Default for CrystalForgeConfig {
 }
 
 impl CrystalForgeConfig {
+    pub fn get_server_config(&self) -> &ServerConfig {
+        &self.server
+    }
     /// Gets build config as reference
     pub fn get_build_config(&self) -> &BuildConfig {
         &self.build
@@ -112,6 +113,11 @@ impl CrystalForgeConfig {
     /// Gets vulnix config as reference
     pub fn get_vulnix_config(&self) -> &VulnixConfig {
         &self.vulnix
+    }
+
+    /// Get deployment config as reference
+    pub fn get_deployment_config(&self) -> &DeploymentConfig {
+        &self.deployment
     }
 
     /// Gets cache config as reference
@@ -140,7 +146,7 @@ impl CrystalForgeConfig {
             .build()
             .context("loading configuration")?;
 
-        let mut config: Self = settings
+        let config: Self = settings
             .try_deserialize()
             .context("parsing configuration")?;
 

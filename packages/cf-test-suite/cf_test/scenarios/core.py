@@ -118,16 +118,17 @@ def _create_base_scenario(
         client,
         """
         INSERT INTO public.derivations (
-            commit_id, derivation_type, derivation_name, derivation_path,
+            commit_id, derivation_type, derivation_name, derivation_path, store_path,
             status_id, attempt_count, scheduled_at, completed_at, error_message
         )
-        VALUES (%s, 'nixos', %s, %s, %s, 0, %s, %s, %s)
+        VALUES (%s, 'nixos', %s, %s, %s, %s, 0, %s, %s, %s)
         RETURNING id
         """,
         (
             commit_id,
             hostname,
             drv_path,
+            drv_path,  # Use same path as store_path for test scenarios
             status_id,
             scheduled_at,
             completed_at,
@@ -159,7 +160,7 @@ def _create_base_scenario(
         client,
         """
         INSERT INTO public.system_states (
-            hostname, change_reason, derivation_path, os, kernel,
+            hostname, change_reason, store_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
             primary_ip_address, nixos_version, agent_compatible, "timestamp"
         )

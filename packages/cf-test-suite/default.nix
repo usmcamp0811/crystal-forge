@@ -13,9 +13,11 @@
     nativeBuildInputs = with pkgs.python3Packages; [
       setuptools
       wheel
+      pynacl
     ];
 
     propagatedBuildInputs = with pkgs.python3Packages; [
+      pynacl
       pytest
       pytest-html # For HTML reports
       pytest-xdist # For parallel test execution
@@ -202,6 +204,7 @@
     ps.pytest-html
     ps.pytest-xdist
     ps.psycopg2
+    ps.pynacl
     cfTest
   ]);
   scenarioRunner = pkgs.writeShellApplication {

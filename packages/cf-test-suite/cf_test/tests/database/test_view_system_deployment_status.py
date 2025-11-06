@@ -211,7 +211,7 @@ def test_deployment_status_scenarios(
     if hostnames:
         rows = cf_client.execute_sql(
             f"""
-            SELECT hostname, deployment_status, current_derivation_path,
+            SELECT hostname, deployment_status, current_store_path,
                    deployment_time, current_commit_hash, current_commit_timestamp,
                    latest_commit_hash, latest_commit_timestamp, commits_behind,
                    flake_name, status_description
@@ -230,7 +230,7 @@ def test_deployment_status_scenarios(
 
         rows = cf_client.execute_sql(
             f"""
-            SELECT hostname, deployment_status, current_derivation_path,
+            SELECT hostname, deployment_status, current_store_path,
                    deployment_time, current_commit_hash, current_commit_timestamp,
                    latest_commit_hash, latest_commit_timestamp, commits_behind,
                    flake_name, status_description
@@ -333,7 +333,7 @@ def test_deployment_view_basic_functionality(cf_client: CFTestClient):
     expected_columns = {
         "hostname",
         "deployment_status",
-        "current_derivation_path",
+        "current_store_path",
         "deployment_time",
         "current_commit_hash",
         "current_commit_timestamp",
@@ -423,7 +423,7 @@ def test_deployment_unknown_status(cf_client: CFTestClient, clean_test_data):
     cf_client.execute_sql(
         """
         INSERT INTO system_states (
-            hostname, change_reason, derivation_path, os, kernel,
+            hostname, change_reason, store_path, os, kernel,
             memory_gb, uptime_secs, cpu_brand, cpu_cores,
             primary_ip_address, nixos_version, agent_compatible, timestamp
         )

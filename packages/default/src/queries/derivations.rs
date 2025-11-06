@@ -1,9 +1,10 @@
 use crate::models::commits::Commit;
-use crate::models::config::BuildConfig; // Add this line
+// Add this line
+use crate::models::derivations::build_agent_target;
 use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
-use anyhow::bail;
 use sqlx::PgPool;
 use sqlx::{Executor, Postgres};
 use tracing::{debug, error, info, warn};
@@ -12,19 +13,14 @@ use tracing::{debug, error, info, warn};
 // These should match the IDs you inserted in your migration
 #[derive(Debug, Clone)]
 pub enum EvaluationStatus {
-    Pending = 1,
-    Queued = 2,
     DryRunPending = 3,
     DryRunInProgress = 4,
     DryRunComplete = 5,
     DryRunFailed = 6,
     BuildPending = 7,
     BuildInProgress = 8,
-    InProgress = 9,
     BuildComplete = 10,
-    Complete = 11,
     BuildFailed = 12,
-    Failed = 13,
 }
 
 impl EvaluationStatus {
@@ -39,21 +35,18 @@ impl EvaluationStatus {
                 | EvaluationStatus::DryRunFailed
                 | EvaluationStatus::BuildComplete
                 | EvaluationStatus::BuildFailed
-                | EvaluationStatus::Complete
-                | EvaluationStatus::Failed
         )
     }
 
     pub fn is_in_progress(&self) -> bool {
         matches!(
             self,
-            EvaluationStatus::DryRunInProgress
-                | EvaluationStatus::BuildInProgress
-                | EvaluationStatus::InProgress
+            EvaluationStatus::DryRunInProgress | EvaluationStatus::BuildInProgress
         )
     }
 }
 
+/// Inserts or updates a derivation entry, assigning the correct status via enum IDs.
 pub async fn insert_derivation(
     pool: &PgPool,
     commit: Option<&Commit>,
@@ -82,8 +75,8 @@ pub async fn insert_derivation(
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) 
         DO UPDATE SET
             status_id = CASE 
-                WHEN derivations.status_id IN (5, 6, 10, 12) THEN derivations.status_id  -- Keep terminal states
-                ELSE EXCLUDED.status_id  -- Reset non-terminal states to pending
+                WHEN derivations.status_id IN ($5, $6) THEN derivations.status_id  -- Keep terminal states
+                ELSE EXCLUDED.status_id  -- Reset non-terminal states to pending-ish
             END
         RETURNING 
             id,
@@ -111,7 +104,9 @@ pub async fn insert_derivation(
         commit_id,
         derivation_type,
         target_name,
-        EvaluationStatus::DryRunPending.as_id()
+        EvaluationStatus::DryRunPending.as_id(),
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::BuildComplete.as_id(),
     )
     .fetch_one(pool)
     .await?;
@@ -125,6 +120,7 @@ pub async fn insert_derivation_with_target(
     derivation_name: &str,
     derivation_type: &str,
     derivation_target: Option<&str>,
+    cf_agent_enabled: Option<bool>,
 ) -> Result<crate::models::derivations::Derivation> {
     let commit_id = commit.map(|c| c.id);
 
@@ -138,21 +134,22 @@ pub async fn insert_derivation_with_target(
             derivation_target,
             status_id,
             attempt_count,
-            scheduled_at
+            scheduled_at,
+            cf_agent_enabled
         )
-        VALUES ($1, $2, $3, $4, $5, 0, NOW())
+        VALUES ($1, $2, $3, $4, $5, 0, NOW(), $10)
         ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
         DO UPDATE SET
-            -- keep terminal states; otherwise reset to pending
+            -- keep terminal states; otherwise reset
             status_id = CASE
-                WHEN derivations.status_id IN (5, 6, 10, 12, 11, 13) THEN derivations.status_id
+                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.status_id
                 ELSE EXCLUDED.status_id
             END,
             -- keep/refresh target if provided
             derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),
             -- nudge the scheduler only for non-terminal rows
             scheduled_at = CASE
-                WHEN derivations.status_id IN (5, 6, 10, 12, 11, 13) THEN derivations.scheduled_at
+                WHEN derivations.status_id IN ($6, $7, $8, $9) THEN derivations.scheduled_at
                 ELSE NOW()
             END
         RETURNING
@@ -178,11 +175,18 @@ pub async fn insert_derivation_with_target(
             cf_agent_enabled,
             store_path
         "#,
+        // $1..$5
         commit_id,
         derivation_type,
         derivation_name,
         derivation_target,
         EvaluationStatus::DryRunPending.as_id(),
+        // $6..$9  (terminal statuses)
+        EvaluationStatus::DryRunComplete.as_id(),
+        EvaluationStatus::DryRunFailed.as_id(),
+        EvaluationStatus::BuildComplete.as_id(),
+        EvaluationStatus::BuildFailed.as_id(),
+        cf_agent_enabled
     )
     .fetch_one(pool)
     .await?;
@@ -252,7 +256,9 @@ pub async fn insert_package_derivation(
         package_name,
         pname,
         version,
-        EvaluationStatus::Complete.as_id() // Packages found during scanning are already "complete"
+        // Previously: EvaluationStatus::Complete
+        // Use DryRunComplete to reflect “discovered/ready after dry-run”
+        EvaluationStatus::DryRunComplete.as_id()
     )
     .fetch_one(pool)
     .await?;
@@ -1116,6 +1122,32 @@ pub async fn update_derivation_path(
     .await
 }
 
+pub async fn get_derivations_by_paths(pool: &PgPool, paths: &[&str]) -> Result<Vec<Derivation>> {
+    // Convert &[&str] to Vec<String> for sqlx
+    let paths_vec: Vec<String> = paths.iter().map(|s| s.to_string()).collect();
+
+    sqlx::query_as!(
+        Derivation,
+        r#"
+        SELECT 
+            id, commit_id, 
+            derivation_type as "derivation_type: DerivationType",
+            derivation_name, derivation_path, derivation_target,
+            scheduled_at, completed_at, started_at, attempt_count,
+            evaluation_duration_ms, error_message, pname, version,
+            status_id, build_elapsed_seconds, build_current_target,
+            build_last_activity_seconds, build_last_heartbeat,
+            cf_agent_enabled, store_path
+        FROM derivations
+        WHERE derivation_path = ANY($1)
+        "#,
+        &paths_vec
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to fetch derivations by paths")
+}
+
 pub async fn get_derivation_by_id(pool: &PgPool, target_id: i32) -> Result<Derivation> {
     let target = sqlx::query_as!(
         Derivation,
@@ -1159,31 +1191,32 @@ pub async fn get_pending_dry_run_derivations(pool: &PgPool) -> Result<Vec<Deriva
         Derivation,
         r#"
         SELECT
-            id,
-            commit_id,
-            derivation_type as "derivation_type: DerivationType",
-            derivation_name,
-            derivation_path,
-            derivation_target,
-            scheduled_at,
-            completed_at,
-            started_at,
-            attempt_count,
-            evaluation_duration_ms,
-            error_message,
-            pname,
-            version,
-            status_id,
-            build_elapsed_seconds,
-            build_current_target,
-            build_last_activity_seconds,
-            build_last_heartbeat,
-            cf_agent_enabled,
-            store_path
-        FROM derivations
-        WHERE status_id = $1
-        AND attempt_count < 5
-        ORDER BY scheduled_at DESC
+            d.id,
+            d.commit_id,
+            d.derivation_type as "derivation_type: DerivationType",
+            d.derivation_name,
+            d.derivation_path,
+            d.derivation_target,
+            d.scheduled_at,
+            d.completed_at,
+            d.started_at,
+            d.attempt_count,
+            d.evaluation_duration_ms,
+            d.error_message,
+            d.pname,
+            d.version,
+            d.status_id,
+            d.build_elapsed_seconds,
+            d.build_current_target,
+            d.build_last_activity_seconds,
+            d.build_last_heartbeat,
+            d.cf_agent_enabled,
+            d.store_path
+        FROM derivations d
+        LEFT JOIN commits c ON d.commit_id = c.id
+        WHERE d.status_id = $1
+        AND d.attempt_count < 5
+        ORDER BY c.commit_timestamp DESC NULLS LAST
         "#,
         EvaluationStatus::DryRunPending.as_id()
     )
@@ -1198,17 +1231,6 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
     let rows = sqlx::query_as!(
         Derivation,
         r#"
-        WITH all_nixos_commits AS (
-            SELECT 
-                d.id as nixos_deriv_id,
-                d.derivation_name as hostname,
-                c.commit_timestamp,
-                c.id as commit_id
-            FROM derivations d
-            INNER JOIN commits c ON d.commit_id = c.id
-            WHERE d.derivation_type = 'nixos'
-              AND d.status_id IN ($1, $2)
-        )
         SELECT
             d.id,
             d.commit_id,
@@ -1232,32 +1254,9 @@ pub async fn get_derivations_ready_for_build(pool: &PgPool) -> Result<Vec<Deriva
             d.cf_agent_enabled,
             d.store_path
         FROM derivations d
-        LEFT JOIN derivation_dependencies dd ON dd.depends_on_id = d.id
-        LEFT JOIN all_nixos_commits n ON dd.derivation_id = n.nixos_deriv_id
-        LEFT JOIN all_nixos_commits anc ON d.id = anc.nixos_deriv_id
-        WHERE d.status_id IN ($1, $2)
-          AND (
-              (d.derivation_type = 'package' AND n.hostname IS NOT NULL)
-              OR
-              (d.derivation_type = 'nixos' AND anc.hostname IS NOT NULL)
-          )
-        ORDER BY 
-            CASE 
-                WHEN d.derivation_type = 'package' THEN COALESCE(n.hostname, 'zzz_orphan')
-                WHEN d.derivation_type = 'nixos' THEN anc.hostname
-            END ASC,
-            CASE 
-                WHEN d.derivation_type = 'package' THEN n.commit_timestamp
-                WHEN d.derivation_type = 'nixos' THEN anc.commit_timestamp
-            END DESC NULLS LAST,
-            CASE 
-                WHEN d.derivation_type = 'package' THEN 0
-                WHEN d.derivation_type = 'nixos' THEN 1
-            END ASC,
-            d.id ASC
-        "#,
-        EvaluationStatus::DryRunComplete.as_id(),
-        EvaluationStatus::BuildPending.as_id()
+        INNER JOIN view_buildable_derivations vbd ON d.id = vbd.id
+        ORDER BY vbd.queue_position
+        "#
     )
     .fetch_all(pool)
     .await?;
@@ -1340,7 +1339,7 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         AND attempt_count >= 5
         AND status_id != $1  -- Only update if not already in terminal failed state
         "#,
-        EvaluationStatus::DryRunFailed.as_id() // $1 = 6
+        EvaluationStatus::DryRunFailed.as_id() // 6
     )
     .execute(pool)
     .await?;
@@ -1353,24 +1352,23 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         AND attempt_count >= 5
         AND status_id != $1  -- Only update if not already in terminal failed state
         "#,
-        EvaluationStatus::BuildFailed.as_id() // $1 = 12
+        EvaluationStatus::BuildFailed.as_id() // 12
     )
     .execute(pool)
     .await?;
 
     // Then, reset derivations that should be retried (attempts < 5)
-    // Reset ALL non-terminal derivations with < 5 attempts to pending states
     let reset_dry_run_result = sqlx::query!(
         r#"
         UPDATE derivations 
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NULL 
         AND attempt_count < 5
-        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
+        AND status_id NOT IN ($2, $3) -- success states that should never be reset
         "#,
-        EvaluationStatus::DryRunPending.as_id(),  // $1 = 3
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
+        EvaluationStatus::DryRunPending.as_id(),  // 3
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+        EvaluationStatus::BuildComplete.as_id()   // 10
     )
     .execute(pool)
     .await?;
@@ -1381,11 +1379,11 @@ pub async fn reset_non_terminal_derivations(pool: &PgPool) -> Result<()> {
         SET status_id = $1, scheduled_at = NOW()
         WHERE derivation_path IS NOT NULL 
         AND attempt_count < 5
-        AND status_id NOT IN ($2, $3) -- Only exclude success states that should never be reset
+        AND status_id NOT IN ($2, $3) -- success states that should never be reset
         "#,
-        EvaluationStatus::BuildPending.as_id(),   // $1 = 7
-        EvaluationStatus::DryRunComplete.as_id(), // $2 = 5 (success - never reset)
-        EvaluationStatus::BuildComplete.as_id()   // $3 = 10 (success - never reset)
+        EvaluationStatus::BuildPending.as_id(),   // 7
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+        EvaluationStatus::BuildComplete.as_id()   // 10
     )
     .execute(pool)
     .await?;
@@ -1468,33 +1466,33 @@ pub async fn discover_and_insert_packages(
 ) -> Result<()> {
     use tracing::warn;
 
+    if derivation_paths.is_empty() {
+        return Ok(());
+    }
+
     info!(
         "🔍 Analyzing {} derivation paths for package information",
         derivation_paths.len()
     );
 
+    // NEW: Batch collect all valid packages first
+    let mut packages_to_insert = Vec::new();
+
     for &drv_path in derivation_paths {
-        // Parse derivation path to extract package information
         if let Some(package_info) = parse_derivation_path(drv_path) {
-            // Skip the main NixOS system derivation - it should already exist as the parent
             if drv_path.contains("nixos-system-") {
                 debug!("⏭️ Skipping NixOS system derivation: {}", drv_path);
                 continue;
             }
 
-            // Use the parsed package name as the derivation_name, fallback to derivation path
             let derivation_name = package_info
                 .pname
                 .as_ref()
-                .map(|name| {
-                    // Include version in the name if available for better identification
-                    match &package_info.version {
-                        Some(version) => format!("{}-{}", name, version),
-                        None => name.clone(),
-                    }
+                .map(|name| match &package_info.version {
+                    Some(version) => format!("{}-{}", name, version),
+                    None => name.clone(),
                 })
                 .unwrap_or_else(|| {
-                    // Extract a reasonable name from the derivation path if parsing fails
                     drv_path
                         .split('/')
                         .last()
@@ -1504,10 +1502,22 @@ pub async fn discover_and_insert_packages(
                         .to_string()
                 });
 
-            // Insert package derivation - using DO NOTHING to skip duplicates
-            let package_derivation = sqlx::query_as!(
-                Derivation,
-                r#"
+            packages_to_insert.push((drv_path, derivation_name, package_info));
+        }
+    }
+
+    if packages_to_insert.is_empty() {
+        info!("No packages to insert");
+        return Ok(());
+    }
+
+    // NEW: Batch insert all packages in a single transaction
+    let mut tx = pool.begin().await?;
+
+    for (drv_path, derivation_name, package_info) in packages_to_insert {
+        let result = sqlx::query!(
+            r#"
+            WITH inserted AS (
                 INSERT INTO derivations (
                     commit_id,
                     derivation_type, 
@@ -1523,69 +1533,30 @@ pub async fn discover_and_insert_packages(
                     derivation_name = EXCLUDED.derivation_name,
                     pname = EXCLUDED.pname,
                     version = EXCLUDED.version
-                RETURNING 
-                    id,
-                    commit_id,
-                    derivation_type as "derivation_type: DerivationType",
-                    derivation_name,
-                    derivation_path,
-                    derivation_target,
-                    scheduled_at,
-                    completed_at,
-                    started_at,
-                    attempt_count,
-                    evaluation_duration_ms,
-                    error_message,
-                    pname,
-                    version,
-                    status_id,
-                    build_elapsed_seconds,
-                    build_current_target,
-                    build_last_activity_seconds,
-                    build_last_heartbeat,
-                    cf_agent_enabled,
-                    store_path
-                "#,
-                None::<i32>,     // commit_id is NULL for discovered packages
-                "package",       // derivation_type = "package"
-                derivation_name, // derivation_name (uses parsed package name)
-                drv_path,        // derivation_path (the actual .drv path)
-                package_info.pname.as_deref(), // pname
-                package_info.version.as_deref(), // version
-                EvaluationStatus::DryRunComplete.as_id()
+                RETURNING id
             )
-            .fetch_one(pool)
-            .await;
+            INSERT INTO derivation_dependencies (derivation_id, depends_on_id)
+            SELECT $8, id FROM inserted
+            ON CONFLICT (derivation_id, depends_on_id) DO NOTHING
+            "#,
+            None::<i32>,
+            "package",
+            derivation_name,
+            drv_path,
+            package_info.pname.as_deref(),
+            package_info.version.as_deref(),
+            EvaluationStatus::DryRunComplete.as_id(),
+            parent_derivation_id
+        )
+        .execute(&mut *tx)
+        .await;
 
-            match package_derivation {
-                Ok(pkg_deriv) => {
-                    // CORRECT dependency relationship: The NixOS system (parent) depends on packages
-                    let dependency_result = sqlx::query!(
-                        r#"
-                        INSERT INTO derivation_dependencies (derivation_id, depends_on_id)
-                        VALUES ($1, $2)
-                        ON CONFLICT (derivation_id, depends_on_id) DO NOTHING
-                        "#,
-                        parent_derivation_id, // The NixOS system derivation
-                        pkg_deriv.id          // depends on this package
-                    )
-                    .execute(pool)
-                    .await;
-
-                    if let Err(e) = dependency_result {
-                        warn!(
-                            "⚠️ Failed to insert dependency relationship for {}: {}",
-                            drv_path, e
-                        );
-                    }
-                }
-                Err(e) => {
-                    warn!("⚠️ Failed to insert package derivation {}: {}", drv_path, e);
-                }
-            }
+        if let Err(e) = result {
+            warn!("⚠️ Failed to insert package {}: {}", drv_path, e);
         }
     }
 
+    tx.commit().await?;
     info!("✅ Completed package discovery");
     Ok(())
 }
@@ -1670,140 +1641,106 @@ pub async fn clear_derivation_build_status(pool: &PgPool, derivation_id: i32) ->
     Ok(())
 }
 
-pub async fn get_latest_successful_derivation_for_flake(
-    pool: &PgPool,
-    flake_id: i32,
-) -> Result<Option<Derivation>> {
-    let derivation = sqlx::query_as::<_, Derivation>(
-        r#"
-        SELECT 
-            d.id,
-            d.commit_id,
-            d.derivation_type,
-            d.derivation_name,
-            d.derivation_path,
-            d.scheduled_at,
-            d.completed_at,
-            d.started_at,
-            d.attempt_count,
-            d.evaluation_duration_ms,
-            d.error_message,
-            d.pname,
-            d.version,
-            d.status_id,
-            d.derivation_target,
-            d.build_elapsed_seconds,
-            d.build_current_target,
-            d.build_last_activity_seconds,
-            d.build_last_heartbeat,
-            d.cf_agent_enabled,
-            d.store_path
-        FROM derivations d
-        INNER JOIN commits c ON d.commit_id = c.id
-        INNER JOIN derivation_statuses ds ON d.status_id = ds.id
-        WHERE c.flake_id = $1
-        AND ds.name = 'cache-pushed'
-        AND ds.is_success = true
-        AND d.derivation_type = 'nixos'
-        ORDER BY d.completed_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(flake_id)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(derivation)
+#[derive(Debug, Clone)]
+pub struct HostLatestTarget {
+    pub hostname: String,
+    pub derivation_id: i32,
+    pub derivation_target: Option<String>,
+    pub store_path: Option<String>,
+    pub last_cache_completed_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// Discover and queue all transitive dependencies for NixOS systems
-pub async fn discover_and_queue_all_transitive_dependencies(
+// src/db/queries.rs
+pub async fn get_latest_deployable_targets_for_flake_hosts(
     pool: &PgPool,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    // Get all NixOS systems that have completed dry-run but haven't had dependencies discovered
-    let nixos_systems = sqlx::query_as!(
-        Derivation,
+    flake_id: i32,
+    hostnames: &[String],
+) -> Result<Vec<HostLatestTarget>> {
+    if hostnames.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // NOTE: pass `hostnames` as a TEXT[] (Vec<String>) to $2
+    let rows = sqlx::query!(
         r#"
-        SELECT
-            id, commit_id, derivation_type as "derivation_type: DerivationType",
-            derivation_name, derivation_path, derivation_target, scheduled_at,
-            completed_at, started_at, attempt_count, evaluation_duration_ms,
-            error_message, pname, version, status_id, build_elapsed_seconds,
-            build_current_target, build_last_activity_seconds, build_last_heartbeat,
-            cf_agent_enabled, store_path
-        FROM derivations 
-        WHERE derivation_type = 'nixos' 
-        AND status_id = $1
-        AND NOT EXISTS (
-            SELECT 1 FROM derivation_dependencies dd WHERE dd.derivation_id = derivations.id
+        WITH latest_commit AS (
+          SELECT id, flake_id, git_commit_hash
+          FROM commits
+          WHERE flake_id = $1
+          ORDER BY commit_timestamp DESC
+          LIMIT 1
+        ),
+        per_host AS (
+          SELECT
+            d.derivation_name AS hostname,
+            d.id              AS derivation_id,
+            d.derivation_target,
+            d.store_path,
+            f.repo_url        AS repo_url,
+            lc.git_commit_hash AS commit_hash,
+            MAX(cpj.completed_at) AS last_cache_completed_at,
+            ROW_NUMBER() OVER (
+              PARTITION BY d.derivation_name
+              ORDER BY
+                MAX(cpj.completed_at) DESC NULLS LAST,
+                MAX(d.completed_at)   DESC NULLS LAST,
+                MAX(d.id)             DESC
+            ) AS rn
+          FROM derivations d
+          JOIN latest_commit lc
+            ON d.commit_id = lc.id
+          JOIN flakes f
+            ON lc.flake_id = f.id
+          JOIN cache_push_jobs cpj
+            ON cpj.derivation_id = d.id
+           AND cpj.status = 'completed'
+          WHERE d.derivation_type = 'nixos'
+            AND d.derivation_target IS NOT NULL
+            AND d.derivation_name = ANY($2::text[])
+          GROUP BY
+            d.derivation_name,
+            d.id,
+            d.derivation_target,
+            d.store_path,
+            f.repo_url,
+            lc.git_commit_hash
         )
+        SELECT
+          hostname,
+          derivation_id,
+          derivation_target,
+          store_path,
+          last_cache_completed_at,
+          repo_url,
+          commit_hash
+        FROM per_host
+        WHERE rn = 1
         "#,
-        EvaluationStatus::DryRunComplete.as_id()
+        flake_id,
+        hostnames
     )
     .fetch_all(pool)
     .await?;
 
-    for nixos_system in nixos_systems {
-        info!(
-            "Discovering dependencies for NixOS system: {}",
-            nixos_system.derivation_name
-        );
-
-        if let Err(e) =
-            discover_all_transitive_dependencies_for_system(pool, &nixos_system, build_config).await
-        {
-            error!(
-                "Failed to discover dependencies for {}: {}",
-                nixos_system.derivation_name, e
-            );
-        }
-    }
-
-    Ok(())
-}
-
-/// Discover all transitive dependencies for a single NixOS system using nix-store --query
-async fn discover_all_transitive_dependencies_for_system(
-    pool: &PgPool,
-    nixos_system: &Derivation,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    let drv_path = nixos_system
-        .derivation_path
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("NixOS system missing derivation_path"))?;
-
-    // Use nix-store --query --requisites to get ALL transitive dependencies
-    let mut cmd = tokio::process::Command::new("nix-store");
-    cmd.args(["--query", "--requisites", drv_path]);
-    build_config.apply_to_command(&mut cmd);
-
-    let output = cmd.output().await?;
-    if !output.status.success() {
-        bail!(
-            "nix-store query failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    let stdout_str = String::from_utf8_lossy(&output.stdout);
-    let all_deps: Vec<&str> = stdout_str
-        .lines()
-        .filter(|line| line.ends_with(".drv"))
-        .filter(|line| *line != drv_path) // Exclude self
+    let out = rows
+        .into_iter()
+        .map(|r| {
+            let hostname = r.hostname.clone();
+            HostLatestTarget {
+                hostname: hostname,
+                derivation_id: r.derivation_id,
+                store_path: r.store_path,
+                derivation_target: Some(build_agent_target(
+                    &r.repo_url,
+                    &r.commit_hash,
+                    &r.hostname,
+                )),
+                last_cache_completed_at: r.last_cache_completed_at,
+            }
+        })
         .collect();
 
-    info!(
-        "Found {} transitive dependencies for {}",
-        all_deps.len(),
-        nixos_system.derivation_name
-    );
-
-    // Insert all dependencies as individual derivations
-    discover_and_insert_packages(pool, nixos_system.id, &all_deps).await?;
-
-    Ok(())
+    Ok(out)
 }
 
 pub async fn mark_derivation_cache_pushed(pool: &PgPool, derivation_id: i32) -> Result<()> {
@@ -1836,6 +1773,238 @@ pub async fn update_cf_agent_enabled(
         "#,
         cf_agent_enabled,
         derivation_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Batch create cache push jobs for all built derivations missing jobs
+pub async fn batch_queue_cache_jobs(pool: &PgPool, destination: &str) -> Result<usize> {
+    let count = sqlx::query_scalar!(
+        r#"
+        INSERT INTO cache_push_jobs (derivation_id, store_path, cache_destination, status)
+        SELECT 
+            d.id,
+            d.store_path,
+            $1,
+            'pending'
+        FROM derivations d
+        WHERE d.status_id = 10  -- build-complete
+            AND d.store_path IS NOT NULL
+            AND NOT EXISTS (
+                SELECT 1 FROM cache_push_jobs cpj 
+                WHERE cpj.derivation_id = d.id
+                AND cpj.cache_destination = $1  -- CHECK SPECIFIC DESTINATION
+            )
+        RETURNING id
+        "#,
+        destination
+    )
+    .fetch_all(pool)
+    .await?
+    .len();
+
+    if count > 0 {
+        info!("📤 Batch queued {} cache push jobs", count);
+    }
+
+    Ok(count)
+}
+
+/// Reset a derivation back to dry-run-complete status when store path is missing
+pub async fn reset_derivation_for_rebuild(pool: &PgPool, derivation_id: i32) -> Result<()> {
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = 5,  -- dry-run-complete
+            store_path = NULL,
+            completed_at = NULL,
+            error_message = 'Store path was garbage collected, needs rebuild'
+        WHERE id = $1
+        "#,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+
+    info!(
+        "Reset derivation {} to dry-run-complete for rebuild",
+        derivation_id
+    );
+    Ok(())
+}
+
+pub async fn batch_mark_derivations_complete(
+    pool: &PgPool,
+    deriv_ids: &[i32],
+    store_paths: &[String],
+) -> Result<()> {
+    use anyhow::Context;
+
+    sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,
+            completed_at = NOW(),
+            evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,
+            store_path = data.store_path
+        FROM (
+            SELECT UNNEST($2::int[]) as id, UNNEST($3::text[]) as store_path
+        ) as data
+        WHERE derivations.id = data.id
+        "#,
+        EvaluationStatus::DryRunComplete as i32,
+        deriv_ids,
+        store_paths
+    )
+    .execute(pool)
+    .await
+    .context("Failed to batch mark derivations as complete")?;
+
+    Ok(())
+}
+
+/// Update the database with build progress information
+pub async fn update_build_heartbeat(
+    pool: &PgPool,
+    derivation_id: i32,
+    elapsed_seconds: i32,
+    current_target: Option<&str>,
+    last_activity_seconds: i32,
+) -> Result<()> {
+    sqlx::query!(
+        r#"
+            UPDATE derivations
+            SET 
+                build_elapsed_seconds = $1,
+                build_current_target = $2,
+                build_last_activity_seconds = $3,
+                build_last_heartbeat = NOW()
+            WHERE id = $4
+            "#,
+        elapsed_seconds,
+        current_target,
+        last_activity_seconds,
+        derivation_id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+/// Queue derivations for building after successful dry run
+///
+/// This transitions derivations from DryRunComplete (5) to BuildPending (7)
+/// so they can be claimed by builders.
+pub async fn queue_derivations_for_build(pool: &PgPool, commit_id: i32) -> Result<usize> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,  -- BuildPending (7)
+            scheduled_at = COALESCE(scheduled_at, NOW())
+        WHERE commit_id = $2
+        AND status_id = $3  -- DryRunComplete (5)
+        AND derivation_type = 'nixos'
+        RETURNING id
+        "#,
+        EvaluationStatus::BuildPending.as_id(), // 7
+        commit_id,
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let count = result.len();
+
+    if count > 0 {
+        info!(
+            "Queued {} derivations for building (commit_id={})",
+            count, commit_id
+        );
+    }
+
+    Ok(count)
+}
+
+/// Queue all derivations that completed dry run
+///
+/// This is useful for batch operations or catching up after server restart
+pub async fn queue_all_ready_derivations(pool: &PgPool) -> Result<usize> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,  -- BuildPending (7)
+            scheduled_at = COALESCE(scheduled_at, NOW())
+        WHERE status_id = $2  -- DryRunComplete (5)
+        AND derivation_type = 'nixos'
+        RETURNING id
+        "#,
+        EvaluationStatus::BuildPending.as_id(),   // 7
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let count = result.len();
+
+    if count > 0 {
+        info!("Queued {} derivations for building", count);
+    }
+
+    Ok(count)
+}
+
+/// Auto-queue derivations with CF agent enabled
+///
+/// This can be called after evaluation to immediately queue systems
+/// that have the CF agent enabled, skipping dry run.
+pub async fn auto_queue_cf_agent_systems(pool: &PgPool, commit_id: i32) -> Result<usize> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = $1,  -- BuildPending (7)
+            scheduled_at = COALESCE(scheduled_at, NOW())
+        WHERE commit_id = $2
+        AND cf_agent_enabled = true
+        AND derivation_type = 'nixos'
+        AND status_id IN ($3, $4)  -- DryRunPending or DryRunComplete
+        RETURNING id
+        "#,
+        EvaluationStatus::BuildPending.as_id(), // 7
+        commit_id,
+        EvaluationStatus::DryRunPending.as_id(),  // 3
+        EvaluationStatus::DryRunComplete.as_id(), // 5
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let count = result.len();
+
+    if count > 0 {
+        info!(
+            "Auto-queued {} CF agent systems for building (commit_id={})",
+            count, commit_id
+        );
+    }
+
+    Ok(count)
+}
+
+pub async fn cleanup_partial_derivations(pool: &PgPool) -> Result<()> {
+    sqlx::query!(
+        r#"
+        DELETE FROM derivations
+        WHERE derivation_path IS NULL
+          AND status_id IN (3, 4)  -- Only delete pending/in-progress
+        "#
     )
     .execute(pool)
     .await?;

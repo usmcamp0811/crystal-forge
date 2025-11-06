@@ -1,14 +1,35 @@
 use super::Derivation;
+use crate::models::commits::Commit;
 use crate::models::config::BuildConfig;
+use crate::models::flakes::Flake;
+use crate::queries::derivations::insert_derivation_with_target;
 use anyhow::{Context, Result, anyhow, bail};
-use serde_json::Value;
+use serde::Deserialize;
+use sqlx::PgPool;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 pub struct PackageInfo {
     pub pname: Option<String>,
     pub version: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NixEvalJobResult {
+    pub attr: String,
+    #[serde(rename = "attrPath")]
+    pub attr_path: Vec<String>,
+    #[serde(rename = "drvPath")]
+    pub drv_path: Option<String>,
+    pub outputs: Option<std::collections::HashMap<String, String>>,
+    pub system: Option<String>,
+    pub error: Option<String>,
+    #[serde(rename = "cacheStatus")]
+    pub cache_status: Option<String>, // "local", "cached", "notBuilt"
 }
 
 impl Derivation {
@@ -40,56 +61,6 @@ impl Derivation {
         // Return the first output path (typically there's only one)
         Ok(store_paths[0].to_string())
     }
-}
-
-/// Get the main derivation path for a flake target
-pub async fn eval_main_drv_path(flake_target: &str, build_config: &BuildConfig) -> Result<String> {
-    // Example: "<flake>#…config.system.build.toplevel" -> ask Nix for ".drvPath"
-    let mut cmd = Command::new("nix");
-    cmd.args(["eval", "--raw", &format!("{flake_target}.drvPath")]);
-    build_config.apply_to_command(&mut cmd);
-
-    let out = cmd.output().await?;
-    if !out.status.success() {
-        bail!(
-            "nix eval failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-}
-
-/// List immediate input derivations for a given derivation
-pub async fn list_immediate_input_drvs(
-    drv_path: &str,
-    build_config: &BuildConfig,
-) -> Result<Vec<String>> {
-    // `nix derivation show <drv>` yields {"<drv>": {"inputDrvs": {"<drv2>": ["out"], …}, …}}
-    let mut cmd = Command::new("nix");
-    cmd.args(["derivation", "show", drv_path]);
-    build_config.apply_to_command(&mut cmd);
-
-    let out = cmd.output().await?;
-    if !out.status.success() {
-        bail!(
-            "nix derivation show failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
-    }
-    let v: Value = serde_json::from_slice(&out.stdout)?;
-    let obj = v
-        .as_object()
-        .and_then(|m| m.get(drv_path))
-        .and_then(|x| x.as_object())
-        .ok_or_else(|| anyhow!("bad JSON from nix derivation show"))?;
-
-    let deps = obj
-        .get("inputDrvs")
-        .and_then(|x| x.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_else(Vec::new);
-
-    Ok(deps)
 }
 
 /// Resolve a .drv path to its output store path(s) - static version
@@ -227,4 +198,90 @@ pub fn parse_derivation_path(drv_path: &str) -> Option<PackageInfo> {
         pname: Some(name_version.to_string()),
         version: None,
     })
+}
+
+// ============================================================================
+// OPTIONAL: Add these helper functions to eval.rs if needed
+// ============================================================================
+
+/// Check if this derivation has Crystal Forge agent enabled
+pub async fn is_cf_agent_enabled(flake_target: &str, build_config: &BuildConfig) -> Result<bool> {
+    // Test environment check
+    if std::env::var("CF_TEST_ENVIRONMENT").is_ok() || flake_target.contains("cf-test-sys") {
+        return Ok(true);
+    }
+
+    // Extract the system name from the flake target
+    let system_name = flake_target
+        .split('#')
+        .nth(1)
+        .and_then(|s| s.split('.').nth(1))
+        .unwrap_or("unknown");
+
+    // Extract the flake URL (before the #)
+    let flake_url = flake_target.split('#').next().unwrap_or(flake_target);
+
+    // Use a simpler evaluation that's less likely to fail
+    let eval_expr = format!(
+        "let flake = builtins.getFlake \"{}\"; cfg = flake.nixosConfigurations.{}.config.services.crystal-forge or {{}}; in {{ enable = cfg.enable or false; client_enable = cfg.client.enable or false; }}",
+        flake_url, system_name
+    );
+
+    let mut cmd = Command::new("nix");
+    cmd.args(["eval", "--json", "--expr", &eval_expr]);
+    build_config.apply_to_command(&mut cmd);
+
+    match cmd.output().await {
+        Ok(output) if output.status.success() => {
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<serde_json::Value>(&json_str) {
+                Ok(json) => {
+                    let cf_enabled = json
+                        .get("enable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let cf_client_enabled = json
+                        .get("client_enable")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    Ok(cf_enabled && cf_client_enabled)
+                }
+                Err(e) => {
+                    warn!("Failed to parse CF agent status JSON: {}", e);
+                    Ok(false)
+                }
+            }
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!("CF agent evaluation failed: {}", stderr);
+            Ok(false)
+        }
+        Err(e) => {
+            warn!("Failed to run CF agent evaluation: {}", e);
+            Ok(false)
+        }
+    }
+}
+
+/// Parse derivation dependencies from `nix derivation show` JSON output
+pub fn parse_input_drvs_from_json(json_str: &str) -> Result<Vec<String>> {
+    let parsed: serde_json::Value = serde_json::from_str(json_str)?;
+
+    let mut deps = Vec::new();
+
+    // nix derivation show returns a map of derivation paths to their info
+    if let Some(obj) = parsed.as_object() {
+        for (_drv_path, drv_info) in obj {
+            if let Some(input_drvs) = drv_info.get("inputDrvs") {
+                if let Some(inputs) = input_drvs.as_object() {
+                    for (input_drv, _outputs) in inputs {
+                        deps.push(input_drv.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(deps)
 }

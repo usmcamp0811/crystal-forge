@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO cache_push_jobs (derivation_id, store_path, cache_destination, status)\n        SELECT \n            d.id,\n            d.store_path,\n            $1,\n            'pending'\n        FROM derivations d\n        WHERE d.status_id = 10  -- build-complete\n            AND d.store_path IS NOT NULL\n            AND NOT EXISTS (\n                SELECT 1 FROM cache_push_jobs cpj \n                WHERE cpj.derivation_id = d.id\n                AND cpj.cache_destination = $1  -- CHECK SPECIFIC DESTINATION\n            )\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dca1df270a700f21f2f46b62e3c1f6f229b0118d8d957e25f70249545a987ad4"
+}

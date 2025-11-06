@@ -8,7 +8,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use sqlx::PgPool;
-use uuid::Uuid;
 
 #[derive(Debug, FromRow, Serialize, Deserialize)]
 pub struct AgentHeartbeat {
@@ -75,7 +74,7 @@ impl AgentHeartbeat {
     fn states_are_equivalent(current: &SystemState, previous: &SystemState) -> bool {
         // Compare all fields except those that naturally change over time
         current.hostname == previous.hostname
-            && current.derivation_path == previous.derivation_path
+            && current.store_path == previous.store_path
             && current.os == previous.os
             && current.kernel == previous.kernel
             && current.memory_gb == previous.memory_gb

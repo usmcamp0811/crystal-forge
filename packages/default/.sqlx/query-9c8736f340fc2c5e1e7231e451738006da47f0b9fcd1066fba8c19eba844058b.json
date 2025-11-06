@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE derivations\n        SET \n            status_id = $1,\n            completed_at = NOW(),\n            evaluation_duration_ms = EXTRACT(EPOCH FROM (NOW() - started_at)) * 1000,\n            store_path = data.store_path\n        FROM (\n            SELECT UNNEST($2::int[]) as id, UNNEST($3::text[]) as store_path\n        ) as data\n        WHERE derivations.id = data.id\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4Array",
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9c8736f340fc2c5e1e7231e451738006da47f0b9fcd1066fba8c19eba844058b"
+}

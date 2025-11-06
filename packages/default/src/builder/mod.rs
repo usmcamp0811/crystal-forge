@@ -1,114 +1,35 @@
-use crate::flake::eval::list_nixos_configurations_from_commit;
 use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
-use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig, VulnixConfig};
+use crate::models::config::CacheType;
+use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::queries::build_reservations;
+use crate::queries::cache_push::CachePushJob;
+use crate::queries::cache_push::create_cache_push_job;
 use crate::queries::cache_push::{
-    create_cache_push_job, get_derivations_needing_cache_push_for_dest,
-    get_pending_cache_push_jobs, mark_cache_push_completed, mark_cache_push_failed,
-    mark_cache_push_in_progress, mark_derivation_cache_pushed,
+    cleanup_stale_cache_push_jobs, get_pending_cache_push_jobs, mark_cache_push_completed,
+    mark_cache_push_failed, mark_cache_push_in_progress,
 };
-use crate::queries::commits::get_commits_pending_evaluation;
 use crate::queries::cve_scans::{
     create_cve_scan, get_targets_needing_cve_scan, mark_cve_scan_failed, mark_scan_in_progress,
     save_scan_results,
 };
+use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::derivations::{
-    EvaluationStatus, get_derivations_ready_for_build, mark_target_build_in_progress,
-    mark_target_failed, update_derivation_status,
+    EvaluationStatus, handle_derivation_failure, mark_target_build_complete,
+    update_derivation_status,
 };
-use crate::queries::derivations::{
-    discover_and_queue_all_transitive_dependencies, handle_derivation_failure,
-    mark_target_build_complete,
-};
+use crate::queries::derivations::{batch_queue_cache_jobs, reset_derivation_for_rebuild};
 use crate::vulnix::vulnix_runner::VulnixRunner;
-use anyhow::Result;
-use anyhow::bail;
+use anyhow::{Context, Result};
+use futures::FutureExt;
 use sqlx::PgPool;
 use std::sync::Arc;
-use std::sync::OnceLock;
 use tokio::fs;
-use tokio::sync::RwLock;
+use tokio::sync::Semaphore;
 use tokio::time::sleep;
+use tokio::time::timeout;
+use tokio::time::{Duration, Instant};
 use tracing::{debug, error, info, warn};
-use uuid::Uuid;
-
-/// New build strategy: discover all dependencies first, then build them individually
-async fn build_derivations_with_dependency_discovery(
-    pool: &PgPool,
-    build_config: &BuildConfig,
-) -> Result<()> {
-    // Get ordered list of what to build (already prioritized by the query)
-    let ready_derivations = get_derivations_ready_for_build(pool).await?;
-
-    if ready_derivations.is_empty() {
-        info!("No derivations ready for building");
-        return Ok(());
-    }
-
-    let max_concurrent = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
-    let to_build: Vec<_> = ready_derivations.into_iter().take(max_concurrent).collect();
-
-    info!("Building {} derivations concurrently", to_build.len());
-
-    // Build them all concurrently
-    let mut tasks = Vec::new();
-    for mut derivation in to_build {
-        let pool = pool.clone();
-        let build_config = build_config.clone();
-
-        tasks.push(tokio::spawn(async move {
-            mark_target_build_in_progress(&pool, derivation.id)
-                .await
-                .ok();
-
-            match build_single_derivation(&pool, &mut derivation, &build_config).await {
-                Ok(store_path) => {
-                    info!("Built {}: {}", derivation.derivation_name, store_path);
-                    mark_target_build_complete(&pool, derivation.id, &store_path)
-                        .await
-                        .ok();
-                }
-                Err(e) => {
-                    error!("Build failed for {}: {}", derivation.derivation_name, e);
-                    handle_derivation_failure(&pool, &derivation, "build", &e)
-                        .await
-                        .ok();
-                }
-            }
-        }));
-    }
-
-    for task in tasks {
-        let _ = task.await;
-    }
-
-    Ok(())
-}
-
-/// Build a single derivation directly using nix-store --realise
-async fn build_single_derivation(
-    pool: &PgPool,
-    derivation: &mut Derivation,
-    build_config: &BuildConfig,
-) -> Result<String> {
-    let drv_path = derivation
-        .derivation_path
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Derivation missing derivation_path"))?;
-
-    if derivation.derivation_type == DerivationType::Package {
-        // For packages, build the .drv directly
-        derivation
-            .build_derivation_from_path(pool, drv_path, build_config)
-            .await
-    } else {
-        // For NixOS systems, use the full evaluate_and_build process
-        derivation
-            .evaluate_and_build(pool, true, build_config)
-            .await
-    }
-}
 
 /// Runs the continuous build loop with multiple workers
 pub async fn run_build_loop(pool: PgPool) {
@@ -117,7 +38,8 @@ pub async fn run_build_loop(pool: PgPool) {
         CrystalForgeConfig::default()
     });
     let build_config = cfg.get_build_config();
-    let num_workers = build_config.max_concurrent_derivations.unwrap_or(6) as usize;
+    let cache_config = cfg.get_cache_config();
+    let num_workers = build_config.max_concurrent_derivations;
 
     info!("🏗 Starting {} continuous build workers...", num_workers);
 
@@ -151,10 +73,11 @@ pub async fn run_build_loop(pool: PgPool) {
     for worker_id in 0..num_workers {
         let pool = pool.clone();
         let build_config = build_config.clone();
+        let cache_config = cache_config.clone();
         let worker_uuid = format!("{}-worker-{}", hostname, worker_id);
 
         let handle = tokio::spawn(async move {
-            build_worker(worker_id, worker_uuid, pool, build_config).await;
+            build_worker(worker_id, worker_uuid, pool, build_config, cache_config).await;
         });
         handles.push(handle);
     }
@@ -165,21 +88,79 @@ pub async fn run_build_loop(pool: PgPool) {
     }
 }
 
+/// Build a task description for display/logging
+///
+/// This helper function encapsulates all the commit-related queries
+/// that were previously embedded in build_worker
+async fn build_task_description(pool: &PgPool, derivation: &Derivation) -> String {
+    if let Some(commit_id) = derivation.commit_id {
+        match crate::queries::commits::get_commit_by_id(pool, commit_id).await {
+            Ok(commit) => {
+                // Try to get distance from HEAD
+                let distance_info = match commit.get_flake(pool).await {
+                    Ok(flake) => {
+                        match crate::queries::commits::get_commit_distance_from_head(
+                            pool, &flake, &commit,
+                        )
+                        .await
+                        {
+                            Ok(distance) => format!(" (HEAD~{})", distance),
+                            Err(_) => String::new(),
+                        }
+                    }
+                    Err(_) => String::new(),
+                };
+
+                format!(
+                    "{} @ {}{}",
+                    derivation.derivation_name,
+                    &commit.git_commit_hash[..8],
+                    distance_info
+                )
+            }
+            Err(_) => format!("{} @ commit#{}", derivation.derivation_name, commit_id),
+        }
+    } else {
+        derivation.derivation_name.clone()
+    }
+}
+
+/// Update worker status (helper to reduce boilerplate)
+///
+/// This function updates the global worker status in a non-blocking way
+fn update_worker_status(worker_id: usize, state: WorkerState, current_task: Option<String>) {
+    tokio::spawn(async move {
+        let mut statuses = get_build_status().write().await;
+        if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
+            status.state = state;
+            status.current_task = current_task;
+            status.started_at = if state == WorkerState::Idle {
+                None
+            } else {
+                Some(std::time::Instant::now())
+            };
+        }
+    });
+}
+
+/// Main build worker loop
+///
+/// CRITICAL IMPROVEMENTS:
+/// 1. Timeout protection prevents workers from getting stuck for hours
+/// 2. Helper functions for task description and status updates
+/// 3. Better error handling and logging
 async fn build_worker(
     worker_id: usize,
     worker_uuid: String,
     pool: PgPool,
     build_config: BuildConfig,
+    cache_config: CacheConfig,
 ) {
-    // Initialize status
-    {
-        let mut statuses = get_build_status().write().await;
-        if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-            status.state = WorkerState::Working;
-            status.current_task = Some("claiming work".to_string());
-            status.started_at = Some(std::time::Instant::now());
-        }
-    }
+    update_worker_status(
+        worker_id,
+        WorkerState::Working,
+        Some("claiming work".to_string()),
+    );
 
     info!("Worker {} ({}) started", worker_id, worker_uuid);
 
@@ -190,47 +171,118 @@ async fn build_worker(
         worker_heartbeat_loop(heartbeat_uuid, heartbeat_pool).await;
     });
 
+    // Get the build timeout from config (with a reasonable maximum)
+    // This is CRITICAL to prevent workers from getting stuck for hours
+    let build_timeout = std::cmp::min(
+        build_config.timeout,
+        std::time::Duration::from_secs(7200), // Max 2 hours
+    );
+
+    info!(
+        "Worker {} configured with {:.1}s timeout",
+        worker_id,
+        build_timeout.as_secs_f64()
+    );
+
     loop {
-        // Update status: looking for work
-        {
-            let mut statuses = get_build_status().write().await;
-            if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-                status.state = WorkerState::Working;
-                status.current_task = Some("claiming work".to_string());
-                status.started_at = Some(std::time::Instant::now());
-            }
-        }
+        update_worker_status(
+            worker_id,
+            WorkerState::Working,
+            Some("claiming work".to_string()),
+        );
 
-        // Get wait_for_cache_push setting from config
-        let wait_for_cache = build_config.wait_for_cache_push.unwrap_or(false);
-
-        match build_reservations::claim_next_derivation(&pool, &worker_uuid, wait_for_cache).await {
+        match build_reservations::claim_next_derivation(&pool, &worker_uuid).await {
             Ok(Some(mut derivation)) => {
-                // Update status: building
-                {
-                    let mut statuses = get_build_status().write().await;
-                    if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-                        status.current_task =
-                            Some(derivation.derivation_path.clone().unwrap_or_else(|| {
-                                format!("{} <unknown derivation path>", derivation.derivation_name)
-                            }));
-                        status.started_at = Some(std::time::Instant::now());
-                    }
-                }
-
                 info!(
-                    "Worker {} claimed: {} (type: {:?})",
-                    worker_id, derivation.derivation_name, derivation.derivation_type
+                    "✅ Worker {} CLAIMED derivation {}",
+                    worker_id, derivation.derivation_name
                 );
 
-                match build_single_derivation(&pool, &mut derivation, &build_config).await {
-                    Ok(store_path) => {
+                // ADD THIS DEBUG LINE
+                info!(
+                    "🔨 Worker {} STARTING BUILD for {}",
+                    worker_id, derivation.derivation_name
+                );
+
+                // Build task description using helper function (no embedded SQL)
+                let task_description = derivation.derivation_name.clone();
+                // let task_description = build_task_description(&pool, &derivation).await;
+
+                update_worker_status(
+                    worker_id,
+                    WorkerState::Working,
+                    Some(task_description.clone()),
+                );
+
+                info!(
+                    "Worker {} claimed: {} (type: {:?}, cf_agent: {:?}, attempt: {})",
+                    worker_id,
+                    task_description,
+                    derivation.derivation_type,
+                    derivation.cf_agent_enabled,
+                    derivation.attempt_count
+                );
+
+                let start = std::time::Instant::now();
+
+                info!(
+                    "🔨 Worker {} STARTING BUILD for {}",
+                    worker_id, derivation.derivation_name
+                );
+                info!("  → Step 1: About to call derivation.build()");
+
+                let build_result =
+                    tokio::time::timeout(build_timeout, derivation.build(&pool, &build_config))
+                        .await;
+
+                info!("  → Step 2: derivation.build() returned");
+
+                match build_result {
+                    // Build succeeded within timeout
+                    Ok(Ok(store_path)) => {
+                        let duration = start.elapsed();
                         info!(
-                            "Worker {} built {}: {}",
-                            worker_id, derivation.derivation_name, store_path
+                            "✅ worker {} completed {} in {:.1}s: {}",
+                            worker_id,
+                            task_description,
+                            duration.as_secs_f64(),
+                            store_path
                         );
 
-                        // Mark complete and delete reservation in transaction
+                        // update derivation with store_path for signing
+                        derivation.store_path = Some(store_path.clone());
+
+                        // sign before cache push
+                        if let Err(e) = derivation.sign(&cache_config).await {
+                            warn!(
+                                "⚠️ signing failed for {}, continuing anyway: {}",
+                                task_description, e
+                            );
+                            // non-fatal - we can still push to cache unsigned
+                        }
+
+                        // TODO: Include the name of the server that built the derivation
+                        if let Some(ref store_path) = derivation.store_path {
+                            if let Err(e) = create_cache_push_job(
+                                &pool,
+                                derivation.id,
+                                store_path,                      // &String coerces to &str
+                                cache_config.push_to.as_deref(), // Option<String> -> Option<&str>
+                            )
+                            .await
+                            {
+                                warn!(
+                                    "⚠️ cache queue failed for {}, continuing anyway: {}",
+                                    task_description, e
+                                );
+                            }
+                        } else {
+                            warn!(
+                                "⚠️ skipping cache queue for {}: missing store_path on derivation {}",
+                                task_description, derivation.id
+                            );
+                        }
+
                         if let Err(e) = mark_build_complete_and_release(
                             &pool,
                             &worker_uuid,
@@ -239,16 +291,21 @@ async fn build_worker(
                         )
                         .await
                         {
-                            error!("Failed to mark build complete: {}", e);
+                            error!("failed to mark build complete: {}", e);
                         }
                     }
-                    Err(e) => {
+
+                    // Build failed within timeout
+                    Ok(Err(e)) => {
+                        let duration = start.elapsed();
                         error!(
-                            "Worker {} build failed for {}: {}",
-                            worker_id, derivation.derivation_name, e
+                            "❌ Worker {} build failed for {} after {:.1}s: {}",
+                            worker_id,
+                            task_description,
+                            duration.as_secs_f64(),
+                            e
                         );
 
-                        // Mark failed and delete reservation
                         if let Err(e2) =
                             mark_build_failed_and_release(&pool, &worker_uuid, &derivation, &e)
                                 .await
@@ -256,22 +313,46 @@ async fn build_worker(
                             error!("Failed to mark build failed: {}", e2);
                         }
                     }
-                }
-            }
-            Ok(None) => {
-                // Update status: idle
-                {
-                    let mut statuses = get_build_status().write().await;
-                    if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-                        status.state = WorkerState::Idle;
-                        status.current_task = None;
-                        status.started_at = None;
+
+                    // Build TIMED OUT - this is the fix for stuck workers!
+                    Err(_timeout) => {
+                        let duration = start.elapsed();
+                        let timeout_error = anyhow::anyhow!(
+                            "Build timed out after {:.1}s (limit: {:.1}s)",
+                            duration.as_secs_f64(),
+                            build_timeout.as_secs_f64()
+                        );
+
+                        error!(
+                            "⏱️  Worker {} build TIMEOUT for {} after {:.1}s (limit: {:.1}s)",
+                            worker_id,
+                            task_description,
+                            duration.as_secs_f64(),
+                            build_timeout.as_secs_f64()
+                        );
+
+                        if let Err(e2) = mark_build_failed_and_release(
+                            &pool,
+                            &worker_uuid,
+                            &derivation,
+                            &timeout_error,
+                        )
+                        .await
+                        {
+                            error!("Failed to mark build timeout: {}", e2);
+                        }
                     }
                 }
+            }
 
+            // No work available - idle
+            Ok(None) => {
+                update_worker_status(worker_id, WorkerState::Idle, None);
                 debug!("Worker {} idle, no work available", worker_id);
                 sleep(std::time::Duration::from_secs(5)).await;
             }
+
+            // Error claiming work
             Err(e) => {
                 error!("Worker {} error claiming work: {}", worker_id, e);
                 sleep(std::time::Duration::from_secs(10)).await;
@@ -318,45 +399,285 @@ pub async fn run_cve_scan_loop(pool: PgPool) {
         sleep(vulnix_config.poll_interval).await;
     }
 }
+pub async fn run_cache_push_workers(pool: PgPool) {
+    let cfg = CrystalForgeConfig::load().unwrap_or_default();
+    let cache_cfg = cfg.get_cache_config();
 
-/// Runs the periodic cache push loop
-pub async fn run_cache_push_loop(pool: PgPool) {
-    let cfg = CrystalForgeConfig::load().unwrap_or_else(|e| {
-        warn!("Failed to load Crystal Forge config: {}, using defaults", e);
-        CrystalForgeConfig::default()
-    });
-
-    let cache_config = cfg.get_cache_config();
-    let build_config = cfg.get_build_config();
-
-    // Only start cache loop if push_after_build is enabled
-    if !cache_config.push_after_build {
-        info!("📤 Cache push disabled in configuration");
+    if cache_cfg.push_to.is_none() {
+        info!("📤 Cache push disabled (no destination configured)");
         return;
     }
 
-    info!(
-        "🔍 Starting Cache Push loop (every {}s)...",
-        cache_config.poll_interval.as_secs()
-    );
+    let build_cfg = cfg.get_build_config();
+    let worker_count = cache_cfg.parallel_uploads.max(1) as usize;
 
-    debug!(
-        "🔧 Cache config: push_after_build={}, push_to={:?}",
-        cache_config.push_after_build, cache_config.push_to
-    );
+    info!("🚚 starting {} cache-push worker(s)…", worker_count);
 
-    loop {
-        if let Err(e) = process_cache_pushes(&pool, &cache_config, &build_config).await {
-            error!("❌ Error in cache push cycle: {e}");
+    // (Optional) one tiny background task to reclaim stuck jobs
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = cleanup_stale_cache_push_jobs(&pool, 60).await {
+                    warn!("cleanup_stale_cache_push_jobs: {e:#}");
+                }
+                sleep(Duration::from_secs(30)).await;
+            }
+        });
+    }
+    {
+        let pool = pool.clone();
+        let destination = cache_cfg.push_to.clone().unwrap(); // Safe because we checked above
+        tokio::spawn(async move {
+            info!("📤 Starting cache job creation loop (every 30s)...");
+            loop {
+                match batch_queue_cache_jobs(&pool, &destination).await {
+                    Ok(count) if count > 0 => {
+                        info!("📤 Created {} new cache push jobs", count);
+                    }
+                    Ok(_) => {
+                        debug!("No new cache push jobs needed");
+                    }
+                    Err(e) => {
+                        warn!("Failed to batch queue cache jobs: {}", e);
+                    }
+                }
+                sleep(Duration::from_secs(30)).await;
+            }
+        });
+    }
+
+    let mut handles = Vec::with_capacity(worker_count);
+    for worker_id in 0..worker_count {
+        let pool = pool.clone();
+        let cache_cfg = cache_cfg.clone();
+        let build_cfg = build_cfg.clone();
+
+        // Pre-register worker status (reuse build status list, or make a dedicated one)
+        {
+            let mut statuses = get_build_status().write().await;
+            statuses.push(WorkerStatus {
+                worker_id: 10_000 + worker_id, // offset so they don’t collide with build workers
+                current_task: None,
+                started_at: None,
+                state: WorkerState::Idle,
+            });
         }
 
-        sleep(cache_config.poll_interval).await;
+        handles.push(tokio::spawn(async move {
+            cache_worker(worker_id, pool, cache_cfg, build_cfg).await;
+        }));
+    }
+
+    for h in handles {
+        let _ = h.await;
     }
 }
 
-/// Process derivations that need building
-async fn build_derivations(pool: &PgPool, build_config: &BuildConfig) -> Result<()> {
-    build_derivations_with_dependency_discovery(pool, build_config).await
+/// Runs the periodic cache push loop with robust error handling
+pub async fn run_cache_push_loop(pool: PgPool) {
+    let cfg = CrystalForgeConfig::load().unwrap_or_default();
+    let cache_cfg = cfg.get_cache_config();
+
+    if cache_cfg.push_to.is_none() {
+        info!("📤 Cache push disabled (no destination configured)");
+        return;
+    }
+
+    let worker_count = match cache_cfg.cache_type {
+        CacheType::S3 => cache_cfg.parallel_uploads.max(1) as usize,
+        CacheType::Attic => 1,
+        CacheType::Http | CacheType::Nix => cache_cfg.parallel_uploads.max(1) as usize,
+    };
+
+    let build_cfg = cfg.get_build_config();
+
+    info!("🚚 starting {} cache-push worker(s)…", worker_count);
+
+    // (Optional) one tiny background task to reclaim stuck jobs
+    {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = cleanup_stale_cache_push_jobs(&pool, 60).await {
+                    warn!("cleanup_stale_cache_push_jobs: {e:#}");
+                }
+                sleep(Duration::from_secs(30)).await;
+            }
+        });
+    }
+
+    let mut handles = Vec::with_capacity(worker_count);
+    for worker_id in 0..worker_count {
+        let pool = pool.clone();
+        let cache_cfg = cache_cfg.clone();
+        let build_cfg = build_cfg.clone();
+
+        // Pre-register worker status (reuse build status list, or make a dedicated one)
+        {
+            let mut statuses = get_build_status().write().await;
+            statuses.push(WorkerStatus {
+                worker_id: 10_000 + worker_id, // offset so they don’t collide with build workers
+                current_task: None,
+                started_at: None,
+                state: WorkerState::Idle,
+            });
+        }
+
+        handles.push(tokio::spawn(async move {
+            cache_worker(worker_id, pool, cache_cfg, build_cfg).await;
+        }));
+    }
+
+    for h in handles {
+        let _ = h.await;
+    }
+}
+
+async fn cache_worker(
+    worker_id: usize,
+    pool: PgPool,
+    cache_cfg: CacheConfig,
+    build_cfg: BuildConfig,
+) {
+    let status_id = 10_000 + worker_id;
+    let tick = cache_cfg.poll_interval;
+
+    info!("🚚 cache-worker {worker_id} started (tick {tick:?})");
+
+    loop {
+        // update status: looking for work
+        {
+            let mut s = get_build_status().write().await;
+            if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
+                ws.state = WorkerState::Working;
+                ws.current_task = Some("claiming cache job".into());
+                ws.started_at = Some(std::time::Instant::now());
+            }
+        }
+
+        // small DB timeout so a wedged DB doesn’t pin the worker forever
+        let jobs = match timeout(
+            Duration::from_secs(30),
+            get_pending_cache_push_jobs(&pool, Some(1)),
+        )
+        .await
+        {
+            Ok(Ok(mut v)) => v.pop(),
+            Ok(Err(e)) => {
+                error!("cache-worker {worker_id}: get_pending_cache_push_jobs failed: {e:#}");
+                None
+            }
+            Err(_) => {
+                error!("cache-worker {worker_id}: get_pending_cache_push_jobs timed out");
+                None
+            }
+        };
+
+        let Some(job) = jobs else {
+            // no work → idle + sleep
+            {
+                let mut s = get_build_status().write().await;
+                if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
+                    ws.state = WorkerState::Idle;
+                    ws.current_task = None;
+                    ws.started_at = None;
+                }
+            }
+            debug!("cache-worker {worker_id}: idle");
+            sleep(tick).await;
+            continue;
+        };
+
+        // mark job in-progress and do the push
+        if let Err(e) = mark_cache_push_in_progress(&pool, job.id).await {
+            warn!("cache-worker {worker_id}: failed to mark in-progress: {e:#}");
+            // brief backoff; another worker can pick it up later
+            sleep(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        if let Err(e) =
+            process_one_job(&pool, &cache_cfg, &build_cfg, job, worker_id, status_id).await
+        {
+            error!("cache-worker {worker_id}: job failed: {e:#}");
+        }
+    }
+}
+
+async fn process_one_job(
+    pool: &PgPool,
+    cache_cfg: &CacheConfig,
+    build_cfg: &BuildConfig,
+    job: CachePushJob,
+    worker_id: usize,
+    status_id: usize,
+) -> Result<()> {
+    // update status for visibility
+    {
+        let mut s = get_build_status().write().await;
+        if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
+            ws.state = WorkerState::Working;
+            ws.current_task = Some(format!(
+                "cache-pushing job#{} (derivation @ {})",
+                job.id,
+                job.store_path
+                    .as_deref()
+                    .unwrap_or(&job.derivation_id.to_string())
+            ));
+            ws.started_at = Some(std::time::Instant::now());
+        }
+    }
+
+    let derivation = get_derivation_by_id(pool, job.derivation_id)
+        .await
+        .context("fetch derivation")?;
+
+    // Prefer job.store_path; else fall back to derivation.store_path / derivation_path (your push method handles .drv → store resolution)
+    let path = job
+        .store_path
+        .or_else(|| derivation.store_path.clone())
+        .or_else(|| derivation.derivation_path.clone())
+        .ok_or_else(|| anyhow::anyhow!("no store/derivation path for {}", job.derivation_id))?;
+
+    // Fast path check if it looks like a nix store path and actually exists
+    if path.starts_with("/nix/store/") && !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        warn!("cache-worker {worker_id}: store path missing: {path}");
+        mark_cache_push_failed(pool, job.id, &format!("Store path missing: {path}")).await?;
+        return Ok(());
+    }
+
+    // Do the push using your existing implementation on Derivation
+    let started = std::time::Instant::now();
+    match derivation.push_to_cache(&path, cache_cfg, build_cfg).await {
+        Ok(()) => {
+            let duration_ms = (started.elapsed().as_millis() as i32).max(0);
+            mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;
+            info!(
+                "✅ cache-worker {worker_id}: pushed {} (job {})",
+                derivation.derivation_name, job.id
+            );
+        }
+        Err(e) => {
+            mark_cache_push_failed(pool, job.id, &e.to_string()).await?;
+            warn!(
+                "❌ cache-worker {worker_id}: push failed for {} (job {}): {e}",
+                derivation.derivation_name, job.id
+            );
+        }
+    }
+
+    // back to idle; the outer loop will look for more work
+    {
+        let mut s = get_build_status().write().await;
+        if let Some(ws) = s.iter_mut().find(|w| w.worker_id == status_id) {
+            ws.state = WorkerState::Idle;
+            ws.current_task = None;
+            ws.started_at = None;
+        }
+    }
+
+    Ok(())
 }
 
 /// Process derivations that need CVE scanning
@@ -487,175 +808,157 @@ async fn scan_derivations(
     Ok(())
 }
 
-/// Process cache pushes for completed builds
+/// Wrapper around process_cache_pushes that ensures errors don't propagate
+async fn process_cache_pushes_safe(
+    pool: &PgPool,
+    cache_config: &CacheConfig,
+    build_config: &BuildConfig,
+) -> Result<usize> {
+    let result =
+        std::panic::AssertUnwindSafe(process_cache_pushes(pool, cache_config, build_config))
+            .catch_unwind()
+            .await;
+
+    match result {
+        Ok(res) => res,
+        Err(_) => {
+            error!("💥 Cache push process panicked! Recovering...");
+            Err(anyhow::anyhow!("Cache push process panicked"))
+        }
+    }
+}
+
+/// Process cache pushes for completed builds (one at a time to avoid batching issues)
 pub async fn process_cache_pushes(
     pool: &PgPool,
     cache_config: &CacheConfig,
     build_config: &BuildConfig,
-) -> Result<()> {
-    // Require a destination (e.g., "attic://my-cache" or "s3://bucket/prefix")
+) -> Result<usize> {
+    // ← Changed from Result<()> to Result<usize>
     let Some(destination) = cache_config.push_to.as_deref() else {
-        info!(
-            "⏭️ No cache destination configured (cache_config.push_to is None); skipping cache push pass"
-        );
-        return Ok(());
+        debug!("⭐️ No cache destination configured, skipping cache push");
+        return Ok(0); // ← Changed from Ok(()) to Ok(0)
     };
 
-    // Step 1: queue jobs for this destination only
-    match get_derivations_needing_cache_push_for_dest(
-        pool,
-        destination,
-        Some(10),
-        cache_config.max_retries as i32, // attempts cap
+    let db_timeout = std::time::Duration::from_secs(30);
+
+    // Always try to cleanup stale jobs first
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        cleanup_stale_cache_push_jobs(pool, 5),
     )
-    .await
-    {
-        Ok(derivations) => {
-            for derivation in derivations {
-                if let Some(store_path) = &derivation.store_path {
-                    if !cache_config.should_push(&derivation.derivation_name) {
-                        info!(
-                            "⏭️ Skipping cache push for {} (filtered out)",
-                            derivation.derivation_name
-                        );
-                        continue;
-                    }
+    .await;
 
-                    info!(
-                        "📤 Queuing cache push for {} → {}",
-                        derivation.derivation_name, destination
-                    );
+    // Get pending jobs (up to 5 at a time for batching)
+    let jobs_result =
+        tokio::time::timeout(db_timeout, get_pending_cache_push_jobs(pool, Some(5))).await;
 
-                    if let Err(e) = create_cache_push_job(
-                        pool,
-                        derivation.id,
-                        store_path,
-                        Some(destination), // <-- ensure job is for this destination
-                    )
-                    .await
-                    {
-                        error!("❌ Failed to queue cache push job: {}", e);
-                    }
-                }
+    match jobs_result {
+        Ok(Ok(jobs)) if !jobs.is_empty() => {
+            let job_count = jobs.len();
+            if let Err(e) = process_batch_cache_push(pool, jobs, cache_config, build_config).await {
+                error!("❌ Failed to process batch cache push: {}", e);
             }
+            Ok(job_count)
         }
-        Err(e) => error!("❌ Failed to get derivations needing cache push: {e}"),
+        Ok(Err(e)) => {
+            error!("❌ Failed to get pending cache push jobs: {e}");
+            Ok(0)
+        }
+        Err(_) => {
+            error!("⏱️ Timeout getting pending cache push jobs");
+            Ok(0)
+        }
+        _ => Ok(0),
+    }
+}
+
+async fn process_batch_cache_push(
+    pool: &PgPool,
+    jobs: Vec<crate::queries::cache_push::CachePushJob>,
+    cache_config: &CacheConfig,
+    build_config: &BuildConfig,
+) -> Result<()> {
+    if jobs.is_empty() {
+        return Ok(());
     }
 
-    // Step 2: process pending jobs (your existing fetch can stay global or be dest-scoped)
-    match get_pending_cache_push_jobs(pool, Some(5)).await {
-        Ok(jobs) => {
-            if jobs.is_empty() {
-                info!("🔍 No cache push jobs need processing");
-                return Ok(());
-            }
+    info!("📤 Processing {} cache push jobs (parallel)", jobs.len());
 
-            for job in jobs {
-                // Prefer store_path; fall back to derivation_path
-                let path_to_push = if let Some(store_path) = &job.store_path {
-                    store_path.clone()
-                } else {
-                    match crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id)
-                        .await
-                    {
-                        Ok(derivation) => {
-                            if let Some(drv_path) = &derivation.derivation_path {
-                                info!("📤 Using derivation path for cache push: {}", drv_path);
-                                drv_path.clone()
-                            } else {
-                                warn!("❌ Job {}: no store path and no derivation_path", job.id);
-                                if let Err(e) = mark_cache_push_failed(
-                                    pool,
-                                    job.id,
-                                    "No store path or derivation path available",
-                                )
-                                .await
-                                {
-                                    error!("❌ Failed to mark job failed: {e}");
-                                }
-                                continue;
-                            }
-                        }
-                        Err(e) => {
-                            error!("❌ Failed to load derivation {}: {}", job.derivation_id, e);
-                            if let Err(se) = mark_cache_push_failed(
-                                pool,
-                                job.id,
-                                &format!("Failed to get derivation: {}", e),
-                            )
-                            .await
-                            {
-                                error!("❌ Failed to mark job failed: {se}");
-                            }
-                            continue;
-                        }
+    // Process up to 3 jobs concurrently
+    let mut tasks = Vec::new();
+
+    for job in jobs {
+        let pool = pool.clone();
+        let cache_config = cache_config.clone();
+        let build_config = build_config.clone();
+
+        let task = tokio::spawn(async move {
+            if let Some(store_path) = job.store_path {
+                // Check if path exists
+                if !tokio::fs::try_exists(&store_path).await.unwrap_or(false) {
+                    warn!("❌ Store path doesn't exist: {}", store_path);
+                    let _ = mark_cache_push_failed(
+                        &pool,
+                        job.id,
+                        &format!("Store path does not exist: {}", store_path),
+                    )
+                    .await;
+                    return;
+                }
+
+                // Mark in-progress
+                if mark_cache_push_in_progress(&pool, job.id).await.is_err() {
+                    return;
+                }
+
+                // Get derivation
+                let derivation = match crate::queries::derivations::get_derivation_by_id(
+                    &pool,
+                    job.derivation_id,
+                )
+                .await
+                {
+                    Ok(d) => d,
+                    Err(e) => {
+                        let _ = mark_cache_push_failed(&pool, job.id, &e.to_string()).await;
+                        return;
                     }
                 };
 
-                info!(
-                    "📤 Processing job {} (derivation {}): {}",
-                    job.id, job.derivation_id, path_to_push
-                );
-
-                if let Err(e) = mark_cache_push_in_progress(pool, job.id).await {
-                    error!("❌ Failed to mark job in_progress: {}", e);
-                    continue;
-                }
-
-                let start_time = std::time::Instant::now();
-
-                match crate::queries::derivations::get_derivation_by_id(pool, job.derivation_id)
+                // Push with retry
+                let start = std::time::Instant::now();
+                match derivation
+                    .push_to_cache_with_retry(&store_path, &cache_config, &build_config)
                     .await
                 {
-                    Ok(derivation) => {
-                        match derivation
-                            .push_to_cache(&path_to_push, cache_config, build_config)
-                            .await
-                        {
-                            Ok(()) => {
-                                let duration_ms = start_time.elapsed().as_millis() as i32;
-                                info!(
-                                    "✅ Cache push completed for {} ({}) in {}ms",
-                                    derivation.derivation_name, path_to_push, duration_ms
-                                );
-
-                                if let Err(e) =
-                                    mark_cache_push_completed(pool, job.id, None, Some(duration_ms))
-                                        .await
-                                {
-                                    error!("❌ Failed to mark job completed: {}", e);
-                                }
-                                // Note: no derivation-level cache-pushed status write
-                            }
-                            Err(e) => {
-                                error!(
-                                    "❌ Cache push failed for {}: {}",
-                                    derivation.derivation_name, e
-                                );
-                                if let Err(se) =
-                                    mark_cache_push_failed(pool, job.id, &e.to_string()).await
-                                {
-                                    error!("❌ Failed to mark job failed: {se}");
-                                }
-                            }
-                        }
+                    Ok(()) => {
+                        let duration_ms = start.elapsed().as_millis() as i32;
+                        let _ =
+                            mark_cache_push_completed(&pool, job.id, None, Some(duration_ms)).await;
+                        info!("✅ Pushed {} (job {})", derivation.derivation_name, job.id);
                     }
                     Err(e) => {
-                        error!("❌ Failed to load derivation {}: {}", job.derivation_id, e);
-                        if let Err(se) = mark_cache_push_failed(
-                            pool,
-                            job.id,
-                            &format!("Failed to get derivation: {}", e),
-                        )
-                        .await
-                        {
-                            error!("❌ Failed to mark job failed: {se}");
-                        }
+                        let _ = mark_cache_push_failed(&pool, job.id, &e.to_string()).await;
+                        error!("❌ Failed to push job {}: {}", job.id, e);
                     }
                 }
             }
+        });
+
+        tasks.push(task);
+
+        // Limit concurrency - wait if we have 3 running
+        if tasks.len() >= 3 {
+            if let Some(task) = tasks.pop() {
+                let _ = task.await;
+            }
         }
-        Err(e) => error!("❌ Failed to get pending cache push jobs: {e}"),
+    }
+
+    // Wait for remaining tasks
+    for task in tasks {
+        let _ = task.await;
     }
 
     Ok(())
@@ -700,6 +1003,12 @@ async fn mark_build_complete_and_release(
     mark_target_build_complete(&mut *tx, derivation_id, store_path).await?;
 
     tx.commit().await?;
+
+    // Create GC root to prevent cleanup before cache push
+    if let Err(e) = create_gc_root(store_path, derivation_id).await {
+        warn!("Failed to create GC root for {}: {}", store_path, e);
+    }
+
     Ok(())
 }
 
@@ -742,4 +1051,43 @@ async fn worker_heartbeat_loop(worker_uuid: String, pool: PgPool) {
             _ => {}
         }
     }
+}
+
+pub async fn get_gc_root_path(derivation_id: i32) -> String {
+    let gc_root_dir = "/var/cache/crystal-forge/gc-roots";
+    tokio::fs::create_dir_all(gc_root_dir)
+        .await
+        .expect("failed to create GC root directory");
+    format!("{}/derivation-{}", gc_root_dir, derivation_id)
+}
+
+/// Create a GC root to prevent garbage collection until cache push
+pub async fn create_gc_root(store_path: &str, derivation_id: i32) -> Result<()> {
+    let gc_root_path = get_gc_root_path(derivation_id).await;
+
+    // Create symlink to store path
+    if let Err(e) = tokio::fs::symlink(store_path, &gc_root_path).await {
+        // Ignore if already exists
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(e.into());
+        }
+    }
+
+    debug!("Created GC root: {} -> {}", gc_root_path, store_path);
+    Ok(())
+}
+
+/// Remove GC root after successful cache push
+pub async fn remove_gc_root(derivation_id: i32) -> Result<()> {
+    let gc_root_path = get_gc_root_path(derivation_id).await;
+
+    if let Err(e) = tokio::fs::remove_file(&gc_root_path).await {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            warn!("Failed to remove GC root {}: {}", gc_root_path, e);
+        }
+    } else {
+        debug!("Removed GC root: {}", gc_root_path);
+    }
+
+    Ok(())
 }
