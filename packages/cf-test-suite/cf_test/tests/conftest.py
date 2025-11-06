@@ -219,7 +219,7 @@ def agent(machines):
 
 @pytest.fixture(scope="session")
 def agents(machines) -> List[Any]:
-    """Ordered list of all agent Machines (agent1, agent2, â€¦)."""
+    """Ordered list of all agent Machines (agent1, agent2, …)."""
     return [m for name, m in sorted(machines.items()) if name.startswith("agent")]
 
 
