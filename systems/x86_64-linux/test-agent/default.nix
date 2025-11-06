@@ -5,7 +5,7 @@
 }: let
   keyPair = pkgs.runCommand "agent-keypair" {} ''
     mkdir -p $out
-    ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/agent.key
+    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
   '';
   key = pkgs.runCommand "agent.key" {} ''
     mkdir -p $out
@@ -41,5 +41,5 @@ in {
     };
   };
 
-  environment.systemPackages = [pkgs.crystal-forge.agent pkgs.bash];
+  environment.systemPackages = [pkgs.crystal-forge.default.agent pkgs.bash];
 }

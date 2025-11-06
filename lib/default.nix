@@ -7,7 +7,7 @@ with lib; rec {
   }:
     pkgs.runCommand "${name}-keypair" {} ''
       mkdir -p $out
-      ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/agent.key
+      ${pkgs.crystal-forge.defautl.cf-keygen}/bin/cf-keygen -f $out/agent.key
     '';
 
   # Extract private key
