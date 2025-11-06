@@ -50,7 +50,7 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 ## Architecture
 
 ```mermaid
-flowchart TB
+flowchart LR
     C["Binary Cache<br/>S3/Attic/Nix"]
     A["Agent<br/>NixOS hosts"]
 
@@ -63,8 +63,8 @@ flowchart TB
 
     A -->|HTTP POST<br/>Ed25519 signed| S
     S --> B
-    B -->|Push builds| C
-    C -->|Pull derivations<br/>for deployment| A
+    B -->|Push| C
+    C -->|Pull| A
     B --> P
     P --> G
 
