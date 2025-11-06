@@ -251,7 +251,7 @@
 
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
-    exec ${pkgs.crystal-forge.server}/bin/server "$@"
+    exec ${pkgs.crystal-forge.default.server}/bin/server "$@"
   '';
 
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
@@ -269,7 +269,7 @@
     mkdir -p /var/lib/crystal-forge/workdir
     cd /var/lib/crystal-forge/workdir
     cleanup_old_builds
-    exec ${pkgs.crystal-forge.server}/bin/builder "$@"
+    exec ${pkgs.crystal-forge.default.server}/bin/builder "$@"
   '';
 
   agentScript = pkgs.writeShellScript "crystal-forge-agent" ''
