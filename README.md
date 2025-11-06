@@ -50,23 +50,23 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 ## Architecture
 
 ```mermaid
-flowchart LR
-    A[Agent<br/>NixOS hosts]
-    C[Binary Cache<br/>S3/Attic/Nix]
+flowchart TB
+    C["Binary Cache<br/>S3/Attic/Nix"]
+    A["Agent<br/>NixOS hosts"]
 
     subgraph "Core Infrastructure"
-        S[Server<br/>API/Coordination]
-        B[Builder<br/>Evaluation/CVE scan]
-        P[PostgreSQL<br/>shared state]
-        G[Grafana<br/>dashboards/alerts]
+        S["Server<br/>API/Coordination"]
+        B["Builder<br/>Evaluation/CVE scan"]
+        P["PostgreSQL<br/>shared state"]
+        G["Grafana<br/>dashboards/alerts"]
     end
 
     A -->|HTTP POST<br/>Ed25519 signed| S
     S --> B
-    B --> P
-    P --> G
     B -->|Push builds| C
     C -->|Pull derivations<br/>for deployment| A
+    B --> P
+    P --> G
 
     classDef default fill:#f9f9f9,stroke:#333,stroke-width:2px,color:#000
     classDef external fill:#e8e8e8,stroke:#666,stroke-width:2px,color:#000
@@ -310,11 +310,3 @@ Contributions are welcome! Please see project repository for:
 ## License
 
 See LICENSE file for details.
-
-## Project Links
-
-- **Repository**: [GitLab](https://gitlab.com/crystal-forge/crystal-forge)
-- **Issues**: [Issue Tracker](https://gitlab.com/crystal-forge/crystal-forge/-/issues)
-- **Documentation**: [docs/](docs/)
-- **Architecture**: [architecture.md](architecture.md)
-- **Design Docs**: [deployments_design_doc.md](deployments_design_doc.md)
