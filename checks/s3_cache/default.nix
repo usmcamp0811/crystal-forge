@@ -6,7 +6,7 @@
 }: let
   keyPair = pkgs.runCommand "agent-keypair" {} ''
     mkdir -p $out
-    ${pkgs.crystal-forge.cf-keygen}/bin/cf-keygen -f $out/agent.key
+    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
   '';
   keyPath = pkgs.runCommand "agent.key" {} ''
     mkdir -p $out
@@ -177,7 +177,7 @@ in
     };
 
     globalTimeout = 300; # 5 minutes
-    extraPythonPackages = p: [p.pytest  pkgs.crystal-forge.cf-test-suite];
+    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.cf-test-suite];
 
     testScript = ''
       import os

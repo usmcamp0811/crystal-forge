@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="../docs/cf-logo-transparent.png" alt="Crystal Forge" width="300"/>
+  <img src="../docs/cf-logo-white-text.png" alt="Crystal Forge" width="300"/>
 </p>
 
 <p align="center">
