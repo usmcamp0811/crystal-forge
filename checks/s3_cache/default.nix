@@ -6,7 +6,7 @@
 }: let
   keyPair = pkgs.runCommand "agent-keypair" {} ''
     mkdir -p $out
-    ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/agent.key
+    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
   '';
   keyPath = pkgs.runCommand "agent.key" {} ''
     mkdir -p $out
@@ -142,14 +142,9 @@ in
           # Test flake configuration - this is what the test expects
           flakes = {
             flake_polling_interval = "1m";
-            watched = [
-              # {
-              #   name = "test-flake";
-              #   repo_url = "http://gitserver/crystal-forge";
-              #   auto_poll = true;
-              #   initial_commit_depth = 5;
-              # }
-            ];
+            commit_evaluation_interval = "1m";
+            build_processing_interval = "1m";
+            watched = [];
           };
 
           # Test environment
@@ -177,7 +172,7 @@ in
     };
 
     globalTimeout = 300; # 5 minutes
-    extraPythonPackages = p: [p.pytest  pkgs.crystal-forge.cf-test-suite];
+    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.cf-test-suite];
 
     testScript = ''
       import os

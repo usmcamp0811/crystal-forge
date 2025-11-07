@@ -182,7 +182,7 @@ with lib.crystal-forge; let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec sudo -E nix run .#agent
       else
-        exec sudo -E ${pkgs.crystal-forge.agent}/bin/agent
+        exec sudo -E ${pkgs.crystal-forge.default.agent}/bin/agent
       fi
     '';
   };
@@ -196,7 +196,7 @@ with lib.crystal-forge; let
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#server
       else
-        exec ${pkgs.crystal-forge.server}/bin/server
+        exec ${pkgs.crystal-forge.default.server}/bin/server
       fi
     '';
   };
