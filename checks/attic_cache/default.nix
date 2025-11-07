@@ -97,6 +97,12 @@ in
           env-file = "/etc/attic-env";
           local-database = true;
           log_level = "debug";
+
+          deployment = {
+            cache_url = "http://atticCache:8080/cf-test";
+            deployment_poll_interval = lib.mkForce "30";
+            fallback_to_local_build = false;
+          };
           client = {
             enable = true;
             private_key = "/etc/agent.key";
@@ -122,7 +128,24 @@ in
           # Build configuration - DISABLE initially
           build = {
             enable = true;
-            offline = false;
+            # BUILD CONCURRENCY
+            max_concurrent_derivations = 1; # 3 parallel builds
+            max_jobs = 1; # 2 derivations per build
+            cores_per_job = 4; # 4 cores per derivation
+            # Math: 3 × 2 × 4 = 24 cores (leaves 8 for system/eval)
+
+            # SYSTEMD LIMITS
+            systemd_memory_max = "6G"; # 32GB per build (3 × 32G = 96GB, safe)
+            systemd_cpu_quota = 400; # 8 cores per build scope (not per derivation!)
+            use_systemd_scope = true;
+            systemd_timeout_stop_sec = 900;
+
+            # OTHER SETTINGS
+            use_substitutes = true;
+            poll_interval = "5s";
+            sandbox = true;
+            max_silent_time = "3h";
+            timeout = "8h";
             systemd_properties = [
               "Environment=ATTIC_SERVER_URL=http://atticCache:8080/cf-test"
               "Environment=ATTIC_REMOTE_NAME=cf-test"
@@ -134,10 +157,12 @@ in
           cache = {
             cache_type = "Attic";
             push_to = "http://atticCache:8080";
-            push_after_build = true;
             attic_cache_name = "cf-test";
-            max_retries = 2;
-            retry_delay_seconds = 1;
+            push_after_build = true;
+            parallel_uploads = 5;
+            max_retries = 5;
+            retry_delay_seconds = 5;
+            poll_interval = "5s";
           };
 
           # Test flake configuration
@@ -157,7 +182,7 @@ in
       };
     };
 
-    globalTimeout = 600; # 10 minutes for more complex setup
+    globalTimeout = 300; # 10 minutes for more complex setup
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.cf-test-suite];
 
     testScript = ''
