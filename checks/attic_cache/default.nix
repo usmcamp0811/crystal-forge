@@ -149,7 +149,6 @@ in
             systemd_properties = [
               "Environment=ATTIC_SERVER_URL=http://atticCache:8080/cf-test"
               "Environment=ATTIC_REMOTE_NAME=cf-test"
-              # Add ATTIC_TOKEN if you have it statically, or let vault handle it
             ];
           };
 
@@ -241,22 +240,27 @@ in
       sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
         {ATTIC} cache create cf-test:cf-test || true
 
-      # Environment for Crystal Forge
-      cat > /etc/attic-env <<EOF
+      # Environment for Crystal Forge (must match module location)
+      cat > /var/lib/crystal-forge/.config/crystal-forge-attic.env <<EOF
       ATTIC_SERVER_URL=http://atticCache:8080
       ATTIC_TOKEN={token}
       ATTIC_REMOTE_NAME=cf-test
       HOME=/var/lib/crystal-forge
       XDG_CONFIG_HOME=/var/lib/crystal-forge/.config
       EOF
-      chmod 644 /etc/attic-env
+      chmod 644 /var/lib/crystal-forge/.config/crystal-forge-attic.env
+      chown crystal-forge:crystal-forge /var/lib/crystal-forge/.config/crystal-forge-attic.env
       """)
+
+      # Ensure runtime directory exists for builder
+      cfServer.succeed("mkdir -p /run/crystal-forge")
+      cfServer.succeed("chmod 755 /run/crystal-forge")
+      cfServer.succeed("chown crystal-forge:crystal-forge /run/crystal-forge")
 
       # Start Crystal Forge builder
       cfServer.succeed("systemctl start crystal-forge-builder.service")
       cfServer.wait_for_unit("crystal-forge-builder.service")
-
-      cfServer.succeed("sleep 5")
+      cfServer.succeed("sleep 10")  # Give builder time to read env and attempt auth
 
       # Wait for database schema to be ready
       cfServer.succeed("""
@@ -268,9 +272,18 @@ in
         echo "Database schema ready!"
       '
       """)
-      cfServer.succeed("systemctl stop crystal-forge-server.service")
 
-      # Run tests
+      # Give builder and server time to stabilize
+      cfServer.succeed("sleep 15")
+
+      # Diagnostic check before running tests
+      print("=== Pre-test diagnostics ===")
+      cfServer.succeed("systemctl status crystal-forge-builder.service || true")
+      cfServer.succeed("systemctl status crystal-forge-server.service || true")
+      cfServer.succeed("ls -la /var/lib/crystal-forge/.config/ || true")
+      cfServer.succeed("ps aux | grep -i crystal-forge | head -5 || true")
+
+      # Run tests (server stays running - tests may need it)
       exit_code = pytest.main([
           "-vvvv", "--tb=short", "-x", "-s",
           "-m", "attic_cache", "--pyargs", "cf_test",
