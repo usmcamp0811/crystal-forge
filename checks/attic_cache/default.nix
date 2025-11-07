@@ -214,7 +214,7 @@ in
       atticCache.wait_for_unit("atticd.service")
       atticCache.wait_for_unit("attic-setup.service")
       cfServer.wait_for_unit("postgresql.service")
-      cfServer.succeed("systemctl stop crystal-forge-builder.service")
+      cfServer.succeed("systemctl stop crystal-forge-server.service")
 
       # Generate Attic token
       server_toml = atticCache.succeed(
@@ -283,7 +283,12 @@ in
       cfServer.succeed("ls -la /var/lib/crystal-forge/.config/ || true")
       cfServer.succeed("ps aux | grep -i crystal-forge | head -5 || true")
 
-      # Run tests (server stays running - tests may need it)
+      # Stop server service - not needed for cache push tests and it pollutes logs
+      print("=== Stopping server service (not needed for cache tests) ===")
+      cfServer.succeed("systemctl stop crystal-forge-server.service || true")
+      cfServer.succeed("sleep 2")
+
+      # Run tests
       exit_code = pytest.main([
           "-vvvv", "--tb=short", "-x", "-s",
           "-m", "attic_cache", "--pyargs", "cf_test",
