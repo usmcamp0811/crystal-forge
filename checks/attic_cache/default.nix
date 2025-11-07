@@ -137,12 +137,14 @@ in
             push_after_build = true;
             attic_cache_name = "cf-test";
             max_retries = 2;
-            retry_delay_seconds = 1;
+            retry_delay_seconds = 5;
           };
 
           # Test flake configuration
           flakes = {
             flake_polling_interval = "1m";
+            commit_evaluation_interval = "1m";
+            build_processing_interval = "1m";
             watched = [];
           };
 
@@ -184,13 +186,38 @@ in
 
       print("=== Crystal Forge Attic Cache Integration Test ===")
 
-      # Start services
-      atticCache.wait_for_unit("atticd.service")
-      atticCache.wait_for_unit("attic-setup.service")
+      # Start all VMs
+      start_all()
+
+      # Mask the server service completely to prevent it from starting
+      print("Masking Crystal Forge server service...")
+      cfServer.succeed("systemctl mask crystal-forge-server.service")
+
+      # Wait for network to be ready on both VMs
+      print("Waiting for network readiness...")
+      cfServer.wait_for_unit("network-online.target")
+      atticCache.wait_for_unit("network-online.target")
+
+      # Start and verify atticCache services
+      print("Starting Attic cache services...")
+      atticCache.wait_for_unit("atticd.service", timeout=120)
+      atticCache.wait_for_unit("attic-setup.service", timeout=180)
+
+      # Verify atticd is listening
+      print("Verifying Attic is listening...")
+      atticCache.succeed("ss -tlnp | grep :8080")
+
+      # Wait for PostgreSQL on cfServer
+      print("Waiting for PostgreSQL...")
       cfServer.wait_for_unit("postgresql.service")
-      cfServer.succeed("systemctl stop crystal-forge-builder.service")
+
+      # Test network connectivity from cfServer to atticCache
+      print("Testing network connectivity between VMs...")
+      cfServer.succeed("ping -c 2 atticCache")
+      cfServer.succeed("timeout 5 bash -c 'until curl -f http://atticCache:8080/ 2>/dev/null; do sleep 1; done'")
 
       # Generate Attic token
+      print("Generating Attic authentication token...")
       server_toml = atticCache.succeed(
           "find /var/lib /etc -name 'server.toml' -o -name 'atticd.toml' 2>/dev/null | head -1"
       ).strip()
@@ -201,8 +228,12 @@ in
           "--pull 'cf-*' --push 'cf-*' --create-cache 'cf-*' --configure-cache 'cf-*'"
       ).strip()
 
-      # Configure Attic client and environment
+      print(f"Token generated: {token[:20]}...")
+
+      # Configure Attic client and environment on cfServer
+      print("Configuring Attic client on cfServer...")
       cfServer.succeed(f"""
+      set -x
       mkdir -p /var/lib/crystal-forge/.config
       chown -R crystal-forge:crystal-forge /var/lib/crystal-forge
 
@@ -214,47 +245,105 @@ in
       sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
         {ATTIC} cache create cf-test:cf-test || true
 
-      # Environment for Crystal Forge
-      cat > /etc/attic-env <<EOF
+      # Environment file for Crystal Forge
+      cat > /var/lib/crystal-forge/.config/crystal-forge-attic.env <<'EOF'
       ATTIC_SERVER_URL=http://atticCache:8080
       ATTIC_TOKEN={token}
       ATTIC_REMOTE_NAME=cf-test
       HOME=/var/lib/crystal-forge
       XDG_CONFIG_HOME=/var/lib/crystal-forge/.config
       EOF
-      chmod 644 /etc/attic-env
+
+      chown crystal-forge:crystal-forge /var/lib/crystal-forge/.config/crystal-forge-attic.env
+      chmod 644 /var/lib/crystal-forge/.config/crystal-forge-attic.env
+
+      # Verify file was created
+      ls -la /var/lib/crystal-forge/.config/
+      cat /var/lib/crystal-forge/.config/crystal-forge-attic.env
+      """)
+
+      # Verify Attic client configuration works
+      print("Verifying Attic client configuration...")
+      cfServer.succeed(f"""
+      sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
+        {ATTIC} cache info cf-test:cf-test
       """)
 
       # Start Crystal Forge builder
+      print("Starting Crystal Forge builder...")
       cfServer.succeed("systemctl start crystal-forge-builder.service")
-      cfServer.wait_for_unit("crystal-forge-builder.service")
+      cfServer.wait_for_unit("crystal-forge-builder.service", timeout=60)
 
-      cfServer.succeed("sleep 5")
+      # Give builder time to initialize and run migrations
+      print("Waiting for builder to complete initialization...")
+      cfServer.succeed("sleep 10")
 
-      # Wait for database schema to be ready
+      # Check for infinite loop early
+      print("Checking for infinite loop...")
+      builder_logs = cfServer.succeed("journalctl -u crystal-forge-builder.service --no-pager | tail -100")
+      loop_count = builder_logs.count("Syncing commits for 0 watched flakes")
+      if loop_count > 10:
+          print(f"ERROR: Detected infinite loop! Found {loop_count} 'Syncing commits' messages")
+          print("=== Builder Logs ===")
+          print(builder_logs)
+          raise Exception("Builder is stuck in infinite loop")
+
+      # Wait for database schema to be ready with diagnostics
+      print("Waiting for database schema to be ready...")
       cfServer.succeed("""
-      timeout 60 bash -c '
+      timeout 120 bash -c '
+        attempts=0
         while ! sudo -u postgres psql -d crystal_forge -c "SELECT 1 FROM derivations LIMIT 1;" >/dev/null 2>&1; do
-          echo "Waiting for database schema..."
-          sleep 2
+          attempts=$((attempts + 1))
+          echo "Attempt $attempts: Waiting for database schema..."
+
+          if [ $attempts -gt 5 ]; then
+            echo "Checking migration status..."
+            sudo -u postgres psql -d crystal_forge -c "SELECT version, description FROM _sqlx_migrations ORDER BY version DESC LIMIT 5;" 2>&1 || echo "Migrations table not ready"
+          fi
+
+          if [ $attempts -gt 10 ]; then
+            echo "Checking builder service status..."
+            systemctl status crystal-forge-builder.service || true
+          fi
+
+          sleep 3
         done
-        echo "Database schema ready!"
+        echo "Database schema ready after $attempts attempts!"
       '
       """)
-      cfServer.succeed("systemctl stop crystal-forge-server.service")
 
-      # Run tests
+      # Verify builder is healthy
+      print("Verifying builder service health...")
+      cfServer.succeed("systemctl is-active crystal-forge-builder.service")
+
+      # Show recent builder logs
+      print("Recent builder logs:")
+      print(cfServer.succeed("journalctl -u crystal-forge-builder.service --no-pager -n 30"))
+
+      # Run the actual tests
+      print("=== Running pytest tests ===")
       exit_code = pytest.main([
           "-vvvv", "--tb=short", "-x", "-s",
           "-m", "attic_cache", "--pyargs", "cf_test",
       ])
 
       if exit_code != 0:
-          print("=== Test Failure Debug Info ===")
-          cfServer.succeed("journalctl -u crystal-forge-builder.service --no-pager -n 50 || true")
-          cfServer.succeed("cat /etc/attic-env || true")
+          print("\n=== Test Failure Debug Info ===")
+          print("\n--- Builder Service Logs ---")
+          cfServer.succeed("journalctl -u crystal-forge-builder.service --no-pager -n 100")
+
+          print("\n--- Attic Environment ---")
+          cfServer.succeed("cat /var/lib/crystal-forge/.config/crystal-forge-attic.env")
+
+          print("\n--- Attic Service Logs ---")
+          atticCache.succeed("journalctl -u atticd.service --no-pager -n 50")
+
+          print("\n--- Database State ---")
+          cfServer.succeed("sudo -u postgres psql -d crystal_forge -c 'SELECT COUNT(*) FROM derivations;'")
+
           raise SystemExit(exit_code)
 
-      print("All tests passed!")
+      print("\n=== All tests passed! ===")
     '';
   }

@@ -37,7 +37,6 @@ def test_attic_server_status(cfServer, atticCache):
         cfServer.log(f"❌ HTTP test failed: {e}")
 
 
-@pytest.mark.skip("TODO: Fix this")
 def test_cache_push_on_build_complete(
     completed_derivation_data, cfServer, atticCache, cf_client
 ):
