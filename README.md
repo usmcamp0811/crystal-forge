@@ -1,5 +1,10 @@
 <p align="center">
-  <img src="cf-bg.png" alt="Crystal Forge" width="300"/>
+  <picture>
+    <!-- Dark mode -->
+    <source srcset="../docs/cf-logo-white-text.png" media="(prefers-color-scheme: dark)">
+    <!-- Light mode -->
+    <img src="../docs/cf-logo-transparent.png" alt="Crystal Forge" width="300">
+  </picture>
 </p>
 
 <p align="center">
@@ -10,59 +15,101 @@
 
 ## What is Crystal Forge?
 
-Crystal Forge is a self-hosted monitoring, compliance, and deployment system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—designed for organizations that need auditability and control.
+Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-built for NixOS fleets. It provides cryptographically-verified system state tracking, automated build coordination, CVE scanning, and policy-based deployment management—designed for organizations that need auditability and control.
 
-**Current Status**: Active development. Core monitoring, build coordination, and deployment enforcement are functional. Advanced features are in progress.
+**Current Status**: Active development. Core monitoring, build coordination, CVE scanning, and system fingerprinting are functional. Deployment management and advanced compliance features are in progress.
 
 ## Key Features
 
 ### System Monitoring & Compliance
 
 - **Cryptographic verification**: Ed25519 signatures on all agent communications
-- **System fingerprinting**: Hardware, software, network, and security status tracking
+- **System fingerprinting**: Hardware, software, network interfaces, and security status tracking
 - **Configuration drift detection**: Compare running systems against evaluated configurations
 - **Intelligent heartbeats**: Distinguish between liveness signals and actual state changes
+- **Agent health monitoring**: Track agent connectivity and state reporting frequency
 
 ### Build Coordination
 
 - **Automatic NixOS evaluation**: Track derivations from Git commits
-- **Concurrent build processing**: Parallel derivation evaluation and building
+- **Parallel build processing**: Concurrent derivation evaluation and building with resource limits
 - **Binary cache integration**: Push to S3, Attic, or standard Nix caches
-- **CVE scanning**: Automated vulnerability assessment with vulnix
-- **Resource isolation**: SystemD-scoped builds with memory and CPU limits
+- **CVE scanning**: Automated vulnerability assessment with vulnix integration
+- **Resource isolation**: SystemD-scoped builds with configurable memory and CPU limits
+- **Build queue management**: Track in-progress and completed builds with status visibility
 
-### Deployment Management
+### Deployment Management (In Development)
 
 - **Deployment policies**: Manual, auto_latest, or pinned deployment strategies
 - **Fleet tracking**: Monitor which systems are running which configurations
 - **Flake integration**: Native support for NixOS flakes and Git repositories
-- **Deployment enforcement**: Server-directed system updates with cryptographic verification
+- **Crystal Forge assertion**: Prevent deployments that would disconnect agents
 
 ### Infrastructure
 
-- **PostgreSQL backend**: Optimized schema with migration support
-- **Horizontal scaling**: Multiple servers/builders can share database
-- **Web dashboards**: Grafana integration for compliance monitoring (in progress)
+- **PostgreSQL backend**: Optimized schema with comprehensive views for compliance data
+- **Horizontal scaling**: Multiple servers/builders can share PostgreSQL instance
 - **Git webhook integration**: Automatic evaluation on configuration updates
+- **Grafana dashboards**: Compliance monitoring and alerting integration
 
 ## Architecture
 
-```
-┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│   Agent     │────────>│   Server    │<────────│   Builder   │
-│ (NixOS)     │  HTTPS  │  (API/DB)   │   DB    │ (Eval/Build)│
-└─────────────┘         └─────────────┘         └─────────────┘
-                              │
-                              │
-                        ┌─────▼─────┐
-                        │ PostgreSQL│
-                        └───────────┘
+```mermaid
+flowchart LR
+    C["Binary Cache<br/>S3/Attic/Nix"]
+    A["Agent<br/>NixOS hosts"]
+
+    subgraph "Core Infrastructure"
+        S["Server<br/>API/Coordination"]
+        B["Builder<br/>Evaluation/CVE scan"]
+        P["PostgreSQL<br/>shared state"]
+        G["Grafana<br/>dashboards/alerts"]
+    end
+
+    A -->|HTTP POST<br/>Ed25519 signed| S
+    S --> B
+    B -->|Push| C
+    C -->|Pull| A
+    B --> P
+    P --> G
+
+    classDef default fill:#f9f9f9,stroke:#333,stroke-width:2px,color:#000
+    classDef external fill:#e8e8e8,stroke:#666,stroke-width:2px,color:#000
+    class C external
 ```
 
-- **Agent**: Runs on each NixOS system, monitors configuration, sends signed reports
-- **Server**: Receives agent reports, coordinates work, provides API
-- **Builder**: Evaluates flakes, builds derivations, runs CVE scans
-- **Database**: Shared state for coordination and compliance tracking
+### Components
+
+**Agent (Rust)**
+
+- Runs on each monitored NixOS system
+- Monitors configuration changes via inotify
+- Collects and reports system fingerprints
+- Sends Ed25519-signed state reports to server
+- Receives and validates deployment instructions
+
+**Server (Rust)**
+
+- Receives and verifies agent reports
+- Processes Git webhooks for configuration updates
+- Coordinates build requests with builders
+- Provides HTTP API for compliance queries
+- Manages deployment policies and state
+
+**Builder (Rust)**
+
+- Evaluates NixOS flakes on demand
+- Builds derivations for CVE scanning
+- Runs vulnix for vulnerability assessment
+- Tracks configuration drift (current vs. latest)
+- Manages binary cache uploads
+
+**PostgreSQL**
+
+- Centralized state for system compliance data
+- Enables horizontal scaling of servers and builders
+- Tracks commits, derivations, systems, and vulnerabilities
+- Provides comprehensive views for compliance reporting
 
 ## Quick Start
 
@@ -152,6 +199,10 @@ CRYSTAL_FORGE__DATABASE__NAME=crystal_forge
 # Agent
 CRYSTAL_FORGE__CLIENT__SERVER_HOST=crystal-forge.example.com
 CRYSTAL_FORGE__CLIENT__PRIVATE_KEY=/var/lib/crystal-forge/host.key
+
+# Builder
+CRYSTAL_FORGE__BUILD__CORES=12
+CRYSTAL_FORGE__BUILD__MAX_JOBS=6
 ```
 
 ## Development
@@ -164,10 +215,10 @@ nix develop
 
 This provides a complete development environment with:
 
-- PostgreSQL database
-- Ed25519 keypair generation
-- Crystal Forge binaries
-- Testing infrastructure
+- PostgreSQL database with all migrations
+- Ed25519 keypair generation tools
+- Crystal Forge binaries (server, agent, builder)
+- Testing infrastructure and pytest environment
 
 ### Running Components
 
@@ -181,11 +232,12 @@ run-agent
 # Run in development mode (live code changes)
 run-server --dev
 run-agent --dev
+run-builder --dev
 ```
 
 ### Testing
 
-Crystal Forge includes comprehensive NixOS VM-based integration tests:
+Crystal Forge includes comprehensive test suites:
 
 ```bash
 # Run all tests
@@ -197,43 +249,69 @@ nix build .#checks.x86_64-linux.server      # Server tests
 nix build .#checks.x86_64-linux.builder     # Builder tests
 nix build .#checks.x86_64-linux.s3-cache    # S3 cache tests
 nix build .#checks.x86_64-linux.attic-cache # Attic cache tests
+
+# Run database tests in dev shell
+nix develop
+server-stack up
+run-db-test -vvv -m database
 ```
 
 ## System Requirements
 
-- **Server/Builder**: Linux with Nix, PostgreSQL 12+
-- **Agent**: NixOS systems only
-- **Network**: HTTPS recommended for production
+- **Server/Builder**: Linux with Nix and PostgreSQL 12+
+- **Agent**: NixOS systems (any recent stable release)
+- **Network**: HTTPS recommended for production deployments
+- **Resources**: Builder requires sufficient CPU/memory for concurrent evaluations (configurable)
+
+## Data Model
+
+Crystal Forge tracks:
+
+- **Commits**: Git commits in monitored flakes
+- **Derivations**: NixOS configurations evaluated from commits (system, dependency types)
+- **Systems**: Monitored NixOS hosts with their configurations and policies
+- **System States**: Periodic snapshots of running system state (fingerprints, changes)
+- **Agent Heartbeats**: Connectivity and health signals from agents
+- **CVE Data**: Vulnerabilities found in evaluated configurations
+- **Deployment Status**: Current vs. desired configuration state
+
+All data is cryptographically verified and immutably logged for audit compliance.
+
+## Compliance Features
+
+- **Audit trails**: Cryptographic proof of system state and changes
+- **Configuration tracking**: Git-backed flake versioning with commit history
+- **Vulnerability scanning**: Automated CVE detection across fleet
+- **Drift detection**: Unauthorized configuration changes identified
+- **Fleet dashboards**: Grafana integration for compliance reporting
+
+## Security Model
+
+- **Ed25519 signatures**: All agent-server communication cryptographically verified
+- **Hardware fingerprints**: Unique system identification for tamper detection
+- **Minimal attack surface**: Agents run with least privilege
+- **Encrypted transport**: HTTPS for all network communication
+- **Database security**: PostgreSQL with standard access controls and audit logging
 
 ## Roadmap
 
-See [ROADMAP.md](ROADMAP.md) for development plans:
+See project issues and pull requests for detailed development plans:
 
-1. **Stabilization** - Fix deployment tracking bugs, improve testing
-2. **Deployment Policies** - Advanced conditional deployment rules
-3. **CVE Dashboard** - Grafana dashboards for vulnerability tracking
-4. **STIG Modules** - Automated DISA STIG compliance for NixOS
-5. **Tvix Integration** - Native Rust Nix evaluation
+1. **v0.2.0**: Deployment execution and policy enforcement
+2. **v0.3.0**: Web-based dashboard (replacing Grafana for core features)
+3. **v0.4.0**: Advanced compliance reporting (STIG, NIST, SOC2)
+4. **v0.5.0**: Multi-tenant support for managed service providers
+5. **Future**: Tvix integration for Rust-native Nix evaluation
 
 ## Contributing
 
-Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Contributions are welcome! Please see project repository for:
 
-Crystal Forge is open source and will remain free for personal and homelab use. Commercial support and features for organizations will be offered in the future to sustain long-term development.
-
-## Security
-
-- Ed25519 cryptographic signatures for agent authentication
-- Hardware-based system fingerprinting
-- No sensitive data transmitted without verification
-- SystemD resource isolation for build operations
+- Contribution guidelines
+- Development workflow documentation
+- Code review process
+- Testing requirements
 
 ## License
 
-See [LICENSE](LICENSE) for details.
-
-## Project Links
-
-- **Repository**: [GitLab](https://gitlab.com/crystal-forge/crystal-forge)
-- **Issues**: [Issue Tracker](https://gitlab.com/crystal-forge/crystal-forge/-/issues)
-- **Documentation**: [docs/](docs/)
+See LICENSE file for details.

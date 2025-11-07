@@ -33,5 +33,15 @@
       channels-config = {
         allowUnfree = true;
       };
+
+      outputs-builder = channels: {
+        packages = {
+          agent = channels.nixpkgs.crystal-forge.default.agent;
+          server = channels.nixpkgs.crystal-forge.default.server;
+          builder = channels.nixpkgs.crystal-forge.default.builder;
+          cf-keygen = channels.nixpkgs.crystal-forge.default.cf-keygen;
+          test-agent = channels.nixpkgs.crystal-forge.default.test-agent;
+        };
+      };
     };
 }

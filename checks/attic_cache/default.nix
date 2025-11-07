@@ -6,7 +6,7 @@
 }: let
   keyPair = pkgs.runCommand "agent-keypair" {} ''
     mkdir -p $out
-    ${pkgs.crystal-forge.agent.cf-keygen}/bin/cf-keygen -f $out/agent.key
+    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
   '';
   keyPath = pkgs.runCommand "agent.key" {} ''
     mkdir -p $out
@@ -97,6 +97,12 @@ in
           env-file = "/etc/attic-env";
           local-database = true;
           log_level = "debug";
+
+          deployment = {
+            cache_url = "http://atticCache:8080/cf-test";
+            deployment_poll_interval = lib.mkForce "30";
+            fallback_to_local_build = false;
+          };
           client = {
             enable = true;
             private_key = "/etc/agent.key";
@@ -122,11 +128,27 @@ in
           # Build configuration - DISABLE initially
           build = {
             enable = true;
-            offline = false;
+            # BUILD CONCURRENCY
+            max_concurrent_derivations = 1; # 3 parallel builds
+            max_jobs = 1; # 2 derivations per build
+            cores_per_job = 4; # 4 cores per derivation
+            # Math: 3 × 2 × 4 = 24 cores (leaves 8 for system/eval)
+
+            # SYSTEMD LIMITS
+            systemd_memory_max = "6G"; # 32GB per build (3 × 32G = 96GB, safe)
+            systemd_cpu_quota = 400; # 8 cores per build scope (not per derivation!)
+            use_systemd_scope = true;
+            systemd_timeout_stop_sec = 900;
+
+            # OTHER SETTINGS
+            use_substitutes = true;
+            poll_interval = "5s";
+            sandbox = true;
+            max_silent_time = "3h";
+            timeout = "8h";
             systemd_properties = [
               "Environment=ATTIC_SERVER_URL=http://atticCache:8080/cf-test"
               "Environment=ATTIC_REMOTE_NAME=cf-test"
-              # Add ATTIC_TOKEN if you have it statically, or let vault handle it
             ];
           };
 
@@ -134,15 +156,19 @@ in
           cache = {
             cache_type = "Attic";
             push_to = "http://atticCache:8080";
-            push_after_build = true;
             attic_cache_name = "cf-test";
-            max_retries = 2;
-            retry_delay_seconds = 1;
+            push_after_build = true;
+            parallel_uploads = 5;
+            max_retries = 5;
+            retry_delay_seconds = 5;
+            poll_interval = "5s";
           };
 
           # Test flake configuration
           flakes = {
             flake_polling_interval = "1m";
+            commit_evaluation_interval = "1m";
+            build_processing_interval = "1m";
             watched = [];
           };
 
@@ -155,7 +181,7 @@ in
       };
     };
 
-    globalTimeout = 600; # 10 minutes for more complex setup
+    globalTimeout = 300; # 10 minutes for more complex setup
     extraPythonPackages = p: [p.pytest pkgs.crystal-forge.cf-test-suite];
 
     testScript = ''
@@ -188,7 +214,7 @@ in
       atticCache.wait_for_unit("atticd.service")
       atticCache.wait_for_unit("attic-setup.service")
       cfServer.wait_for_unit("postgresql.service")
-      cfServer.succeed("systemctl stop crystal-forge-builder.service")
+      cfServer.succeed("systemctl stop crystal-forge-server.service")
 
       # Generate Attic token
       server_toml = atticCache.succeed(
@@ -214,22 +240,27 @@ in
       sudo -u crystal-forge env HOME=/var/lib/crystal-forge XDG_CONFIG_HOME=/var/lib/crystal-forge/.config \\
         {ATTIC} cache create cf-test:cf-test || true
 
-      # Environment for Crystal Forge
-      cat > /etc/attic-env <<EOF
+      # Environment for Crystal Forge (must match module location)
+      cat > /var/lib/crystal-forge/.config/crystal-forge-attic.env <<EOF
       ATTIC_SERVER_URL=http://atticCache:8080
       ATTIC_TOKEN={token}
       ATTIC_REMOTE_NAME=cf-test
       HOME=/var/lib/crystal-forge
       XDG_CONFIG_HOME=/var/lib/crystal-forge/.config
       EOF
-      chmod 644 /etc/attic-env
+      chmod 644 /var/lib/crystal-forge/.config/crystal-forge-attic.env
+      chown crystal-forge:crystal-forge /var/lib/crystal-forge/.config/crystal-forge-attic.env
       """)
+
+      # Ensure runtime directory exists for builder
+      cfServer.succeed("mkdir -p /run/crystal-forge")
+      cfServer.succeed("chmod 755 /run/crystal-forge")
+      cfServer.succeed("chown crystal-forge:crystal-forge /run/crystal-forge")
 
       # Start Crystal Forge builder
       cfServer.succeed("systemctl start crystal-forge-builder.service")
       cfServer.wait_for_unit("crystal-forge-builder.service")
-
-      cfServer.succeed("sleep 5")
+      cfServer.succeed("sleep 10")  # Give builder time to read env and attempt auth
 
       # Wait for database schema to be ready
       cfServer.succeed("""
@@ -241,7 +272,21 @@ in
         echo "Database schema ready!"
       '
       """)
-      cfServer.succeed("systemctl stop crystal-forge-server.service")
+
+      # Give builder and server time to stabilize
+      cfServer.succeed("sleep 15")
+
+      # Diagnostic check before running tests
+      print("=== Pre-test diagnostics ===")
+      cfServer.succeed("systemctl status crystal-forge-builder.service || true")
+      cfServer.succeed("systemctl status crystal-forge-server.service || true")
+      cfServer.succeed("ls -la /var/lib/crystal-forge/.config/ || true")
+      cfServer.succeed("ps aux | grep -i crystal-forge | head -5 || true")
+
+      # Stop server service - not needed for cache push tests and it pollutes logs
+      print("=== Stopping server service (not needed for cache tests) ===")
+      cfServer.succeed("systemctl stop crystal-forge-server.service || true")
+      cfServer.succeed("sleep 2")
 
       # Run tests
       exit_code = pytest.main([
