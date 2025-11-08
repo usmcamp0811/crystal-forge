@@ -730,7 +730,7 @@ async fn scan_derivations(
             }
 
             // Check if the derivation path exists
-            if let Some(ref path) = derivation.derivation_path {
+            if let Some(ref path) = derivation.store_path {
                 match fs::try_exists(path).await {
                     Ok(true) => {
                         info!(
@@ -753,7 +753,23 @@ async fn scan_derivations(
                             .scan_derivation(&pool, derivation.id, vulnix_version)
                             .await
                         {
-                            Ok(vulnix_entries) => {
+                            Ok(mut vulnix_entries) => {
+                                for entry in &mut vulnix_entries {
+                                    match entry.resolve_store_path().await {
+                                        Ok(_) => {
+                                            debug!(
+                                                "Resolved store path for {}: {:?}",
+                                                entry.derivation, entry.store_path
+                                            );
+                                        }
+                                        Err(e) => {
+                                            debug!(
+                                                "Failed to resolve store path for {}: {}",
+                                                entry.derivation, e
+                                            );
+                                        }
+                                    }
+                                }
                                 let scan_duration_ms =
                                     Some(start_time.elapsed().as_millis() as i32);
                                 let stats =
