@@ -2,16 +2,22 @@ INSERT INTO daily_heartbeat_health (snapshot_date, total_systems, systems_health
 SELECT
     CURRENT_DATE AS snapshot_date,
     COUNT(*) AS total_systems,
-    COUNT(*) FILTER (WHERE status = 'Healthy') AS systems_healthy,
-    COUNT(*) FILTER (WHERE status = 'Warning') AS systems_warning,
-    COUNT(*) FILTER (WHERE status = 'Critical') AS systems_critical,
-    COUNT(*) FILTER (WHERE status = 'Offline') AS systems_offline,
-    COUNT(*) FILTER (WHERE status = 'No Heartbeats') AS systems_no_heartbeats,
-    AVG(avg_heartbeat_interval_seconds / 60.0) AS avg_heartbeat_interval_minutes,
-    SUM(COALESCE(heartbeat_count_24h, 0)) AS total_heartbeats_24h,
+    COUNT(*) FILTER (WHERE heartbeat_status = 'Healthy') AS systems_healthy,
+    COUNT(*) FILTER (WHERE heartbeat_status = 'Warning') AS systems_warning,
+    COUNT(*) FILTER (WHERE heartbeat_status = 'Critical') AS systems_critical,
+    COUNT(*) FILTER (WHERE heartbeat_status = 'Offline') AS systems_offline,
+    0 AS systems_no_heartbeats,
+    ROUND(AVG(minutes_since_last_activity), 2) AS avg_heartbeat_interval_minutes,
+    (
+        SELECT
+            COUNT(*)
+        FROM
+            agent_heartbeats
+        WHERE
+            timestamp >= CURRENT_DATE - INTERVAL '1 day') AS total_heartbeats_24h,
     NOW() AS created_at
 FROM
-    view_system_heartbeat_health
+    view_system_heartbeat_status
 ON CONFLICT (snapshot_date)
     DO UPDATE SET
         total_systems = EXCLUDED.total_systems,
