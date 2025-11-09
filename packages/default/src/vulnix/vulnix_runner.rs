@@ -59,33 +59,30 @@ impl VulnixRunner {
         vulnix_version: Option<String>,
     ) -> Result<VulnixScanOutput> {
         // Fetch store path in a separate scope so connection is released
-        let derivation_path = {
+        let store_path = {
             let derivation =
                 crate::queries::derivations::get_derivation_by_id(pool, derivation_id).await?;
             derivation
-                .derivation_path
-                .ok_or_else(|| anyhow!("Derivation {} has no derivation_path", derivation_id))?
+                .store_path
+                .ok_or_else(|| anyhow!("Derivation {} has no store_path", derivation_id))?
         }; // Connection released here when `derivation` goes out of scope
 
         // Only scan if the path exists
-        if !tokio::fs::try_exists(&derivation_path)
-            .await
-            .unwrap_or(false)
-        {
+        if !tokio::fs::try_exists(&store_path).await.unwrap_or(false) {
             return Err(anyhow!(
-                "Derivation path does not exist: {}",
-                derivation_path
+                "Derivation store_path does not exist: {}",
+                store_path
             ));
         }
 
         info!(
             "🔍 Scanning derivation {} with store path: {}",
-            derivation_id, derivation_path
+            derivation_id, store_path
         );
 
         // Build vulnix command
         let mut cmd = AsyncCommand::new("vulnix");
-        cmd.arg("--json").arg(&derivation_path);
+        cmd.arg("--json").arg(&store_path);
 
         if self.config.enable_whitelist {
             cmd.arg("--whitelist").arg("/etc/vulnix-whitelist.toml");

@@ -730,7 +730,7 @@ async fn scan_derivations(
             }
 
             // Check if the derivation path exists
-            if let Some(ref path) = derivation.derivation_path {
+            if let Some(ref path) = derivation.store_path {
                 match fs::try_exists(path).await {
                     Ok(true) => {
                         info!(
