@@ -1238,25 +1238,44 @@ in {
       };
     };
 
-    services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
-      enable = true;
-      ensureDatabases = [cfg.database.name];
-      ensureUsers = [
-        {
+    services.postgresql = lib.mkIf cfg.local-database {
+      # Enable PostgreSQL if server or dashboards need it
+      enable = lib.mkIf (cfg.server.enable || cfg.dashboards.enable) true;
+
+      # Ensure database exists (only needed for server)
+      ensureDatabases = lib.mkIf cfg.server.enable [cfg.database.name];
+
+      # Ensure users exist - combine both user types
+      ensureUsers =
+        lib.optional cfg.server.enable {
           name = cfg.database.user;
           ensureDBOwnership = true;
           ensureClauses.login = true;
         }
-      ];
-      identMap = ''
+        ++ lib.optional cfg.dashboards.enable {
+          name = cfg.dashboards.datasource.user;
+          ensureDBOwnership = false;
+        };
+
+      # Identity map (only for server)
+      identMap = lib.mkIf cfg.server.enable ''
         crystal-forge-map crystal-forge ${cfg.database.user}
       '';
-      authentication = lib.mkAfter ''
-        local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
-        local  ${cfg.database.name}  ${cfg.database.user}  trust
-        host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
-        host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
-      '';
+
+      # Authentication - combine rules for both users
+      authentication = lib.mkAfter (
+        lib.optionalString cfg.server.enable ''
+          local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
+          local  ${cfg.database.name}  ${cfg.database.user}  trust
+          host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
+          host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
+        ''
+        + lib.optionalString cfg.dashboards.enable ''
+          local  ${cfg.database.name}  ${cfg.dashboards.datasource.user}  peer
+          host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  127.0.0.1/32  trust
+          host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  ::1/128       trust
+        ''
+      );
     };
 
     # Grafana dashboard configuration
@@ -1305,21 +1324,6 @@ in {
           }
         ];
       };
-    };
-
-    # Ensure Grafana user can access the database if using local PostgreSQL
-    services.postgresql = lib.mkIf (cfg.dashboards.enable && cfg.local-database) {
-      ensureUsers = lib.mkAfter [
-        {
-          name = cfg.dashboards.datasource.user;
-          ensureDBOwnership = false;
-        }
-      ];
-      authentication = lib.mkAfter ''
-        local  ${cfg.database.name}  ${cfg.dashboards.datasource.user}  peer
-        host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  127.0.0.1/32  trust
-        host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  ::1/128       trust
-      '';
     };
 
     systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
