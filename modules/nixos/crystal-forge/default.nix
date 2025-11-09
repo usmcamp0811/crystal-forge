@@ -404,6 +404,94 @@ in {
         description = "Whether to disable strict host key checking for SSH";
       };
     };
+
+    dashboards = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Enable Crystal Forge Grafana dashboards.
+
+          This will:
+          - Enable Grafana if not already enabled
+          - Configure a PostgreSQL datasource for Crystal Forge
+          - Provision the Crystal Forge monitoring dashboard
+
+          Can be enabled on any host (with or without server/builder).
+        '';
+      };
+
+      datasource = {
+        name = lib.mkOption {
+          type = lib.types.str;
+          default = "Crystal Forge PostgreSQL";
+          description = "Name for the Grafana datasource";
+        };
+
+        host = lib.mkOption {
+          type = lib.types.str;
+          default = cfg.database.host;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.host";
+          description = "PostgreSQL host for Grafana to connect to";
+        };
+
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = cfg.database.port;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.port";
+          description = "PostgreSQL port for Grafana to connect to";
+        };
+
+        database = lib.mkOption {
+          type = lib.types.str;
+          default = cfg.database.name;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.name";
+          description = "Database name for Grafana to connect to";
+        };
+
+        user = lib.mkOption {
+          type = lib.types.str;
+          default = "grafana";
+          description = "Database user for Grafana datasource";
+        };
+
+        passwordFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = lib.mdDoc ''
+            Path to file containing the database password for Grafana.
+
+            If null, Grafana will attempt to connect without a password
+            (works for socket connections with peer auth).
+          '';
+        };
+
+        sslMode = lib.mkOption {
+          type = lib.types.enum ["disable" "require" "verify-ca" "verify-full"];
+          default = "disable";
+          description = "SSL mode for PostgreSQL connection";
+        };
+      };
+
+      grafana = {
+        provision = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = lib.mdDoc ''
+            Whether to use Grafana provisioning for dashboards.
+
+            When true, dashboards are managed declaratively by NixOS.
+            When false, you must manually configure the datasource and import dashboards.
+          '';
+        };
+
+        disableDeletion = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "Prevent deletion of provisioned dashboards from Grafana UI";
+        };
+      };
+    };
     build = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -1171,6 +1259,65 @@ in {
       '';
     };
 
+    # Grafana dashboard configuration
+    services.grafana = lib.mkIf cfg.dashboards.enable {
+      enable = true;
+      
+      settings = lib.mkIf cfg.dashboards.grafana.provision {
+        # Ensure Grafana has PostgreSQL plugin (built-in, but explicit)
+        "plugin.grafana-postgresql-datasource" = {
+          enabled = true;
+        };
+      };
+
+      provision = lib.mkIf cfg.dashboards.grafana.provision {
+        enable = true;
+
+        # Configure the Crystal Forge PostgreSQL datasource
+        datasources.settings.datasources = [{
+          name = cfg.dashboards.datasource.name;
+          type = "postgres";
+          url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
+          database = cfg.dashboards.datasource.database;
+          user = cfg.dashboards.datasource.user;
+          jsonData = {
+            sslmode = cfg.dashboards.datasource.sslMode;
+            postgresVersion = 1400;
+            timescaledb = false;
+          };
+          secureJsonData = lib.mkIf (cfg.dashboards.datasource.passwordFile != null) {
+            password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
+          };
+          isDefault = false;
+          editable = true;
+        }];
+
+        # Provision the Crystal Forge dashboard
+        dashboards.settings.providers = [{
+          name = "Crystal Forge";
+          type = "file";
+          options.path = pkgs.crystal-forge.dashboards;
+          disableDeletion = cfg.dashboards.grafana.disableDeletion;
+          updateIntervalSeconds = 60;
+        }];
+      };
+    };
+
+    # Ensure Grafana user can access the database if using local PostgreSQL
+    services.postgresql = lib.mkIf (cfg.dashboards.enable && cfg.local-database) {
+      ensureUsers = lib.mkAfter [
+        {
+          name = cfg.dashboards.datasource.user;
+          ensureDBOwnership = false;
+        }
+      ];
+      authentication = lib.mkAfter ''
+        local  ${cfg.database.name}  ${cfg.dashboards.datasource.user}  peer
+        host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  127.0.0.1/32  trust
+        host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  ::1/128       trust
+      '';
+    };
+
     systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Postgres Jobs";
       after = ["postgresql.service"];
@@ -1583,8 +1730,12 @@ in {
         message = "Cannot specify both database.password and database.passwordFile";
       }
       {
-        assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable;
-        message = "At least one of server or client must be enabled";
+        assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable || cfg.dashboards.enable;
+        message = "At least one of server, client, build, or dashboards must be enabled";
+      }
+      {
+        assertion = cfg.dashboards.enable -> (cfg.dashboards.datasource.host != null);
+        message = "Crystal Forge dashboards require database.host or dashboards.datasource.host to be set";
       }
     ];
   };
