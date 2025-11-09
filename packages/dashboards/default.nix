@@ -52,13 +52,15 @@ pkgs.stdenv.mkDerivation {
   '';
 
   passthru = {
-    # Convenience accessor for the dashboard path
+    # Convenience accessor for a specific dashboard file
     dashboardPath = "${placeholder "out"}/dashboards/crystal-forge-dashboard.json";
+    # Directory containing all dashboards - use this for Grafana provisioning
+    dashboardsDir = "${placeholder "out"}/dashboards";
   };
 
   meta = with lib; {
     description = "Crystal Forge monitoring dashboard for Grafana";
-    license = licenses.agpl3Only; 
+    license = licenses.agpl3Only;
     platforms = platforms.all;
   };
 }

@@ -1292,11 +1292,11 @@ in {
           editable = true;
         }];
 
-        # Provision the Crystal Forge dashboard
+        # Provision the Crystal Forge dashboard(s)
         dashboards.settings.providers = [{
           name = "Crystal Forge";
           type = "file";
-          options.path = pkgs.crystal-forge.dashboards;
+          options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
           disableDeletion = cfg.dashboards.grafana.disableDeletion;
           updateIntervalSeconds = 60;
         }];
