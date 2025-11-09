@@ -1,4 +1,5 @@
 use crate::models::cve_scans::{CveScan, ScanStatus};
+use crate::models::derivations::utils::get_store_path_from_drv;
 use crate::models::derivations::{Derivation, DerivationType};
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
@@ -252,6 +253,8 @@ pub async fn save_scan_results(
             "CVE Scan Entry - name: '{}', pname: {:?}, version: {:?}, derivation: '{}', affected_by: {:?}",
             entry.name, entry.pname, entry.version, entry.derivation, entry.affected_by
         );
+
+        let store_path = get_store_path_from_drv(&entry.derivation).await?;
         // Insert package as a derivation with type 'package' and NULL commit_id
         let package_derivation_id = sqlx::query!(
             r#"
@@ -264,11 +267,11 @@ pub async fn save_scan_results(
                 pname, 
                 version, 
                 status_id, 
+                store_path,
                 attempt_count
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0)
-            ON CONFLICT (derivation_path) DO UPDATE SET
-                derivation_name = EXCLUDED.derivation_name,
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)
+            ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO UPDATE SET
                 pname = EXCLUDED.pname,
                 version = EXCLUDED.version,
                 status_id = EXCLUDED.status_id
@@ -281,7 +284,8 @@ pub async fn save_scan_results(
             None::<String>,   // derivation_target is NULL for packages discovered during scanning
             entry.pname,
             entry.version,
-            11i32, // Status ID for 'complete' from your EvaluationStatus enum
+            11i32, // Status ID for 'complete'
+            store_path,
         )
         .fetch_one(&mut *tx)
         .await?

@@ -20,8 +20,6 @@ pub struct VulnixEntry {
     pub derivation: String,
     /// Dict of CVSS v3 impact base scores for each CVE found
     pub cvssv3_basescore: HashMap<String, f32>,
-    /// Location in the /nix/store
-    pub store_path: String,
 }
 
 impl VulnixEntry {
@@ -46,13 +44,6 @@ impl VulnixEntry {
             .copied()
             .fold(None, |acc, score| Some(acc.map_or(score, |a| a.max(score))))
     }
-
-    pub async fn resolve_store_path(&mut self) -> Result<()> {
-        let resolved = get_store_path_from_drv(&self.derivation).await?;
-        self.store_path = resolved;
-        Ok(())
-    }
-
     /// Count vulnerabilities by severity for this entry
     pub fn severity_counts(&self) -> SeverityCounts {
         let mut counts = SeverityCounts::default();
@@ -179,7 +170,6 @@ mod tests {
                 "affected_by": ["CVE-2023-1234", "CVE-2023-5678"],
                 "whitelisted": ["CVE-2023-5678"],
                 "derivation": "/nix/store/abc123-openssl-1.1.1w.drv",
-                "store_path": "/nix/store/openssl-1.1.1w",
                 "cvssv3_basescore": {
                     "CVE-2023-1234": 7.5,
                     "CVE-2023-5678": 5.3
@@ -192,7 +182,6 @@ mod tests {
                 "affected_by": [],
                 "whitelisted": [],
                 "derivation": "/nix/store/def456-curl-8.0.1.drv",
-                "store_path": "/nix/store/curl-8.0.1",
                 "cvssv3_basescore": {}
             }
         ]"#;
@@ -234,7 +223,6 @@ mod tests {
             affected_by: vec!["CVE-2023-1234".to_string(), "CVE-2023-5678".to_string()],
             whitelisted: vec![],
             derivation: "/nix/store/test".to_string(),
-            store_path: "/nix/store/kjldjsljj4433jljljljs-test-1.0".to_string(),
             cvssv3_basescore: [
                 ("CVE-2023-1234".to_string(), 9.5), // Critical
                 ("CVE-2023-5678".to_string(), 6.0), // Medium
@@ -261,7 +249,6 @@ mod tests {
                 affected_by: vec!["CVE-2023-1234".to_string()],
                 whitelisted: vec![],
                 derivation: "/nix/store/pkg1".to_string(),
-                store_path: "/nix/store/pkg1hash-pkg1-1.0".to_string(),
                 cvssv3_basescore: [("CVE-2023-1234".to_string(), 9.5)].into_iter().collect(),
             },
             VulnixEntry {
@@ -271,7 +258,6 @@ mod tests {
                 affected_by: vec!["CVE-2023-1234".to_string(), "CVE-2023-5678".to_string()],
                 whitelisted: vec![],
                 derivation: "/nix/store/pkg2".to_string(),
-                store_path: "/nix/store/pkg2hash-pkg2-2.0".to_string(),
                 cvssv3_basescore: [
                     ("CVE-2023-1234".to_string(), 9.5),
                     ("CVE-2023-5678".to_string(), 7.5),
@@ -299,7 +285,6 @@ mod tests {
             affected_by: vec!["CVE-2023-1234".to_string(), "CVE-2023-5678".to_string()],
             whitelisted: vec!["CVE-2023-5678".to_string(), "CVE-2023-9999".to_string()],
             derivation: "/nix/store/test".to_string(),
-            store_path: "/nix/store/kjldjsljj4433jljljljs-test-1.0".to_string(),
             cvssv3_basescore: HashMap::new(),
         };
 
