@@ -1,3 +1,4 @@
+use crate::models::derivations::utils::get_store_path_from_drv;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -43,7 +44,6 @@ impl VulnixEntry {
             .copied()
             .fold(None, |acc, score| Some(acc.map_or(score, |a| a.max(score))))
     }
-
     /// Count vulnerabilities by severity for this entry
     pub fn severity_counts(&self) -> SeverityCounts {
         let mut counts = SeverityCounts::default();

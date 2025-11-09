@@ -1,6 +1,7 @@
 use super::Derivation;
 use crate::models::commits::Commit;
 use crate::models::config::BuildConfig;
+use crate::models::derivations::utils::get_store_path_from_drv;
 use crate::models::flakes::Flake;
 use crate::queries::derivations::insert_derivation_with_target;
 use anyhow::{Context, Result, anyhow, bail};
@@ -33,7 +34,18 @@ pub struct NixEvalJobResult {
 }
 
 impl Derivation {
+    pub async fn resolve_store_path(&mut self) -> Result<()> {
+        let resolved = get_store_path_from_drv(
+            self.derivation_path
+                .as_deref()
+                .ok_or_else(|| anyhow!("missing derivation_path"))?,
+        )
+        .await?;
+        self.store_path = Some(resolved);
+        Ok(())
+    }
     /// Resolve a .drv path to its output store path(s)
+    /// TODO: Replace this everywhere its called with resolve_store_path
     pub async fn resolve_drv_to_store_path(drv_path: &str) -> Result<String> {
         if !drv_path.ends_with(".drv") {
             // Already a store path, return as-is

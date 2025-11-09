@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO derivations (\n                commit_id,        -- NULL for packages\n                derivation_type, \n                derivation_name, \n                derivation_path, \n                derivation_target, -- NULL for packages discovered during scanning\n                pname, \n                version, \n                status_id, \n                store_path,\n                attempt_count\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 0)\n            ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type) DO UPDATE SET\n                pname = EXCLUDED.pname,\n                version = EXCLUDED.version,\n                status_id = EXCLUDED.status_id\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Varchar",
+        "Varchar",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6ba8a13cec52a6067473a946444ad878d1a0040155df37307ea49b053942b184"
+}
