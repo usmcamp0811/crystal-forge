@@ -3,19 +3,25 @@ WITH todays_activity AS (
     SELECT
         c.id AS commit_id,
         c.commit_timestamp,
-        MIN(et.completed_at) AS first_evaluation_completed,
+        MIN(d.completed_at) AS first_evaluation_completed,
         MIN(ss.timestamp) FILTER (WHERE ss.change_reason = 'config_change'
             AND ss.timestamp >= c.commit_timestamp) AS first_deployment
     FROM
         commits c
-    LEFT JOIN evaluation_targets et ON c.id = et.commit_id
-        AND et.status = 'complete'
-    LEFT JOIN system_states ss ON ss.derivation_path = et.derivation_path
-WHERE
-    c.commit_timestamp >= CURRENT_DATE - INTERVAL '1 day'
-GROUP BY
-    c.id,
-    c.commit_timestamp),
+    LEFT JOIN derivations d ON c.id = d.commit_id
+        AND d.status_id IN (
+            SELECT
+                id
+            FROM
+                derivation_statuses
+        WHERE
+            name = 'complete')
+        LEFT JOIN system_states ss ON ss.store_path = COALESCE(d.store_path, d.derivation_path)
+    WHERE
+        c.commit_timestamp >= CURRENT_DATE - INTERVAL '1 day'
+    GROUP BY
+        c.id,
+        c.commit_timestamp),
 deployment_timings AS (
     SELECT
         EXTRACT(EPOCH FROM (first_deployment - first_evaluation_completed)) / 3600 AS eval_to_deploy_hours,
@@ -39,10 +45,11 @@ SELECT
         SELECT
             COUNT(DISTINCT commit_id)
         FROM
-            evaluation_targets
+            derivations d
+            JOIN derivation_statuses ds ON d.status_id = ds.id
         WHERE
-            completed_at >= CURRENT_DATE - INTERVAL '1 day'
-            AND status = 'complete') AS commits_evaluated_today,
+            d.completed_at >= CURRENT_DATE - INTERVAL '1 day'
+            AND ds.name = 'complete') AS commits_evaluated_today,
     COUNT(*) FILTER (WHERE first_deployment IS NOT NULL) AS commits_deployed_today,
     AVG(eval_to_deploy_hours) AS avg_eval_to_deploy_hours,
     MAX(eval_to_deploy_hours) AS max_eval_to_deploy_hours,

@@ -4,11 +4,11 @@
 INSERT INTO daily_drift_snapshots (snapshot_date, hostname, drift_hours, is_behind)
 SELECT
     CURRENT_DATE AS snapshot_date,
-    hostname,
-    drift_hours,
-    (is_running_latest_derivation = FALSE) AS is_behind
+    sys.hostname,
+    EXTRACT(EPOCH FROM (NOW() - sys.deployment_time)) / 3600 AS drift_hours,
+    (sys.deployment_status = 'behind') AS is_behind
 FROM
-    view_systems_drift_time
+    view_system_deployment_status sys
 ON CONFLICT (snapshot_date,
     hostname)
     DO UPDATE SET

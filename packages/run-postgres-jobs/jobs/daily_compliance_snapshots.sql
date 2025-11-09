@@ -3,14 +3,14 @@ INSERT INTO daily_compliance_snapshots (snapshot_date, total_systems, systems_up
 SELECT
     CURRENT_DATE AS snapshot_date,
     COUNT(*) AS total_systems,
-    COUNT(*) FILTER (WHERE is_running_latest_derivation = TRUE) AS systems_up_to_date,
-    COUNT(*) FILTER (WHERE is_running_latest_derivation = FALSE) AS systems_behind,
-    COUNT(*) FILTER (WHERE is_running_latest_derivation IS NULL) AS systems_no_evaluation,
-    COUNT(*) FILTER (WHERE last_seen < NOW() - INTERVAL '4 hours') AS systems_offline,
-    COUNT(*) FILTER (WHERE last_seen IS NULL) AS systems_never_seen,
-    ROUND(COUNT(*) FILTER (WHERE is_running_latest_derivation = TRUE) * 100.0 / NULLIF (COUNT(*), 0), 2) AS compliance_percentage
+    COUNT(*) FILTER (WHERE deployment_status = 'up_to_date') AS systems_up_to_date,
+    COUNT(*) FILTER (WHERE deployment_status = 'behind') AS systems_behind,
+    COUNT(*) FILTER (WHERE deployment_status = 'no_evaluation') AS systems_no_evaluation,
+    COUNT(*) FILTER (WHERE deployment_status = 'offline') AS systems_offline,
+    COUNT(*) FILTER (WHERE deployment_status = 'never_seen') AS systems_never_seen,
+    ROUND(COUNT(*) FILTER (WHERE deployment_status = 'up_to_date') * 100.0 / NULLIF (COUNT(*), 0), 2) AS compliance_percentage
 FROM
-    view_systems_current_state
+    view_system_deployment_status
 ON CONFLICT (snapshot_date)
     DO UPDATE SET
         total_systems = EXCLUDED.total_systems,
