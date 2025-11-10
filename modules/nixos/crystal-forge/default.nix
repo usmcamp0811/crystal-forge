@@ -8,7 +8,7 @@
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
 
-  # Recursively remove any null values so TOML generation wonâ€™t choke.
+  # Recursively remove any null values so TOML generation won’t choke.
   stripNulls = v:
     if builtins.isAttrs v
     then lib.filterAttrs (_: vv: vv != null) (lib.mapAttrs (_: stripNulls) v)
@@ -34,6 +34,9 @@
       server = {
         host = cfg.server.host;
         port = cfg.server.port;
+        eval_workers = cfg.server.eval_workers;
+        eval_max_memory_mb = cfg.server.eval_max_memory_mb;
+        eval_check_cache = cfg.server.eval_check_cache;
       };
     }
     // lib.optionalAttrs cfg.client.enable {
@@ -51,6 +54,7 @@
           fallback_to_local_build = cfg.deployment.fallback_to_local_build;
           deployment_timeout_minutes = cfg.deployment.deployment_timeout_minutes;
           deployment_poll_interval = cfg.deployment.deployment_poll_interval;
+          require_sigs = cfg.deployment.require_sigs;
         }
         // lib.optionalAttrs (cfg.deployment.cache_url != null) {
           cache_url = cfg.deployment.cache_url;
@@ -58,8 +62,8 @@
         };
     }
     // lib.optionalAttrs (cfg.systems != []) {
-      # NOTE: systemsâ€™ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
-      # Weâ€™ll strip them globally via stripNulls below.
+      # NOTE: systems’ items can include null fields by default (e.g., flake_name, desired_target, server_public_key)
+      # We’ll strip them globally via stripNulls below.
       systems = cfg.systems;
     }
     // lib.optionalAttrs (cfg.flakes.watched != []) {
@@ -76,16 +80,25 @@
     // lib.optionalAttrs cfg.build.enable {
       build =
         {
-          cores = cfg.build.cores;
+          # New concurrency control
+          max_concurrent_derivations = cfg.build.max_concurrent_derivations;
           max_jobs = cfg.build.max_jobs;
+          cores_per_job = cfg.build.cores_per_job;
+
+          # Binary cache and network
           use_substitutes = cfg.build.use_substitutes;
           offline = cfg.build.offline;
+
+          # Timing
           poll_interval = cfg.build.poll_interval;
           max_silent_time = cfg.build.max_silent_time;
           timeout = cfg.build.timeout;
+
+          # Security
           sandbox = cfg.build.sandbox;
+
+          # Systemd isolation
           use_systemd_scope = cfg.build.use_systemd_scope;
-          max_concurrent_derivations = cfg.build.max_concurrent_derivations;
         }
         // lib.optionalAttrs (cfg.build.systemd_memory_max != null) {
           systemd_memory_max = cfg.build.systemd_memory_max;
@@ -136,6 +149,10 @@
           parallel_uploads = cfg.cache.parallel_uploads;
           max_retries = cfg.cache.max_retries;
           retry_delay_seconds = cfg.cache.retry_delay_seconds;
+          force_repush = cfg.cache.force_repush;
+          require_sigs = cfg.deployment.require_sigs;
+          attic_ignore_upstream_cache_filter = cfg.cache.attic_ignore_upstream_cache_filter;
+          attic_jobs = cfg.cache.attic_jobs;
         }
         // lib.optionalAttrs (cfg.cache.push_to != null) {
           push_to = cfg.cache.push_to;
@@ -167,70 +184,79 @@
   baseConfig = stripNulls baseConfigRaw;
 
   rawConfigFile = tomlFormat.generate "crystal-forge-config.toml" baseConfig;
-  generatedConfigPath = "/var/lib/crystal-forge/config.toml";
 
-  configScript = pkgs.writeShellScript "generate-crystal-forge-config" ''
-    set -euo pipefail
-    mkdir -p "$(dirname "${generatedConfigPath}")"
-    cp "${rawConfigFile}" "${generatedConfigPath}"
+  serverConfigPath = "/var/lib/crystal-forge/config.toml";
+  agentConfigPath = "/var/lib/crystal-forge-agent/config.toml";
 
-    ${lib.optionalString (cfg.database.passwordFile != null) ''
-      if [ -f "${cfg.database.passwordFile}" ]; then
-        PASSWORD=$(cat "${cfg.database.passwordFile}")
-        ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|$PASSWORD|" "${generatedConfigPath}"
-      else
-        echo "ERROR: Password file not found: ${cfg.database.passwordFile}" >&2
-        exit 1
-      fi
-    ''}
+  makeConfigScript = destPath:
+    pkgs.writeShellScript "generate-crystal-forge-config-${lib.replaceStrings ["/" "."] ["-" "-"] destPath}" ''
+      set -euo pipefail
+      generatedConfigPath="${destPath}"
 
-    ${lib.optionalString (cfg.cache.cache_type == "Attic") ''
-      if [ -f "${cfg.env-file}" ]; then
-        echo "Loading Attic token from ${cfg.env-file}..."
-        source ${cfg.env-file}
-        if [ -n "$ATTIC_TOKEN" ]; then
-          echo "Injecting dynamic ATTIC_TOKEN into config..."
-          if grep -q "attic_token" "${generatedConfigPath}"; then
-            ${pkgs.gnused}/bin/sed -i "s|attic_token = .*|attic_token = \"$ATTIC_TOKEN\"|" "${generatedConfigPath}"
-          else
-            ${pkgs.gnused}/bin/sed -i '/^\[cache\]/a attic_token = "'"$ATTIC_TOKEN"'"' "${generatedConfigPath}"
-          fi
-          echo "âœ… Attic token injected successfully"
+      mkdir -p "$(dirname "$generatedConfigPath")"
+      cp "${rawConfigFile}" "$generatedConfigPath"
+
+      ${lib.optionalString (cfg.database.passwordFile != null) ''
+        if [ -f "${cfg.database.passwordFile}" ]; then
+          PASSWORD=$(cat "${cfg.database.passwordFile}")
+          ${pkgs.gnused}/bin/sed -i "s|__PLACEHOLDER_PASSWORD__|$PASSWORD|" "$generatedConfigPath"
         else
-          echo "âš ï¸  ATTIC_TOKEN not found in ${cfg.env-file}"
+          echo "ERROR: Password file not found: ${cfg.database.passwordFile}" >&2
+          exit 1
         fi
-      else
-        echo "âš ï¸  ${cfg.env-file} not found - using static attic_token from config"
-      fi
-    ''}
+      ''}
 
-    ${lib.optionalString (cfg.auth.ssh_key_path == null && (cfg.build.enable || cfg.server.enable)) ''
-      SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
-      if [ ! -f "$SSH_KEY_PATH" ]; then
-        echo "Generating SSH key for Crystal Forge Git authentication..."
-        ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
-        chown crystal-forge:crystal-forge "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub"
-        chmod 600 "$SSH_KEY_PATH"
-        chmod 644 "$SSH_KEY_PATH.pub"
-        echo "SSH key generated at $SSH_KEY_PATH"
-        echo "Public key for Git repository setup:"
-        cat "$SSH_KEY_PATH.pub"
-      fi
+      ${lib.optionalString (cfg.cache.cache_type == "Attic") ''
+        if [ -f "${cfg.env-file}" ]; then
+          echo "Loading Attic token from ${cfg.env-file}..."
+          # shellcheck disable=SC1090
+          source ${cfg.env-file}
+          if [ -n "$ATTIC_TOKEN" ]; then
+            echo "Injecting dynamic ATTIC_TOKEN into config..."
+            if grep -q "attic_token" "$generatedConfigPath"; then
+              ${pkgs.gnused}/bin/sed -i 's|attic_token = .*|attic_token = "'"$ATTIC_TOKEN"'"|' "$generatedConfigPath"
+            else
+              ${pkgs.gnused}/bin/sed -i '/^\[cache\]/a attic_token = "'"$ATTIC_TOKEN"'"' "$generatedConfigPath"
+            fi
+            echo "✅ Attic token injected successfully"
+          else
+            echo "⚠️  ATTIC_TOKEN not found in ${cfg.env-file}"
+          fi
+        else
+          echo "⚠️  ${cfg.env-file} not found - using static attic_token from config"
+        fi
+      ''}
 
-      ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "${generatedConfigPath}"
-    ''}
+      ${lib.optionalString (cfg.auth.ssh_key_path == null && (cfg.build.enable || cfg.server.enable)) ''
+        SSH_KEY_PATH="/var/lib/crystal-forge/.ssh/id_ed25519"
+        if [ ! -f "$SSH_KEY_PATH" ]; then
+          echo "Generating SSH key for Crystal Forge Git authentication..."
+          ${pkgs.openssh}/bin/ssh-keygen -t ed25519 -f "$SSH_KEY_PATH" -N "" -C "crystal-forge@$(${pkgs.nettools}/bin/hostname)"
+          chown crystal-forge:crystal-forge "$SSH_KEY_PATH" "$SSH_KEY_PATH.pub"
+          chmod 600 "$SSH_KEY_PATH"
+          chmod 644 "$SSH_KEY_PATH.pub"
+          echo "SSH key generated at $SSH_KEY_PATH"
+          echo "Public key for Git repository setup:"
+          cat "$SSH_KEY_PATH.pub"
+        fi
 
-    chmod 600 "${generatedConfigPath}"
-  '';
+        ${pkgs.gnused}/bin/sed -i '/\[auth\]/a ssh_key_path = "/var/lib/crystal-forge/.ssh/id_ed25519"' "$generatedConfigPath"
+      ''}
+
+      chmod 600 "$generatedConfigPath"
+    '';
+
+  configScriptServer = makeConfigScript serverConfigPath;
+  configScriptAgent = makeConfigScript agentConfigPath;
 
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
-    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
-    exec ${pkgs.crystal-forge.server}/bin/server "$@"
+    export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
+    exec ${pkgs.crystal-forge.default.server}/bin/server "$@"
   '';
 
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
     set -euo pipefail
-    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
+    export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
     export TMPDIR="/var/lib/crystal-forge/tmp"
     export HOME="/var/lib/crystal-forge"
 
@@ -243,16 +269,12 @@
     mkdir -p /var/lib/crystal-forge/workdir
     cd /var/lib/crystal-forge/workdir
     cleanup_old_builds
-
-    export NIX_BUILD_CORES="${toString cfg.build.cores}"
-    export NIX_MAX_JOBS="${toString cfg.build.max_jobs}"
-
-    exec ${pkgs.crystal-forge.server}/bin/builder "$@"
+    exec ${pkgs.crystal-forge.default.server}/bin/builder "$@"
   '';
 
   agentScript = pkgs.writeShellScript "crystal-forge-agent" ''
-    export CRYSTAL_FORGE_CONFIG="${generatedConfigPath}"
-    exec ${pkgs.crystal-forge.agent}/bin/agent "$@"
+    export CRYSTAL_FORGE_CONFIG="${agentConfigPath}"
+    exec ${pkgs.crystal-forge.default.agent}/bin/agent "$@"
   '';
 in {
   options.services.crystal-forge = {
@@ -266,7 +288,7 @@ in {
 
     configPath = lib.mkOption {
       type = lib.types.path;
-      default = generatedConfigPath;
+      default = serverConfigPath;
       readOnly = true;
       description = "Path to the generated config.toml file";
     };
@@ -382,91 +404,439 @@ in {
         description = "Whether to disable strict host key checking for SSH";
       };
     };
+
+    dashboards = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Enable Crystal Forge Grafana dashboards.
+
+          This will:
+          - Enable Grafana if not already enabled
+          - Configure a PostgreSQL datasource for Crystal Forge
+          - Provision the Crystal Forge monitoring dashboard
+
+          Can be enabled on any host (with or without server/builder).
+        '';
+      };
+
+      datasource = {
+        name = lib.mkOption {
+          type = lib.types.str;
+          default = "Crystal Forge PostgreSQL";
+          description = "Name for the Grafana datasource";
+        };
+
+        host = lib.mkOption {
+          type = lib.types.str;
+          default = cfg.database.host;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.host";
+          description = "PostgreSQL host for Grafana to connect to";
+        };
+
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = cfg.database.port;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.port";
+          description = "PostgreSQL port for Grafana to connect to";
+        };
+
+        database = lib.mkOption {
+          type = lib.types.str;
+          default = cfg.database.name;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.name";
+          description = "Database name for Grafana to connect to";
+        };
+
+        user = lib.mkOption {
+          type = lib.types.str;
+          default = "grafana";
+          description = "Database user for Grafana datasource";
+        };
+
+        passwordFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = lib.mdDoc ''
+            Path to file containing the database password for Grafana.
+
+            If null, Grafana will attempt to connect without a password
+            (works for socket connections with peer auth).
+          '';
+        };
+
+        sslMode = lib.mkOption {
+          type = lib.types.enum ["disable" "require" "verify-ca" "verify-full"];
+          default = "disable";
+          description = "SSL mode for PostgreSQL connection";
+        };
+      };
+
+      grafana = {
+        provision = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = lib.mdDoc ''
+            Whether to use Grafana provisioning for dashboards.
+
+            When true, dashboards are managed declaratively by NixOS.
+            When false, you must manually configure the datasource and import dashboards.
+          '';
+        };
+
+        disableDeletion = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "Prevent deletion of provisioned dashboards from Grafana UI";
+        };
+      };
+    };
     build = {
       enable = lib.mkOption {
         type = lib.types.bool;
         default = cfg.server.enable;
         description = "Crystal Forge Builder";
       };
-      cores = lib.mkOption {
+
+      # === BUILD CONCURRENCY SETTINGS ===
+
+      max_concurrent_derivations = lib.mkOption {
         type = lib.types.ints.positive;
         default = 1;
-        description = "Maximum CPU cores to use per build job";
+        description = lib.mdDoc ''
+          Maximum number of concurrent nix-store --realise processes.
+
+          This controls how many builds Crystal Forge runs in parallel across
+          the entire system.
+
+          **Formula for CPU usage:**
+          ```
+          Max CPU = max_concurrent_derivations × max_jobs × cores_per_job
+          ```
+
+          **Default**: 1 (very conservative - one build at a time)
+
+          **Recommended values by system:**
+          - 4-8 cores: 1-2
+          - 16 cores: 2-3
+          - 32 cores: 3-4
+          - 64+ cores: 4-8
+
+          ⚠️  Too high = system overload and slowdown
+        '';
+        example = 3;
       };
+
       max_jobs = lib.mkOption {
         type = lib.types.ints.positive;
         default = 1;
-        description = "Maximum number of concurrent build jobs";
+        description = lib.mdDoc ''
+          Number of parallel derivations within each nix-store process.
+
+          Passed as `--max-jobs` to Nix. This is NOT cores per build - it's
+          how many different derivations can build simultaneously within a
+          single build process.
+
+          **Default**: 1 (sequential derivations within each build)
+
+          **Example**: If max_jobs=2, a single build process can compile
+          two different packages at the same time.
+
+          **Recommended values:**
+          - Conservative: 1 (one derivation at a time)
+          - Moderate: 2-3 (some parallelism)
+          - Aggressive: 4-6 (high parallelism, needs many cores)
+
+          ⚠️  Total parallelism = max_concurrent_derivations × max_jobs
+        '';
+        example = 2;
       };
+
+      cores_per_job = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 0;
+        description = lib.mdDoc ''
+          Number of CPU cores each derivation build can use.
+
+          Passed as `--cores` to Nix. Controls how many cores a single
+          derivation (e.g., compiling a package) can utilize.
+
+          **Special value 0**: Unrestricted - each derivation can use all
+          available cores. This is the Nix default and works well when
+          max_concurrent_derivations = 1.
+
+          **Default**: 0 (unrestricted for single builds)
+
+          **Recommended values:**
+          - If max_concurrent_derivations = 1: 0 (let it use all cores)
+          - If max_concurrent_derivations > 1: Set to avoid oversubscription
+
+          **Formula to avoid oversubscription:**
+          ```
+          cores_per_job ≤ total_cores / (max_concurrent_derivations × max_jobs)
+          ```
+
+          **Example on 32-core system:**
+          - max_concurrent_derivations=3, max_jobs=2 → cores_per_job=4
+          - (3 × 2 × 4 = 24 cores, leaves 8 for system)
+
+          ⚠️  If 0 with max_concurrent_derivations > 1, you'll oversubscribe CPUs!
+        '';
+        example = 4;
+      };
+
+      # === BINARY CACHE SETTINGS ===
+
       use_substitutes = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Whether to use binary substitutes/caches";
+        description = lib.mdDoc ''
+          Whether to use binary substitutes/caches.
+
+          When true, Nix will download pre-built packages from caches
+          instead of building them locally.
+
+          **Recommended**: true (much faster builds)
+          **Disable if**: Testing local builds or working offline
+        '';
       };
+
       offline = lib.mkOption {
         type = lib.types.bool;
         default = false;
-        description = "Build in offline mode (no network access)";
+        description = lib.mdDoc ''
+          Build in offline mode (no network access).
+
+          When true, Nix will not attempt to download anything. Useful
+          for air-gapped environments or testing.
+
+          **Note**: Requires all sources to be pre-fetched or in store.
+        '';
       };
+
+      # === TIMING SETTINGS ===
+
       poll_interval = lib.mkOption {
         type = lib.types.str;
         default = "5m";
-        description = "Interval between checking for new build jobs";
+        description = lib.mdDoc ''
+          Interval between checking for new build jobs.
+
+          How often the build coordinator checks the database for new
+          derivations to build.
+
+          **Default**: "5m" (5 minutes)
+          **For active development**: "5s" (5 seconds)
+          **For production**: "1m" - "5m"
+
+          Format: duration string (e.g., "30s", "5m", "1h")
+        '';
+        example = "30s";
       };
+
       max_silent_time = lib.mkOption {
         type = lib.types.str;
         default = "1h";
-        description = "Maximum time a build can be silent before timing out";
+        description = lib.mdDoc ''
+          Maximum time a build can be silent before timing out.
+
+          If a build produces no output for this duration, it will be
+          killed. Prevents hung builds from consuming resources.
+
+          **Default**: "1h" (1 hour)
+
+          **Adjust for:**
+          - Large builds (Firefox, Chromium): "2h" or more
+          - Small packages: "30m"
+
+          Format: duration string (e.g., "30m", "2h")
+        '';
+        example = "2h";
       };
+
       timeout = lib.mkOption {
         type = lib.types.str;
         default = "2h";
-        description = "Maximum total time for a build before timing out";
+        description = lib.mdDoc ''
+          Maximum total time for a build before timing out.
+
+          The absolute maximum time any build can run, regardless of
+          whether it's producing output.
+
+          **Default**: "2h" (2 hours)
+
+          **Adjust for:**
+          - Very large builds (LLVM, WebKit): "6h" or more
+          - Typical packages: "1h" - "3h"
+
+          Format: duration string (e.g., "1h", "6h")
+        '';
+        example = "6h";
       };
+
+      # === SECURITY SETTINGS ===
+
       sandbox = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Enable sandbox for builds";
+        description = lib.mdDoc ''
+          Enable sandbox for builds.
+
+          When true, builds run in an isolated environment with restricted
+          network and filesystem access. This is a security best practice.
+
+          **Recommended**: true (always)
+          **Disable only if**: Build requires network access (rare, usually wrong)
+        '';
       };
 
-      max_concurrent_derivations = lib.mkOption {
-        type = lib.types.int;
-        default = 8;
-        description = "Maximum concurrent dry run derivations to process";
-      };
+      # === SYSTEMD RESOURCE ISOLATION ===
 
-      # Systemd resource controls
       use_systemd_scope = lib.mkOption {
         type = lib.types.bool;
         default = true;
-        description = "Whether to use systemd-run for resource isolation";
+        description = lib.mdDoc ''
+          Whether to use systemd-run for resource isolation.
+
+          When enabled, each build runs in a systemd scope with enforced
+          resource limits (memory, CPU). This prevents runaway builds from
+          taking down the entire system.
+
+          **Benefits:**
+          - Memory limits prevent OOM kills of main process
+          - CPU quotas prevent one build from starving others
+          - Automatic cleanup of build processes
+
+          **Requires**: systemd (works on NixOS, most Linux distros)
+
+          **Fallback**: If systemd-run fails, builds run directly
+
+          **Recommended**: true (critical for production)
+        '';
       };
+
       systemd_memory_max = lib.mkOption {
         type = lib.types.nullOr lib.types.str;
         default = "32G";
-        description = "Memory limit for systemd scope (e.g., '4G', '2048M')";
+        description = lib.mdDoc ''
+          Memory limit for each build scope.
+
+          Maximum amount of RAM a single build scope can use. When
+          exceeded, the scope's processes will be OOM-killed, protecting
+          the main Crystal Forge process.
+
+          **Formula:**
+          ```
+          Total memory usage ≤ max_concurrent_derivations × systemd_memory_max
+          ```
+
+          **Default**: "32G" (32 GB per build)
+
+          **Recommended values:**
+          - 16GB system: "4G" per build
+          - 32GB system: "8G" - "16G" per build
+          - 64GB system: "16G" - "32G" per build
+          - 128GB+ system: "32G" - "64G" per build
+
+          **Large builds (LLVM, Chromium)**: May need 16GB+
+
+          Format: suffixed size (e.g., "4G", "2048M", "8192M")
+
+          Set to `null` to disable memory limits (not recommended).
+        '';
+        example = "16G";
       };
+
       systemd_cpu_quota = lib.mkOption {
         type = lib.types.nullOr lib.types.ints.positive;
         default = 800;
-        description = "CPU quota as percentage (e.g., 300 for 3 cores worth)";
+        description = lib.mdDoc ''
+          CPU quota for each build scope as percentage.
+
+          Limits the total CPU time available to an entire build scope
+          (which may run multiple derivations via max_jobs).
+
+          **Value**: Percentage × 100 (e.g., 400 = 4 cores, 800 = 8 cores)
+
+          **Default**: 800 (8 cores per build scope)
+
+          **Formula for setting:**
+          ```
+          systemd_cpu_quota ≥ (max_jobs × cores_per_job) × 100
+          ```
+
+          **Example:**
+          - max_jobs=2, cores_per_job=4 → systemd_cpu_quota should be ≥ 800
+
+          **Recommended values:**
+          - Small systems: 200-400 (2-4 cores per build)
+          - Medium systems: 400-800 (4-8 cores per build)
+          - Large systems: 800-1200 (8-12 cores per build)
+
+          ⚠️  If too low, builds will be throttled even if cores are free
+
+          Set to `null` to disable CPU quotas (not recommended).
+        '';
+        example = 600;
       };
+
       systemd_timeout_stop_sec = lib.mkOption {
         type = lib.types.nullOr lib.types.ints.positive;
         default = 600;
-        description = "Timeout for systemd scope stop operation in seconds";
+        description = lib.mdDoc ''
+          Timeout for systemd scope stop operation in seconds.
+
+          How long systemd will wait for a build scope to stop gracefully
+          before force-killing it.
+
+          **Default**: 600 (10 minutes)
+
+          **Recommended values:**
+          - Quick builds: 300 (5 minutes)
+          - Normal builds: 600 (10 minutes)
+          - Large builds: 900 (15 minutes)
+
+          ⚠️  Too short = premature kills during cleanup
+          ⚠️  Too long = delays in canceling stuck builds
+        '';
+        example = 900;
       };
+
       systemd_properties = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [
           "MemorySwapMax=2G"
           "TasksMax=3000"
         ];
-        description = "Additional systemd properties to set";
+        description = lib.mdDoc ''
+          Additional systemd properties to set for build scopes.
+
+          These are passed as `--property` arguments to systemd-run.
+          Only certain properties are valid for scopes.
+
+          **Default properties:**
+          - `MemorySwapMax=2G`: Limit swap usage
+          - `TasksMax=3000`: Limit number of processes/threads
+
+          **Valid property prefixes for scopes:**
+          - Memory* (MemoryMax, MemorySwapMax, MemoryHigh, etc.)
+          - CPU* (CPUQuota, CPUWeight, etc.)
+          - Tasks* (TasksMax)
+          - IO* (IOWeight, IOReadBandwidthMax, etc.)
+          - Kill* (KillMode, KillSignal)
+          - OOM* (OOMPolicy, OOMScoreAdjust)
+          - Device* (DevicePolicy, DeviceAllow)
+          - IPAccounting* (IPAccounting, IPAddressAllow, etc.)
+
+          **Note**: Service-only properties (Environment, Restart,
+          WorkingDirectory) are ignored for scopes.
+        '';
         example = [
-          "MemorySwapMax=2G"
-          "TasksMax=3000"
+          "MemorySwapMax=4G"
+          "TasksMax=5000"
           "IOWeight=100"
+          "CPUWeight=100"
         ];
       };
     };
@@ -562,6 +932,16 @@ in {
         default = null;
         description = "Attic cache name";
       };
+      attic_ignore_upstream_cache_filter = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Push full derivation to attic";
+      };
+      attic_jobs = lib.mkOption {
+        type = lib.types.ints.unsigned;
+        default = 5;
+        description = "Parallel Attic cache uploads";
+      };
       # Retry configuration
       max_retries = lib.mkOption {
         type = lib.types.ints.unsigned;
@@ -577,6 +957,11 @@ in {
         type = lib.types.ints.unsigned;
         default = 5;
         description = "Delay between cache push attempts in seconds";
+      };
+      force_repush = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = "Force re-push to cache even if it thinks it's already there.";
       };
     };
     deployment = {
@@ -614,6 +999,11 @@ in {
         type = lib.types.str;
         default = "15m";
         description = "Interval between deployment polling checks";
+      };
+      require_sigs = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Check sigs before deployment";
       };
     };
     systems = lib.mkOption {
@@ -712,6 +1102,44 @@ in {
         default = 3000;
         description = "Server port";
       };
+
+      eval_workers = lib.mkOption {
+        type = lib.types.int;
+        default = 4;
+        description = lib.mdDoc ''
+          Number of worker threads for nix-eval-jobs parallel evaluation.
+          Set to 0 to automatically use the number of CPU cores available.
+
+          This controls how many systems can be evaluated concurrently
+          when processing flake commits.
+        '';
+      };
+
+      eval_max_memory_mb = lib.mkOption {
+        type = lib.types.int;
+        default = 4096;
+        description = lib.mdDoc ''
+          Maximum memory size per worker in MB for nix-eval-jobs.
+
+          Each evaluation worker will be limited to this amount of memory.
+          Default is 4096 MB (4 GB) per worker.
+
+          Adjust based on available system memory and the number of workers.
+        '';
+      };
+
+      eval_check_cache = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = lib.mdDoc ''
+          Whether to check cache status during evaluation.
+
+          When enabled, nix-eval-jobs will report which derivations are
+          already built (in local store or binary cache) vs need building.
+
+          Disable if cache checking is slow or causing issues.
+        '';
+      };
     };
 
     client = {
@@ -806,29 +1234,96 @@ in {
         CPUQuota =
           lib.mkIf (cfg.build.systemd_cpu_quota != null)
           (toString cfg.build.systemd_cpu_quota + "%");
-        TasksMax = "200"; # Keep this as a reasonable default
+        TasksMax = "infinity"; # Keep this as a reasonable default
       };
     };
 
-    services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
-      enable = true;
-      ensureDatabases = [cfg.database.name];
-      ensureUsers = [
-        {
+    services.postgresql = lib.mkIf cfg.local-database {
+      # Enable PostgreSQL if server or dashboards need it
+      enable = lib.mkIf (cfg.server.enable || cfg.dashboards.enable) true;
+
+      # Ensure database exists (only needed for server)
+      ensureDatabases = lib.mkIf cfg.server.enable [cfg.database.name];
+
+      # Ensure users exist - combine both user types
+      ensureUsers =
+        lib.optional cfg.server.enable {
           name = cfg.database.user;
           ensureDBOwnership = true;
           ensureClauses.login = true;
         }
-      ];
-      identMap = ''
+        ++ lib.optional cfg.dashboards.enable {
+          name = cfg.dashboards.datasource.user;
+          ensureDBOwnership = false;
+        };
+
+      # Identity map (only for server)
+      identMap = lib.mkIf cfg.server.enable ''
         crystal-forge-map crystal-forge ${cfg.database.user}
       '';
-      authentication = lib.mkAfter ''
-        local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
-        local  ${cfg.database.name}  ${cfg.database.user}  trust
-        host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
-        host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
-      '';
+
+      # Authentication - combine rules for both users
+      authentication = lib.mkAfter (
+        lib.optionalString cfg.server.enable ''
+          local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
+          local  ${cfg.database.name}  ${cfg.database.user}  trust
+          host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
+          host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
+        ''
+        + lib.optionalString cfg.dashboards.enable ''
+          local  ${cfg.database.name}  ${cfg.dashboards.datasource.user}  peer
+          host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  127.0.0.1/32  trust
+          host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  ::1/128       trust
+        ''
+      );
+    };
+
+    # Grafana dashboard configuration
+    services.grafana = lib.mkIf cfg.dashboards.enable {
+      enable = true;
+
+      settings = lib.mkIf cfg.dashboards.grafana.provision {
+        # Ensure Grafana has PostgreSQL plugin (built-in, but explicit)
+        "plugin.grafana-postgresql-datasource" = {
+          enabled = true;
+        };
+      };
+
+      provision = lib.mkIf cfg.dashboards.grafana.provision {
+        enable = true;
+
+        # Configure the Crystal Forge PostgreSQL datasource
+        datasources.settings.datasources = [
+          {
+            name = cfg.dashboards.datasource.name;
+            type = "postgres";
+            url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
+            database = cfg.dashboards.datasource.database;
+            user = cfg.dashboards.datasource.user;
+            jsonData = {
+              sslmode = cfg.dashboards.datasource.sslMode;
+              postgresVersion = 1400;
+              timescaledb = false;
+            };
+            secureJsonData = lib.mkIf (cfg.dashboards.datasource.passwordFile != null) {
+              password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
+            };
+            isDefault = false;
+            editable = true;
+          }
+        ];
+
+        # Provision the Crystal Forge dashboard(s)
+        dashboards.settings.providers = [
+          {
+            name = "Crystal Forge";
+            type = "file";
+            options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
+            disableDeletion = cfg.dashboards.grafana.disableDeletion;
+            updateIntervalSeconds = 60;
+          }
+        ];
+      };
     };
 
     systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
@@ -852,7 +1347,9 @@ in {
         DB_USER = cfg.database.user;
         DB_PASSWORD = lib.mkIf (cfg.database.passwordFile == null) cfg.database.password;
         JOB_DIR = "${pkgs.crystal-forge.run-postgres-jobs}/jobs";
-        NIX_CONFIG_DIR = "/var/lib/crystal-forge/.config/nix";
+        # disable registry and per-user nix.conf for deterministic evals
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
       };
 
       script =
@@ -887,7 +1384,7 @@ in {
     '';
 
     systemd.services.crystal-forge-builder = lib.mkIf cfg.build.enable (let
-      # Parse cfg.build.systemd_properties (["Environment=FOO=bar" "IOWeight=100" â€¦])
+      # Parse cfg.build.systemd_properties (["Environment=FOO=bar" "IOWeight=100" …])
       parsed =
         lib.foldl' (
           acc: prop: let
@@ -920,18 +1417,23 @@ in {
       wants = lib.optional cfg.local-database "postgresql.service";
 
       path = with pkgs;
-        [nix git vulnix systemd]
+        [nix git vulnix systemd nix-fast-build nix-eval-jobs]
         ++ lib.optional (cfg.cache.cache_type == "Attic") attic-client;
 
-      # Merge existing env with any Environment=â€¦ pairs from systemd_properties
+      # Merge existing env with any Environment=… pairs from systemd_properties
       environment = lib.mkMerge [
         {
           RUST_LOG = cfg.log_level;
-          NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
+          NIX_REMOTE = "daemon";
+          # NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
           TMPDIR = "/var/lib/crystal-forge/tmp";
           XDG_RUNTIME_DIR = "/run/crystal-forge";
           XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
           HOME = "/var/lib/crystal-forge";
+          # disable registry and per-user nix.conf for deterministic evals
+          NIX_REGISTRY = "/dev/null";
+          NIX_CONFIG_DIR = "/dev/null";
+          GC_MARKERS = "1";
         }
         # Add Attic-specific environment variables if using Attic cache
         (lib.mkIf (cfg.cache.cache_type == "Attic") {
@@ -943,15 +1445,20 @@ in {
           // lib.optionalAttrs (envFromProps ? ATTIC_TOKEN) {
             ATTIC_TOKEN = envFromProps.ATTIC_TOKEN;
           })
+        envFromProps
       ];
 
       preStart = ''
-        ${configScript}
         mkdir -p /run/crystal-forge
+        ${configScriptServer}
         mkdir -p /var/lib/crystal-forge/.config/attic
 
-        # Ensure attic config directory has proper ownership
+        # Ensure proper ownership - do this AFTER creating all directories
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
         chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
+        # Ensure proper permissions
+        chmod -R 755 /var/lib/crystal-forge/.cache
+        chmod -R 755 /var/lib/crystal-forge/.config
 
         # Source the attic environment if it exists
         if [ -f ${cfg.env-file} ]; then
@@ -1005,11 +1512,16 @@ in {
 
           NoNewPrivileges = true;
           ProtectSystem = "no";
-          ProtectHome = true;
+          ProtectHome = false;
           PrivateTmp = true;
           ProtectKernelTunables = true;
           ProtectKernelModules = true;
           ProtectControlGroups = true;
+
+          TasksMax = "infinity";
+          LimitNPROC = "infinity";
+          LimitNOFILE = 1048576;
+          OOMPolicy = "continue";
 
           ReadWritePaths = [
             "/var/lib/crystal-forge"
@@ -1017,6 +1529,8 @@ in {
             "/run/crystal-forge"
             "/var/cache/crystal-forge-nix"
             "/var/cache/crystal-forge"
+            "/var/lib/crystal-forge/.cache"
+            "/nix/var/nix/daemon-socket"
           ];
           ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
@@ -1032,15 +1546,55 @@ in {
       after = lib.optional cfg.local-database "postgresql.service";
       wants = lib.optional cfg.local-database "postgresql.service";
 
-      path = with pkgs; [nix git];
+      path = with pkgs; [
+        nix
+        git
+        nix-fast-build
+        nix-eval-jobs
+        coreutils
+        findutils
+        gnused
+        gnugrep
+      ];
+
       environment = {
+        # Core runtime
         RUST_LOG = cfg.log_level;
+        TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+
+        # --- Critical Nix environment for deterministic evaluation ---
+        # Use the daemon socket for evaluation
+        NIX_REMOTE = "daemon";
+
+        # Completely isolate from user registries/config
+        HOME = "/var/lib/crystal-forge";
+        XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
+        NIX_USER_CONF_FILES = "/dev/null";
+
+        # Enable flakes and nix-command — exactly as in your manual test
+        NIX_CONFIG = ''
+          experimental-features = nix-command flakes
+          flake-registry =
+        '';
+
+        # Required to allow git+ssh or https fetches
+        GIT_SSH_COMMAND = "ssh -i /var/lib/crystal-forge/.ssh/id_ed25519 -o UserKnownHostsFile=/var/lib/crystal-forge/.ssh/known_hosts -o StrictHostKeyChecking=yes";
+
+        # Optional: specify cache location for nix-eval-jobs
         NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
       };
 
       preStart = ''
-        ${configScript}
         mkdir -p /run/crystal-forge
+        ${configScriptServer}
+        mkdir -p /var/lib/crystal-forge/.config/attic
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
+        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
+        chmod -R 755 /var/lib/crystal-forge/.cache
+        chmod -R 755 /var/lib/crystal-forge/.config
       '';
 
       serviceConfig = {
@@ -1048,26 +1602,32 @@ in {
         ExecStart = serverScript;
         User = "crystal-forge";
         Group = "crystal-forge";
+        WorkingDirectory = "/var/lib/crystal-forge";
 
+        # Filesystem permissions
         StateDirectory = "crystal-forge";
         StateDirectoryMode = "0750";
         RuntimeDirectory = "crystal-forge";
         RuntimeDirectoryMode = "0700";
         CacheDirectory = "crystal-forge-nix";
         CacheDirectoryMode = "0750";
-        WorkingDirectory = "/var/lib/crystal-forge";
 
-        NoNewPrivileges = true;
-        ProtectSystem = "no";
-        ProtectHome = true;
+        # Read/write permissions
         ReadWritePaths = [
           "/var/lib/crystal-forge"
+          "/var/lib/crystal-forge/.cache"
           "/tmp"
           "/run/crystal-forge"
-          "/var/cache/crystal-forge-nix"
           "/var/cache/crystal-forge"
+          "/var/cache/crystal-forge-nix"
+          "/nix/var/nix/daemon-socket"
         ];
+
+        # Security isolation
+        NoNewPrivileges = true;
         PrivateTmp = true;
+        ProtectSystem = "no";
+        ProtectHome = false;
         ProtectKernelTunables = true;
         ProtectKernelModules = true;
         ProtectControlGroups = true;
@@ -1083,6 +1643,8 @@ in {
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
       path = with pkgs; [
+        nix-eval-jobs
+        nix-fast-build
         coreutils
         zfs
         util-linux
@@ -1105,14 +1667,29 @@ in {
       ];
       environment = {
         RUST_LOG = cfg.log_level;
-        CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
-        CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
-        CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
+        # CRYSTAL_FORGE__CLIENT__SERVER_HOST = cfg.client.server_host;
+        # CRYSTAL_FORGE__CLIENT__SERVER_PORT = toString cfg.client.server_port;
+        # CRYSTAL_FORGE__CLIENT__PRIVATE_KEY = cfg.client.private_key;
+
         # make nix/git caches writable for the agent
-        HOME = "/var/lib/crystal-forge";
-        XDG_CACHE_HOME = "/var/lib/crystal-forge/.cache";
-        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge";
+        HOME = "/var/lib/crystal-forge-agent";
+        XDG_CACHE_HOME = "/var/lib/crystal-forge-agent/.cache";
+        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-agent";
+
+        NIX_CONFIG = ''
+          experimental-features = nix-command flakes
+          ${lib.optionalString (cfg.deployment.cache_url != null) ''
+            substituters = ${cfg.deployment.cache_url}
+          ''}
+          ${lib.optionalString (cfg.deployment.cache_public_key != null) ''
+            trusted-public-keys = ${cfg.deployment.cache_public_key}
+          ''}
+        '';
       };
+      preStart = ''
+        mkdir -p /var/lib/crystal-forge-agent
+        ${configScriptAgent}
+      '';
 
       serviceConfig = {
         Type = "exec";
@@ -1121,27 +1698,27 @@ in {
         Group = "root";
 
         # Keep state + runtime under /var/lib and /run
-        StateDirectory = "crystal-forge";
+        StateDirectory = "crystal-forge-agent";
         StateDirectoryMode = "0750";
-        RuntimeDirectory = "crystal-forge";
+        RuntimeDirectory = "crystal-forge-agent";
         RuntimeDirectoryMode = "0700";
-        WorkingDirectory = "/var/lib/crystal-forge";
+        WorkingDirectory = "/var/lib/crystal-forge-agent";
 
-        CacheDirectory = "crystal-forge";
+        CacheDirectory = "crystal-forge-agent";
 
         NoNewPrivileges = true;
         ProtectSystem = "strict";
-        ProtectHome = true;
+        ProtectHome = false;
 
         # Allow writes where we actually need them
         ReadWritePaths = [
           "/nix/var/nix/profiles"
           "/nix/var/nix/gcroots"
-          "/boot"
-          "/var/lib/crystal-forge"
-          "/var/cache/crystal-forge"
+          # "/boot"
+          "/var/lib/crystal-forge-agent"
+          "/var/cache/crystal-forge-agent"
           "/tmp"
-          "/run/crystal-forge"
+          "/run/crystal-forge-agent"
         ];
         # Also ensure read-only access to CA bundle (good practice):
         ReadOnlyPaths = ["/etc/ssl/certs"];
@@ -1161,8 +1738,12 @@ in {
         message = "Cannot specify both database.password and database.passwordFile";
       }
       {
-        assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable;
-        message = "At least one of server or client must be enabled";
+        assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable || cfg.dashboards.enable;
+        message = "At least one of server, client, build, or dashboards must be enabled";
+      }
+      {
+        assertion = cfg.dashboards.enable -> (cfg.dashboards.datasource.host != null);
+        message = "Crystal Forge dashboards require database.host or dashboards.datasource.host to be set";
       }
     ];
   };
