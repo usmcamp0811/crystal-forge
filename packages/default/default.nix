@@ -41,9 +41,9 @@
       export SRC_HASH="${lib.strings.removeSuffix "\n" srcHash}"
     '';
 
-    # Optionally, if you want the git hash to be available inside your Rust code:
     meta = with lib; {
       description = "Crystal Forge";
+      license = licenses.agpl3Only;
       platforms = platforms.all;
     };
   };
@@ -98,6 +98,11 @@
       cp ${crystal-forge}/bin/agent $out/bin/agent
       cp ${crystal-forge}/bin/cf-keygen $out/bin/cf-keygen
     '';
+    meta = with lib; {
+      description = "Crystal Forge";
+      license = licenses.agpl3Only;
+      platforms = platforms.all;
+    };
   };
 
   server = pkgs.stdenv.mkDerivation {
@@ -110,6 +115,11 @@
       cp ${pkgs.crystal-forge.default}/bin/cf-keygen $out/bin/cf-keygen
       cp ${pkgs.crystal-forge.default}/bin/builder $out/bin/builder
     '';
+    meta = with lib; {
+      description = "Crystal Forge";
+      license = licenses.agpl3Only;
+      platforms = platforms.all;
+    };
   };
   cf-keygen = pkgs.writeShellApplication {
     name = "cf-keygen";
