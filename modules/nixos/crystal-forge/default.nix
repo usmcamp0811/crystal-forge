@@ -1486,58 +1486,63 @@ in {
 
       # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above
       serviceConfig =
-        {
-          Type = "exec";
-          ExecStart = builderScript;
-          User = "crystal-forge";
-          Group = "crystal-forge";
-          Slice = "crystal-forge-builds.slice";
+        (
+          {
+            Type = "exec";
+            ExecStart = builderScript;
+            User = "crystal-forge";
+            Group = "crystal-forge";
+            Slice = "crystal-forge-builds.slice";
 
-          StateDirectory = "crystal-forge";
-          StateDirectoryMode = "0750";
-          RuntimeDirectory = "crystal-forge";
-          RuntimeDirectoryMode = "0700";
-          CacheDirectory = "crystal-forge-nix";
-          CacheDirectoryMode = "0750";
-          WorkingDirectory = "/var/lib/crystal-forge/workdir";
+            StateDirectory = "crystal-forge";
+            StateDirectoryMode = "0750";
+            RuntimeDirectory = "crystal-forge";
+            RuntimeDirectoryMode = "0700";
+            CacheDirectory = "crystal-forge-nix";
+            CacheDirectoryMode = "0750";
+            WorkingDirectory = "/var/lib/crystal-forge/workdir";
 
-          # When this service stops, kill all children
-          KillMode = "control-group";
+            # When this service stops, kill all children
+            KillMode = "control-group";
 
-          # Make sure we load the environment file
-          EnvironmentFile = [
-            "-${cfg.env-file}"
-            "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
-          ];
+            # Make sure we load the environment file
+            EnvironmentFile = [
+              "-${cfg.env-file}"
+              "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
+            ];
 
-          NoNewPrivileges = true;
-          ProtectSystem = "no";
-          ProtectHome = false;
-          PrivateTmp = true;
-          ProtectKernelTunables = true;
-          ProtectKernelModules = true;
-          ProtectControlGroups = true;
+            NoNewPrivileges = true;
+            ProtectSystem = "no";
+            ProtectHome = false;
+            PrivateTmp = true;
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectControlGroups = true;
 
-          TasksMax = "infinity";
-          LimitNPROC = "infinity";
-          LimitNOFILE = 1048576;
-          OOMPolicy = "continue";
+            TasksMax = "infinity";
+            LimitNPROC = "infinity";
+            LimitNOFILE = 1048576;
+            OOMPolicy = "continue";
 
-          ReadWritePaths = [
-            "/var/lib/crystal-forge"
-            "/tmp"
-            "/run/crystal-forge"
-            "/var/cache/crystal-forge-nix"
-            "/var/cache/crystal-forge"
-            "/var/lib/crystal-forge/.cache"
-            "/nix/var/nix/daemon-socket"
-          ];
-          ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
+            ReadWritePaths = [
+              "/var/lib/crystal-forge"
+              "/tmp"
+              "/run/crystal-forge"
+              "/var/cache/crystal-forge-nix"
+              "/var/cache/crystal-forge"
+              "/var/lib/crystal-forge/.cache"
+              "/nix/var/nix/daemon-socket"
+            ];
+            ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
-          Restart = "always";
-          RestartSec = 5;
-        }
-        // parsed.svc;
+            Restart = "always";
+            RestartSec = 5;
+          }
+          // parsed.svc
+        ) // {
+          # Ensure ExecStart is never removed by parsed.svc merge
+          ExecStart = lib.mkForce builderScript;
+        };
     });
 
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
