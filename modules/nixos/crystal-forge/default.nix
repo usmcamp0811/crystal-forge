@@ -404,6 +404,94 @@ in {
         description = "Whether to disable strict host key checking for SSH";
       };
     };
+
+    dashboards = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = lib.mdDoc ''
+          Enable Crystal Forge Grafana dashboards.
+
+          This will:
+          - Enable Grafana if not already enabled
+          - Configure a PostgreSQL datasource for Crystal Forge
+          - Provision the Crystal Forge monitoring dashboard
+
+          Can be enabled on any host (with or without server/builder).
+        '';
+      };
+
+      datasource = {
+        name = lib.mkOption {
+          type = lib.types.str;
+          default = "Crystal Forge PostgreSQL";
+          description = "Name for the Grafana datasource";
+        };
+
+        host = lib.mkOption {
+          type = lib.types.str;
+          default = cfg.database.host;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.host";
+          description = "PostgreSQL host for Grafana to connect to";
+        };
+
+        port = lib.mkOption {
+          type = lib.types.port;
+          default = cfg.database.port;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.port";
+          description = "PostgreSQL port for Grafana to connect to";
+        };
+
+        database = lib.mkOption {
+          type = lib.types.str;
+          default = cfg.database.name;
+          defaultText = lib.literalExpression "config.services.crystal-forge.database.name";
+          description = "Database name for Grafana to connect to";
+        };
+
+        user = lib.mkOption {
+          type = lib.types.str;
+          default = "grafana";
+          description = "Database user for Grafana datasource";
+        };
+
+        passwordFile = lib.mkOption {
+          type = lib.types.nullOr lib.types.path;
+          default = null;
+          description = lib.mdDoc ''
+            Path to file containing the database password for Grafana.
+
+            If null, Grafana will attempt to connect without a password
+            (works for socket connections with peer auth).
+          '';
+        };
+
+        sslMode = lib.mkOption {
+          type = lib.types.enum ["disable" "require" "verify-ca" "verify-full"];
+          default = "disable";
+          description = "SSL mode for PostgreSQL connection";
+        };
+      };
+
+      grafana = {
+        provision = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = lib.mdDoc ''
+            Whether to use Grafana provisioning for dashboards.
+
+            When true, dashboards are managed declaratively by NixOS.
+            When false, you must manually configure the datasource and import dashboards.
+          '';
+        };
+
+        disableDeletion = lib.mkOption {
+          type = lib.types.bool;
+          default = true;
+          description = "Prevent deletion of provisioned dashboards from Grafana UI";
+        };
+      };
+    };
     build = {
       enable = lib.mkOption {
         type = lib.types.bool;
@@ -1150,25 +1238,92 @@ in {
       };
     };
 
-    services.postgresql = lib.mkIf (cfg.local-database && cfg.server.enable) {
-      enable = true;
-      ensureDatabases = [cfg.database.name];
-      ensureUsers = [
-        {
+    services.postgresql = lib.mkIf cfg.local-database {
+      # Enable PostgreSQL if server or dashboards need it
+      enable = lib.mkIf (cfg.server.enable || cfg.dashboards.enable) true;
+
+      # Ensure database exists (only needed for server)
+      ensureDatabases = lib.mkIf cfg.server.enable [cfg.database.name];
+
+      # Ensure users exist - combine both user types
+      ensureUsers =
+        lib.optional cfg.server.enable {
           name = cfg.database.user;
           ensureDBOwnership = true;
           ensureClauses.login = true;
         }
-      ];
-      identMap = ''
+        ++ lib.optional cfg.dashboards.enable {
+          name = cfg.dashboards.datasource.user;
+          ensureDBOwnership = false;
+        };
+
+      # Identity map (only for server)
+      identMap = lib.mkIf cfg.server.enable ''
         crystal-forge-map crystal-forge ${cfg.database.user}
       '';
-      authentication = lib.mkAfter ''
-        local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
-        local  ${cfg.database.name}  ${cfg.database.user}  trust
-        host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
-        host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
-      '';
+
+      # Authentication - combine rules for both users
+      authentication = lib.mkAfter (
+        lib.optionalString cfg.server.enable ''
+          local  ${cfg.database.name}  ${cfg.database.user}  peer map=crystal-forge-map
+          local  ${cfg.database.name}  ${cfg.database.user}  trust
+          host   ${cfg.database.name}  ${cfg.database.user}  127.0.0.1/32  trust
+          host   ${cfg.database.name}  ${cfg.database.user}  ::1/128       trust
+        ''
+        + lib.optionalString cfg.dashboards.enable ''
+          local  ${cfg.database.name}  ${cfg.dashboards.datasource.user}  peer
+          host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  127.0.0.1/32  trust
+          host   ${cfg.database.name}  ${cfg.dashboards.datasource.user}  ::1/128       trust
+        ''
+      );
+    };
+
+    # Grafana dashboard configuration
+    services.grafana = lib.mkIf cfg.dashboards.enable {
+      enable = true;
+
+      settings = lib.mkIf cfg.dashboards.grafana.provision {
+        # Ensure Grafana has PostgreSQL plugin (built-in, but explicit)
+        "plugin.grafana-postgresql-datasource" = {
+          enabled = true;
+        };
+      };
+
+      provision = lib.mkIf cfg.dashboards.grafana.provision {
+        enable = true;
+
+        # Configure the Crystal Forge PostgreSQL datasource
+        datasources.settings.datasources = [
+          {
+            name = cfg.dashboards.datasource.name;
+            type = "postgres";
+            url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
+            database = cfg.dashboards.datasource.database;
+            user = cfg.dashboards.datasource.user;
+            jsonData = {
+              sslmode = cfg.dashboards.datasource.sslMode;
+              postgresVersion = 1400;
+              timescaledb = false;
+            };
+            secureJsonData = lib.mkIf (cfg.dashboards.datasource.passwordFile != null) {
+              password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
+            };
+            isDefault = false;
+            editable = true;
+          }
+        ];
+
+        # Provision the Crystal Forge dashboard(s)
+        dashboards.settings.providers = [
+          {
+            name = "Crystal Forge";
+            type = "file";
+            options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
+            disableDeletion = cfg.dashboards.grafana.disableDeletion;
+            updateIntervalSeconds = 60;
+          }
+        ];
+      };
     };
 
     systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
@@ -1331,58 +1486,63 @@ in {
 
       # Splice arbitrary unit properties (e.g., IOWeight=100, TasksMax=3000) parsed above
       serviceConfig =
-        {
-          Type = "exec";
-          ExecStart = builderScript;
-          User = "crystal-forge";
-          Group = "crystal-forge";
-          Slice = "crystal-forge-builds.slice";
+        (
+          {
+            Type = "exec";
+            ExecStart = builderScript;
+            User = "crystal-forge";
+            Group = "crystal-forge";
+            Slice = "crystal-forge-builds.slice";
 
-          StateDirectory = "crystal-forge";
-          StateDirectoryMode = "0750";
-          RuntimeDirectory = "crystal-forge";
-          RuntimeDirectoryMode = "0700";
-          CacheDirectory = "crystal-forge-nix";
-          CacheDirectoryMode = "0750";
-          WorkingDirectory = "/var/lib/crystal-forge/workdir";
+            StateDirectory = "crystal-forge";
+            StateDirectoryMode = "0750";
+            RuntimeDirectory = "crystal-forge";
+            RuntimeDirectoryMode = "0700";
+            CacheDirectory = "crystal-forge-nix";
+            CacheDirectoryMode = "0750";
+            WorkingDirectory = "/var/lib/crystal-forge/workdir";
 
-          # When this service stops, kill all children
-          KillMode = "control-group";
+            # When this service stops, kill all children
+            KillMode = "control-group";
 
-          # Make sure we load the environment file
-          EnvironmentFile = [
-            "-${cfg.env-file}"
-            "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
-          ];
+            # Make sure we load the environment file
+            EnvironmentFile = [
+              "-${cfg.env-file}"
+              "-/var/lib/crystal-forge/.config/crystal-forge-attic.env"
+            ];
 
-          NoNewPrivileges = true;
-          ProtectSystem = "no";
-          ProtectHome = false;
-          PrivateTmp = true;
-          ProtectKernelTunables = true;
-          ProtectKernelModules = true;
-          ProtectControlGroups = true;
+            NoNewPrivileges = true;
+            ProtectSystem = "no";
+            ProtectHome = false;
+            PrivateTmp = true;
+            ProtectKernelTunables = true;
+            ProtectKernelModules = true;
+            ProtectControlGroups = true;
 
-          TasksMax = "infinity";
-          LimitNPROC = "infinity";
-          LimitNOFILE = 1048576;
-          OOMPolicy = "continue";
+            TasksMax = "infinity";
+            LimitNPROC = "infinity";
+            LimitNOFILE = 1048576;
+            OOMPolicy = "continue";
 
-          ReadWritePaths = [
-            "/var/lib/crystal-forge"
-            "/tmp"
-            "/run/crystal-forge"
-            "/var/cache/crystal-forge-nix"
-            "/var/cache/crystal-forge"
-            "/var/lib/crystal-forge/.cache"
-            "/nix/var/nix/daemon-socket"
-          ];
-          ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
+            ReadWritePaths = [
+              "/var/lib/crystal-forge"
+              "/tmp"
+              "/run/crystal-forge"
+              "/var/cache/crystal-forge-nix"
+              "/var/cache/crystal-forge"
+              "/var/lib/crystal-forge/.cache"
+              "/nix/var/nix/daemon-socket"
+            ];
+            ReadOnlyPaths = ["/etc/nix" "/etc/ssl/certs"];
 
-          Restart = "always";
-          RestartSec = 5;
-        }
-        // parsed.svc;
+            Restart = "always";
+            RestartSec = 5;
+          }
+          // parsed.svc
+        ) // {
+          # Ensure ExecStart is never removed by parsed.svc merge
+          ExecStart = lib.mkForce builderScript;
+        };
     });
 
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
@@ -1583,8 +1743,12 @@ in {
         message = "Cannot specify both database.password and database.passwordFile";
       }
       {
-        assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable;
-        message = "At least one of server or client must be enabled";
+        assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable || cfg.dashboards.enable;
+        message = "At least one of server, client, build, or dashboards must be enabled";
+      }
+      {
+        assertion = cfg.dashboards.enable -> (cfg.dashboards.datasource.host != null);
+        message = "Crystal Forge dashboards require database.host or dashboards.datasource.host to be set";
       }
     ];
   };
