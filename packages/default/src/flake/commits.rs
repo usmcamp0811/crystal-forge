@@ -1,5 +1,5 @@
+use crate::config;
 use crate::models::commits::Commit;
-use crate::models::config;
 use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
 use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
