@@ -1,6 +1,6 @@
 use crate::models::cve_scans::{CveScan, ScanStatus};
-use crate::models::derivations::utils::get_store_path_from_drv;
-use crate::models::derivations::{Derivation, DerivationType};
+use crate::derivations::utils::get_store_path_from_drv;
+use crate::derivations::{Derivation, DerivationType};
 use crate::vulnix::vulnix_parser::{VulnixParser, VulnixScanOutput};
 use anyhow::Result;
 use bigdecimal::BigDecimal;

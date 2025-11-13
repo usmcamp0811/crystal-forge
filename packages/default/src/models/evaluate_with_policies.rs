@@ -7,7 +7,7 @@ use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
 use crate::models::commits::Commit;
-use crate::models::config::{BuildConfig, ServerConfig};
+use crate::config::{BuildConfig, ServerConfig};
 use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };

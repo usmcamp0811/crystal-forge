@@ -1,8 +1,8 @@
 use super::Derivation;
 use super::utils::*;
 use crate::builder::get_gc_root_path;
-use crate::models::config::BuildConfig;
-use crate::models::config::CacheConfig;
+use crate::config::BuildConfig;
+use crate::config::CacheConfig;
 use anyhow::Context;
 use anyhow::{Result, anyhow, bail};
 use sqlx::PgPool;

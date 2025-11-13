@@ -1,7 +1,7 @@
 use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
-use crate::models::config::CacheType;
-use crate::models::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
-use crate::models::derivations::{Derivation, DerivationType};
+use crate::config::CacheType;
+use crate::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
+use crate::derivations::{Derivation, DerivationType};
 use crate::queries::build_reservations;
 use crate::queries::cache_push::CachePushJob;
 use crate::queries::cache_push::create_cache_push_job;

@@ -1,4 +1,4 @@
-use crate::models::config::EnvironmentConfig;
+use crate::config::EnvironmentConfig;
 use crate::models::environments::Environment;
 use anyhow::Result;
 use sqlx::PgPool;

@@ -3,7 +3,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use crystal_forge::deployment::agent::{AgentDeploymentManager, DeploymentResult, readlink_path};
 use crystal_forge::handlers::agent::heartbeat::LogResponse;
-use crystal_forge::models::config::CrystalForgeConfig;
+use crystal_forge::config::CrystalForgeConfig;
 use crystal_forge::models::system_states::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
 use nix::sys::inotify::{AddWatchFlags, InitFlags, Inotify};

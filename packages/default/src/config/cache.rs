@@ -1,4 +1,4 @@
-use crate::models::config::duration_serde;
+use crate::config::duration_serde;
 use serde::Deserialize;
 use serde::Serialize;
 use std::time::Duration;

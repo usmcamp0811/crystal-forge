@@ -27,7 +27,7 @@ pub async fn get_derivations_needing_cache_push_for_dest(
     destination: &str,
     limit: Option<i32>,
     max_attempts: i32,
-) -> Result<Vec<crate::models::derivations::Derivation>> {
+) -> Result<Vec<crate::derivations::Derivation>> {
     use crate::queries::derivations::EvaluationStatus;
 
     let sql = r#"
