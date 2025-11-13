@@ -5,6 +5,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
+    config::CrystalForgeConfig,
     flake::commits::initialize_flake_commits,
     handlers::{
         agent::{heartbeat, state},
@@ -12,7 +13,6 @@ use crystal_forge::{
         status,
         webhook::webhook_handler,
     },
-    models::config::CrystalForgeConfig,
     queries::derivations::reset_non_terminal_derivations,
     server::memory_monitor_task,
     server::spawn_background_tasks,
