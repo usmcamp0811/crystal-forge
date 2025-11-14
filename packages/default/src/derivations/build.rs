@@ -137,7 +137,7 @@ impl Derivation {
                 line_result = stdout_reader.next_line() => {
                     match line_result {
                         Ok(Some(line)) => {
-                            info!("{} stdout: {}", operation_name, line);
+                            debug!("{} stdout: {}", operation_name, line);
                         }
                         Ok(None) => break,
                         Err(e) => {
