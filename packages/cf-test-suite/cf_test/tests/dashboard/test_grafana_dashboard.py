@@ -118,7 +118,7 @@ def grafana_client(grafana_url: str, server) -> GrafanaClient:
     pytest.fail(f"Grafana not ready after {max_retries * 2} seconds at {grafana_url}")
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_grafana_service_running(server):
     """Verify Grafana service is active and running"""
     if server is None:
@@ -130,14 +130,14 @@ def test_grafana_service_running(server):
     ), "Grafana service is not active. Check systemctl status grafana.service"
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_grafana_health_check(grafana_client: GrafanaClient):
     """Verify Grafana is healthy and responding"""
     health = grafana_client.health()
     assert health.get("status") == "ok", f"Grafana health check failed: {health}"
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_postgresql_datasource_provisioned(grafana_client: GrafanaClient):
     """Verify PostgreSQL datasource is provisioned and correctly named"""
     datasources = grafana_client.datasources()
@@ -156,7 +156,7 @@ def test_postgresql_datasource_provisioned(grafana_client: GrafanaClient):
     ), f"PostgreSQL datasource name unexpected: {postgres_ds.get('name')}"
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_postgresql_datasource_connection(grafana_client: GrafanaClient):
     """Verify PostgreSQL datasource can connect to database"""
     datasources = grafana_client.datasources()
@@ -176,7 +176,7 @@ def test_postgresql_datasource_connection(grafana_client: GrafanaClient):
     ), f"Datasource connection test failed: {result}"
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_crystal_forge_dashboards_provisioned(grafana_client: GrafanaClient):
     """Verify Crystal Forge dashboards are provisioned"""
     dashboards = grafana_client.dashboards()
@@ -191,7 +191,7 @@ def test_crystal_forge_dashboards_provisioned(grafana_client: GrafanaClient):
     ), f"No Crystal Forge dashboards found. Available: {dashboard_names}"
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_dashboard_system_count_query(
     grafana_client: GrafanaClient,
     cf_client: CFTestClient,
@@ -225,7 +225,7 @@ def test_dashboard_system_count_query(
     assert system_count >= 3, f"Expected at least 3 systems, got {system_count}"
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_dashboard_status_breakdown_query(
     grafana_client: GrafanaClient,
     cf_client: CFTestClient,
@@ -263,7 +263,7 @@ def test_dashboard_status_breakdown_query(
     ), f"Expected at least 3 status counts, got {len(results[0])}"
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_dashboard_panels_have_queries(
     grafana_client: GrafanaClient,
 ):
@@ -293,7 +293,7 @@ def test_dashboard_panels_have_queries(
         print(f"  Panel {i+1}: {title} ({targets} targets)")
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_dashboard_screenshot_capture(
     grafana_client: GrafanaClient,
     server,
@@ -342,7 +342,7 @@ def test_dashboard_screenshot_capture(
         pytest.skip(f"⚠️ Screenshot capture not available: {e}")
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_grafana_provisioning_immutability(server):
     """
     Verify that provisioned dashboards are set to be non-deletable
@@ -370,7 +370,7 @@ def test_grafana_provisioning_immutability(server):
     assert config_found, "No Grafana provisioning config found"
 
 
-@pytest.mark.integration
+@pytest.mark.dashboard
 def test_dashboard_data_persistence(
     grafana_client: GrafanaClient,
     cf_client: CFTestClient,

@@ -4,8 +4,20 @@
   pkgs,
   ...
 }: let
-  CF_TEST_DB_PORT = 5432;
-  CF_TEST_SERVER_PORT = 3000;
+  keyPair = pkgs.runCommand "agent-keypair" {} ''
+    mkdir -p $out
+    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
+  '';
+  keyPath = pkgs.runCommand "agent.key" {} ''
+    mkdir -p $out
+    cp ${keyPair}/agent.key $out/
+  '';
+  pubPath = pkgs.runCommand "agent.pub" {} ''
+    mkdir -p $out
+    cp ${keyPair}/agent.pub $out/
+  '';
+  CF_TEST_SERVER_PORT = 8000;
+
   systemBuildClosure = pkgs.closureInfo {
     rootPaths =
       [
@@ -22,24 +34,16 @@ in
     skipTypeCheck = true;
 
     nodes = {
-      gitserver = lib.crystal-forge.makeGitServerNode {
-        inherit pkgs systemBuildClosure;
-        port = 8080;
-      };
-
       server = {
         imports = [inputs.self.nixosModules.crystal-forge];
 
         networking.useDHCP = true;
-        networking.firewall.allowedTCPPorts = [5432 3000];
+        # Allow PostgreSQL, Crystal Forge server, and Grafana ports
+        networking.firewall.allowedTCPPorts = [5432 8000 3000];
 
         virtualisation.writableStore = true;
         virtualisation.memorySize = 2048;
         virtualisation.cores = 2;
-        virtualisation.additionalPaths = [
-          systemBuildClosure
-          inputs.self.nixosConfigurations.cf-test-sys.config.system.build.toplevel.drvPath
-        ];
 
         services.postgresql = {
           enable = true;
@@ -58,30 +62,25 @@ in
             GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
             GRANT CONNECT ON DATABASE crystal_forge TO grafana;
             GRANT USAGE ON SCHEMA public TO grafana;
+            GRANT CREATE ON SCHEMA public TO grafana;
             GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana;
             ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO grafana;
           '';
         };
 
-        environment.systemPackages = with pkgs; [
-          git
-          jq
-          hello
-          curl
-          crystal-forge.default
-          crystal-forge.cf-test-suite.runTests
-          crystal-forge.cf-test-suite.testRunner
-        ];
-
+        # Enable Crystal Forge server
         services.crystal-forge = {
           enable = true;
           local-database = true;
           log_level = "info";
 
-          # Disable components not needed for dashboard testing
-          server.enable = true;
-          server.host = "127.0.0.1";
-          server.port = 8000;
+          server = {
+            enable = true;
+            host = "127.0.0.1";
+            port = 8000;
+          };
+
+          # Disable components not needed for Grafana dashboard testing
           build.enable = false;
           client.enable = false;
 
@@ -93,7 +92,7 @@ in
             port = 5432;
           };
 
-          # Enable Grafana dashboard
+          # Enable Grafana dashboard support
           dashboards = {
             enable = true;
             datasource = {
@@ -117,72 +116,111 @@ in
           };
         };
 
-        # Grafana configuration
+        # Configure Grafana
         services.grafana = {
           enable = true;
           settings = {
             server = {
               http_addr = "127.0.0.1";
               http_port = 3000;
+              root_url = "http://127.0.0.1:3000";
             };
             security = {
               admin_user = "admin";
               admin_password = "admin";
             };
+            database = {
+              type = "postgres";
+              host = "127.0.0.1:5432";
+              name = "crystal_forge";
+              user = "grafana";
+              # password not needed with peer auth
+            };
+            users = {
+              allow_sign_up = false;
+            };
           };
+        };
+
+        environment.systemPackages = with pkgs; [
+          git
+          jq
+          curl
+          crystal-forge.default
+          crystal-forge.cf-test-suite.runTests
+          crystal-forge.cf-test-suite.testRunner
+        ];
+
+        environment.variables = {
+          TMPDIR = "/tmp";
+          TMP = "/tmp";
+          TEMP = "/tmp";
+        };
+
+        environment.etc = {
+          "agent.key".source = "${keyPath}/agent.key";
+          "agent.pub".source = "${pubPath}/agent.pub";
         };
       };
     };
 
-    globalTimeout = 600; # 10 minutes for dashboard + grafana startup
-    extraPythonPackages = p: [p.pytest p.requests pkgs.crystal-forge.cf-test-suite];
+    globalTimeout = 300; # 10 minutes - Grafana takes time to start
+
+    extraPythonPackages = p: [
+      p.pytest
+      p.pytest-xdist
+      p.pytest-metadata
+      p.pytest-html
+      p.psycopg2
+      p.requests
+      pkgs.crystal-forge.cf-test-suite
+    ];
 
     testScript = ''
       import os
       import pytest
 
-      # Set test environment variables
-      os.environ.update({
-          "CF_TEST_DB_HOST": "127.0.0.1",
-          "CF_TEST_DB_PORT": "5433",
-          "CF_TEST_DB_USER": "postgres",
-          "CF_TEST_DB_PASSWORD": "",
-          "CF_TEST_SERVER_HOST": "127.0.0.1",
-          "CF_TEST_SERVER_PORT": "8000",
-          "CF_TEST_GIT_SERVER_URL": "http://gitserver/crystal-forge",
-          "CF_TEST_REAL_COMMIT_HASH": "${lib.strings.trim (builtins.readFile (lib.crystal-forge.testFlake + "/MAIN_HEAD"))}",
-      })
-
-      # Configure machine access for cf_test
-      import cf_test
-      cf_test._driver_machines = {
-          "server": server,
-          "gitserver": gitserver,
-      }
-
-      # Start all machines
+      os.environ["NIXOS_TEST_DRIVER"] = "1"
       start_all()
 
       # Wait for PostgreSQL
       server.wait_for_unit("postgresql.service")
       server.wait_for_open_port(5432)
+
+      # Forward DB to host for the python tests
       server.forward_port(5433, 5432)
 
       # Wait for Crystal Forge server
       server.wait_for_unit("crystal-forge-server.service")
+      server.succeed("systemctl stop crystal-forge-server.service")
       server.wait_for_open_port(8000)
 
-      # Wait for Grafana
+      # Wait for Grafana - this takes a bit longer
+      print("⏳ Waiting for Grafana to start...")
       server.wait_for_unit("grafana.service")
       server.wait_for_open_port(3000)
+      print("✓ Grafana is ready")
 
-      # Wait for git server
-      from cf_test.vm_helpers import wait_for_git_server_ready
-      wait_for_git_server_ready(gitserver, timeout=60)
+      # Test env for client/fixtures
+      os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_DB_PORT"] = "5433"
+      os.environ["CF_TEST_DB_USER"] = "postgres"
+      os.environ["CF_TEST_DB_PASSWORD"] = ""
+      os.environ["CF_TEST_SERVER_HOST"] = "127.0.0.1"
+      os.environ["CF_TEST_SERVER_PORT"] = "8000"
 
-      # Run Grafana dashboard tests
+      import cf_test
+      cf_test._driver_machines = { "server": server }
+
+      print("\n" + "="*60)
+      print("Running Grafana Dashboard Tests")
+      print("="*60 + "\n")
+
       exit_code = pytest.main([
-          "-vvvv", "--tb=short", "-x", "-s",
+          "-vvvv",
+          "--tb=short",
+          "-x",
+          "-s",
           "-m", "dashboard",
           "--pyargs", "cf_test",
       ])
