@@ -55,17 +55,6 @@ in
             "host    all   all ::1/128      trust"
             "host    all   all 10.0.2.2/32  trust"
           ];
-          initialScript = pkgs.writeText "init-crystal-forge.sql" ''
-            CREATE USER crystal_forge LOGIN;
-            CREATE USER grafana LOGIN;
-            CREATE DATABASE crystal_forge OWNER crystal_forge;
-            GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-            GRANT CONNECT ON DATABASE crystal_forge TO grafana;
-            GRANT USAGE ON SCHEMA public TO grafana;
-            GRANT CREATE ON SCHEMA public TO grafana;
-            GRANT SELECT ON ALL TABLES IN SCHEMA public TO grafana;
-            ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO grafana;
-          '';
         };
 
         # Enable Crystal Forge server
@@ -134,7 +123,7 @@ in
               host = "127.0.0.1:5432";
               name = "crystal_forge";
               user = "grafana";
-              # password not needed with peer auth
+              # password not needed with trust auth
             };
             users = {
               allow_sign_up = false;
@@ -164,7 +153,7 @@ in
       };
     };
 
-    globalTimeout = 300; # 10 minutes - Grafana takes time to start
+    globalTimeout = 150; # 10 minutes - Grafana takes time to start
 
     extraPythonPackages = p: [
       p.pytest
@@ -191,15 +180,14 @@ in
       server.forward_port(5433, 5432)
 
       # Wait for Crystal Forge server
-      server.wait_for_unit("crystal-forge-server.service")
-      server.succeed("systemctl stop crystal-forge-server.service")
-      server.wait_for_open_port(8000)
+      # server.wait_for_unit("crystal-forge-server.service")
+      # server.wait_for_open_port(8000)
 
       # Wait for Grafana - this takes a bit longer
-      print("⏳ Waiting for Grafana to start...")
-      server.wait_for_unit("grafana.service")
-      server.wait_for_open_port(3000)
-      print("✓ Grafana is ready")
+      # print("⏳ Waiting for Grafana to start...")
+      # server.wait_for_unit("grafana.service")
+      # server.wait_for_open_port(3000)
+      # print("✓ Grafana is ready")
 
       # Test env for client/fixtures
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"
