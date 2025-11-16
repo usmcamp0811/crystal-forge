@@ -11,7 +11,7 @@ from cf_test import CFTestClient
 from cf_test.scenarios import scenario_behind, scenario_offline, scenario_up_to_date
 from cf_test.vm_helpers import SmokeTestConstants as C
 
-pytestmark = [pytest.mark.integration, pytest.mark.driver]
+pytestmark = [pytest.mark.dashboard, pytest.mark.driver]
 
 
 class GrafanaClient:

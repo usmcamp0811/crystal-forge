@@ -135,7 +135,7 @@ in
     };
 
     globalTimeout = 600; # 10 minutes for dashboard + grafana startup
-    extraPythonPackages = p: [p.pytest pkgs.crystal-forge.cf-test-suite];
+    extraPythonPackages = p: [p.pytest p.requests pkgs.crystal-forge.cf-test-suite];
 
     testScript = ''
       import os
@@ -183,8 +183,8 @@ in
       # Run Grafana dashboard tests
       exit_code = pytest.main([
           "-vvvv", "--tb=short", "-x", "-s",
-          "-m", "integration",
-          "--pyargs", "cf_test.tests.test_grafana_dashboard",
+          "-m", "dashboard",
+          "--pyargs", "cf_test",
       ])
       if exit_code != 0:
           raise SystemExit(exit_code)
