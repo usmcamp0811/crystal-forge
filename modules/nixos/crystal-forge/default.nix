@@ -1297,13 +1297,14 @@ in {
           {
             name = cfg.dashboards.datasource.name;
             type = "postgres";
-            url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
+            url = cfg.dashboards.datasource.host;
             database = cfg.dashboards.datasource.database;
             user = cfg.dashboards.datasource.user;
             jsonData = {
               sslmode = cfg.dashboards.datasource.sslMode;
               postgresVersion = 1400;
               timescaledb = false;
+              port = cfg.dashboards.datasource.port;
             };
             secureJsonData = lib.mkIf (cfg.dashboards.datasource.passwordFile != null) {
               password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
