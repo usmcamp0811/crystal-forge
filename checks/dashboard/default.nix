@@ -62,6 +62,9 @@ in
           enable = true;
           local-database = true;
           log_level = "info";
+          flakes = {
+            flake_polling_interval = "600m";
+          };
 
           server = {
             enable = true;
