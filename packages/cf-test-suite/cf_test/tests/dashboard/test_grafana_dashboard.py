@@ -248,7 +248,7 @@ def test_dashboard_status_breakdown_query(
 
     # Query for status breakdown
     status_query = """
-    SELECT 
+    SELECT
         COUNT(*) FILTER (WHERE is_running_latest_derivation = TRUE) as up_to_date,
         COUNT(*) FILTER (WHERE is_running_latest_derivation = FALSE) as behind,
         COUNT(*) FILTER (WHERE last_seen < NOW() - INTERVAL '15 minutes') as no_heartbeat
@@ -392,8 +392,8 @@ def test_dashboard_data_persistence(
 
     # Query the specific hostname from our scenario
     hostname_query = f"""
-    SELECT hostname, is_running_latest_derivation 
-    FROM view_systems_current_state 
+    SELECT hostname, is_running_latest_derivation
+    FROM view_systems_current_state
     WHERE hostname = %s
     """
 
