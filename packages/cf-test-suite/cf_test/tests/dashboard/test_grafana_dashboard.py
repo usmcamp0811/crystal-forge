@@ -22,10 +22,19 @@ class GrafanaClient:
     the host↔VM connectivity issue (connection reset on 127.0.0.1:3000).
     """
 
-    def __init__(self, base_url: str, timeout: int = 10, server=None):
+    def __init__(
+        self,
+        base_url: str,
+        timeout: int = 10,
+        server=None,
+        username: str = "admin",
+        password: str = "admin",
+    ):
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.server = server
+        self.username = username
+        self.password = password
 
         # Only used when server is None (e.g. running tests against an external Grafana)
         if self.server is None:
@@ -46,7 +55,14 @@ class GrafanaClient:
 
         # VM path: use curl via server.succeed
         if self.server is not None:
-            parts = ["curl", "-sS", "-X", method.upper()]
+            parts = [
+                "curl",
+                "-sS",
+                "-u",
+                f"{self.username}:{self.password}",
+                "-X",
+                method.upper(),
+            ]
             data = kwargs.get("json")
 
             if data is not None:
@@ -82,6 +98,7 @@ class GrafanaClient:
         import requests
 
         kwargs.setdefault("timeout", self.timeout)
+        kwargs.setdefault("auth", (self.username, self.password))
         resp = self._requests.request(method, url, **kwargs)
 
         data: Dict[str, Any] = {
@@ -167,7 +184,8 @@ class GrafanaClient:
         """
         try:
             cmd = (
-                f"curl -s 'http://127.0.0.1:3000/render/d-solo/{dashboard_uid}"
+                f"curl -s -u {shlex.quote(f'{self.username}:{self.password}')} "
+                f"'http://127.0.0.1:3000/render/d-solo/{dashboard_uid}"
                 f"?orgId=1&panelId=1&width=1200&height=800&tz=browser' "
                 f"> {shlex.quote(filepath)}"
             )

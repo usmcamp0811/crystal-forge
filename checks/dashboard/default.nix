@@ -57,7 +57,7 @@ in
           ];
         };
 
-        # Enable Crystal Forge server
+        # Enable Crystal Forge server with Grafana dashboard support
         services.crystal-forge = {
           enable = true;
           local-database = true;
@@ -85,6 +85,7 @@ in
           };
 
           # Enable Grafana dashboard support
+          # The crystal-forge module will automatically configure Grafana when this is enabled
           dashboards = {
             enable = true;
             datasource = {
@@ -108,39 +109,10 @@ in
           };
         };
 
-        # Configure Grafana
-        services.grafana = {
-          enable = true;
-          settings = {
-            plugins = {
-              check_for_plugin_updates = false;
-            };
-            "plugin.catalog" = {
-              url = "";
-            };
-            "plugin.signature" = {
-              mode = "off";
-            };
-            security = {
-              admin_user = "admin";
-              admin_password = "admin";
-            };
-            server = {
-              http_addr = "127.0.0.1";
-              http_port = 3000;
-              root_url = "http://127.0.0.1:3000";
-            };
-            database = {
-              type = "postgres";
-              host = "127.0.0.1:5432";
-              name = "crystal_forge";
-              user = "grafana";
-            };
-            users = {
-              allow_sign_up = false;
-            };
-          };
-        };
+        # NOTE: Do NOT manually configure services.grafana here!
+        # The crystal-forge module handles Grafana configuration automatically
+        # when dashboards.enable = true is set above.
+        # Manual configuration causes conflicts with the module.
 
         environment.systemPackages = with pkgs; [
           git

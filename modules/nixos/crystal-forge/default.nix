@@ -1341,37 +1341,44 @@ in {
         enable = true;
 
         # Configure the Crystal Forge PostgreSQL datasource
-        datasources.settings.datasources = [
-          {
-            name = cfg.dashboards.datasource.name;
-            type = "postgres";
-            url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
-            database = cfg.dashboards.datasource.database;
-            user = cfg.dashboards.datasource.user;
-            jsonData = {
-              sslmode = cfg.dashboards.datasource.sslMode;
-              postgresVersion = 1400;
-              timescaledb = false;
-              # Don't specify port in jsonData since it's in the URL
-            };
-            secureJsonData = lib.mkIf (cfg.dashboards.datasource.passwordFile != null) {
-              password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
-            };
-            isDefault = false;
-            editable = true;
-          }
-        ];
+        datasources.settings = {
+          apiVersion = 1;
+          datasources = [
+            ({
+                name = cfg.dashboards.datasource.name;
+                type = "postgres";
+                url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
+                database = cfg.dashboards.datasource.database;
+                user = cfg.dashboards.datasource.user;
+                jsonData = {
+                  sslmode = cfg.dashboards.datasource.sslMode;
+                  postgresVersion = 1400;
+                  timescaledb = false;
+                };
+                isDefault = false;
+                editable = true;
+              }
+              // lib.optionalAttrs (cfg.dashboards.datasource.passwordFile != null) {
+                secureJsonData = {
+                  password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
+                };
+              })
+          ];
+        };
 
         # Provision the Crystal Forge dashboard(s)
-        dashboards.settings.providers = [
-          {
-            name = "Crystal Forge";
-            type = "file";
-            options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
-            disableDeletion = cfg.dashboards.grafana.disableDeletion;
-            updateIntervalSeconds = 60;
-          }
-        ];
+        dashboards.settings = {
+          apiVersion = 1;
+          providers = [
+            {
+              name = "Crystal Forge";
+              type = "file";
+              options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
+              disableDeletion = cfg.dashboards.grafana.disableDeletion;
+              updateIntervalSeconds = 60;
+            }
+          ];
+        };
       };
     };
 
