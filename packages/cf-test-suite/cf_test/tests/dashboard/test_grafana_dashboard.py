@@ -1,11 +1,11 @@
 import json
 import os
+import shlex
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
-import requests
 
 from cf_test import CFTestClient
 from cf_test.scenarios import scenario_behind, scenario_offline, scenario_up_to_date
@@ -15,56 +15,74 @@ pytestmark = [pytest.mark.dashboard, pytest.mark.driver]
 
 
 class GrafanaClient:
-    """Helper client for Grafana API interactions"""
+    """Helper client for Grafana API interactions.
 
-    def __init__(self, base_url: str, timeout: int = 10):
-        self.base_url = base_url
+    When `server` is provided, all HTTP traffic is performed from inside the
+    NixOS VM via `curl`, instead of from the host with `requests`. This avoids
+    the host↔VM connectivity issue (connection reset on 127.0.0.1:3000).
+    """
+
+    def __init__(self, base_url: str, timeout: int = 10, server=None):
+        self.base_url = base_url.rstrip("/")
         self.timeout = timeout
-        self.session = requests.Session()
+        self.server = server
+
+        # Only used when server is None (e.g. running tests against an external Grafana)
+        if self.server is None:
+            import requests
+
+            self._requests = requests.Session()
+        else:
+            self._requests = None
 
     def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
         """
         Make HTTP request to Grafana API.
 
-        NOTE: We do *not* raise_for_status here anymore so that callers can
-        inspect status codes and bodies even on 4xx/5xx responses.
+        If `server` is set, we shell out to `curl` inside the VM.
+        Otherwise, we use `requests` from the host.
         """
         url = f"{self.base_url}/api{path}"
-        kwargs.setdefault("timeout", self.timeout)
-        response = self.session.request(method, url, **kwargs)
 
-        data: Dict[str, Any] = {
-            "_status_code": response.status_code,
-            "_ok": response.ok,
-        }
-        # Try to parse JSON, but don't die on HTML or empty bodies
-        if response.text:
+        # VM path: use curl via server.succeed
+        if self.server is not None:
+            parts = ["curl", "-sS", "-X", method.upper()]
+            data = kwargs.get("json")
+
+            if data is not None:
+                body = json.dumps(data)
+                parts += ["-H", "Content-Type: application/json", "-d", body]
+
+            # Build shell-safe command
+            cmd = " ".join(shlex.quote(p) for p in parts + [url])
+
             try:
-                parsed = response.json()
-                if isinstance(parsed, dict):
-                    data.update(parsed)
-                else:
-                    data["_parsed"] = parsed
-            except ValueError:
-                data["_raw_text"] = response.text[:1024]
-        return data
+                out = self.server.succeed(cmd)
+            except Exception as e:
+                return {
+                    "status": "unreachable",
+                    "_error": str(e),
+                    "_status_code": None,
+                }
 
-    def health(self) -> Dict[str, Any]:
-        """
-        Check Grafana health.
+            out = out.strip()
+            if not out:
+                return {}
 
-        We special-case this so we can handle odd responses more gracefully and
-        always see the status code.
-        """
-        url = f"{self.base_url}/api/health"
-        try:
-            resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
-        except requests.RequestException as e:
-            return {
-                "status": "unreachable",
-                "_error": str(e),
-                "_status_code": None,
-            }
+            try:
+                parsed = json.loads(out)
+                return parsed if isinstance(parsed, dict) else {"_parsed": parsed}
+            except json.JSONDecodeError:
+                return {"_raw_text": out}
+
+        # Host path: normal requests (for non-VM use)
+        if self._requests is None:
+            raise RuntimeError("Requests session not initialized")
+
+        import requests
+
+        kwargs.setdefault("timeout", self.timeout)
+        resp = self._requests.request(method, url, **kwargs)
 
         data: Dict[str, Any] = {
             "_status_code": resp.status_code,
@@ -79,14 +97,20 @@ class GrafanaClient:
                     data["_parsed"] = parsed
             except ValueError:
                 data["_raw_text"] = resp.text[:1024]
-        # If Grafana returns the classic health payload, it will have "status": "ok"
-        # Otherwise, callers can still inspect _status_code/_raw_text.
         return data
+
+    def health(self) -> Dict[str, Any]:
+        """Check Grafana health"""
+        result = self._request("GET", "/health")
+        # Grafana normally returns {"database": "ok", "version": "...", "commit": "..."}
+        # Newer versions also add {"status": "ok"}; if it's missing, we infer it.
+        if "status" not in result and result.get("database") == "ok":
+            result["status"] = "ok"
+        return result
 
     def datasources(self) -> List[Dict[str, Any]]:
         """Get all datasources"""
         result = self._request("GET", "/datasources")
-        # Grafana normally returns a list; we normalize for safety
         if isinstance(result, list):
             return result
         if "datasources" in result and isinstance(result["datasources"], list):
@@ -125,14 +149,15 @@ class GrafanaClient:
             "to": "now",
         }
         result = self._request("POST", "/tsdb/query", json=payload)
-        # Extract actual query results
-        if "results" in result and isinstance(result["results"], dict):
-            # Take the first result entry
-            first_key = next(iter(result["results"]), None)
-            if first_key is not None:
-                series = result["results"][first_key].get("series", [])
-                if series:
-                    return series[0].get("values", [])
+
+        # Grafana's /tsdb/query returns something like:
+        # {"results": {"A": {"series": [{"name": "...", "columns": [...], "values": [[...], ...]}]}}}
+        results = result.get("results")
+        if isinstance(results, dict) and results:
+            first_key = next(iter(results))
+            series = results[first_key].get("series", [])
+            if series:
+                return series[0].get("values", [])
         return []
 
     def screenshot_curl(self, dashboard_uid: str, filepath: str, server) -> bool:
@@ -142,13 +167,14 @@ class GrafanaClient:
         """
         try:
             cmd = (
-                f"curl -s 'http://127.0.0.1:3000/render/d-solo/{dashboard_uid}?orgId=1&panelId=1&width=1200&height=800&tz=browser' "
-                f"> {filepath}"
+                f"curl -s 'http://127.0.0.1:3000/render/d-solo/{dashboard_uid}"
+                f"?orgId=1&panelId=1&width=1200&height=800&tz=browser' "
+                f"> {shlex.quote(filepath)}"
             )
             server.succeed(cmd)
             # Verify file was created
             result = server.succeed(
-                f"test -f {filepath} && stat -c%s {filepath} || echo 0"
+                f"test -f {shlex.quote(filepath)} && stat -c%s {shlex.quote(filepath)} || echo 0"
             )
             size = int(result.strip())
             return size > 100
@@ -161,6 +187,7 @@ def grafana_url(server) -> str:
     """Construct Grafana URL from server machine"""
     if server is None:
         pytest.skip("Server machine not available")
+    # Inside the VM Grafana listens on localhost:3000
     return "http://127.0.0.1:3000"
 
 
@@ -169,49 +196,30 @@ def grafana_client(grafana_url: str, server) -> GrafanaClient:
     """
     Create and verify Grafana client.
 
-    We consider Grafana "ready" if:
-      - /api/health returns status == "ok", OR
-      - we can connect and get a HTTP status code in {200, 401, 403},
-        which means the server is up and responding (auth or health
-        details can be asserted in specific tests).
+    In the NixOS VM test, this talks to Grafana *from inside the VM* via curl.
     """
     if server is None:
         pytest.skip("Server machine not available")
 
-    client = GrafanaClient(grafana_url)
+    client = GrafanaClient(grafana_url, timeout=10, server=server)
 
-    max_retries = 30
+    max_retries = 10
     last_health: Dict[str, Any] = {}
-    last_error: Optional[BaseException] = None
 
-    for attempt in range(max_retries):
-        try:
-            health = client.health()
-            last_health = health
+    for _ in range(max_retries):
+        health = client.health()
+        last_health = health
 
-            status = health.get("status")
-            code = health.get("_status_code")
-
-            # "Happy path": classic Grafana health endpoint
-            if status == "ok":
-                return client
-
-            # Fallback: server is clearly up, even if auth/health is odd
-            if isinstance(code, int) and code in {200, 401, 403}:
-                return client
-
-        except Exception as e:
-            last_error = e
+        status = health.get("status")
+        if status == "ok":
+            return client
 
         time.sleep(2)
 
-    msg = (
+    pytest.fail(
         f"Grafana not ready after {max_retries * 2} seconds at {grafana_url}. "
-        f"Last health payload: {last_health!r}. "
+        f"Last health payload: {last_health!r}"
     )
-    if last_error is not None:
-        msg += f"Last error: {last_error!r}"
-    pytest.fail(msg)
 
 
 @pytest.mark.dashboard
@@ -298,9 +306,9 @@ def test_dashboard_system_count_query(
     Creates test scenarios and verifies the query returns expected counts.
     """
     # Create multiple test scenarios with different states
-    scenario1 = scenario_up_to_date(cf_client)
-    scenario2 = scenario_behind(cf_client)
-    scenario3 = scenario_offline(cf_client)
+    scenario_up_to_date(cf_client)
+    scenario_behind(cf_client)
+    scenario_offline(cf_client)
 
     # Get PostgreSQL datasource
     datasources = grafana_client.datasources()
@@ -315,7 +323,7 @@ def test_dashboard_system_count_query(
     )
     results = grafana_client.query_datasource(ds_id, system_count_query)
 
-    assert len(results) > 0, f"System count query returned no results"
+    assert len(results) > 0, "System count query returned no results"
     # We expect at least 3 systems from our scenarios
     system_count = results[0][0] if results else 0
     assert system_count >= 3, f"Expected at least 3 systems, got {system_count}"
@@ -424,7 +432,7 @@ def test_dashboard_screenshot_capture(
             server.copy_from_vm(screenshot_path, screenshot_path)
             assert Path(
                 screenshot_path
-            ).exists(), f"Failed to retrieve screenshot from VM"
+            ).exists(), "Failed to retrieve screenshot from VM"
             assert (
                 Path(screenshot_path).stat().st_size > 100
             ), "Screenshot file too small"
@@ -456,7 +464,9 @@ def test_grafana_provisioning_immutability(server):
     config_found = False
     for config_path in grafana_config_paths:
         try:
-            result = server.succeed(f"test -f {config_path} && echo exists || true")
+            result = server.succeed(
+                f"test -f {shlex.quote(config_path)} && echo exists || true"
+            )
             if "exists" in result or result.strip() == "exists":
                 config_found = True
                 break
@@ -502,4 +512,4 @@ def test_dashboard_data_persistence(
     ), f"Scenario hostname {scenario['hostname']} not found in database"
     assert (
         hostname_check[0]["is_running_latest_derivation"] is True
-    ), f"System should be up-to-date but is not"
+    ), "System should be up-to-date but is not"
