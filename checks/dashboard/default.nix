@@ -112,21 +112,29 @@ in
         services.grafana = {
           enable = true;
           settings = {
-            server = {
-              http_addr = "127.0.0.1";
-              http_port = 3000;
-              root_url = "http://127.0.0.1:3000";
+            plugins = {
+              check_for_plugin_updates = false;
+            };
+            "plugin.catalog" = {
+              url = "";
+            };
+            "plugin.signature" = {
+              mode = "off";
             };
             security = {
               admin_user = "admin";
               admin_password = "admin";
+            };
+            server = {
+              http_addr = "127.0.0.1";
+              http_port = 3000;
+              root_url = "http://127.0.0.1:3000";
             };
             database = {
               type = "postgres";
               host = "127.0.0.1:5432";
               name = "crystal_forge";
               user = "grafana";
-              # password not needed with trust auth
             };
             users = {
               allow_sign_up = false;
@@ -183,14 +191,21 @@ in
       server.forward_port(5433, 5432)
 
       # Wait for Crystal Forge server
-      # server.wait_for_unit("crystal-forge-server.service")
-      # server.wait_for_open_port(8000)
+      server.wait_for_unit("crystal-forge-server.service")
+      server.wait_for_open_port(8000)
 
       # Wait for Grafana - this takes a bit longer
-      # print("⏳ Waiting for Grafana to start...")
-      # server.wait_for_unit("grafana.service")
-      # server.wait_for_open_port(3000)
-      # print("✓ Grafana is ready")
+      print("⏳ Waiting for Grafana to start...")
+      server.wait_for_unit("grafana.service")
+      server.wait_for_open_port(3000)
+      print("✓ Grafana is ready")
+
+      server.succeed(
+          "curl --fail http://127.0.0.1:3000/api/health || (echo 'health check failed' >&2; exit 1)"
+      )
+
+      # 🔹 NEW: forward Grafana HTTP port from VM → host
+      server.forward_port(3000, 3000)
 
       # Test env for client/fixtures
       os.environ["CF_TEST_DB_HOST"] = "127.0.0.1"

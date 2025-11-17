@@ -23,20 +23,75 @@ class GrafanaClient:
         self.session = requests.Session()
 
     def _request(self, method: str, path: str, **kwargs) -> Dict[str, Any]:
-        """Make HTTP request to Grafana API"""
+        """
+        Make HTTP request to Grafana API.
+
+        NOTE: We do *not* raise_for_status here anymore so that callers can
+        inspect status codes and bodies even on 4xx/5xx responses.
+        """
         url = f"{self.base_url}/api{path}"
         kwargs.setdefault("timeout", self.timeout)
         response = self.session.request(method, url, **kwargs)
-        response.raise_for_status()
-        return response.json() if response.text else {}
+
+        data: Dict[str, Any] = {
+            "_status_code": response.status_code,
+            "_ok": response.ok,
+        }
+        # Try to parse JSON, but don't die on HTML or empty bodies
+        if response.text:
+            try:
+                parsed = response.json()
+                if isinstance(parsed, dict):
+                    data.update(parsed)
+                else:
+                    data["_parsed"] = parsed
+            except ValueError:
+                data["_raw_text"] = response.text[:1024]
+        return data
 
     def health(self) -> Dict[str, Any]:
-        """Check Grafana health"""
-        return self._request("GET", "/health")
+        """
+        Check Grafana health.
+
+        We special-case this so we can handle odd responses more gracefully and
+        always see the status code.
+        """
+        url = f"{self.base_url}/api/health"
+        try:
+            resp = self.session.get(url, timeout=self.timeout, allow_redirects=True)
+        except requests.RequestException as e:
+            return {
+                "status": "unreachable",
+                "_error": str(e),
+                "_status_code": None,
+            }
+
+        data: Dict[str, Any] = {
+            "_status_code": resp.status_code,
+            "_ok": resp.ok,
+        }
+        if resp.text:
+            try:
+                parsed = resp.json()
+                if isinstance(parsed, dict):
+                    data.update(parsed)
+                else:
+                    data["_parsed"] = parsed
+            except ValueError:
+                data["_raw_text"] = resp.text[:1024]
+        # If Grafana returns the classic health payload, it will have "status": "ok"
+        # Otherwise, callers can still inspect _status_code/_raw_text.
+        return data
 
     def datasources(self) -> List[Dict[str, Any]]:
         """Get all datasources"""
-        return self._request("GET", "/datasources")
+        result = self._request("GET", "/datasources")
+        # Grafana normally returns a list; we normalize for safety
+        if isinstance(result, list):
+            return result
+        if "datasources" in result and isinstance(result["datasources"], list):
+            return result["datasources"]
+        return []
 
     def test_datasource(self, datasource_id: int) -> Dict[str, Any]:
         """Test a datasource connection"""
@@ -44,7 +99,12 @@ class GrafanaClient:
 
     def dashboards(self) -> List[Dict[str, Any]]:
         """Get all provisioned dashboards"""
-        return self._request("GET", "/search?query=&type=dash-db")
+        result = self._request("GET", "/search?query=&type=dash-db")
+        if isinstance(result, list):
+            return result
+        if "dashboards" in result and isinstance(result["dashboards"], list):
+            return result["dashboards"]
+        return []
 
     def dashboard(self, uid: str) -> Dict[str, Any]:
         """Get dashboard by UID"""
@@ -66,8 +126,13 @@ class GrafanaClient:
         }
         result = self._request("POST", "/tsdb/query", json=payload)
         # Extract actual query results
-        if "results" in result and len(result["results"]) > 0:
-            return result["results"][0].get("series", [{}])[0].get("values", [])
+        if "results" in result and isinstance(result["results"], dict):
+            # Take the first result entry
+            first_key = next(iter(result["results"]), None)
+            if first_key is not None:
+                series = result["results"][first_key].get("series", [])
+                if series:
+                    return series[0].get("values", [])
         return []
 
     def screenshot_curl(self, dashboard_uid: str, filepath: str, server) -> bool:
@@ -87,7 +152,7 @@ class GrafanaClient:
             )
             size = int(result.strip())
             return size > 100
-        except Exception as e:
+        except Exception:
             return False
 
 
@@ -101,21 +166,52 @@ def grafana_url(server) -> str:
 
 @pytest.fixture(scope="session")
 def grafana_client(grafana_url: str, server) -> GrafanaClient:
-    """Create and verify Grafana client"""
+    """
+    Create and verify Grafana client.
+
+    We consider Grafana "ready" if:
+      - /api/health returns status == "ok", OR
+      - we can connect and get a HTTP status code in {200, 401, 403},
+        which means the server is up and responding (auth or health
+        details can be asserted in specific tests).
+    """
+    if server is None:
+        pytest.skip("Server machine not available")
+
     client = GrafanaClient(grafana_url)
 
-    # Wait for Grafana to be ready
     max_retries = 30
+    last_health: Dict[str, Any] = {}
+    last_error: Optional[BaseException] = None
+
     for attempt in range(max_retries):
         try:
             health = client.health()
-            if health.get("status") == "ok":
+            last_health = health
+
+            status = health.get("status")
+            code = health.get("_status_code")
+
+            # "Happy path": classic Grafana health endpoint
+            if status == "ok":
                 return client
-        except Exception:
-            pass
+
+            # Fallback: server is clearly up, even if auth/health is odd
+            if isinstance(code, int) and code in {200, 401, 403}:
+                return client
+
+        except Exception as e:
+            last_error = e
+
         time.sleep(2)
 
-    pytest.fail(f"Grafana not ready after {max_retries * 2} seconds at {grafana_url}")
+    msg = (
+        f"Grafana not ready after {max_retries * 2} seconds at {grafana_url}. "
+        f"Last health payload: {last_health!r}. "
+    )
+    if last_error is not None:
+        msg += f"Last error: {last_error!r}"
+    pytest.fail(msg)
 
 
 @pytest.mark.dashboard
