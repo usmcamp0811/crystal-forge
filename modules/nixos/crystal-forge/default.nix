@@ -1861,20 +1861,12 @@ in {
         message = "Crystal Forge client requires a private key file";
       }
       {
-        assertion = cfg.database.passwordFile != null -> cfg.database.password == "";
-        message = "Cannot specify both database.password and database.passwordFile";
-      }
-      {
         assertion = cfg.server.enable || cfg.client.enable || cfg.build.enable || cfg.dashboards.enable;
         message = "At least one of server, client, build, or dashboards must be enabled";
       }
       {
         assertion = cfg.dashboards.enable -> (cfg.dashboards.datasource.host != null);
         message = "Crystal Forge dashboards require database.host or dashboards.datasource.host to be set";
-      }
-      {
-        assertion = cfg.dashboards.enable && !cfg.local-database -> (cfg.dashboards.datasource.passwordFile != null);
-        message = "When using remote database for dashboards, dashboards.datasource.passwordFile must be set";
       }
       {
         assertion = cfg.dashboards.enable && !cfg.local-database -> (cfg.dashboards.datasource.host != "/run/postgresql");
