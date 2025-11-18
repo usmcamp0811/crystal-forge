@@ -116,7 +116,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "description": "",
       "fieldConfig": {
@@ -244,7 +244,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -276,7 +276,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "fieldConfig": {
         "defaults": {
@@ -568,7 +568,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -600,7 +600,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "fieldConfig": {
         "defaults": {
@@ -706,7 +706,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -757,7 +757,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "fieldConfig": {
         "defaults": {
@@ -806,7 +806,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -838,7 +838,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "fieldConfig": {
         "defaults": {
@@ -913,7 +913,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -945,7 +945,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "fieldConfig": {
         "defaults": {
@@ -997,7 +997,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -1042,7 +1042,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "fieldConfig": {
         "defaults": {
@@ -1094,7 +1094,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -1187,7 +1187,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "fieldConfig": {
             "defaults": {
@@ -1282,7 +1282,7 @@
             {
               "datasource": {
                 "type": "grafana-postgresql-datasource",
-                "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+                "uid": "crystal-forge-postgres"
               },
               "editorMode": "code",
               "format": "table",
@@ -1318,7 +1318,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "fieldConfig": {
         "defaults": {
@@ -1367,7 +1367,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -1399,7 +1399,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "fieldConfig": {
         "defaults": {
@@ -1448,7 +1448,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -1480,7 +1480,7 @@
     {
       "datasource": {
         "type": "grafana-postgresql-datasource",
-        "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+        "uid": "crystal-forge-postgres"
       },
       "description": "Check this if all your systems are `unknown`. ",
       "fieldConfig": {
@@ -1530,7 +1530,7 @@
         {
           "datasource": {
             "type": "grafana-postgresql-datasource",
-            "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+            "uid": "crystal-forge-postgres"
           },
           "editorMode": "code",
           "format": "table",
@@ -1570,7 +1570,7 @@
         "current": {},
         "datasource": {
           "type": "grafana-postgresql-datasource",
-          "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+          "uid": "crystal-forge-postgres"
         },
         "definition": "SELECT id AS \"__value\", name AS \"__text\"\nFROM flakes\nORDER BY name;",
         "description": "The Flake or Flakes to Display",
@@ -1589,7 +1589,7 @@
         "current": {},
         "datasource": {
           "type": "grafana-postgresql-datasource",
-          "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+          "uid": "crystal-forge-postgres"
         },
         "definition": "SELECT t.__text, t.__value\nFROM (\n  SELECT DISTINCT ON (commit_id)\n         (flake_name || ' ' || short_hash) AS __text,\n         commit_id AS __value,\n         commit_timestamp\n  FROM view_commit_nixos_table\n  ORDER BY commit_id, commit_timestamp DESC\n) AS t\nORDER BY t.commit_timestamp DESC;",
         "description": "Query to get the available commits",
@@ -1607,7 +1607,7 @@
         "current": {},
         "datasource": {
           "type": "grafana-postgresql-datasource",
-          "uid": "${DS_CRYSTAL_FORGE_POSTGRES}"
+          "uid": "crystal-forge-postgres"
         },
         "definition": "-- Grafana variable: text/value\nSELECT\n  f.name || '/' || d.derivation_name || ' @ ' || LEFT(c.git_commit_hash, 8) AS text,\n  d.id AS value\nFROM public.derivations d\nJOIN public.derivation_statuses s ON s.id = d.status_id\nJOIN public.commits c ON c.id = d.commit_id\nJOIN public.flakes f ON f.id = c.flake_id\nWHERE s.name = 'build-inprogress'\nORDER BY d.started_at DESC NULLS LAST;\n",
         "description": "",
