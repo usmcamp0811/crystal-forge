@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            id, commit_id,\n            derivation_type as \"derivation_type: crate::models::derivations::DerivationType\",\n            derivation_name, derivation_path, derivation_target,\n            scheduled_at, completed_at, started_at, attempt_count,\n            evaluation_duration_ms, error_message, pname, version, status_id,\n            build_elapsed_seconds, build_current_target, build_last_activity_seconds,\n            build_last_heartbeat, cf_agent_enabled, store_path\n        FROM derivations\n        WHERE id = $1\n        ",
+  "query": "\n        SELECT \n            id, commit_id,\n            derivation_type as \"derivation_type: crate::derivations::DerivationType\",\n            derivation_name, derivation_path, derivation_target,\n            scheduled_at, completed_at, started_at, attempt_count,\n            evaluation_duration_ms, error_message, pname, version, status_id,\n            build_elapsed_seconds, build_current_target, build_last_activity_seconds,\n            build_last_heartbeat, cf_agent_enabled, store_path\n        FROM derivations\n        WHERE id = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -15,7 +15,7 @@
       },
       {
         "ordinal": 2,
-        "name": "derivation_type: crate::models::derivations::DerivationType",
+        "name": "derivation_type: crate::derivations::DerivationType",
         "type_info": "Text"
       },
       {
@@ -138,5 +138,5 @@
       true
     ]
   },
-  "hash": "9d216459f41488fbce15d91bcba0c600b6e4173de50a49ff073c0c4b21d3929c"
+  "hash": "57771259f3b76d7b57fc40dff176c4d4bef24ce79ed54702cb737bd1a8859a46"
 }

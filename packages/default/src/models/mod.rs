@@ -1,10 +1,8 @@
 pub mod agent_heartbeats;
 pub mod commits;
-pub mod config;
 pub mod cve_scans;
 pub mod cves;
 pub mod deployment_policies;
-pub mod derivations;
 pub mod environments;
 pub mod evaluate_with_policies;
 pub mod flakes;

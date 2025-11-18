@@ -1,4 +1,4 @@
-use crate::models::config::CrystalForgeConfig;
+use crate::config::CrystalForgeConfig;
 use crate::models::systems::DeploymentPolicy;
 use crate::queries::deployment::{get_systems_with_auto_latest_policy, update_desired_target};
 use crate::queries::derivations::get_latest_deployable_targets_for_flake_hosts;

@@ -1,4 +1,4 @@
-use crate::models::derivations::utils::get_store_path_from_drv;
+use crate::derivations::utils::get_store_path_from_drv;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

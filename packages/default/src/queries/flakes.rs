@@ -1,4 +1,4 @@
-use crate::models::config::{FlakeConfig, WatchedFlake};
+use crate::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
 use anyhow::Context;
 use anyhow::Result;

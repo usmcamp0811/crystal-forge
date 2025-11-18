@@ -1,4 +1,4 @@
-use crate::models::config::VulnixConfig;
+use crate::config::VulnixConfig;
 use crate::vulnix::vulnix_parser::VulnixEntry;
 
 use anyhow::{Result, anyhow};

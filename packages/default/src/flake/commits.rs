@@ -1,5 +1,5 @@
+use crate::config;
 use crate::models::commits::Commit;
-use crate::models::config;
 use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
 use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
@@ -53,7 +53,7 @@ pub async fn fetch_and_insert_recent_commits(
 /// This is meant to run once when the server first starts
 pub async fn initialize_flake_commits(
     pool: &PgPool,
-    watched_flakes: &[crate::models::config::WatchedFlake],
+    watched_flakes: &[crate::config::WatchedFlake],
 ) -> Result<()> {
     info!(
         "🔄 Initializing commits for {} watched flakes",

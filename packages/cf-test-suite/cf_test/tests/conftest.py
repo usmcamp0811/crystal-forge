@@ -29,6 +29,7 @@ def pytest_configure(config: pytest.Config) -> None:
         ("build_pipeline", "Build pipeline tests"),
         ("reservation_queue", "Build reservation queue tests"),
         ("vm_internal", "Tests that run inside VMs"),
+        ("dashboard", "Tests the Grafana Dashboard"),
     ]:
         config.addinivalue_line("markers", f"{mark}: {desc}")
 

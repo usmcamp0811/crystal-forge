@@ -1,5 +1,5 @@
 use crate::handlers::agent::heartbeat::LogResponse;
-use crate::models::config::{CacheType, deployment::DeploymentConfig};
+use crate::config::{CacheType, deployment::DeploymentConfig};
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;

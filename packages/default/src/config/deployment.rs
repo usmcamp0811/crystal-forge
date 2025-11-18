@@ -1,4 +1,4 @@
-use crate::models::config::{CacheType, duration_serde};
+use crate::config::{CacheType, duration_serde};
 use crate::models::deployment_policies::DeploymentPolicy;
 use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};

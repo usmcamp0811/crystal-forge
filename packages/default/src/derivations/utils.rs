@@ -1,4 +1,4 @@
-use crate::models::config::BuildConfig;
+use crate::config::BuildConfig;
 use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
