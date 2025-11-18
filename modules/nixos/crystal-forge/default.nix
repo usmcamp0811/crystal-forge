@@ -1396,7 +1396,7 @@ in {
         PGHOST = cfg.dashboards.datasource.host;
         PGPORT = toString cfg.dashboards.datasource.port;
         PGDATABASE = cfg.dashboards.datasource.database;
-        PGUSER = cfg.database.user; # Use the main CF user to grant permissions
+        PGUSER = cfg.dashboards.datasource.user; # Use the main CF user to grant permissions
       };
 
       script = let
