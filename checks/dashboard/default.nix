@@ -190,6 +190,60 @@ in
       import cf_test
       cf_test._driver_machines = { "server": server }
 
+      # === DEBUG BLOCK: Check provisioning files ===
+      print("\n" + "="*60)
+      print("DEBUG: Checking Grafana Provisioning Configuration")
+      print("="*60)
+      
+      print("\n1️⃣ Check if provisioning directories exist:")
+      try:
+          result = server.succeed("ls -la /etc/grafana/provisioning/")
+          print(result)
+      except Exception as e:
+          print(f"ERROR: {e}")
+      
+      print("\n2️⃣ Check datasources directory:")
+      try:
+          result = server.succeed("ls -la /etc/grafana/provisioning/datasources/ || echo 'DIR NOT FOUND'")
+          print(result)
+      except Exception as e:
+          print(f"ERROR: {e}")
+      
+      print("\n3️⃣ Check datasources YAML file:")
+      try:
+          result = server.succeed("cat /etc/grafana/provisioning/datasources/*.yaml 2>/dev/null || cat /etc/grafana/provisioning/datasources/*.yml 2>/dev/null || echo 'NO YAML FILES'")
+          print(result)
+      except Exception as e:
+          print(f"ERROR: {e}")
+      
+      print("\n4️⃣ Check Grafana logs for provisioning errors:")
+      try:
+          result = server.succeed("journalctl -u grafana.service --no-pager | grep -i 'provision\\|datasource\\|error' || echo 'NO MATCHES'")
+          print(result)
+      except Exception as e:
+          print(f"ERROR: {e}")
+      
+      print("\n5️⃣ Check Grafana datasources via API:")
+      try:
+          result = server.succeed("curl -sS -u admin:admin http://127.0.0.1:3000/api/datasources | jq . || echo 'FAILED'")
+          print(result)
+      except Exception as e:
+          print(f"ERROR: {e}")
+      
+      print("\n6️⃣ Check if crystal-forge-grafana-db-init service succeeded:")
+      try:
+          result = server.succeed("systemctl status crystal-forge-grafana-db-init")
+          print(result)
+      except Exception as e:
+          print(f"ERROR: {e}")
+      
+      print("\n7️⃣ Check database - does grafana user exist?:")
+      try:
+          result = server.succeed("psql -U crystal_forge -d crystal_forge -c \"SELECT usename FROM pg_user WHERE usename='grafana';\" 2>/dev/null || echo 'FAILED'")
+          print(result)
+      except Exception as e:
+          print(f"ERROR: {e}")
+
       print("\n" + "="*60)
       print("Running Grafana Dashboard Tests")
       print("="*60 + "\n")

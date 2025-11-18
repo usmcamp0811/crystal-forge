@@ -1330,8 +1330,7 @@ in {
     # Grafana dashboard configuration
     services.grafana = lib.mkIf cfg.dashboards.enable {
       enable = true;
-      settings = lib.mkIf cfg.dashboards.grafana.provision {
-        # Ensure Grafana has PostgreSQL plugin (built-in, but explicit)
+      settings = {
         "plugin.grafana-postgresql-datasource" = {
           enabled = true;
         };
@@ -1340,11 +1339,12 @@ in {
       provision = lib.mkIf cfg.dashboards.grafana.provision {
         enable = true;
 
-        # Configure the Crystal Forge PostgreSQL datasource
         datasources.settings = {
           apiVersion = 1;
           datasources = [
             ({
+                uid = "crystal-forge-postgres";
+                id = 1;
                 name = cfg.dashboards.datasource.name;
                 type = "postgres";
                 url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
@@ -1366,7 +1366,6 @@ in {
           ];
         };
 
-        # Provision the Crystal Forge dashboard(s)
         dashboards.settings = {
           apiVersion = 1;
           providers = [
