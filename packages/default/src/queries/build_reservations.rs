@@ -1,4 +1,4 @@
-use crate::models::derivations::Derivation;
+use crate::derivations::Derivation;
 use crate::queries::derivations::EvaluationStatus;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -318,7 +318,7 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
         r#"
         SELECT 
             id, commit_id,
-            derivation_type as "derivation_type: crate::models::derivations::DerivationType",
+            derivation_type as "derivation_type: crate::derivations::DerivationType",
             derivation_name, derivation_path, derivation_target,
             scheduled_at, completed_at, started_at, attempt_count,
             evaluation_duration_ms, error_message, pname, version, status_id,

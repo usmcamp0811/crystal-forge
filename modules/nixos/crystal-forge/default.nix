@@ -1262,6 +1262,55 @@ in {
         crystal-forge-map crystal-forge ${cfg.database.user}
       '';
 
+      initialScript = lib.mkIf cfg.dashboards.enable (
+        pkgs.writeText "init-crystal-forge-grafana.sql" ''
+          -- Create users if they don't exist
+          DO $$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_user WHERE usename = 'crystal_forge') THEN
+              CREATE USER crystal_forge LOGIN;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_user WHERE usename = 'grafana') THEN
+              CREATE USER grafana LOGIN;
+            END IF;
+          END
+          $$;
+
+          -- Create database
+          SELECT 'CREATE DATABASE crystal_forge OWNER crystal_forge'
+          WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'crystal_forge')\gexec
+
+          -- Grant database-level privileges
+          GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+          GRANT CONNECT ON DATABASE crystal_forge TO grafana;
+
+          -- Connect to database and set schema permissions
+          \c crystal_forge
+
+          -- PostgreSQL 15+ requires explicit schema permissions
+          ALTER SCHEMA public OWNER TO crystal_forge;
+
+          -- Grant comprehensive permissions to grafana
+          GRANT USAGE ON SCHEMA public TO grafana;
+          GRANT CREATE ON SCHEMA public TO grafana;
+          GRANT ALL PRIVILEGES ON SCHEMA public TO grafana;
+
+          -- Grant permissions on all current tables and sequences
+          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO grafana;
+          GRANT SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA public TO grafana;
+
+          -- Set default privileges for future objects created by crystal_forge
+          ALTER DEFAULT PRIVILEGES FOR USER crystal_forge IN SCHEMA public
+            GRANT SELECT ON TABLES TO grafana;
+
+          -- Set default privileges for objects created by grafana
+          ALTER DEFAULT PRIVILEGES FOR USER grafana IN SCHEMA public
+            GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO grafana;
+          ALTER DEFAULT PRIVILEGES FOR USER grafana IN SCHEMA public
+            GRANT SELECT, UPDATE ON SEQUENCES TO grafana;
+        ''
+      );
+
       # Authentication - combine rules for both users
       authentication = lib.mkAfter (
         lib.optionalString cfg.server.enable ''
@@ -1281,9 +1330,7 @@ in {
     # Grafana dashboard configuration
     services.grafana = lib.mkIf cfg.dashboards.enable {
       enable = true;
-
-      settings = lib.mkIf cfg.dashboards.grafana.provision {
-        # Ensure Grafana has PostgreSQL plugin (built-in, but explicit)
+      settings = {
         "plugin.grafana-postgresql-datasource" = {
           enabled = true;
         };
@@ -1292,40 +1339,114 @@ in {
       provision = lib.mkIf cfg.dashboards.grafana.provision {
         enable = true;
 
-        # Configure the Crystal Forge PostgreSQL datasource
-        datasources.settings.datasources = [
-          {
-            name = cfg.dashboards.datasource.name;
-            type = "postgres";
-            url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
-            database = cfg.dashboards.datasource.database;
-            user = cfg.dashboards.datasource.user;
-            jsonData = {
-              sslmode = cfg.dashboards.datasource.sslMode;
-              postgresVersion = 1400;
-              timescaledb = false;
-            };
-            secureJsonData = lib.mkIf (cfg.dashboards.datasource.passwordFile != null) {
-              password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
-            };
-            isDefault = false;
-            editable = true;
-          }
-        ];
+        datasources.settings = {
+          apiVersion = 1;
+          datasources = [
+            ({
+                uid = "crystal-forge-postgres";
+                id = 1;
+                name = cfg.dashboards.datasource.name;
+                type = "postgres";
+                url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
+                database = cfg.dashboards.datasource.database;
+                user = cfg.dashboards.datasource.user;
+                jsonData = {
+                  sslmode = cfg.dashboards.datasource.sslMode;
+                  postgresVersion = 1400;
+                  timescaledb = false;
+                };
+                isDefault = false;
+                editable = true;
+              }
+              // lib.optionalAttrs (cfg.dashboards.datasource.passwordFile != null) {
+                secureJsonData = {
+                  password = "$__file{${cfg.dashboards.datasource.passwordFile}}";
+                };
+              })
+          ];
+        };
 
-        # Provision the Crystal Forge dashboard(s)
-        dashboards.settings.providers = [
-          {
-            name = "Crystal Forge";
-            type = "file";
-            options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
-            disableDeletion = cfg.dashboards.grafana.disableDeletion;
-            updateIntervalSeconds = 60;
-          }
-        ];
+        dashboards.settings = {
+          apiVersion = 1;
+          providers = [
+            {
+              name = "Crystal Forge";
+              type = "file";
+              options.path = "${pkgs.crystal-forge.dashboards}/dashboards";
+              disableDeletion = cfg.dashboards.grafana.disableDeletion;
+              updateIntervalSeconds = 60;
+            }
+          ];
+        };
       };
     };
 
+    systemd.services.crystal-forge-grafana-db-init = lib.mkIf cfg.dashboards.enable {
+      description = "Initialize Crystal Forge database for Grafana";
+      after = lib.optional cfg.local-database "postgresql.service";
+      before = ["grafana.service"];
+      wantedBy = ["multi-user.target"];
+
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+
+      environment = {
+        PGHOST = cfg.dashboards.datasource.host;
+        PGPORT = toString cfg.dashboards.datasource.port;
+        PGDATABASE = cfg.dashboards.datasource.database;
+        PGUSER = cfg.database.user; # Use the main CF user to grant permissions
+      };
+
+      script = let
+        psqlCmd =
+          if cfg.local-database
+          then "${postgres_pkg}/bin/psql"
+          else "${pkgs.postgresql}/bin/psql";
+      in ''
+        # Wait for database to be available
+        max_attempts=30
+        attempt=0
+        while ! ${psqlCmd} -c "SELECT 1" >/dev/null 2>&1; do
+          attempt=$((attempt + 1))
+          if [ $attempt -ge $max_attempts ]; then
+            echo "Failed to connect to database after $max_attempts attempts"
+            exit 1
+          fi
+          echo "Waiting for database... (attempt $attempt/$max_attempts)"
+          sleep 2
+        done
+
+        # Create grafana user if it doesn't exist (works for both local and remote)
+        ${psqlCmd} <<'EOF'
+        DO $$
+        BEGIN
+          IF NOT EXISTS (SELECT FROM pg_user WHERE usename = '${cfg.dashboards.datasource.user}') THEN
+            CREATE USER ${cfg.dashboards.datasource.user} LOGIN;
+          END IF;
+        END
+        $$;
+
+        -- Grant permissions
+        GRANT USAGE ON SCHEMA public TO ${cfg.dashboards.datasource.user};
+        GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${cfg.dashboards.datasource.user};
+        GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ${cfg.dashboards.datasource.user};
+
+        -- Set default privileges
+        ALTER DEFAULT PRIVILEGES FOR USER ${cfg.database.user} IN SCHEMA public
+          GRANT SELECT ON TABLES TO ${cfg.dashboards.datasource.user};
+        EOF
+      '';
+    };
+
+    systemd.services.grafana = lib.mkIf cfg.dashboards.enable {
+      after =
+        lib.optionals cfg.local-database ["postgresql.service"]
+        ++ ["crystal-forge-grafana-db-init.service"];
+      wants = ["crystal-forge-grafana-db-init.service"];
+      requires = ["crystal-forge-grafana-db-init.service"];
+    };
     systemd.services."crystal-forge-postgres-jobs" = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Postgres Jobs";
       after = ["postgresql.service"];
@@ -1539,7 +1660,8 @@ in {
             RestartSec = 5;
           }
           // parsed.svc
-        ) // {
+        )
+        // {
           # Ensure ExecStart is never removed by parsed.svc merge
           ExecStart = lib.mkForce builderScript;
         };
@@ -1749,6 +1871,14 @@ in {
       {
         assertion = cfg.dashboards.enable -> (cfg.dashboards.datasource.host != null);
         message = "Crystal Forge dashboards require database.host or dashboards.datasource.host to be set";
+      }
+      {
+        assertion = cfg.dashboards.enable && !cfg.local-database -> (cfg.dashboards.datasource.passwordFile != null);
+        message = "When using remote database for dashboards, dashboards.datasource.passwordFile must be set";
+      }
+      {
+        assertion = cfg.dashboards.enable && !cfg.local-database -> (cfg.dashboards.datasource.host != "/run/postgresql");
+        message = "When using remote database for dashboards, dashboards.datasource.host must be a network address, not a socket path";
       }
     ];
   };

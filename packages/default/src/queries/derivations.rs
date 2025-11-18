@@ -1,7 +1,6 @@
 use crate::models::commits::Commit;
 // Add this line
-use crate::models::derivations::build_agent_target;
-use crate::models::derivations::{Derivation, DerivationType, parse_derivation_path};
+use crate::derivations::{Derivation, DerivationType, build_agent_target, parse_derivation_path};
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
@@ -121,11 +120,11 @@ pub async fn insert_derivation_with_target(
     derivation_type: &str,
     derivation_target: Option<&str>,
     cf_agent_enabled: Option<bool>,
-) -> Result<crate::models::derivations::Derivation> {
+) -> Result<crate::derivations::Derivation> {
     let commit_id = commit.map(|c| c.id);
 
     let derivation = sqlx::query_as!(
-        crate::models::derivations::Derivation,
+        crate::derivations::Derivation,
         r#"
         INSERT INTO derivations (
             commit_id,

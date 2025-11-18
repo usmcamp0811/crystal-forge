@@ -108,7 +108,7 @@ impl Derivation {
     }
 
     pub async fn summary(&self) -> anyhow::Result<String> {
-        let pool = crate::models::config::CrystalForgeConfig::db_pool().await?;
+        let pool = crate::config::CrystalForgeConfig::db_pool().await?;
 
         if let Some(commit_id) = self.commit_id {
             let commit = crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;

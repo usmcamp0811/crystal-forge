@@ -1,6 +1,6 @@
 use super::Derivation;
 use super::utils::*;
-use crate::models::config::{BuildConfig, CacheConfig};
+use crate::config::{BuildConfig, CacheConfig};
 use anyhow::bail;
 use anyhow::{Context, Result};
 use sqlx::PgPool;

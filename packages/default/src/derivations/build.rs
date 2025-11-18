@@ -1,8 +1,8 @@
 use super::Derivation;
 use super::utils::*;
 use crate::builder::get_gc_root_path;
-use crate::models::config::BuildConfig;
-use crate::models::config::CacheConfig;
+use crate::config::BuildConfig;
+use crate::config::CacheConfig;
 use anyhow::Context;
 use anyhow::{Result, anyhow, bail};
 use sqlx::PgPool;
@@ -137,7 +137,7 @@ impl Derivation {
                 line_result = stdout_reader.next_line() => {
                     match line_result {
                         Ok(Some(line)) => {
-                            info!("{} stdout: {}", operation_name, line);
+                            debug!("{} stdout: {}", operation_name, line);
                         }
                         Ok(None) => break,
                         Err(e) => {

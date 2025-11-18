@@ -1,8 +1,8 @@
+use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
 use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
-use crate::models::config::{CrystalForgeConfig, FlakeConfig};
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::evaluate_with_nix_eval_jobs;
 use crate::models::flakes::Flake;
@@ -48,8 +48,10 @@ async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
         // Get all flakes from database instead of just config ones
         match get_all_flakes_from_db(&pool, &flake_config).await {
             Ok(db_flakes) => {
-                if let Err(e) = sync_all_watched_flakes_commits(&pool, &db_flakes).await {
-                    error!("❌ Error in flake polling cycle: {e}");
+                if !db_flakes.is_empty() {
+                    if let Err(e) = sync_all_watched_flakes_commits(&pool, &db_flakes).await {
+                        error!("❌ Error in flake polling cycle: {e}");
+                    }
                 }
             }
             Err(e) => error!("❌ Failed to get flakes from database: {e}"),

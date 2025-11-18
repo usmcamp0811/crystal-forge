@@ -3,7 +3,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use crystal_forge::models::config::CrystalForgeConfig;
+use crystal_forge::config::CrystalForgeConfig;
 use crystal_forge::models::system_states::SystemState;
 use ed25519_dalek::{Signer, SigningKey};
 use reqwest::blocking::Client;

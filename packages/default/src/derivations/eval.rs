@@ -1,7 +1,7 @@
 use super::Derivation;
 use crate::models::commits::Commit;
-use crate::models::config::BuildConfig;
-use crate::models::derivations::utils::get_store_path_from_drv;
+use crate::config::BuildConfig;
+use crate::derivations::utils::get_store_path_from_drv;
 use crate::models::flakes::Flake;
 use crate::queries::derivations::insert_derivation_with_target;
 use anyhow::{Context, Result, anyhow, bail};
