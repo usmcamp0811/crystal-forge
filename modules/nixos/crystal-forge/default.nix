@@ -432,6 +432,8 @@ in {
           type = lib.types.str;
           default = cfg.database.host;
           defaultText = lib.literalExpression "config.services.crystal-forge.database.host";
+          description = "PostgreSQL host for Grafana to connect to";
+        };
 
         port = lib.mkOption {
           type = lib.types.port;
