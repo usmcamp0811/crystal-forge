@@ -432,8 +432,6 @@ in {
           type = lib.types.str;
           default = cfg.database.host;
           defaultText = lib.literalExpression "config.services.crystal-forge.database.host";
-          description = "PostgreSQL host for Grafana to connect to";
-        };
 
         port = lib.mkOption {
           type = lib.types.port;
@@ -1344,7 +1342,7 @@ in {
           datasources = [
             ({
                 uid = "crystal-forge-postgres";
-                id = 1;
+                # id = 1;
                 name = cfg.dashboards.datasource.name;
                 type = "postgres";
                 url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
