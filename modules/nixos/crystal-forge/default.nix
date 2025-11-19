@@ -1344,7 +1344,6 @@ in {
           datasources = [
             ({
                 uid = "crystal-forge-postgres";
-                id = 1;
                 name = cfg.dashboards.datasource.name;
                 type = "postgres";
                 url = "${cfg.dashboards.datasource.host}:${toString cfg.dashboards.datasource.port}";
