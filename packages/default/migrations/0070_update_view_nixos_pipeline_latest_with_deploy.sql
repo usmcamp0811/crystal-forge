@@ -1,3 +1,5 @@
+DROP VIEW IF EXISTS view_nixos_pipeline_latest_with_deploy CASCADE;
+
 CREATE OR REPLACE VIEW view_nixos_pipeline_latest_with_deploy AS
 WITH nixos_latest AS (
     -- latest commit per NixOS system (by derivation_name; newest commit_timestamp wins)
