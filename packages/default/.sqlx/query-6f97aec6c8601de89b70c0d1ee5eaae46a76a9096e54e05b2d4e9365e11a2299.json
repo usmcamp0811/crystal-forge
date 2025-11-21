@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            id as \"id!\",\n            derivation_name as \"derivation_name!\",\n            derivation_type as \"derivation_type!\",\n            derivation_path,\n            pname,\n            version,\n            status_id as \"status_id!\",\n            nixos_id,\n            nixos_commit_ts,\n            total_packages,\n            completed_packages,\n            cached_packages,\n            active_workers,\n            build_type as \"build_type!\",\n            queue_position\n        FROM view_buildable_derivations\n        WHERE \n            CASE \n                WHEN build_type = 'system' AND $1 = true THEN \n                    cached_packages = total_packages\n                ELSE true\n            END\n        ORDER BY queue_position\n        LIMIT 1\n        ",
+  "query": "\n        SELECT \n            id as \"id!\",\n            derivation_name as \"derivation_name!\",\n            derivation_type as \"derivation_type!\",\n            derivation_path,\n            pname,\n            version,\n            status_id as \"status_id!\",\n            nixos_id,\n            nixos_commit_ts,\n            total_packages,\n            completed_packages,\n            cached_packages,\n            active_workers,\n            build_type as \"build_type!\",\n            queue_position\n        FROM view_buildable_derivations\n        WHERE \n            build_type != 'system'\n            OR NOT $1\n            OR cached_packages = total_packages\n        ORDER BY queue_position\n        LIMIT 1\n        ",
   "describe": {
     "columns": [
       {
@@ -102,5 +102,5 @@
       true
     ]
   },
-  "hash": "80a15907a050d5513b6bc3d8eabf1bc9b809b2ff238c125ae783558e0222e882"
+  "hash": "6f97aec6c8601de89b70c0d1ee5eaae46a76a9096e54e05b2d4e9365e11a2299"
 }
