@@ -119,3 +119,52 @@ ORDER BY
     nl.commit_timestamp DESC,
     nl.system_name;
 
+DROP VIEW IF EXISTS view_buildable_derivations CASCADE;
+
+CREATE VIEW view_buildable_derivations AS
+WITH buildable_systems AS (
+    -- NixOS systems ready to build (dry-run-complete or build-pending, not reserved)
+    SELECT
+        d.id,
+        d.derivation_name,
+        d.derivation_type,
+        d.derivation_path,
+        d.status_id,
+        d.id AS nixos_id,
+        c.commit_timestamp AS nixos_commit_ts,
+        COUNT(DISTINCT br.id) AS active_workers,
+        ROW_NUMBER() OVER (ORDER BY c.commit_timestamp DESC,
+            d.id ASC) AS queue_position
+    FROM
+        derivations d
+        JOIN commits c ON c.id = d.commit_id
+        LEFT JOIN build_reservations br ON br.derivation_id = d.id
+    WHERE
+        d.derivation_type = 'nixos'
+        AND d.status_id IN (5, 7)
+        AND d.derivation_path IS NOT NULL
+        AND d.attempt_count <= 5
+        AND br.id IS NULL
+    GROUP BY
+        d.id,
+        d.derivation_name,
+        d.derivation_type,
+        d.derivation_path,
+        d.status_id,
+        c.commit_timestamp
+)
+SELECT
+    id,
+    derivation_name,
+    derivation_type,
+    derivation_path,
+    status_id,
+    nixos_id,
+    nixos_commit_ts,
+    active_workers,
+    queue_position
+FROM
+    buildable_systems
+ORDER BY
+    queue_position;
+

@@ -24,16 +24,10 @@ pub struct BuildableDerivation {
     pub derivation_name: String,
     pub derivation_type: String,
     pub derivation_path: Option<String>,
-    pub pname: Option<String>,
-    pub version: Option<String>,
     pub status_id: i32,
-    pub nixos_id: Option<i32>,
+    pub nixos_id: i32,
     pub nixos_commit_ts: Option<DateTime<Utc>>,
-    pub total_packages: Option<i64>,
-    pub completed_packages: Option<i64>,
-    pub cached_packages: Option<i64>,
     pub active_workers: Option<i64>,
-    pub build_type: String,
     pub queue_position: Option<i64>,
 }
 
@@ -233,26 +227,20 @@ pub async fn claim_next_derivation(pool: &PgPool, worker_id: &str) -> Result<Opt
     let buildable = sqlx::query_as!(
         BuildableDerivation,
         r#"
-        SELECT 
-            id as "id!",
-            derivation_name as "derivation_name!",
-            derivation_type as "derivation_type!",
-            derivation_path,
-            pname,
-            version,
-            status_id as "status_id!",
-            nixos_id,
-            nixos_commit_ts,
-            total_packages,
-            completed_packages,
-            cached_packages,
-            active_workers,
-            build_type as "build_type!",
-            queue_position
-        FROM view_buildable_derivations
-        ORDER BY queue_position
-        LIMIT 1
-        "#
+    SELECT 
+        id as "id!",
+        derivation_name as "derivation_name!",
+        derivation_type as "derivation_type!",
+        derivation_path,
+        status_id as "status_id!",
+        nixos_id as "nixos_id!",
+        nixos_commit_ts,
+        active_workers,
+        queue_position
+    FROM view_buildable_derivations
+    ORDER BY queue_position
+    LIMIT 1
+    "#
     )
     .fetch_optional(&mut *tx)
     .await?;
