@@ -14,6 +14,110 @@ with lib.crystal-forge; let
   # db_password = "password";
   # cf_port = 3445;
   # pgweb_port = 12084;
+  scenarioRunnerPy = pkgs.writeTextFile {
+    name = "scenario-runner.py";
+    text = ''
+      import sys
+      import os
+      sys.path.insert(0, os.environ.get("PYTHONPATH", ""))
+      from cf_test import CFTestClient, CFTestConfig
+      from cf_test.scenarios.cli import _discover_scenarios, _filter_kwargs, _coerce_arg
+
+      cfg = CFTestConfig()
+      cfg.db_host = os.getenv("CF_TEST_DB_HOST", "127.0.0.1")
+      cfg.db_port = int(os.getenv("CF_TEST_DB_PORT", "5432"))
+      cfg.db_name = os.getenv("CF_TEST_DB_NAME", "crystal_forge")
+      cfg.db_user = os.getenv("CF_TEST_DB_USER", "postgres")
+      cfg.db_password = os.getenv("CF_TEST_DB_PASSWORD", "")
+
+      client = CFTestClient(config=cfg)
+      scenarios = _discover_scenarios()
+      scenario_name = sys.argv[1]
+
+      if scenario_name not in scenarios:
+          print(f"""❌ Unknown scenario: {scenario_name}""")
+          print(f"""Available: {", ".join(sorted(scenarios.keys()))}""")
+          sys.exit(1)
+
+      kwargs = {}
+      for arg in sys.argv[2:]:
+          if '=' in arg:
+              k, v = arg.split('=', 1)
+              kwargs[k.replace('-', '_')] = _coerce_arg(v)
+
+      call_kwargs = _filter_kwargs(scenarios[scenario_name], kwargs)
+      print(f"\n📋 Running scenario: {scenario_name}")
+      if call_kwargs:
+          print(f"   Parameters: {call_kwargs}\n")
+
+      try:
+          result = scenarios[scenario_name](client, **call_kwargs)
+          print(f"\n✅ Success! Created {len(result.get('hostnames', []))} systems")
+          for hn in result.get('hostnames', []):
+              print(f"   • {hn}")
+      except Exception as e:
+          print(f"\n❌ Failed: {e}")
+          import traceback
+          traceback.print_exc()
+          sys.exit(1)
+    '';
+  };
+
+  run-scenario = pkgs.writeShellApplication {
+    name = "run-scenario";
+    runtimeInputs = [
+      (pkgs.python3.withPackages (
+        ps:
+          with ps;
+            [
+              psycopg2
+            ]
+            ++ [pkgs.crystal-forge.cf-test-suite]
+      ))
+
+      pkgs.postgresql
+    ];
+    text = ''
+      set -euo pipefail
+
+      SCENARIO_NAME="''${1:-mixed_commit_lag}"
+      shift || true
+
+      # Ensure required environment variables are set with your devshell defaults
+      : "''${CF_TEST_DB_HOST:=$DB_HOST}"
+      : "''${CF_TEST_DB_PORT:=$DB_PORT}"
+      : "''${CF_TEST_DB_USER:=$DB_USER}"
+      : "''${CF_TEST_DB_PASSWORD:=$DB_PASSWORD}"
+      : "''${CF_TEST_DB_NAME:=$DB_NAME}"
+
+      export CF_TEST_DB_HOST CF_TEST_DB_PORT CF_TEST_DB_USER CF_TEST_DB_PASSWORD CF_TEST_DB_NAME
+
+      # Check database connection
+      check_db() {
+          local psql_cmd=(psql -h "$CF_TEST_DB_HOST" -p "$CF_TEST_DB_PORT" -U "$CF_TEST_DB_USER" -d "$CF_TEST_DB_NAME" -c "SELECT 1")
+          if [[ -n "$CF_TEST_DB_PASSWORD" ]]; then
+              PGPASSWORD="$CF_TEST_DB_PASSWORD" "''${psql_cmd[@]}" &>/dev/null
+          else
+              "''${psql_cmd[@]}" &>/dev/null
+          fi
+      }
+
+      echo "📍 Connecting to database at $CF_TEST_DB_HOST:$CF_TEST_DB_PORT..."
+      for i in {1..30}; do
+          if check_db; then
+              echo "✓ Database ready"
+              break
+          fi
+          if [[ $i -eq 30 ]]; then
+              echo "❌ Could not connect to database after 30 attempts"
+              exit 1
+          fi
+          sleep 1
+      done
+
+      python3 ${scenarioRunnerPy} "$SCENARIO_NAME" "$@"
+    '';
+  };
 in
   mkShell {
     buildInputs = with pkgs; [
@@ -27,6 +131,7 @@ in
       vulnix
       python3
       python3Packages.pytest
+      run-scenario
       # Add the test modules to the shell
     ];
     shellHook = ''
@@ -96,7 +201,7 @@ in
       export CRYSTAL_FORGE__CLIENT__PRIVATE_KEY="$CF_KEY_DIR/agent.key"
       hostname="$(hostname)"
       pubkey="$(cat "$CF_KEY_DIR/agent.pub")"
-      export CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__"''${hostname}"="$pubkey"
+      export "CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__''${hostname}"="$pubkey"
       ${pkgs.crystal-forge.devScripts.envExports}
       sqlx-refresh() {
         echo "🔄 Resetting and preparing sqlx..."
