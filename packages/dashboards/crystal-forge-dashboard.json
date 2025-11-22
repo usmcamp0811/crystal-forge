@@ -18,7 +18,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 5,
+  "id": 7,
   "links": [],
   "panels": [
     {
@@ -444,10 +444,21 @@
           "mappings": [
             {
               "options": {
+                "pattern": "^0 deployed \\((.*)\\)§[1-9]$",
+                "result": {
+                  "color": "dark-blue",
+                  "index": 0,
+                  "text": "$1 deployed ($2)"
+                }
+              },
+              "type": "regex"
+            },
+            {
+              "options": {
                 "pattern": "^(.*) deployed \\((.*)\\)§0$",
                 "result": {
                   "color": "green",
-                  "index": 0,
+                  "index": 1,
                   "text": "$1 deployed ($2)"
                 }
               },
@@ -457,8 +468,8 @@
               "options": {
                 "pattern": "^(.*) deployed \\((.*)\\)§[1-2]$",
                 "result": {
-                  "color": "orange",
-                  "index": 1,
+                  "color": "yellow",
+                  "index": 2,
                   "text": "$1 deployed ($2)"
                 }
               },
@@ -469,7 +480,7 @@
                 "pattern": "^(.*) deployed \\((.*)\\)§([3-9]|\\d{2,})$",
                 "result": {
                   "color": "red",
-                  "index": 2,
+                  "index": 3,
                   "text": "$1 deployed ($2)"
                 }
               },
@@ -570,6 +581,10 @@
       },
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
           "custom": {
             "align": "auto",
             "cellOptions": {
@@ -591,7 +606,83 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^0 deployed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^1 deployed.*§0$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^1 deployed.*§1$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^1 deployed.*§[23]$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^1 deployed.*§[4-9]"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 6,
@@ -1420,6 +1511,6 @@
   "timepicker": {},
   "timezone": "browser",
   "title": "Crystal Forge Dashboard",
-  "uid": "e54a8d8d-c299-446c-a2b0-cdd992302269",
+  "uid": "d3997b8a-d925-4315-8881-49c27fe23f2e",
   "version": 1
 }
