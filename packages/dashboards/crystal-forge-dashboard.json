@@ -137,23 +137,8 @@
         "overrides": [
           {
             "matcher": {
-              "id": "byName",
-              "options": "Offline"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#424242",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Healthy"
+              "id": "byRegexp",
+              "options": ".*Healthy.*"
             },
             "properties": [
               {
@@ -167,8 +152,23 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "🔴 Offline"
+              "id": "byRegexp",
+              "options": ".*Warning.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*Critical.*"
             },
             "properties": [
               {
@@ -182,29 +182,14 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "🟠 Critical"
+              "id": "byRegexp",
+              "options": ".*Offline.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "dotfiles Healthy"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "semi-dark-green",
+                  "fixedColor": "#424242",
                   "mode": "fixed"
                 }
               }
@@ -229,7 +214,7 @@
         },
         "pieType": "pie",
         "reduceOptions": {
-          "calcs": ["uniqueValues"],
+          "calcs": ["lastNotNull"],
           "fields": "/^count$/",
           "values": true
         },
@@ -297,208 +282,13 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Outdated"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Up to Date"
+              "options": "up_to_date"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Updating"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Unknown State"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#c58342",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Evaluation Stuck"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#c58342",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Offline"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#424242",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "No Data"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f5f5f5",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "starting"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "offline"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "online"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "stale"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "🔴 Behind"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "⚪ No Evaluation"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#424242",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "unknown"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#465145",
                   "mode": "fixed"
                 }
               }
@@ -522,13 +312,43 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "up_to_date"
+              "options": "no_deployment"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "green",
+                  "fixedColor": "#000000",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#424242",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ahead"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
                   "mode": "fixed"
                 }
               }
@@ -623,48 +443,37 @@
           "links": [],
           "mappings": [
             {
-              "options": {
-                "pattern": "^(0) deployed \\((.*)\\)§.*$",
-                "result": {
-                  "color": "dark-blue",
-                  "index": 0,
-                  "text": "$2"
-                }
-              },
-              "type": "regex"
-            },
-            {
-              "options": {
-                "pattern": "^(.*) deployed \\((.*)\\)§([3-9]|\\d{2,})$",
-                "result": {
-                  "color": "red",
-                  "index": 1,
-                  "text": "$1 deployed ($2)"
-                }
-              },
-              "type": "regex"
-            },
-            {
-              "options": {
-                "pattern": "^(.*) deployed \\((.*)\\)§[1-2]$",
-                "result": {
-                  "color": "yellow",
-                  "index": 2,
-                  "text": "$1 deployed ($2)"
-                }
-              },
-              "type": "regex"
-            },
-            {
+              "type": "regex",
               "options": {
                 "pattern": "^(.*) deployed \\((.*)\\)§0$",
                 "result": {
                   "color": "green",
-                  "index": 3,
+                  "index": 0,
                   "text": "$1 deployed ($2)"
                 }
-              },
-              "type": "regex"
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^(.*) deployed \\((.*)\\)§[1-2]$",
+                "result": {
+                  "color": "orange",
+                  "index": 1,
+                  "text": "$1 deployed ($2)"
+                }
+              }
+            },
+            {
+              "type": "regex",
+              "options": {
+                "pattern": "^(.*) deployed \\((.*)\\)§([3-9]|\\d{2,})$",
+                "result": {
+                  "color": "red",
+                  "index": 2,
+                  "text": "$1 deployed ($2)"
+                }
+              }
             }
           ],
           "thresholds": {
