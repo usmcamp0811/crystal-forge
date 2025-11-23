@@ -171,6 +171,7 @@ pub async fn cleanup_stale_reservations(
     Ok(derivation_ids)
 }
 
+// TODO: Remove this
 /// Get the next buildable derivation from the queue
 pub async fn get_next_buildable_derivation(
     pool: &PgPool,
@@ -190,14 +191,9 @@ pub async fn get_next_buildable_derivation(
             active_workers,
             queue_position
         FROM view_buildable_derivations
-        WHERE 
-            build_type != 'system'
-            OR NOT $1
-            OR cached_packages = total_packages
         ORDER BY queue_position
         LIMIT 1
         "#,
-        wait_for_cache_push
     )
     .fetch_optional(pool)
     .await?;
@@ -417,27 +413,6 @@ pub async fn get_active_worker_count(pool: &PgPool) -> Result<i64> {
         SELECT COUNT(DISTINCT worker_id) as "count!"
         FROM build_reservations
         "#
-    )
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count)
-}
-
-/// Get queue depth (total buildable derivations)
-pub async fn get_queue_depth(pool: &PgPool, wait_for_cache_push: bool) -> Result<i64> {
-    let count = sqlx::query_scalar!(
-        r#"
-        SELECT COUNT(*) as "count!"
-        FROM view_buildable_derivations
-        WHERE 
-            CASE 
-                WHEN build_type = 'system' AND $1 = true THEN 
-                    cached_packages = total_packages
-                ELSE true
-            END
-        "#,
-        wait_for_cache_push
     )
     .fetch_one(pool)
     .await?;
