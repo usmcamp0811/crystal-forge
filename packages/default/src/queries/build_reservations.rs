@@ -171,36 +171,6 @@ pub async fn cleanup_stale_reservations(
     Ok(derivation_ids)
 }
 
-// TODO: Remove this
-/// Get the next buildable derivation from the queue
-pub async fn get_next_buildable_derivation(
-    pool: &PgPool,
-    wait_for_cache_push: bool,
-) -> Result<Option<BuildableDerivation>> {
-    let row = sqlx::query_as!(
-        BuildableDerivation,
-        r#"
-        SELECT 
-            id as "id!",
-            derivation_name as "derivation_name!",
-            derivation_type as "derivation_type!",
-            derivation_path,
-            status_id as "status_id!",
-            nixos_id,
-            nixos_commit_ts,
-            active_workers,
-            queue_position
-        FROM view_buildable_derivations
-        ORDER BY queue_position
-        LIMIT 1
-        "#,
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row)
-}
-
 /// Claim the next derivation that needs building
 ///
 /// FIXED: Only claims derivations with status = 5 (DryRunComplete)
