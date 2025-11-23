@@ -444,7 +444,7 @@
           "mappings": [
             {
               "options": {
-                "pattern": "^0 deployed \\((.*)\\)§[1-9]$",
+                "pattern": "^0 deployed \((.*)\)§([1-9]\d*)$",
                 "result": {
                   "color": "dark-blue",
                   "index": 0,
