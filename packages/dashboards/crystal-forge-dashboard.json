@@ -18,7 +18,7 @@
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
-  "id": 32,
+  "id": 8,
   "links": [],
   "panels": [
     {
@@ -66,7 +66,7 @@
         "textMode": "auto",
         "wideLayout": true
       },
-      "pluginVersion": "12.0.6",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -137,23 +137,8 @@
         "overrides": [
           {
             "matcher": {
-              "id": "byName",
-              "options": "Offline"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#424242",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Healthy"
+              "id": "byRegexp",
+              "options": ".*Healthy.*"
             },
             "properties": [
               {
@@ -167,8 +152,23 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "🔴 Offline"
+              "id": "byRegexp",
+              "options": ".*Warning.*"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": ".*Critical.*"
             },
             "properties": [
               {
@@ -182,29 +182,14 @@
           },
           {
             "matcher": {
-              "id": "byName",
-              "options": "🟠 Critical"
+              "id": "byRegexp",
+              "options": ".*Offline.*"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "dotfiles Healthy"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "semi-dark-green",
+                  "fixedColor": "#424242",
                   "mode": "fixed"
                 }
               }
@@ -229,8 +214,8 @@
         },
         "pieType": "pie",
         "reduceOptions": {
-          "calcs": ["uniqueValues"],
-          "fields": "/^count$/",
+          "calcs": ["lastNotNull"],
+          "fields": "/.*/",
           "values": true
         },
         "tooltip": {
@@ -239,7 +224,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.6",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -249,7 +234,7 @@
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
-          "rawSql": "-- Per-flake heartbeat breakdown (stacked bar friendly) — hostnames via subquery (no join)\nSELECT\n  (\n    SELECT name\n    FROM flakes\n    WHERE id = (\n      SELECT s.flake_id\n      FROM systems AS s\n      WHERE s.hostname = h.hostname\n      LIMIT 1\n    )\n  ) AS flake_name,\n  h.heartbeat_status AS health_status,\n  COUNT(*) AS count\nFROM view_system_heartbeat_status AS h\nWHERE h.hostname IN (\n  SELECT s.hostname\n  FROM systems AS s\n  WHERE s.flake_id IN (${flake:csv})\n)\nGROUP BY flake_name, h.heartbeat_status\nORDER BY flake_name, h.heartbeat_status;\n",
+          "rawSql": "SELECT\n  COALESCE(SUM(CASE WHEN h.heartbeat_status = 'Healthy' THEN 1 ELSE 0 END), 0) AS \"Healthy\",\n  COALESCE(SUM(CASE WHEN h.heartbeat_status = 'Warning' THEN 1 ELSE 0 END), 0) AS \"Warning\",\n  COALESCE(SUM(CASE WHEN h.heartbeat_status = 'Critical' THEN 1 ELSE 0 END), 0) AS \"Critical\",\n  COALESCE(SUM(CASE WHEN h.heartbeat_status = 'Offline' THEN 1 ELSE 0 END), 0) AS \"Offline\"\nFROM view_system_heartbeat_status AS h\nWHERE h.hostname IN (\n  SELECT s.hostname\n  FROM systems AS s\n  WHERE s.flake_id IN (${flake:csv})\n);\n",
           "refId": "A",
           "sql": {
             "columns": [
@@ -297,208 +282,13 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "Outdated"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Up to Date"
+              "options": "up_to_date"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
                   "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Updating"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Unknown State"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#c58342",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Evaluation Stuck"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#c58342",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Offline"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#424242",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "No Data"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#f5f5f5",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "starting"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "yellow",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "offline"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "online"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "green",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "stale"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "orange",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "🔴 Behind"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "red",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "⚪ No Evaluation"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#424242",
-                  "mode": "fixed"
-                }
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "unknown"
-            },
-            "properties": [
-              {
-                "id": "color",
-                "value": {
-                  "fixedColor": "#465145",
                   "mode": "fixed"
                 }
               }
@@ -522,13 +312,43 @@
           {
             "matcher": {
               "id": "byName",
-              "options": "up_to_date"
+              "options": "no_deployment"
             },
             "properties": [
               {
                 "id": "color",
                 "value": {
-                  "fixedColor": "green",
+                  "fixedColor": "#000000",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "unknown"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "#424242",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ahead"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
                   "mode": "fixed"
                 }
               }
@@ -563,7 +383,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.6",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -624,20 +444,20 @@
           "mappings": [
             {
               "options": {
-                "pattern": "^(0) deployed \\((.*)\\)§.*$",
+                "pattern": "^0 deployed \\((.*)\\)§[1-9]$",
                 "result": {
                   "color": "dark-blue",
                   "index": 0,
-                  "text": "$2"
+                  "text": "0 deployed ($1)"
                 }
               },
               "type": "regex"
             },
             {
               "options": {
-                "pattern": "^(.*) deployed \\((.*)\\)§([3-9]|\\d{2,})$",
+                "pattern": "^(.*) deployed \\((.*)\\)§0$",
                 "result": {
-                  "color": "red",
+                  "color": "green",
                   "index": 1,
                   "text": "$1 deployed ($2)"
                 }
@@ -648,7 +468,7 @@
               "options": {
                 "pattern": "^(.*) deployed \\((.*)\\)§[1-2]$",
                 "result": {
-                  "color": "yellow",
+                  "color": "orange",
                   "index": 2,
                   "text": "$1 deployed ($2)"
                 }
@@ -657,9 +477,9 @@
             },
             {
               "options": {
-                "pattern": "^(.*) deployed \\((.*)\\)§0$",
+                "pattern": "^(.*) deployed \\((.*)\\)§([3-9]|\\d{2,})$",
                 "result": {
-                  "color": "green",
+                  "color": "red",
                   "index": 3,
                   "text": "$1 deployed ($2)"
                 }
@@ -701,7 +521,7 @@
           "sort": "none"
         }
       },
-      "pluginVersion": "12.0.6",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -761,6 +581,10 @@
       },
       "fieldConfig": {
         "defaults": {
+          "color": {
+            "fixedColor": "blue",
+            "mode": "fixed"
+          },
           "custom": {
             "align": "auto",
             "cellOptions": {
@@ -782,7 +606,83 @@
             ]
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^0 deployed"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "blue",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^1 deployed.*§0$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "green",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^1 deployed.*§1$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "yellow",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^1 deployed.*§[23]$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^1 deployed.*§[4-9]"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
       },
       "gridPos": {
         "h": 6,
@@ -801,7 +701,7 @@
         },
         "showHeader": true
       },
-      "pluginVersion": "12.0.6",
+      "pluginVersion": "12.0.4",
       "targets": [
         {
           "datasource": {
@@ -1591,24 +1491,6 @@
           "type": "grafana-postgresql-datasource",
           "uid": "crystal-forge-postgres"
         },
-        "definition": "SELECT t.__text, t.__value\nFROM (\n  SELECT DISTINCT ON (commit_id)\n         (flake_name || ' ' || short_hash) AS __text,\n         commit_id AS __value,\n         commit_timestamp\n  FROM view_commit_nixos_table\n  ORDER BY commit_id, commit_timestamp DESC\n) AS t\nORDER BY t.commit_timestamp DESC;",
-        "description": "Query to get the available commits",
-        "label": "Commit",
-        "multi": true,
-        "name": "commit",
-        "options": [],
-        "query": "SELECT t.__text, t.__value\nFROM (\n  SELECT DISTINCT ON (commit_id)\n         (flake_name || ' ' || short_hash) AS __text,\n         commit_id AS __value,\n         commit_timestamp\n  FROM view_commit_nixos_table\n  ORDER BY commit_id, commit_timestamp DESC\n) AS t\nORDER BY t.commit_timestamp DESC;",
-        "refresh": 1,
-        "regex": "",
-        "type": "query"
-      },
-      {
-        "allowCustomValue": false,
-        "current": {},
-        "datasource": {
-          "type": "grafana-postgresql-datasource",
-          "uid": "crystal-forge-postgres"
-        },
         "definition": "-- Grafana variable: text/value\nSELECT\n  f.name || '/' || d.derivation_name || ' @ ' || LEFT(c.git_commit_hash, 8) AS text,\n  d.id AS value\nFROM public.derivations d\nJOIN public.derivation_statuses s ON s.id = d.status_id\nJOIN public.commits c ON c.id = d.commit_id\nJOIN public.flakes f ON f.id = c.flake_id\nWHERE s.name = 'build-inprogress'\nORDER BY d.started_at DESC NULLS LAST;\n",
         "description": "",
         "hide": 2,
@@ -1629,6 +1511,6 @@
   "timepicker": {},
   "timezone": "browser",
   "title": "Crystal Forge Dashboard",
-  "uid": "a4dd55a8-03f8-4b55-9ebc-f9e38700e28f",
+  "uid": "39cb52f8-27d9-404f-81a5-8233493db1bc",
   "version": 1
 }

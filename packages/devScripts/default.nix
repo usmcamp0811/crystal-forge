@@ -14,30 +14,15 @@ with lib.crystal-forge; let
   cf_port = 3445;
   grafana_port = 3446;
   pgweb_port = 12084;
-  # Create the dashboard JSON file
-  crystalForgeDashboard = pkgs.writeTextFile {
-    name = "crystal-forge-dashboard.json";
-    text = builtins.toJSON (builtins.fromJSON (builtins.readFile ./dashboards/crystal-forge-dashboard.json));
-  };
   tomlFormat = pkgs.formats.toml {};
-  # gray = pkgs.writeShellApplication {
-  #   name = "test-gray";
-  #   text = ''
-  #     nix run "$PROJECT_ROOT#testAgents.test-gray.agent"
-  #   '';
-  # };
-  # lucas = pkgs.writeShellApplication {
-  #   name = "test-lucas";
-  #   text = ''
-  #     nix run "$PROJECT_ROOT#testAgents.test-lucas.agent"
-  #   '';
-  # };
+
   agent-sim = pkgs.writeShellApplication {
     name = "agent-sim";
     text = ''
       nix run "$PROJECT_ROOT#testAgents.weekly-simulation"
     '';
   };
+
   generateConfig = pkgs.writeShellApplication {
     name = "generate-config";
     runtimeInputs = with pkgs; [hostname coreutils];
@@ -60,7 +45,10 @@ with lib.crystal-forge; let
       echo "$CONFIG_FILE"
     '';
   };
-  # Create a template config that will be filled at runtime
+
+  envExports = ''
+    export CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
+  '';
   configTemplate = tomlFormat.generate "crystal-forge-config-template.toml" {
     database = {
       host = "127.0.0.1";
@@ -84,13 +72,6 @@ with lib.crystal-forge; let
       private_key = "$CF_KEY_DIR/agent.key";
     };
     environments = [
-      # {
-      #   name = "devshell";
-      #   description = "Development environment for Crystal Forge agents and evaluation";
-      #   is_active = true;
-      #   risk_profile = "LOW";
-      #   compliance_level = "NONE";
-      # }
       {
         name = "mockenv";
         description = "An environment full of agents created from shell scripts for testing purposes";
@@ -100,24 +81,12 @@ with lib.crystal-forge; let
       }
     ];
     systems = [
-      # {
-      #   hostname = "HOSTNAME_PLACEHOLDER";
-      #   public_key = "PUBLIC_KEY_PLACEHOLDER";
-      #   environment = "devshell";
-      #   flake_name = "dotfiles";
-      # }
       {
         hostname = "test.gray";
         public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
         environment = "mockenv";
         flake_name = "dotfiles";
       }
-      # {
-      #   hostname = "test.lucas";
-      #   public_key = pkgs.crystal-forge.testAgents.test-lucas.publicKey;
-      #   environment = "mockenv";
-      #   flake_name = "dotfiles";
-      # }
     ];
     flakes = {
       flake_polling_interval = "10m";
@@ -133,10 +102,6 @@ with lib.crystal-forge; let
       ];
     };
   };
-
-  envExports = ''
-    export CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
-  '';
 
   simulatePush = pkgs.writeShellApplication {
     name = "simulate-push";
@@ -200,6 +165,7 @@ with lib.crystal-forge; let
       fi
     '';
   };
+
   db-module = {
     settings.processes.pgweb = {
       inherit namespace;
@@ -218,9 +184,9 @@ with lib.crystal-forge; let
         GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
 
         CREATE USER root WITH SUPERUSER LOGIN;
-        CREATE USER grafana_user LOGIN;
-        CREATE DATABASE grafana_db OWNER grafana_user;
-        GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana_user;
+        CREATE USER grafana LOGIN;
+        CREATE DATABASE grafana_db OWNER grafana;
+        GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana;
       '';
       initialDatabases = [];
     };
@@ -242,27 +208,10 @@ with lib.crystal-forge; let
       enable = true;
       http_port = grafana_port;
       domain = "localhost";
-      declarativePlugins = with pkgs.grafanaPlugins; [grafana-piechart-panel];
-      providers = [
-        {
-          name = "default";
-          type = "file";
-          disableDeletion = false;
-          updateIntervalSeconds = 10;
-          options = {
-            path = pkgs.linkFarm "grafana-dashboards" [
-              {
-                name = "crystal-forge-dashboard.json";
-                path = crystalForgeDashboard;
-              }
-            ];
-          };
-        }
-      ];
       datasources = [
         {
-          name = "CrystalForge DB";
-          uid = "crystal-forge-ds";
+          name = "Crystal Forge PostgreSQL";
+          uid = "crystal-forge-postgres";
           type = "postgres";
           access = "proxy";
           url = "localhost:${toString db_port}";
@@ -273,42 +222,26 @@ with lib.crystal-forge; let
           };
           jsonData = {
             sslmode = "disable";
-            maxOpenConns = 100;
-            maxIdleConns = 100;
-            maxIdleConnsAuto = true;
           };
+          isDefault = false;
+          editable = true;
         }
+      ];
+      providers = [
         {
-          name = "Grafana DB";
-          uid = "grafana-db";
-          type = "postgres";
-          access = "proxy";
-          url = "localhost:${toString db_port}";
-          database = "grafana_db";
-          user = "grafana_user";
-          secureJsonData = {
-            password = db_password;
-          };
-          jsonData = {
-            sslmode = "disable";
-            maxOpenConns = 100;
-            maxIdleConns = 100;
-            maxIdleConnsAuto = true;
+          name = "Crystal Forge";
+          type = "file";
+          disableDeletion = true;
+          updateIntervalSeconds = 60;
+          options = {
+            path = "${pkgs.crystal-forge.dashboards}/dashboards";
           };
         }
       ];
-      extraConf."auth.anonymous" = {
-        enabled = true;
-        org_role = "Editor";
-      };
-      extraConf.database = with config.services.postgres.grafana-db; {
-        type = "postgres";
-        host = "localhost:${toString db_port}";
-        name = "grafana_db";
-      };
     };
     settings.processes."grafana".depends_on."db".condition = "process_healthy";
   };
+
   agent-module = {
     settings.processes.agent = {
       inherit namespace;
@@ -317,6 +250,7 @@ with lib.crystal-forge; let
       disabled = false;
     };
   };
+
   server-module = {
     settings.processes.server = {
       inherit namespace;
@@ -341,6 +275,7 @@ with lib.crystal-forge; let
       agent-module
     ];
   };
+
   server-only = pkgs.process-compose-flake.evalModules {
     modules = [
       inputs.services-flake.processComposeModules.default
@@ -355,7 +290,6 @@ with lib.crystal-forge; let
       db-module
     ];
   };
-  # Simple agent with default actions
 in
   full-stack.config.outputs.package
   // {
