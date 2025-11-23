@@ -203,11 +203,9 @@ pub async fn get_next_buildable_derivation(
             queue_position
         FROM view_buildable_derivations
         WHERE 
-            CASE 
-                WHEN build_type = 'system' AND $1 = true THEN 
-                    cached_packages = total_packages
-                ELSE true
-            END
+            build_type != 'system'
+            OR NOT $1
+            OR cached_packages = total_packages
         ORDER BY queue_position
         LIMIT 1
         "#,

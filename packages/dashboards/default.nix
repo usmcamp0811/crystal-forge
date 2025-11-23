@@ -15,7 +15,7 @@ pkgs.stdenv.mkDerivation {
 
   buildPhase = ''
     runHook preBuild
-
+    # TODO: This isnt needed any more..
     # Process the dashboard to make it generic and reusable
     jq '
       # Set uid to null so Grafana auto-generates it

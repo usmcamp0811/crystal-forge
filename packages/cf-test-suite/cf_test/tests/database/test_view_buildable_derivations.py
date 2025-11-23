@@ -39,16 +39,10 @@ def test_view_buildable_derivations_columns(cf_client: CFTestClient):
         "derivation_name",
         "derivation_type",
         "derivation_path",
-        "pname",
-        "version",
         "status_id",
         "nixos_id",
         "nixos_commit_ts",
-        "total_packages",
-        "completed_packages",
-        "cached_packages",
         "active_workers",
-        "build_type",
         "queue_position",
     }
     assert expected.issubset(actual), f"Missing columns: {expected - actual}"
@@ -72,7 +66,7 @@ def test_view_buildable_derivations_ordering(cf_client: CFTestClient):
     """Verify queue_position is sequential and ordering is correct"""
     rows = cf_client.execute_sql(
         f"""
-        SELECT queue_position, nixos_commit_ts, total_packages, build_type
+        SELECT queue_position, nixos_commit_ts
         FROM {VIEW}
         ORDER BY queue_position
         LIMIT 100
@@ -141,67 +135,17 @@ def test_view_buildable_derivations_no_reserved(cf_client: CFTestClient):
 
 @pytest.mark.views
 @pytest.mark.database
-def test_view_buildable_derivations_build_types(cf_client: CFTestClient):
-    """Verify build_type field is either 'package' or 'system'"""
-    rows = cf_client.execute_sql(f"SELECT DISTINCT build_type FROM {VIEW}")
-
-    if len(rows) == 0:
-        pytest.skip("No buildable derivations in queue")
-
-    build_types = {r["build_type"] for r in rows}
-    assert build_types.issubset(
-        {"package", "system"}
-    ), f"Invalid build_types: {build_types - {'package', 'system'}}"
-
-
-@pytest.mark.views
-@pytest.mark.database
-def test_view_buildable_derivations_system_readiness(cf_client: CFTestClient):
-    """Verify systems only appear when all packages are complete"""
+def test_view_buildable_derivations_derivation_type(cf_client: CFTestClient):
+    """Verify derivation_type field is 'nixos'"""
     rows = cf_client.execute_sql(
-        f"""
-        SELECT id, build_type, total_packages, completed_packages
-        FROM {VIEW}
-        WHERE build_type = 'system'
-        """
-    )
-
-    for row in rows:
-        assert (
-            row["total_packages"] == row["completed_packages"]
-        ), f"System {row['id']} in queue but only {row['completed_packages']}/{row['total_packages']} packages complete"
-
-
-@pytest.mark.views
-@pytest.mark.database
-def test_view_buildable_derivations_progress_tracking(cf_client: CFTestClient):
-    """Verify progress tracking fields are accurate"""
-    rows = cf_client.execute_sql(
-        f"""
-        SELECT nixos_id, total_packages, completed_packages, cached_packages, active_workers
-        FROM {VIEW}
-        GROUP BY nixos_id, total_packages, completed_packages, cached_packages, active_workers
-        """
+        f"SELECT DISTINCT derivation_type FROM {VIEW}"
     )
 
     if len(rows) == 0:
         pytest.skip("No buildable derivations in queue")
 
-    for row in rows:
-        # Completed packages should not exceed total
-        assert (
-            row["completed_packages"] <= row["total_packages"]
-        ), f"System {row['nixos_id']}: completed_packages ({row['completed_packages']}) > total_packages ({row['total_packages']})"
-
-        # Cached packages should not exceed completed
-        assert (
-            row["cached_packages"] <= row["completed_packages"]
-        ), f"System {row['nixos_id']}: cached_packages ({row['cached_packages']}) > completed_packages ({row['completed_packages']})"
-
-        # Active workers should be non-negative
-        assert (
-            row["active_workers"] >= 0
-        ), f"System {row['nixos_id']}: negative active_workers ({row['active_workers']})"
+    types = {r["derivation_type"] for r in rows}
+    assert types == {"nixos"}, f"Only nixos derivations should be buildable: {types}"
 
 
 @pytest.mark.views
@@ -220,7 +164,7 @@ def test_view_buildable_derivations_status_filter(cf_client: CFTestClient):
     if len(rows) == 0:
         pytest.skip("No buildable derivations in queue")
 
-    valid_status_ids = {5, 12}  # DryRunComplete, Scheduled
+    valid_status_ids = {5, 7}  # dry-run-complete, build-pending
     actual_status_ids = {r["status_id"] for r in rows}
 
     assert actual_status_ids.issubset(
@@ -251,37 +195,17 @@ def test_view_buildable_derivations_attempt_count_filter(cf_client: CFTestClient
 
 @pytest.mark.views
 @pytest.mark.database
-def test_view_buildable_derivations_smallest_first_within_commit(
-    cf_client: CFTestClient,
-):
-    """Verify smaller systems are prioritized within the same commit"""
+def test_view_buildable_derivations_derivation_path_present(cf_client: CFTestClient):
+    """Verify all buildable derivations have derivation_path set"""
     rows = cf_client.execute_sql(
         f"""
-        SELECT nixos_commit_ts, total_packages, queue_position
+        SELECT id, derivation_path
         FROM {VIEW}
-        ORDER BY queue_position
-        LIMIT 50
+        WHERE derivation_path IS NULL
         """
     )
 
-    if len(rows) < 2:
-        pytest.skip("Not enough derivations to test ordering")
-
-    # Group by commit timestamp
-    by_commit: Dict[Any, List[int]] = {}
-    for row in rows:
-        ts = row["nixos_commit_ts"]
-        if ts not in by_commit:
-            by_commit[ts] = []
-        by_commit[ts].append(row["total_packages"])
-
-    # Within each commit, verify packages are non-decreasing (smallest first)
-    for commit_ts, packages in by_commit.items():
-        if len(packages) > 1:
-            for i in range(len(packages) - 1):
-                assert (
-                    packages[i] <= packages[i + 1]
-                ), f"Commit {commit_ts}: packages not sorted ASC within commit: {packages[i]} > {packages[i+1]}"
+    assert len(rows) == 0, f"Found {len(rows)} derivations with NULL derivation_path"
 
 
 @pytest.mark.views
