@@ -19,6 +19,8 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 
 **Current Status**: Active development. Core monitoring, build coordination, CVE scanning, and system fingerprinting are functional. Deployment management and advanced compliance features are in progress.
 
+![](./docs/dashboard.png)
+
 ## Key Features
 
 ### System Monitoring & Compliance
