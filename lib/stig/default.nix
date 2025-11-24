@@ -59,7 +59,7 @@ with lib; rec {
         assertions = [
           {
             assertion =
-              (!cfg.enable && (config.crystal-forge.stig.enable or false))
+              (!cfg.enable && (config.crystal-forge.stig.${name}.enable or false))
               -> (cfg.justification != []);
             message = "You must provide at least one justification if config.crystal-forge.stig.${name} is disabled.";
           }
