@@ -33,13 +33,31 @@ with lib; rec {
     cfg = config.crystal-forge.stig.${name};
     forceAttrs = attrs: mapAttrsRecursive (_: v: mkForce v) attrs;
   in {
-    options.crystal-forge.stig.${name} = with types; {
-      enable =
-        lib.crystal-forge.mkBoolOpt true
-        "Enable/Disable ${name}";
-      justification =
-        lib.crystal-forge.mkOpt (listOf str) [] "Reasons why this is disabled.";
+    options.crystal-forge.stig = with types; {
+      active = mkOption {
+        type = attrsOf (attrsOf anything);
+        default = {};
+        description = "Tracking of active STIG controls with their SRG, CCI, and config";
+      };
+      inactive = mkOption {
+        type = attrsOf (attrsOf anything);
+        default = {};
+        description = "Tracking of inactive STIG controls with justifications";
+      };
+      ${name} = {
+        enable = mkOption {
+          type = bool;
+          default = true;
+          description = "Enable STIG control ${name}";
+        };
+        justification = mkOption {
+          type = listOf str;
+          default = [];
+          description = "Reasons why this control is disabled";
+        };
+      };
     };
+
     config = mkMerge [
       (mkIf cfg.enable (forceAttrs stigConfig))
       {
