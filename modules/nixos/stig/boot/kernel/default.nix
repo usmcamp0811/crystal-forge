@@ -7,7 +7,7 @@ with lib;
 with lib.crystal-forge;
   mkStigModule {
     inherit config;
-    name = "kernel_hardening";
+    name = "kernel";
     srgList = [
       "SRG-OS-000478-GPOS-00223"
       "SRG-OS-000396-GPOS-00176"
@@ -18,7 +18,7 @@ with lib.crystal-forge;
       "SRG-OS-000132-GPOS-00067"
       "SRG-OS-000433-GPOS-00193"
     ];
-    cciList = []; # CCI values not available on stigui.com; check the STIG document directly
+    cciList = []; # TODO: CCI values not available on stigui.com; check the STIG document directly
     stigConfig = {
       boot.kernelParams = [
         # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268168
