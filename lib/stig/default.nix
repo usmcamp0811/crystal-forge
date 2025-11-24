@@ -18,10 +18,10 @@ with lib; rec {
   *
   * @return A NixOS module with:
   *         - options under `crystal-forge.stig.${name}`:
-  *           - `enable`: toggle for this control (defaults to global crystal-forge.stig.enable)
+  *           - `enable`: toggle for this control (defaults to true)
   *           - `justification`: list of strings explaining why disabled
   *         - config that enforces stigConfig when enabled and tracks state in active/inactive
-  *         - assertion requiring justification if disabled while stig is globally enabled
+  *         - assertion requiring justification if disabled
   */
   mkStigModule = {
     name,
@@ -35,7 +35,7 @@ with lib; rec {
   in {
     options.crystal-forge.stig.${name} = with types; {
       enable =
-        lib.crystal-forge.mkBoolOpt config.crystal-forge.stig.enable
+        lib.crystal-forge.mkBoolOpt true
         "Enable/Disable ${name}";
       justification =
         lib.crystal-forge.mkOpt (listOf str) [] "Reasons why this is disabled.";
@@ -58,10 +58,8 @@ with lib; rec {
         };
         assertions = [
           {
-            assertion =
-              (!cfg.enable && (config.crystal-forge.stig.enable or false))
-              -> (cfg.justification != []);
-            message = "You must provide at least one justification if config.crystal-forge.stig.${name} is disabled.";
+            assertion = (!cfg.enable) -> (cfg.justification != []);
+            message = "You must provide justification if config.crystal-forge.stig.${name} is disabled.";
           }
         ];
       }
