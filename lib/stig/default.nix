@@ -30,10 +30,10 @@ with lib; rec {
     config,
     stigConfig,
   }: let
-    cfg = config.crystal-forge.stig.${name};
+    cfg = config.stig.${name};
     forceAttrs = attrs: mapAttrsRecursive (_: v: mkForce v) attrs;
   in {
-    options.crystal-forge.stig.${name} = with types; {
+    options.stig.${name} = with types; {
       enable =
         lib.crystal-forge.mkBoolOpt true
         "Enable/Disable ${name}";
@@ -43,7 +43,7 @@ with lib; rec {
     config = mkMerge [
       (mkIf cfg.enable (forceAttrs stigConfig))
       {
-        crystal-forge.stig = {
+        stig = {
           active.${name} = mkIf cfg.enable {
             srg = srgList;
             cci = cciList;
@@ -59,7 +59,7 @@ with lib; rec {
         assertions = [
           {
             assertion = (!cfg.enable) -> (cfg.justification != []);
-            message = "You must provide justification if config.crystal-forge.stig.${name} is disabled.";
+            message = "You must provide justification if config.stig.${name} is disabled.";
           }
         ];
       }
