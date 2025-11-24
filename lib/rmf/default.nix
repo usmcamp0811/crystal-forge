@@ -37,15 +37,10 @@
         lib.asserts.assertMsg allResolved
           "All RMF controls must be either 'met' or 'waived'.";
 
-      justificationRequired =
-        !(rmfMeta.approved or false)
-        || builtins.any (c: controlSet.${c}.status != "met")
-          (builtins.attrNames controlSet);
-
       _1 =
         lib.asserts.assertMsg
-          (!justificationRequired
-            || builtins.all (c: controlSet.${c} ? justification)
+          (builtins.all 
+            (c: controlSet.${c}.status == "met" || (controlSet.${c} ? justification))
             (builtins.attrNames controlSet))
           "Each non-met RMF control must include a justification.";
 
@@ -79,7 +74,7 @@
   * Generates a NixOS module for enabling and configuring a wrapped RMF-compliant package.
   *
   * This function is intended to be used by system integrators (e.g., government consumers)
-  * to declare whether to enforce a vendor’s wrapped package, configure its controls,
+  * to declare whether to enforce a vendor's wrapped package, configure its controls,
   * and optionally apply the vendor-defined install configuration and settings.
   *
   * Enables structured declaration of RMF control status and justification, enforces assertions,
@@ -112,7 +107,7 @@
         let
           ctrlCfg = config.campground.rmf.${name}.controls.${controlName} or { };
           pkgEnabled = config.campground.rmf.${name}.enable or false;
-          enabled = (ctrlCfg ? enabled && ctrlCfg.enabled) || pkgEnabled;
+          enabled = if (ctrlCfg ? enabled) then ctrlCfg.enabled else pkgEnabled;
 
           controlConfig = control.config or { };
           srg = control.srg or [ ];
