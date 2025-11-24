@@ -1,5 +1,5 @@
 {
   imports = [
-    ./banner
+    ./banner.nix
   ];
 }
