@@ -35,7 +35,7 @@ with lib; rec {
   in {
     options.crystal-forge.stig.${name} = with types; {
       enable =
-        lib.crystal-forge.mkBoolOpt config.crystal-forge.stig.enable
+        lib.crystal-forge.mkBoolOpt config.crystal-forge.stig.${name}.enable
         "Enable/Disable ${name}";
       justification =
         lib.crystal-forge.mkOpt (listOf str) [] "Reasons why this is disabled.";
