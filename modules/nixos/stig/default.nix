@@ -1,6 +1,7 @@
-{lib, ...}: {
-  imports =
-    builtins.filter
-    (p: p != ./default.nix)
-    (lib.snowfall.fs.get-default-nix-files-recursive ./.);
+{
+  lib,
+  inputs,
+  ...
+}: {
+  imports = inputs.snowfall-lib.outputs.snowfall.internal-lib.fs.get-default-nix-files-recursive ./.;
 }
