@@ -46,7 +46,7 @@ with lib.crystal-forge;
       # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268176
       services.openssh.settings.UsePAM = true;
       # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268083
-      services.openssh.banner = lib.mkDefault ''
+      services.openssh.banner = ''
         You are accessing a U.S. Government (USG) Information System (IS) that is provided for USG-authorized use only.
         By using this IS (which includes any device attached to this IS), you consent to the following conditions:
         -The USG routinely intercepts and monitors communications on this IS for purposes including, but not limited to, penetration testing, COMSEC monitoring, network operations and defense, personnel misconduct (PM), law enforcement (LE), and counterintelligence (CI) investigations.
