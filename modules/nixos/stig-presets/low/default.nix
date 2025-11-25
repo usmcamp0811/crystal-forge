@@ -17,7 +17,6 @@ with lib; {
       sudo = {enable = true;};
 
       # Legal compliance
-      banner = {enable = true;};
       timesyncd = {enable = true;};
 
       # Everything else disabled

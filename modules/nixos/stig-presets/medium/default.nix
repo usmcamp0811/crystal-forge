@@ -21,7 +21,6 @@ with lib; {
       kernel = {enable = true;};
 
       # Access & authentication
-      banner = {enable = true;};
       getty = {enable = true;};
       displaymanager = {enable = true;};
 
