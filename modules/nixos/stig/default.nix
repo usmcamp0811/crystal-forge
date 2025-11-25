@@ -1,7 +1,10 @@
-{
-  lib,
-  inputs,
-  ...
-}: {
-  imports = inputs.snowfall-lib.outputs.snowfall.internal-lib.fs.get-default-nix-files-recursive ./.;
+{lib, ...}: let
+  importDir = dir:
+    builtins.map (name: dir + "/${name}")
+    (builtins.filter (
+      name:
+        builtins.pathExists (dir + "/${name}/default.nix")
+    ) (builtins.attrNames (builtins.readDir dir)));
+in {
+  imports = importDir ./.;
 }
