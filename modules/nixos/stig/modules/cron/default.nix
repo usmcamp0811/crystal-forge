@@ -7,7 +7,6 @@ with lib;
 with lib.crystal-forge;
   mkStigModule {
     inherit config;
-
     name = "cron";
     srgList = [
       "SRG-OS-000363-GPOS-00150" # V-268153: notify of unauthorized configuration changes
