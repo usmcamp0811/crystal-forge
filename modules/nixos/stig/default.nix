@@ -1,4 +1,3 @@
-# modules/nixos/stig/default.nix
 {lib, ...}: let
   fs = lib.snowfall.fs;
 
