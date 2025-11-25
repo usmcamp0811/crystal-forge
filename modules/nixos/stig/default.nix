@@ -1,5 +1,7 @@
-{lib, ...}: {
-  imports = [
-    ./banner
-  ];
+{
+  lib,
+  inputs,
+  ...
+}: {
+  imports = inputs.snowfall.lib.modules.importDir ./.;
 }
