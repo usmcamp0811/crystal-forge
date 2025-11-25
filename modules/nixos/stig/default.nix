@@ -3,5 +3,5 @@
   inputs,
   ...
 }: {
-  imports = inputs.snowfall-lib.lib.modules.importDir ./.;
+  imports = lib.snowfall.fs.get-default-nix-files-recursive ./.;
 }
