@@ -14,5 +14,5 @@
   in
     builtins.concatLists (builtins.attrValues paths);
 in {
-  imports = importDir ./. ++ [../stig];
+  imports = importDir ./.;
 }
