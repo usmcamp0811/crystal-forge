@@ -4,8 +4,7 @@
   ...
 }:
 with lib;
-with lib.crystal-forge;
-let
+with lib.crystal-forge; let
   cfg = config.services.syslog-ng;
 in
   mkStigModule {
@@ -59,9 +58,10 @@ in
                 syslog(
                   ${host}
                 );
-              '') cfg.remote_hosts}
+              '')
+              cfg.remote_hosts}
             };
-            log { 
+            log {
               source(s_local);
               destination(d_network);
             };
@@ -80,7 +80,8 @@ in
                     peer-verify(yes)
                   )
                 );
-              '') cfg.remote_hosts}
+              '')
+              cfg.remote_hosts}
             };
             log { source(s_local); destination(d_local); destination(d_network); };
           '')
@@ -111,6 +112,29 @@ in
             };
           ''
         ];
+      };
+    };
+    extraOptions = {
+      services.syslog-ng = {
+        remote_hosts = mkOption {
+          type = types.listOf types.str;
+        };
+        remote_tls = mkOption {
+          type = types.bool;
+          default = true;
+        };
+        certfile = mkOption {
+          type = types.str;
+          default = "/var/syslog-ng/certs.d/certificate.crt";
+        };
+        keyfile = mkOption {
+          type = types.str;
+          default = "/var/syslog-ng/certs.d/certificate.key";
+        };
+        cafile = mkOption {
+          type = types.str;
+          default = "/var/syslog-ng/certs.d/cert-bundle.crt";
+        };
       };
     };
   }
