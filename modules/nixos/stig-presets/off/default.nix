@@ -4,11 +4,11 @@
   ...
 }:
 with lib; {
-  options.crystal-forge.stig-presets.high = {
+  options.crystal-forge.stig-presets.off = {
     enable = mkEnableOption "STIG High Security preset - enables all controls for maximum compliance";
   };
 
-  config = mkIf config.crystal-forge.stig-presets.high.enable {
+  config = mkIf config.crystal-forge.stig-presets.off.enable {
     crystal-forge.stig = {
       # Critical security controls
       ssh = {enable = false;};
