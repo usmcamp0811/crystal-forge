@@ -56,9 +56,9 @@ with lib.crystal-forge;
         -Notwithstanding the above, using this IS does not constitute consent to PM, LE or CI investigative searching or monitoring of the content of privileged communications, or work product, related to personal representation or services by attorneys, psychotherapists, or clergy, and their assistants. Such communications and work product are private and confidential. See User Agreement for details.
       '';
       # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268088
-      services.openssh.settings.LogLevel = mkForce "VERBOSE";
+      services.openssh.settings.LogLevel = "VERBOSE";
       # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268137
-      services.openssh.settings.PermitRootLogin = mkForce "no";
+      services.openssh.settings.PermitRootLogin = "no";
       services.openssh.extraConfig = lib.strings.concatLines [
         # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268142
         ''
