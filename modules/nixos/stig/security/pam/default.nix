@@ -36,13 +36,13 @@ with lib.crystal-forge;
           account required pam_faillock.so
         '';
       in {
-        login.text = mkDefault pamfile;
-        sshd.text = mkDefault pamfile;
+        login.text = pamfile;
+        sshd.text = pamfile;
       };
       # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268177
       security.pam.p11.enable = true;
       # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268179
-      environment.etc."pam_pkcs11/pam_pkcs11.conf".text = mkDefault ''
+      environment.etc."pam_pkcs11/pam_pkcs11.conf".text = ''
         cert_policy = ca,signature,ocsp_on,crl_auto;
       '';
       # https://stigui.com/stigs/Anduril_NixOS_STIG/groups/V-268085
