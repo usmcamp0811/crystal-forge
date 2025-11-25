@@ -3,5 +3,5 @@
   inputs,
   ...
 }: {
-  imports = inputs.snowfall.lib.modules.importDir ./.;
+  imports = inputs.snowfall-lib.lib.modules.importDir ./.;
 }
