@@ -25,6 +25,8 @@ with lib; rec {
   * @param stigConfig    NixOS configuration attrset to apply when this control is enabled.
   *                      This can include any valid NixOS configuration options
   *                      (services, security, environment, etc.).
+  *                      All values are automatically overridden with priority 1000 to ensure
+  *                      STIG compliance takes precedence over other module definitions.
   *
   * @param extraOptions  Additional NixOS module options to define for this control.
   *                      Use this to declare custom configuration options that downstream
@@ -41,7 +43,7 @@ with lib; rec {
   *           - crystal-forge.stig.${name}.justification: list of strings (required if disabled)
   *
   *         - config:
-  *           - Applies stigConfig with mkForce when enabled to prevent accidental overrides
+  *           - Applies stigConfig with mkOverride priority 1000 when enabled to override all other definitions
   *           - Populates crystal-forge.stig.active.${name} with srg, cci, and config when enabled
   *           - Populates crystal-forge.stig.inactive.${name} with srg, cci, justification, and config when disabled
   *           - Enforces assertion: disabled controls must have justification provided
@@ -93,7 +95,9 @@ with lib; rec {
     extraOptions ? {},
   }: let
     cfg = config.crystal-forge.stig.${name};
-    forceAttrs = attrs: mapAttrsRecursive (_: v: mkForce v) attrs;
+    # Use mkOverride with priority 1000 to override all conflicting definitions
+    # Priority 1000 is much higher than mkForce (50) and ensures STIG config takes precedence
+    overrideAttrs = attrs: mapAttrsRecursive (_: v: mkOverride 1000 v) attrs;
   in {
     options =
       extraOptions
@@ -124,7 +128,7 @@ with lib; rec {
         };
       };
     config = mkMerge [
-      (mkIf cfg.enable (forceAttrs stigConfig))
+      (mkIf cfg.enable (overrideAttrs stigConfig))
       {
         crystal-forge.stig = {
           active.${name} = mkIf cfg.enable {
