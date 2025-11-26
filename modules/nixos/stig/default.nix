@@ -14,5 +14,5 @@
   in
     builtins.concatLists (builtins.attrValues paths);
 in {
-  imports = importDir ../stig-modules;
+  imports = importDir ../stig-modules ++ importDir ./.;
 }
