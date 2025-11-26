@@ -18,7 +18,7 @@ with lib; {
       pam = {enable = true;};
       pwquality = {enable = true;};
       sudo = {enable = true;};
-      boot.kernel = {enable = true;};
+      kernel = {enable = true;};
 
       # Access & authentication
       getty = {enable = true;};

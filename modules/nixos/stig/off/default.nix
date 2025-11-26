@@ -29,7 +29,7 @@ with lib; {
         pam = disabledControl;
         pwquality = disabledControl;
         sudo = disabledControl;
-        boot.kernel = disabledControl;
+        kernel = disabledControl;
 
         # Access & authentication
         getty = disabledControl;
