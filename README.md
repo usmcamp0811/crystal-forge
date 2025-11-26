@@ -1,8 +1,5 @@
 <p align="center">
-  <picture>
-    <!-- Light mode -->
     <img src="../docs/cf-logo-transparent.png" alt="Crystal Forge" width="300">
-  </picture>
 </p>
 
 <p align="center">
