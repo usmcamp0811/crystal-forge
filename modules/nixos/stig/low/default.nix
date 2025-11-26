@@ -32,7 +32,7 @@ with lib; {
         enable = false;
         justification = ["Password quality not enforced"];
       };
-      kernel = {
+      boot.kernel = {
         enable = false;
         justification = ["Kernel hardening disabled"];
       };
