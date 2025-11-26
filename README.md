@@ -1,5 +1,5 @@
 <p align="center">
-    ![Crystal Forge](../docs/cf-logo-transparent.png)
+    <img src="../docs/cf-logo-transparent.png" alt="Crystal Forge" width="300">
 </p>
 
 <p align="center">
