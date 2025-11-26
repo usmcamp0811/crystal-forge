@@ -7,7 +7,7 @@ with lib;
 with lib.crystal-forge;
   mkStigModule {
     inherit config;
-    name = "boot.kernel";
+    name = "kernel";
     srgList = [
       "SRG-OS-000478-GPOS-00223"
       "SRG-OS-000396-GPOS-00176"
