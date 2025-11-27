@@ -40,6 +40,7 @@ in
       };
 
       server = {
+        # crystal-forge.stig-presets.off.enable = true;
         nix.settings = {
           experimental-features = ["nix-command" "flakes"];
           # use-registries = false;
