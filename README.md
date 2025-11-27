@@ -227,8 +227,8 @@ Add STIG modules to your `systems.modules.nixos`:
 ```nix
 systems.modules.nixos = with inputs; [
   crystal-forge.nixosModules.crystal-forge
-  crystal-forge.nixosModules.stig
-];
+]
+++ (lib.attrValues (lib.filterAttrs (name: _: lib.hasPrefix "stig" name) crystal-forge.nixosModules));
 ```
 
 ### Configuring STIG Controls
