@@ -143,8 +143,8 @@ class GrafanaClient:
         return self._request("POST", f"/datasources/{datasource_id}/testConnection")
 
     def dashboards(self) -> List[Dict[str, Any]]:
-        """Get all provisioned dashboards"""
-        result = self._request("GET", "/search?query=&type=dash-db")
+        """Get all dashboards (including provisioned)"""
+        result = self._request("GET", "/dashboards")
         if isinstance(result, list):
             return result
         if "dashboards" in result and isinstance(result["dashboards"], list):
@@ -309,8 +309,17 @@ def test_postgresql_datasource_connection(grafana_client: GrafanaClient):
 @pytest.mark.dashboard
 def test_crystal_forge_dashboards_provisioned(grafana_client: GrafanaClient):
     """Verify Crystal Forge dashboards are provisioned"""
-    dashboards = grafana_client.dashboards()
-    assert len(dashboards) > 0, "No dashboards found"
+    max_retries = 5
+    dashboards = []
+
+    for attempt in range(max_retries):
+        dashboards = grafana_client.dashboards()
+        if dashboards:
+            break
+        if attempt < max_retries - 1:
+            time.sleep(1)
+
+    assert len(dashboards) > 0, "No dashboards found after waiting"
 
     dashboard_names = [d.get("title", "").lower() for d in dashboards]
     has_cf_dashboard = any(
@@ -329,7 +338,7 @@ def test_dashboard_system_count_query(
 ):
     """
     Verify dashboard can query system counts from the database.
-    
+
     NOTE: Skipped because /api/tsdb/query endpoint is deprecated in Grafana 10+.
     The datasource provisioning is verified by test_postgresql_datasource_provisioned.
     """
@@ -347,7 +356,7 @@ def test_dashboard_status_breakdown_query(
 ):
     """
     Verify dashboard queries return correct status breakdown.
-    
+
     NOTE: Skipped because /api/tsdb/query endpoint is deprecated in Grafana 10+.
     The datasource provisioning is verified by test_postgresql_datasource_provisioned.
     """
@@ -441,7 +450,7 @@ def test_grafana_provisioning_immutability(server):
     """
     Verify that provisioned dashboards are set to be non-deletable
     (disableDeletion setting is respected).
-    
+
     NOTE: Skipped because provisioning location is implementation-dependent.
     The actual provisioning is verified by test_crystal_forge_dashboards_provisioned.
     """
@@ -459,7 +468,7 @@ def test_dashboard_data_persistence(
 ):
     """
     Verify that dashboard data persists and is queryable after creation.
-    
+
     NOTE: Skipped because /api/tsdb/query endpoint is deprecated in Grafana 10+.
     The datasource provisioning is verified by test_postgresql_datasource_provisioned.
     """
