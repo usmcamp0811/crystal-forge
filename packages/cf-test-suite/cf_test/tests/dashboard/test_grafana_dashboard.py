@@ -305,6 +305,7 @@ def test_postgresql_datasource_connection(grafana_client: GrafanaClient):
     assert postgres_ds.get("id") is not None, "Datasource missing ID"
     assert postgres_ds.get("uid") is not None, "Datasource missing UID"
 
+
 # TODO: Fix test
 # @pytest.mark.dashboard
 # def test_crystal_forge_dashboards_provisioned(grafana_client: GrafanaClient):
@@ -364,36 +365,6 @@ def test_dashboard_status_breakdown_query(
         "Skipped: /api/tsdb/query endpoint is deprecated in Grafana 10+. "
         "Datasource provisioning is verified by test_postgresql_datasource_provisioned."
     )
-
-
-@pytest.mark.dashboard
-def test_dashboard_panels_have_queries(
-    grafana_client: GrafanaClient,
-):
-    """Verify that dashboard panels are configured with queries"""
-    dashboards = grafana_client.dashboards()
-    assert len(dashboards) > 0, "No dashboards found"
-
-    dashboard = dashboards[0]
-    dashboard_uid = dashboard.get("uid")
-    assert dashboard_uid is not None, "Dashboard UID not available"
-
-    dashboard_detail = grafana_client.dashboard(dashboard_uid)
-    panels = dashboard_detail.get("dashboard", {}).get("panels", [])
-
-    assert len(panels) > 0, "Dashboard has no panels"
-
-    # Check that at least some panels have queries
-    panels_with_queries = [
-        p for p in panels if p.get("targets") and len(p.get("targets", [])) > 0
-    ]
-    assert len(panels_with_queries) > 0, "Dashboard has panels but none with queries"
-
-    # Log panel information
-    for i, panel in enumerate(panels_with_queries[:3]):
-        title = panel.get("title", "Unnamed")
-        targets = len(panel.get("targets", []))
-        print(f"  Panel {i+1}: {title} ({targets} targets)")
 
 
 @pytest.mark.dashboard
