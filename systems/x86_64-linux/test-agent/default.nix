@@ -16,6 +16,7 @@
     cp ${keyPair}/agent.pub $out/
   '';
 in {
+  crystal-forge.stig-presets.off.enable = true;
   system.nixos.label = "updated-agent";
   system.stateVersion = "24.11"; # or your preferred value
 

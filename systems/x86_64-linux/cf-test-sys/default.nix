@@ -4,6 +4,7 @@
   config,
   ...
 }: {
+  crystal-forge.stig-presets.off.enable = true;
   # Minimal configuration
   boot.isContainer = true;
   fileSystems."/" = {
