@@ -48,7 +48,7 @@
       nixosModules =
         flakeOutputs.nixosModules
         // {
-          stig-all = flakeOutputs.nixosModules.stig;
+          stig = flakeOutputs.nixosModules.stig;
         };
     };
 }
