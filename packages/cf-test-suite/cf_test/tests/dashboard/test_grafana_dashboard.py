@@ -305,29 +305,29 @@ def test_postgresql_datasource_connection(grafana_client: GrafanaClient):
     assert postgres_ds.get("id") is not None, "Datasource missing ID"
     assert postgres_ds.get("uid") is not None, "Datasource missing UID"
 
-# TODO: Fix test
-# @pytest.mark.dashboard
-# def test_crystal_forge_dashboards_provisioned(grafana_client: GrafanaClient):
-#     """Verify Crystal Forge dashboards are provisioned"""
-#     max_retries = 5
-#     dashboards = []
-#
-#     for attempt in range(max_retries):
-#         dashboards = grafana_client.dashboards()
-#         if dashboards:
-#             break
-#         if attempt < max_retries - 1:
-#             time.sleep(1)
-#
-#     assert len(dashboards) > 0, "No dashboards found after waiting"
-#
-#     dashboard_names = [d.get("title", "").lower() for d in dashboards]
-#     has_cf_dashboard = any(
-#         "crystal" in name or "forge" in name for name in dashboard_names
-#     )
-#     assert (
-#         has_cf_dashboard or len(dashboards) > 0
-#     ), f"No Crystal Forge dashboards found. Available: {dashboard_names}"
+
+@pytest.mark.dashboard
+def test_crystal_forge_dashboards_provisioned(grafana_client: GrafanaClient):
+    """Verify Crystal Forge dashboards are provisioned"""
+    max_retries = 5
+    dashboards = []
+
+    for attempt in range(max_retries):
+        dashboards = grafana_client.dashboards()
+        if dashboards:
+            break
+        if attempt < max_retries - 1:
+            time.sleep(1)
+
+    assert len(dashboards) > 0, "No dashboards found after waiting"
+
+    dashboard_names = [d.get("title", "").lower() for d in dashboards]
+    has_cf_dashboard = any(
+        "crystal" in name or "forge" in name for name in dashboard_names
+    )
+    assert (
+        has_cf_dashboard or len(dashboards) > 0
+    ), f"No Crystal Forge dashboards found. Available: {dashboard_names}"
 
 
 @pytest.mark.dashboard
