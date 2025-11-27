@@ -1,10 +1,5 @@
 <p align="center">
-  <picture>
-    <!-- Dark mode -->
-    <source srcset="../docs/cf-logo-white-text.png" media="(prefers-color-scheme: dark)">
-    <!-- Light mode -->
     <img src="../docs/cf-logo-transparent.png" alt="Crystal Forge" width="300">
-  </picture>
 </p>
 
 <p align="center">
@@ -30,6 +25,7 @@ Crystal Forge is a self-hosted monitoring, compliance, and build system purpose-
 - **Configuration drift detection**: Compare running systems against evaluated configurations
 - **Intelligent heartbeats**: Distinguish between liveness signals and actual state changes
 - **Agent health monitoring**: Track agent connectivity and state reporting frequency
+- **STIG Compliance Modules**: Declarative security controls with 30+ NixOS-native STIG implementations, "secure by default" design, and mandatory justification for disabling controls
 
 ### Build Coordination
 
@@ -207,6 +203,82 @@ CRYSTAL_FORGE__BUILD__CORES=12
 CRYSTAL_FORGE__BUILD__MAX_JOBS=6
 ```
 
+## STIG Compliance Modules
+
+Crystal Forge provides declarative STIG compliance modules that can be imported into downstream NixOS flakes. These modules implement 30+ security controls with "secure by default" design and mandatory justification for deviations.
+
+### Importing STIG Modules
+
+Add Crystal Forge to your flake inputs:
+
+```nix
+{
+  inputs = {
+    crystal-forge = {
+      url = "gitlab:crystal-forge/crystal-forge";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+  };
+}
+```
+
+Add STIG modules to your `systems.modules.nixos`:
+
+```nix
+systems.modules.nixos = with inputs; [
+  crystal-forge.nixosModules.crystal-forge
+]
+++ (lib.attrValues (lib.filterAttrs (name: _: lib.hasPrefix "stig" name) crystal-forge.nixosModules));
+```
+
+### Configuring STIG Controls
+
+**Using presets** (quick compliance posture):
+
+```nix
+# Disable all STIG controls with standard justification
+crystal-forge.stig-presets.off.enable = true;
+
+# Enable specific preset levels
+crystal-forge.stig-presets.low.enable = true;    # Low-severity controls
+crystal-forge.stig-presets.medium.enable = true; # Medium-severity controls
+crystal-forge.stig-presets.high.enable = true;   # High-severity controls
+```
+
+**Fine-grained control** (individual controls):
+
+```nix
+crystal-forge.stig = {
+  banner.enable = true;
+  account_expiry = {
+    enable = false;
+    justification = [
+      "Not applicable in development environment"
+      "Reviewed by security team on 2025-01-15"
+    ];
+  };
+};
+```
+
+### Control Tracking
+
+All active and inactive controls are automatically tracked for compliance reporting:
+
+```nix
+config.crystal-forge.stig.active.banner = {
+  srg = ["SRG-OS-000023-GPOS-00006"];
+  cci = ["CCI-000048"];
+  config = { /* applied NixOS config */ };
+};
+
+config.crystal-forge.stig.inactive.account_expiry = {
+  srg = ["SRG-OS-000002-GPOS-00002"];
+  cci = ["CCI-000016"];
+  justification = ["Not applicable in dev environment"];
+  config = { /* unapplied config */ };
+};
+```
+
 ## Development
 
 ### Dev Environment
@@ -276,6 +348,7 @@ Crystal Forge tracks:
 - **Agent Heartbeats**: Connectivity and health signals from agents
 - **CVE Data**: Vulnerabilities found in evaluated configurations
 - **Deployment Status**: Current vs. desired configuration state
+- **STIG Controls**: Active and inactive compliance controls with justifications
 
 All data is cryptographically verified and immutably logged for audit compliance.
 
@@ -285,6 +358,7 @@ All data is cryptographically verified and immutably logged for audit compliance
 - **Configuration tracking**: Git-backed flake versioning with commit history
 - **Vulnerability scanning**: Automated CVE detection across fleet
 - **Drift detection**: Unauthorized configuration changes identified
+- **STIG compliance**: Declarative security control implementation with tracking
 - **Fleet dashboards**: Grafana integration for compliance reporting
 
 ## Security Model
@@ -294,6 +368,7 @@ All data is cryptographically verified and immutably logged for audit compliance
 - **Minimal attack surface**: Agents run with least privilege
 - **Encrypted transport**: HTTPS for all network communication
 - **Database security**: PostgreSQL with standard access controls and audit logging
+- **Secure by default**: STIG modules enabled unless explicitly disabled with justification
 
 ## Roadmap
 
