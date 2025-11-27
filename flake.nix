@@ -28,12 +28,10 @@
         namespace = "crystal-forge";
       };
     };
-  in
-    lib.mkFlake {
+    flakeOutputs = lib.mkFlake {
       channels-config = {
         allowUnfree = true;
       };
-
       outputs-builder = channels: {
         packages = {
           agent = channels.nixpkgs.crystal-forge.default.agent;
@@ -43,5 +41,14 @@
           test-agent = channels.nixpkgs.crystal-forge.default.test-agent;
         };
       };
+    };
+  in
+    flakeOutputs
+    // {
+      nixosModules =
+        flakeOutputs.nixosModules
+        // {
+          stig-all = flakeOutputs.nixosModules.stig;
+        };
     };
 }
