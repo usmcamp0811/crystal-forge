@@ -1,5 +1,5 @@
-use crate::handlers::agent::heartbeat::LogResponse;
 use crate::config::{CacheType, deployment::DeploymentConfig};
+use crate::handlers::agent::heartbeat::LogResponse;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -203,7 +203,11 @@ impl AgentDeploymentManager {
             .await?;
 
         // Step 2: Activate the configuration using systemd-run
-        info!("Activating configuration via systemd-run...");
+        info!("Activating (boot) configuration via systemd-run...");
+        self.boot_configuration(store_path, &unit_name).await?;
+
+        // Step 2: Activate the configuration using systemd-run
+        info!("Activating (switch) configuration via systemd-run...");
         self.activate_configuration(store_path, &unit_name).await?;
 
         info!("Deployment detached to systemd unit: {}", unit_name);
@@ -438,6 +442,51 @@ impl AgentDeploymentManager {
                 );
             }
         }
+    }
+
+    async fn boot_configuration(&self, store_path: &str, unit_name: &str) -> Result<()> {
+        let switch_script = format!("{}/bin/switch-to-configuration", store_path);
+
+        // Verify the script exists
+        if !std::path::Path::new(&switch_script).exists() {
+            anyhow::bail!(
+                "switch-to-configuration script not found at: {}. Store path may not be available.",
+                switch_script
+            );
+        }
+
+        let run_args = [
+            "--unit",
+            unit_name,
+            "--no-block",
+            "--same-dir",
+            "--collect",
+            "--",
+            &switch_script,
+            "boot",
+        ];
+
+        debug!("Executing: systemd-run {}", shell_join(&run_args));
+
+        let output = Command::new("systemd-run")
+            .args(&run_args)
+            .output()
+            .context("Failed to spawn systemd-run process")?;
+
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            error!("systemd-run failed stdout: {}", stdout);
+            error!("systemd-run failed stderr: {}", stderr);
+            anyhow::bail!(
+                "systemd-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                output.status.code(),
+                stdout.trim(),
+                stderr.trim()
+            );
+        }
+
+        Ok(())
     }
 
     async fn activate_configuration(&self, store_path: &str, unit_name: &str) -> Result<()> {
