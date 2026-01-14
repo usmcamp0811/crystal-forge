@@ -13,7 +13,7 @@ with lib.crystal-forge; let
     slides = [./slides];
     assets = [./assets];
     customCss = ./style.css;
-    meta = {title = "A Nix Powered DevSecOps Revolution";};
+    meta = {title = "Crystal Forge: Forging Trust Through Reproducibility";};
   };
 in
   slides
