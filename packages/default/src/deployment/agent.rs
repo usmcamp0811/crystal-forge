@@ -444,48 +444,25 @@ impl AgentDeploymentManager {
         }
     }
 
-    async fn boot_configuration(&self, store_path: &str, unit_name: &str) -> Result<()> {
-        let switch_script = format!("{}/bin/switch-to-configuration", store_path);
-
-        // Verify the script exists
-        if !std::path::Path::new(&switch_script).exists() {
-            anyhow::bail!(
-                "switch-to-configuration script not found at: {}. Store path may not be available.",
-                switch_script
-            );
-        }
-
-        let run_args = [
-            "--unit",
-            unit_name,
-            "--no-block",
-            "--same-dir",
-            "--collect",
-            "--",
-            &switch_script,
-            "boot",
-        ];
-
-        debug!("Executing: systemd-run {}", shell_join(&run_args));
-
-        let output = Command::new("systemd-run")
-            .args(&run_args)
+    async fn set_system_profile(&self, store_path: &str) -> Result<()> {
+        let output = Command::new("nix-env")
+            .args([
+                "--profile",
+                "/nix/var/nix/profiles/system",
+                "--set",
+                store_path,
+            ])
             .output()
-            .context("Failed to spawn systemd-run process")?;
+            .context("Failed to spawn nix-env process")?;
 
         if !output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("systemd-run failed stdout: {}", stdout);
-            error!("systemd-run failed stderr: {}", stderr);
             anyhow::bail!(
-                "systemd-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
+                "nix-env --set failed with exit code {:?}\nstderr: {}",
                 output.status.code(),
-                stdout.trim(),
                 stderr.trim()
             );
         }
-
         Ok(())
     }
 
@@ -499,6 +476,9 @@ impl AgentDeploymentManager {
                 switch_script
             );
         }
+
+        // Set as the current system profile (creates generation)
+        self.set_system_profile(store_path).await?;
 
         let run_args = [
             "--unit",
