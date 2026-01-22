@@ -473,9 +473,6 @@ impl AgentDeploymentManager {
             );
         }
 
-        // Set as the current system profile (creates generation)
-        self.set_system_profile(store_path).await?;
-
         let run_args = [
             "--unit",
             unit_name,
@@ -506,6 +503,9 @@ impl AgentDeploymentManager {
                 stderr.trim()
             );
         }
+
+        // Set as the current system profile (creates generation)
+        self.set_system_profile(store_path).await?;
 
         Ok(())
     }
