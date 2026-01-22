@@ -1,5 +1,5 @@
-use crate::handlers::agent::heartbeat::LogResponse;
 use crate::config::{CacheType, deployment::DeploymentConfig};
+use crate::handlers::agent::heartbeat::LogResponse;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -203,7 +203,7 @@ impl AgentDeploymentManager {
             .await?;
 
         // Step 2: Activate the configuration using systemd-run
-        info!("Activating configuration via systemd-run...");
+        info!("Activating (switch) configuration via systemd-run...");
         self.activate_configuration(store_path, &unit_name).await?;
 
         info!("Deployment detached to systemd unit: {}", unit_name);
@@ -440,6 +440,28 @@ impl AgentDeploymentManager {
         }
     }
 
+    async fn set_system_profile(&self, store_path: &str) -> Result<()> {
+        let output = Command::new("nix-env")
+            .args([
+                "--profile",
+                "/nix/var/nix/profiles/system",
+                "--set",
+                store_path,
+            ])
+            .output()
+            .context("Failed to spawn nix-env process")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "nix-env --set failed with exit code {:?}\nstderr: {}",
+                output.status.code(),
+                stderr.trim()
+            );
+        }
+        Ok(())
+    }
+
     async fn activate_configuration(&self, store_path: &str, unit_name: &str) -> Result<()> {
         let switch_script = format!("{}/bin/switch-to-configuration", store_path);
 
@@ -450,6 +472,9 @@ impl AgentDeploymentManager {
                 switch_script
             );
         }
+
+        // Set as the current system profile (creates generation)
+        self.set_system_profile(store_path).await?;
 
         let run_args = [
             "--unit",
