@@ -203,10 +203,6 @@ impl AgentDeploymentManager {
             .await?;
 
         // Step 2: Activate the configuration using systemd-run
-        info!("Activating (boot) configuration via systemd-run...");
-        self.boot_configuration(store_path, &unit_name).await?;
-
-        // Step 2: Activate the configuration using systemd-run
         info!("Activating (switch) configuration via systemd-run...");
         self.activate_configuration(store_path, &unit_name).await?;
 
