@@ -4,6 +4,22 @@ use ed25519_dalek::VerifyingKey;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Deployment strategy for activating configurations
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentStrategy {
+    /// Create generation + activate immediately (default)
+    ImmediatePersist,
+    /// Create generation, activate on next boot only
+    BootOnly,
+}
+
+impl Default for DeploymentStrategy {
+    fn default() -> Self {
+        Self::ImmediatePersist
+    }
+}
+
 /// Configuration for deployment operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentConfig {
@@ -28,6 +44,10 @@ pub struct DeploymentConfig {
     pub cache_type: CacheType,
     /// Attic cache name (used when cache_type is Attic)
     pub attic_cache_name: Option<String>,
+
+    /// Deployment strategy (immediate_persist or boot_only)
+    #[serde(default)]
+    pub strategy: DeploymentStrategy,
 }
 
 impl Default for DeploymentConfig {
@@ -48,6 +68,40 @@ impl Default for DeploymentConfig {
             require_sigs: true,
             cache_type: CacheType::Nix,
             attic_cache_name: None,
+            strategy: DeploymentStrategy::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_deployment_strategy_default() {
+        let strategy = DeploymentStrategy::default();
+        assert_eq!(strategy, DeploymentStrategy::ImmediatePersist);
+    }
+
+    #[test]
+    fn test_deployment_strategy_serde_immediate_persist() {
+        let json = r#"{"strategy": "immediate_persist"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let strategy: DeploymentStrategy = serde_json::from_value(parsed["strategy"].clone()).unwrap();
+        assert_eq!(strategy, DeploymentStrategy::ImmediatePersist);
+    }
+
+    #[test]
+    fn test_deployment_strategy_serde_boot_only() {
+        let json = r#"{"strategy": "boot_only"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let strategy: DeploymentStrategy = serde_json::from_value(parsed["strategy"].clone()).unwrap();
+        assert_eq!(strategy, DeploymentStrategy::BootOnly);
+    }
+
+    #[test]
+    fn test_deployment_config_default_strategy() {
+        let config = DeploymentConfig::default();
+        assert_eq!(config.strategy, DeploymentStrategy::ImmediatePersist);
     }
 }
