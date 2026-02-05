@@ -4,7 +4,7 @@ title: 'Feature: MicroVM-based Development and Testing Environment'
 status: To Do
 assignee: []
 created_date: '2026-02-05 15:16'
-updated_date: '2026-02-05 15:17'
+updated_date: '2026-02-05 15:19'
 labels:
   - feature
   - microvm
@@ -33,6 +33,31 @@ Replace process-compose with MicroVM-based environment for dev/test. Each compon
 - [ ] #9 Developer documentation complete
 - [ ] #10 Resource usage optimized
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Project Reference: microvm.nix
+
+GitHub: https://github.com/astro/microvm.nix
+Handbook: https://astro.github.io/microvm.nix/
+
+This project provides the foundation for our MicroVM-based dev environment. It offers:
+- Multiple hypervisor options (recommend qemu or cloud-hypervisor)
+- NixOS integration via flake modules
+- TAP networking for VM-to-VM communication
+- Fast boot times and efficient resource usage
+- Can run as systemd services or standalone
+
+Installation:
+nix registry add microvm github:astro/microvm.nix
+
+Quick start:
+nix flake init -t microvm
+nix run microvm#qemu-example
+
+All subtasks should leverage microvm.nix rather than building from scratch.
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
