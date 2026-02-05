@@ -103,6 +103,36 @@ backlog task edit TASK-X.Y --check-ac 1
 
 **Note**: Status values are case-sensitive and must be quoted if they contain spaces!
 
+### **CRITICAL**: Handling Out-of-Scope Work
+
+> [!IMPORTANT]
+> **When you discover work that needs to be done but is outside the scope of your current task:**
+>
+> 1. **DO NOT** immediately start working on it
+> 2. **DO** create a new task in the backlog
+> 3. **DO** continue with your current task
+> 4. **DO** reference the new task in your notes if relevant
+>
+> **Example**: While fixing a deployment bug, you notice a typo in documentation:
+> ```bash
+> # Create a new task for the typo
+> backlog task create "Fix typo in deployment documentation" \
+>   -d "Found typo in docs/deployment.md line 42 while working on TASK-1.6" \
+>   -l documentation,typo \
+>   --priority low
+> 
+> # Add note to current task
+> backlog task edit TASK-1.6 --append-notes "Created TASK-X for documentation typo"
+> 
+> # Continue with current task
+> ```
+>
+> **Why this matters**:
+> - Keeps work focused and traceable
+> - Prevents scope creep
+> - Ensures nothing is forgotten
+> - Maintains clean git history (one task = one branch)
+
 ### Task Update Checklist
 
 Before ending a work session, ensure you:
@@ -490,6 +520,7 @@ After completing work:
 - [ ] Update task status to "Done" or "In Progress"
 - [ ] Check acceptance criteria
 - [ ] Add implementation notes to tasks
+- [ ] **Create new tasks for any out-of-scope work discovered**
 - [ ] Commit changes with proper commit message format
 - [ ] Push changes to remote branch
 - [ ] Update any related documentation
@@ -507,6 +538,7 @@ After completing work:
 5. **Learn from mistakes** - Update lessons_learned.md when you encounter issues
 6. **Test thoroughly** - Unit tests + integration tests + manual tests when needed
 7. **Ask for clarification** - Better to ask than make wrong assumptions
+8. **Create tasks for out-of-scope work** - Don't let discoveries derail your current task; capture them in the backlog instead
 
 ---
 
