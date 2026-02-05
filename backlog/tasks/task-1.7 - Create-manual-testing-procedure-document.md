@@ -20,12 +20,12 @@ Document step-by-step manual testing procedure for deployment persistence on rea
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Document pre-deployment checks (generation list, current system)
-- [ ] #2 Document how to trigger deployment
-- [ ] #3 Document post-deployment verification steps
-- [ ] #4 Document reboot persistence test
-- [ ] #5 Document bootloader verification
-- [ ] #6 Include both strategies (immediate_persist and boot_only)
+- [x] #1 Document pre-deployment checks (generation list, current system)
+- [x] #2 Document how to trigger deployment
+- [x] #3 Document post-deployment verification steps
+- [x] #4 Document reboot persistence test
+- [x] #5 Document bootloader verification
+- [x] #6 Include both strategies (immediate_persist and boot_only)
 <!-- AC:END -->
 
 ## Implementation Notes
