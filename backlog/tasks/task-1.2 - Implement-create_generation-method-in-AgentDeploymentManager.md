@@ -1,9 +1,10 @@
 ---
 id: TASK-1.2
 title: Implement create_generation method in AgentDeploymentManager
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-02-04 20:19'
+updated_date: '2026-02-05 14:53'
 labels:
   - deployment
   - nixos
