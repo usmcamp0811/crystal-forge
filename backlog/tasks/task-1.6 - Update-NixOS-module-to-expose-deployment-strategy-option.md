@@ -1,9 +1,10 @@
 ---
 id: TASK-1.6
 title: Update NixOS module to expose deployment strategy option
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-04 20:19'
+updated_date: '2026-02-05 14:53'
 labels:
   - nixos
   - nix
