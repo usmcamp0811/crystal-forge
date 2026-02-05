@@ -4,6 +4,7 @@ title: Design MicroVM network topology and IP allocation
 status: To Do
 assignee: []
 created_date: '2026-02-05 15:16'
+updated_date: '2026-02-05 15:19'
 labels:
   - design
   - networking
@@ -27,3 +28,25 @@ Design network topology for MicroVM cluster. Define IP ranges, DNS resolution, a
 - [ ] #5 Plan SSH access from host to VMs
 - [ ] #6 Create network topology diagram
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Reference: microvm.nix networking options
+
+Networking Options:
+1. TAP networking - Best for VM-to-VM and host-to-VM communication
+   - Requires bridge setup on host
+   - Enable vhost-net for high throughput (~10 Gbps)
+   - Supported by: qemu, cloud-hypervisor, firecracker, crosvm, kvmtool, stratovirt, alioth
+
+2. User networking - Simplest, no host setup required
+   - Supported by: qemu, kvmtool, vfkit
+   - Good for basic internet access
+
+3. virtiofs - For filesystem sharing
+   - Supported by: qemu, cloud-hypervisor, crosvm
+   - Not supported by: firecracker, kvmtool, stratovirt, alioth, vfkit
+
+Recommended for Crystal Forge: TAP networking with static IPs for predictable VM-to-VM communication.
+<!-- SECTION:NOTES:END -->
