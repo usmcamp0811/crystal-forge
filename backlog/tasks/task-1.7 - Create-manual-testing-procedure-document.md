@@ -1,9 +1,10 @@
 ---
 id: TASK-1.7
 title: Create manual testing procedure document
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-04 20:19'
+updated_date: '2026-02-05 15:04'
 labels:
   - documentation
   - testing
