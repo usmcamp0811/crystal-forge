@@ -21,9 +21,9 @@ Add deployment_strategy option to crystal-forge NixOS module configuration.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Add deployment_strategy option to module
-- [ ] #2 Set type to enum [immediate_persist boot_only]
-- [ ] #3 Set default to immediate_persist
-- [ ] #4 Add description documenting both strategies
-- [ ] #5 Wire option to agent configuration
+- [x] #1 Add deployment_strategy option to module
+- [x] #2 Set type to enum [immediate_persist boot_only]
+- [x] #3 Set default to immediate_persist
+- [x] #4 Add description documenting both strategies
+- [x] #5 Wire option to agent configuration
 <!-- AC:END -->
