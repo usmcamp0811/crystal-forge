@@ -14,6 +14,8 @@
       url = "github:oar-team/nixos-compose/25.05";
       inputs.nixpkgs.url = "github:nixos/nixpkgs/release-25.05";
     };
+    # Stable nixpkgs for pre-built browser binaries (screenshots in web-ui check)
+    nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-25.05";
   };
 
   outputs = inputs:
