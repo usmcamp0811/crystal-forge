@@ -11,6 +11,7 @@ labels:
 dependencies:
   - TASK-3
 priority: medium
+milestone: m-2
 ---
 
 ## Description

@@ -10,6 +10,7 @@ labels:
   - rust
 dependencies: []
 parent_task_id: TASK-4
+milestone: m-2
 ---
 
 ## Description

@@ -11,6 +11,7 @@ dependencies:
   - TASK-8.3
 parent_task_id: TASK-8
 priority: medium
+milestone: m-3
 ---
 
 ## Description

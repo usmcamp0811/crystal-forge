@@ -13,6 +13,7 @@ labels:
 dependencies:
   - TASK-5
 priority: low
+milestone: m-2
 ---
 
 ## Description
