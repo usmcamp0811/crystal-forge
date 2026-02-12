@@ -7,13 +7,14 @@ use dioxus::prelude::*;
 use crate::components::layout::AppLayout;
 use crate::views::dashboard::DashboardView;
 use crate::views::not_found::NotFoundView;
+use crate::views::style_guide::StyleGuideView;
 use crate::views::system_detail::SystemDetailView;
 use crate::views::systems::SystemsView;
 
 /// All application routes.
 ///
-/// Variant names must match the component function names (sans the `View` suffix
-/// doesn't matter — Dioxus router derives component names from variants).
+/// Variant names must match the component function names — the Dioxus router
+/// macro derives component names from enum variants.
 #[derive(Clone, Routable, Debug, PartialEq)]
 pub enum Route {
     #[layout(AppLayout)]
@@ -25,6 +26,9 @@ pub enum Route {
 
     #[route("/systems/:id")]
     SystemDetailView { id: String },
+
+    #[route("/style-guide")]
+    StyleGuideView {},
 
     #[end_layout]
     #[route("/:..route")]

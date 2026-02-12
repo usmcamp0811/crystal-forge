@@ -7,6 +7,7 @@ mod api;
 mod components;
 mod routes;
 mod state;
+pub mod theme;
 mod views;
 
 use dioxus::prelude::*;
