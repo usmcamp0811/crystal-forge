@@ -8,3 +8,7 @@ title = "Crystal Forge"
 [web.watcher]
 reload_html = true
 watch_path = ["src"]
+
+[web.resource.dev]
+style = []
+script = ["https://cdn.tailwindcss.com"]

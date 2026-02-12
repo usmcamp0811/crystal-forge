@@ -5,7 +5,7 @@ title: "User Interface"
 
 ## Description
 
-Build initial web interface for Crystal Forge management using Dioxus (web target) and Tailwind CSS. Implement dashboard, system views, and backend APIs. TUI interface deferred to a future milestone.
+Build initial web interface for Crystal Forge management using Dioxus 0.7 (web target) and Tailwind CSS. Web UI lives in a separate crate at `packages/web-ui/` (server has native-only deps incompatible with wasm32). API DTOs in `packages/default/src/api/models.rs`, with matching client-side types in the web-ui crate. TUI deferred to a future milestone.
 
 ## Success Criteria
 
