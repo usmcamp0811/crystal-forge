@@ -1,7 +1,7 @@
 ---
 id: TASK-8.2
 title: Dioxus Proof of Concept - TUI Target
-status: To Do
+status: Cancelled
 assignee: []
 created_date: '2026-02-05 14:15'
 labels:
@@ -18,19 +18,9 @@ milestone: m-3
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Build and validate a minimal TUI application using Dioxus to prove terminal interface works.
+**CANCELLED**: TUI target deferred to a future milestone. Dioxus dropped `dioxus-tui` in 0.5+. Decision made to focus on web UI first, then potentially add Ratatui-based TUI later.
 
-Steps:
-1. Create tui/ directory with Cargo.toml
-2. Add dioxus and dioxus-tui dependencies
-3. Create main.rs with same counter component as web
-4. Build: cargo build --bin cf-tui
-5. Run in terminal: cargo run --bin cf-tui
-6. Test keyboard navigation (Tab, Enter, q to quit)
-7. Measure binary size: ls -lh target/release/cf-tui
-8. Document any rendering issues or limitations
-
-Expected: TUI renders correctly, binary < 10MB, keyboard nav works
+Original scope: Build and validate a minimal TUI application using Dioxus.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
