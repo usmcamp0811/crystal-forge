@@ -4,3 +4,4 @@ pub mod dashboard;
 pub mod systems;
 pub mod system_detail;
 pub mod not_found;
+pub mod style_guide;
