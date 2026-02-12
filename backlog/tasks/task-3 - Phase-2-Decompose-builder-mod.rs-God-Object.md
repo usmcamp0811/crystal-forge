@@ -11,6 +11,7 @@ labels:
 dependencies:
   - TASK-2
 priority: high
+milestone: m-2
 ---
 
 ## Description
