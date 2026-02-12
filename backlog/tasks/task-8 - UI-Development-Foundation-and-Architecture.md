@@ -22,7 +22,7 @@ Architecture decisions (Feb 2026):
 - **Framework**: Dioxus (web target only)
 - **TUI**: Deferred to future milestone (TASK-8.2 cancelled; Ratatui considered for later)
 - **Styling**: Tailwind CSS with dark theme defaults
-- **Package location**: Inside packages/default/ (not a separate workspace)
+- **Package location**: Separate crate at packages/web-ui/ (server deps incompatible with wasm32)
 - **Production serving**: Embedded in axum server binary
 - **Data models**: Separate API DTOs decoupled from DB models
 - **Charts**: Stretch goal (simple counters/badges for v1)
