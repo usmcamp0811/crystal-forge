@@ -10,6 +10,7 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
+        api::dashboard,
         status,
         webhook::webhook_handler,
     },
@@ -62,6 +63,11 @@ async fn main() -> anyhow::Result<()> {
         .route("/agent/heartbeat", post(heartbeat::log))
         .route("/agent/state", post(state::update))
         .route("/webhook", post(webhook_handler))
+        // REST API v1
+        .route(
+            "/api/v1/dashboard/summary",
+            get(dashboard::dashboard_summary),
+        )
         .with_state(state);
 
     let listener = TcpListener::bind(("0.0.0.0", server_cfg.port)).await?;
