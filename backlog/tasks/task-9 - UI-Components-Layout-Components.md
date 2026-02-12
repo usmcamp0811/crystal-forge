@@ -17,25 +17,32 @@ milestone: m-3
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Build core layout components: AppShell, Sidebar, TopBar, Card.
+Build core layout components for the Dioxus web UI using Tailwind CSS. Web-only target.
 
 Steps:
-1. Create src/components/layout/app_shell.rs with main layout
-2. Create sidebar.rs with navigation menu
-3. Create topbar.rs with search bar and user menu
-4. Create card.rs for content containers
-5. Apply design system colors and spacing
-6. Test in both web and TUI
-7. Write component documentation
+1. Create src/ui/components/layout/app_shell.rs - main layout with sidebar + content area
+2. Create sidebar.rs - navigation menu with links (Dashboard, Systems, Builds, CVEs)
+3. Create topbar.rs - header bar with page title and optional search input
+4. Create card.rs - reusable card container with header/body/footer slots
+5. Apply Tailwind dark theme classes (bg-gray-900, text-gray-100, etc.)
+6. Implement responsive layout (sidebar collapses on mobile via Tailwind breakpoints)
+7. Set up Dioxus Router for page navigation between views
+8. Test layout in Chrome and Firefox at various viewport sizes
 
-Expected: Layout components work in both targets
+Architecture notes:
+- All layout components in src/ui/components/layout/
+- Use Tailwind utility classes directly in RSX (class: "...")
+- Sidebar navigation drives Dioxus Router
+
+Expected: Responsive dark-themed shell with working navigation between placeholder pages
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 AppShell component complete
-- [ ] #2 Sidebar with navigation
-- [ ] #3 TopBar with search
-- [ ] #4 Card component reusable
-- [ ] #5 Works in web and TUI
+- [ ] #1 AppShell component with sidebar + content area
+- [ ] #2 Sidebar with navigation links (Dioxus Router integrated)
+- [ ] #3 TopBar with page title
+- [ ] #4 Card component reusable with header/body slots
+- [ ] #5 Responsive layout (sidebar collapses on mobile)
+- [ ] #6 Dark theme applied via Tailwind
 <!-- AC:END -->

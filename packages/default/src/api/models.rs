@@ -1,0 +1,495 @@
+//! API data transfer objects for Crystal Forge REST endpoints.
+//!
+//! These DTOs define the JSON contract between server and clients (web UI, TUI, external).
+//! They are intentionally decoupled from database models (`crate::models`) so the API
+//! surface can evolve independently of schema migrations.
+//!
+//! # Naming Conventions
+//! - `*Summary` — lightweight aggregate used in list views and dashboards
+//! - `*Detail` — full representation used in detail views
+//! - `*Count` — numeric breakdown by category
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Common Enums
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Health status derived from heartbeat recency.
+///
+/// Thresholds match `view_fleet_health_status`:
+/// - Healthy: last seen < 15 min ago
+/// - Warning: last seen < 1 hour ago
+/// - Critical: last seen < 4 hours ago
+/// - Offline: last seen >= 4 hours ago (or never)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthStatus {
+    Healthy,
+    Warning,
+    Critical,
+    Offline,
+}
+
+/// Deployment status relative to the latest available commit.
+///
+/// Derived from `view_system_deployment_status`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentStatus {
+    UpToDate,
+    Behind,
+    Ahead,
+    NeverDeployed,
+    NoCommitsAvailable,
+    Unknown,
+}
+
+/// CVE severity level derived from CVSS v3 score thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CveSeverity {
+    Critical,
+    High,
+    Medium,
+    Low,
+}
+
+/// Pipeline stage for a NixOS system's build/deploy lifecycle.
+///
+/// Derived from `view_nixos_pipeline_latest_with_deploy.inferred_stage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PipelineStage {
+    DryRun,
+    ReadyForBuild,
+    Building,
+    BuildComplete,
+    ReadyForDeploy,
+    Unknown,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Dashboard DTOs — GET /api/v1/dashboard/summary
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Top-level dashboard response aggregating fleet-wide metrics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardSummary {
+    /// Breakdown of system count by health status.
+    pub fleet_health: FleetHealthSummary,
+
+    /// Breakdown of system count by deployment status.
+    pub deployment_status: DeploymentStatusSummary,
+
+    /// Fleet-wide CVE totals by severity.
+    pub cve_summary: CveSummary,
+
+    /// Total number of registered systems.
+    pub total_systems: i64,
+
+    /// Number of active builds (in-progress derivations).
+    pub active_builds: i64,
+
+    /// Recent deployment events (newest first, capped).
+    pub recent_deployments: Vec<RecentDeployment>,
+
+    /// Server timestamp for cache-freshness.
+    pub timestamp: DateTime<Utc>,
+}
+
+/// System counts grouped by health status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetHealthSummary {
+    pub healthy: i64,
+    pub warning: i64,
+    pub critical: i64,
+    pub offline: i64,
+}
+
+impl FleetHealthSummary {
+    /// Total across all health categories.
+    pub fn total(&self) -> i64 {
+        self.healthy + self.warning + self.critical + self.offline
+    }
+}
+
+/// System counts grouped by deployment status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentStatusSummary {
+    pub up_to_date: i64,
+    pub behind: i64,
+    pub never_deployed: i64,
+    pub unknown: i64,
+}
+
+impl DeploymentStatusSummary {
+    /// Total across all deployment categories.
+    pub fn total(&self) -> i64 {
+        self.up_to_date + self.behind + self.never_deployed + self.unknown
+    }
+}
+
+/// Fleet-wide CVE vulnerability counts by severity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CveSummary {
+    pub critical: i64,
+    pub high: i64,
+    pub medium: i64,
+    pub low: i64,
+}
+
+impl CveSummary {
+    /// Total vulnerabilities across all severities.
+    pub fn total(&self) -> i64 {
+        self.critical + self.high + self.medium + self.low
+    }
+}
+
+/// A single recent deployment event for the dashboard timeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentDeployment {
+    pub hostname: String,
+    pub commit_hash: String,
+    pub deployed_at: DateTime<Utc>,
+    pub status: DeploymentStatus,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// System DTOs — GET /api/v1/systems, GET /api/v1/systems/:id
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lightweight system representation for list views.
+///
+/// Contains just enough data to render a table row or card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemSummary {
+    pub id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub health_status: HealthStatus,
+    pub deployment_status: DeploymentStatus,
+    pub pipeline_stage: Option<PipelineStage>,
+    pub cve_counts: CveSummary,
+    pub nixos_version: Option<String>,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub deployment_policy: String,
+}
+
+/// Full system representation for the detail view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemDetail {
+    /// Core identity.
+    pub id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub is_active: bool,
+    pub deployment_policy: String,
+
+    /// Status indicators.
+    pub health_status: HealthStatus,
+    pub deployment_status: DeploymentStatus,
+    pub pipeline_stage: Option<PipelineStage>,
+
+    /// Software versions.
+    pub nixos_version: Option<String>,
+    pub kernel: Option<String>,
+    pub agent_version: Option<String>,
+    pub current_store_path: Option<String>,
+
+    /// Hardware information.
+    pub hardware: SystemHardwareInfo,
+
+    /// Network information.
+    pub network: SystemNetworkInfo,
+
+    /// Security posture.
+    pub security: SystemSecurityInfo,
+
+    /// CVE vulnerability counts.
+    pub cve_counts: CveSummary,
+
+    /// Flake and commit context.
+    pub flake: Option<FlakeSummary>,
+
+    /// Timestamps.
+    pub last_seen: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Hardware information subset for system detail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemHardwareInfo {
+    pub cpu_brand: Option<String>,
+    pub cpu_cores: Option<i32>,
+    pub memory_gb: Option<f64>,
+    pub uptime_secs: Option<i64>,
+    pub board_serial: Option<String>,
+    pub bios_version: Option<String>,
+}
+
+/// Network information subset for system detail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemNetworkInfo {
+    pub primary_ip: Option<String>,
+    pub primary_mac: Option<String>,
+    pub gateway_ip: Option<String>,
+}
+
+/// Security posture subset for system detail.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemSecurityInfo {
+    pub tpm_present: Option<bool>,
+    pub secure_boot_enabled: Option<bool>,
+    pub fips_mode: Option<bool>,
+    pub selinux_status: Option<String>,
+}
+
+/// Flake context for a system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlakeSummary {
+    pub id: i32,
+    pub name: String,
+    pub repo_url: String,
+    pub latest_commit: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pagination
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Wrapper for paginated list responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PaginatedResponse<T> {
+    pub items: Vec<T>,
+    pub total: i64,
+    pub page: i64,
+    pub per_page: i64,
+}
+
+impl<T> PaginatedResponse<T> {
+    /// Number of pages given the current `per_page`.
+    pub fn total_pages(&self) -> i64 {
+        if self.per_page == 0 {
+            return 0;
+        }
+        (self.total + self.per_page - 1) / self.per_page
+    }
+}
+
+/// Query parameters for the systems list endpoint.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SystemsListParams {
+    pub page: Option<i64>,
+    pub per_page: Option<i64>,
+    pub search: Option<String>,
+    pub health_status: Option<HealthStatus>,
+    pub deployment_status: Option<DeploymentStatus>,
+    pub environment: Option<String>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<SortOrder>,
+}
+
+/// Sort direction for list queries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SortOrder {
+    Asc,
+    Desc,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error Response
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Standard error envelope for API error responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiError {
+    pub error: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fleet_health_summary_total() {
+        let summary = FleetHealthSummary {
+            healthy: 10,
+            warning: 3,
+            critical: 1,
+            offline: 2,
+        };
+        assert_eq!(summary.total(), 16);
+    }
+
+    #[test]
+    fn deployment_status_summary_total() {
+        let summary = DeploymentStatusSummary {
+            up_to_date: 8,
+            behind: 4,
+            never_deployed: 2,
+            unknown: 1,
+        };
+        assert_eq!(summary.total(), 15);
+    }
+
+    #[test]
+    fn cve_summary_total() {
+        let summary = CveSummary {
+            critical: 2,
+            high: 5,
+            medium: 12,
+            low: 30,
+        };
+        assert_eq!(summary.total(), 49);
+    }
+
+    #[test]
+    fn paginated_response_total_pages() {
+        let resp: PaginatedResponse<()> = PaginatedResponse {
+            items: vec![],
+            total: 25,
+            page: 1,
+            per_page: 10,
+        };
+        assert_eq!(resp.total_pages(), 3);
+    }
+
+    #[test]
+    fn paginated_response_total_pages_exact() {
+        let resp: PaginatedResponse<()> = PaginatedResponse {
+            items: vec![],
+            total: 20,
+            page: 1,
+            per_page: 10,
+        };
+        assert_eq!(resp.total_pages(), 2);
+    }
+
+    #[test]
+    fn paginated_response_total_pages_zero_per_page() {
+        let resp: PaginatedResponse<()> = PaginatedResponse {
+            items: vec![],
+            total: 20,
+            page: 1,
+            per_page: 0,
+        };
+        assert_eq!(resp.total_pages(), 0);
+    }
+
+    #[test]
+    fn health_status_serializes_snake_case() {
+        let json = serde_json::to_string(&HealthStatus::Healthy).unwrap();
+        assert_eq!(json, r#""healthy""#);
+    }
+
+    #[test]
+    fn health_status_deserializes_snake_case() {
+        let status: HealthStatus = serde_json::from_str(r#""critical""#).unwrap();
+        assert_eq!(status, HealthStatus::Critical);
+    }
+
+    #[test]
+    fn deployment_status_serializes_snake_case() {
+        let json = serde_json::to_string(&DeploymentStatus::UpToDate).unwrap();
+        assert_eq!(json, r#""up_to_date""#);
+    }
+
+    #[test]
+    fn cve_severity_serializes_snake_case() {
+        let json = serde_json::to_string(&CveSeverity::Critical).unwrap();
+        assert_eq!(json, r#""critical""#);
+    }
+
+    #[test]
+    fn pipeline_stage_round_trips() {
+        let stage = PipelineStage::ReadyForDeploy;
+        let json = serde_json::to_string(&stage).unwrap();
+        let back: PipelineStage = serde_json::from_str(&json).unwrap();
+        assert_eq!(stage, back);
+    }
+
+    #[test]
+    fn dashboard_summary_serializes() {
+        let summary = DashboardSummary {
+            fleet_health: FleetHealthSummary {
+                healthy: 5,
+                warning: 1,
+                critical: 0,
+                offline: 0,
+            },
+            deployment_status: DeploymentStatusSummary {
+                up_to_date: 4,
+                behind: 1,
+                never_deployed: 1,
+                unknown: 0,
+            },
+            cve_summary: CveSummary {
+                critical: 0,
+                high: 2,
+                medium: 8,
+                low: 15,
+            },
+            total_systems: 6,
+            active_builds: 1,
+            recent_deployments: vec![],
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["total_systems"], 6);
+        assert_eq!(json["fleet_health"]["healthy"], 5);
+        assert_eq!(json["cve_summary"]["total"], serde_json::Value::Null);
+        // total() is a method, not serialized — verify the method works
+        assert_eq!(summary.cve_summary.total(), 25);
+    }
+
+    #[test]
+    fn api_error_omits_none_details() {
+        let err = ApiError {
+            error: "not_found".into(),
+            message: "System not found".into(),
+            details: None,
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("details"));
+    }
+
+    #[test]
+    fn api_error_includes_details_when_present() {
+        let err = ApiError {
+            error: "validation_error".into(),
+            message: "Invalid parameters".into(),
+            details: Some(serde_json::json!({"field": "hostname"})),
+        };
+        let json = serde_json::to_value(&err).unwrap();
+        assert_eq!(json["details"]["field"], "hostname");
+    }
+
+    #[test]
+    fn systems_list_params_default() {
+        let params = SystemsListParams::default();
+        assert!(params.page.is_none());
+        assert!(params.search.is_none());
+        assert!(params.health_status.is_none());
+    }
+
+    #[test]
+    fn sort_order_serializes() {
+        assert_eq!(serde_json::to_string(&SortOrder::Asc).unwrap(), r#""asc""#);
+        assert_eq!(
+            serde_json::to_string(&SortOrder::Desc).unwrap(),
+            r#""desc""#
+        );
+    }
+}

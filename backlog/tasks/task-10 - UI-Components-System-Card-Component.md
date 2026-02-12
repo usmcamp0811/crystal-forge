@@ -9,6 +9,7 @@ labels:
   - components
 dependencies:
   - TASK-8.4
+  - TASK-8.5
 priority: high
 milestone: m-3
 ---
@@ -16,18 +17,20 @@ milestone: m-3
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Build SystemCard component to display system summary.
+Build SystemCard component to display system summary using Tailwind CSS.
 
 Steps:
-1. Create src/components/system/system_card.rs
-2. Accept props: hostname, environment, health, deployment_status, cve_count
-3. Use StatusBadge for health indicator
-4. Display CVE count with severity colors
-5. Add click handler to navigate to system detail
-6. Style with design system
-7. Test with mock data
+1. Create src/ui/components/system/system_card.rs
+2. Accept props: hostname, environment, health_status, deployment_status, cve_counts
+3. Create StatusBadge sub-component with Tailwind status colors (green/amber/red/gray)
+4. Display CVE count with severity color indicators (matching TASK-8.4 tokens)
+5. Add click handler to navigate to system detail via Dioxus Router
+6. Style with Tailwind dark theme (card bg-gray-800, rounded, shadow, hover states)
+7. Test with mock data from MockClient (TASK-8.7)
 
-Expected: Card shows all system info clearly
+Props should map to the API DTOs defined in TASK-8.5, not DB models directly.
+
+Expected: Card shows all system info clearly with proper status coloring
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

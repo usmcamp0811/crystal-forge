@@ -1,6 +1,6 @@
 ---
 id: TASK-8.3
-title: Create Shared Component Library Structure
+title: Create UI Module Structure within packages/default
 status: To Do
 assignee: []
 created_date: '2026-02-05 14:15'
@@ -9,7 +9,6 @@ labels:
   - architecture
 dependencies:
   - TASK-8.1
-  - TASK-8.2
 parent_task_id: TASK-8
 priority: high
 milestone: m-3
@@ -18,25 +17,27 @@ milestone: m-3
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Set up the shared Rust library that both web and TUI will use.
+Set up the module structure within packages/web-ui/ for the Dioxus web application. TUI has been deferred; this is web-only.
+
+Note: The web UI lives in a separate crate (packages/web-ui/) because the server crate has native-only deps (sqlx, sysinfo, nix) incompatible with wasm32. API DTOs live in packages/default/src/api/models.rs and are duplicated as equivalent types in the web-ui crate for JSON wire compatibility.
 
 Steps:
-1. Create src/lib.rs as library root
-2. Create module structure: components/, views/, state/, api/, utils/
-3. Add re-exports in lib.rs
-4. Create mod.rs files for each module
-5. Add placeholder components with TODO comments
-6. Verify both web and TUI can import from library
-7. Run: cargo test to ensure structure compiles
+1. Create module structure in packages/web-ui/src/: components/, views/, state/, api/
+2. Create mod.rs files for each sub-module with re-exports
+3. Create api/models.rs with client-side DTO types matching packages/default/src/api/models.rs
+4. Create api/client.rs placeholder (HTTP client, implemented in TASK-8.6)
+5. Create api/mock.rs placeholder (mock data, implemented in TASK-8.7)
+6. Add placeholder components with TODO comments
+7. Run: dx build to ensure structure compiles
 
-Expected: Clean module structure, no circular dependencies
+Expected: Clean module structure, all Dioxus components organized
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 All module directories created
-- [ ] #2 mod.rs files with proper exports
-- [ ] #3 Library compiles without warnings
-- [ ] #4 Web can import shared components
-- [ ] #5 TUI can import shared components
+- [ ] #1 packages/web-ui/src/ module structure created (components/, views/, state/, api/)
+- [ ] #2 Client-side API DTO types defined matching server-side DTOs
+- [ ] #3 mod.rs files with proper exports
+- [ ] #4 dx build succeeds without warnings
+- [ ] #5 Existing server/agent/builder bins unaffected (separate crate)
 <!-- AC:END -->

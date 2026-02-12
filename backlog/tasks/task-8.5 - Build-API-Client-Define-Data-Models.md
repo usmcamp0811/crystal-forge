@@ -1,7 +1,7 @@
 ---
 id: TASK-8.5
 title: Build API Client - Define Data Models
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-02-05 14:15'
 labels:
@@ -34,8 +34,19 @@ Expected: All models compile, tests pass, no warnings
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 All API models defined
-- [ ] #2 Serde serialization works
-- [ ] #3 Unit tests pass
-- [ ] #4 Doc comments on all public types
+- [x] #1 All API models defined
+- [x] #2 Serde serialization works
+- [x] #3 Unit tests pass (16 tests)
+- [x] #4 Doc comments on all public types
+
+## Implementation Notes
+
+- Created `src/api/mod.rs` and `src/api/models.rs`
+- Registered `api` module in `src/lib.rs`
+- DTOs defined: DashboardSummary, FleetHealthSummary, DeploymentStatusSummary, CveSummary, RecentDeployment, SystemSummary, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, FlakeSummary, PaginatedResponse<T>, SystemsListParams, ApiError
+- Enums: HealthStatus, DeploymentStatus, CveSeverity, PipelineStage, SortOrder
+- All enums use `#[serde(rename_all = "snake_case")]` for consistent JSON
+- ApiError uses `#[serde(skip_serializing_if = "Option::is_none")]` for optional details
+- PaginatedResponse is generic and includes `total_pages()` helper
+- All types have doc comments explaining their purpose and data source
 <!-- AC:END -->
