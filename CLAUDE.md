@@ -487,8 +487,12 @@ cargo fmt                                   # Format code
 ### Project-Specific Docs
 
 - [Git Workflow](backlog/GIT_WORKFLOW.md) - Detailed Git workflow guide
-- [Milestone: Refactoring 2026 Q1](backlog/milestones/refactoring-2026-q1.md) - Current milestone
-- [Task: Deployment Persistence](backlog/tasks/task-000-bug-deployment-persistence.md) - Example task
+- [Milestone: Critical Bugs & Stability](backlog/milestones/m-0%20-%20critical-bugs-and-stability.md) - Immediate focus (m-0)
+- [Milestone: Development Infrastructure](backlog/milestones/m-1%20-%20development-infrastructure.md) - Dev/Test groundwork (m-1)
+- [Milestone: Code Quality & Architecture](backlog/milestones/m-2%20-%20code-quality-and-architecture.md) - Core refactoring (m-2)
+- [Milestone: User Interface](backlog/milestones/m-3%20-%20user-interface.md) - UI development (m-3)
+- [Milestone: Advanced Features](backlog/milestones/m-4%20-%20advanced-features.md) - Deployment enhancements (m-4)
+- [Task: Deployment Persistence](backlog/tasks/task-1%20-%20BUG-Agent-Deployments-Dont-Persist-Across-Reboots.md) - Example task (TASK-1)
 
 ### External Resources
 
