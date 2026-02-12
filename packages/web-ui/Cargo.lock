@@ -446,7 +446,11 @@ dependencies = [
  "dioxus",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
