@@ -26,10 +26,13 @@ let
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
       ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.100
 
+      ${pkgs.tailwindcss}/bin/tailwindcss \
+        -i ${./assets/tailwind.css} \
+        -o ./assets/tailwind.min.css \
+        --minify \
+        --content "./src/**/*.rs"
+
       dx bundle --platform web --release
-      ${pkgs.tailwindcss}/bin/tailwindcss -i ${
-        ./tailwind.css
-      } -o ./assets/tailwind.min.css --minify
     '';
 
     installPhase = ''
@@ -55,11 +58,13 @@ let
         esac
       done
 
-      echo "Running test server on Port: \$PORT" >&2
+      echo "Starting test server (requested port: \$PORT)" >&2
       DOC_ROOT="$out/public" exec ${pkgs.python3}/bin/python3 -c 'import argparse
+      import errno
       import http.server
       import os
       import socketserver
+      import sys
 
       parser = argparse.ArgumentParser()
       parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8080)))
@@ -84,8 +89,25 @@ let
               path = self.translate_path(request_path)
               return os.path.isfile(path)
 
-      with socketserver.TCPServer(("", args.port), SpaHandler) as httpd:
-          httpd.serve_forever()'
+      def bind_server(start_port: int) -> socketserver.TCPServer:
+          if start_port == 0:
+              return socketserver.TCPServer(("", 0), SpaHandler)
+
+          for port in range(start_port, start_port + 20):
+              try:
+                  return socketserver.TCPServer(("", port), SpaHandler)
+              except OSError as exc:
+                  if exc.errno != errno.EADDRINUSE:
+                      raise
+
+          raise SystemExit(
+              f"No available port found between {start_port} and {start_port + 19}."
+          )
+
+      httpd = bind_server(args.port)
+      selected_port = httpd.server_address[1]
+      print(f"Running test server on Port: {selected_port}", file=sys.stderr)
+      httpd.serve_forever()'
       EOF
             chmod +x $out/bin/${pname}
     '';
