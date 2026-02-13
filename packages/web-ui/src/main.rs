@@ -20,6 +20,7 @@ fn main() {
 }
 
 /// Root application component.
+#[component]
 fn app() -> Element {
     provide_app_state();
 
