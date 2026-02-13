@@ -31,11 +31,11 @@
     '';
 
     installPhase = ''
-      mkdir -p $out/public
-      cp -r target/dx/*/release/web/public/* $out/public/
+            mkdir -p $out/public
+            cp -r target/dx/*/release/web/public/* $out/public/
 
-      mkdir -p $out/bin
-      cat > $out/bin/${pname} <<EOF
+            mkdir -p $out/bin
+            cat > $out/bin/${pname} <<EOF
       #!${pkgs.bash}/bin/bash
       PORT=8080
       while [[ \$# -gt 0 ]]; do
@@ -49,12 +49,43 @@
             ;;
         esac
       done
+
       echo "Running test server on Port: \$PORT" >&2
-      exec ${pkgs.python3}/bin/python3 -m http.server "\$PORT" --directory "$out/public"
+      DOC_ROOT="$out/public" exec ${pkgs.python3}/bin/python3 -c 'import argparse
+      import http.server
+      import os
+      import socketserver
+
+      parser = argparse.ArgumentParser()
+      parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", 8080)))
+      parser.add_argument("--directory", default=os.environ.get("DOC_ROOT", "."))
+      args = parser.parse_args()
+
+      class SpaHandler(http.server.SimpleHTTPRequestHandler):
+          def __init__(self, *handler_args, **handler_kwargs):
+              super().__init__(*handler_args, directory=args.directory, **handler_kwargs)
+
+          def do_GET(self):
+              if not self._has_asset(self.path):
+                  self.path = "/index.html"
+              return super().do_GET()
+
+          def do_HEAD(self):
+              if not self._has_asset(self.path):
+                  self.path = "/index.html"
+              return super().do_HEAD()
+
+          def _has_asset(self, request_path: str) -> bool:
+              path = self.translate_path(request_path)
+              return os.path.isfile(path)
+
+      with socketserver.TCPServer(("", args.port), SpaHandler) as httpd:
+          httpd.serve_forever()'
       EOF
-      chmod +x $out/bin/${pname}
+            chmod +x $out/bin/${pname}
     '';
   };
+
   desktop-app = pkgs.rustPlatform.buildRustPackage {
     inherit pname;
     version = "0.1.0";
