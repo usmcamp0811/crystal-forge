@@ -1,9 +1,7 @@
-{
-  lib,
-  pkgs,
-  ...
-}: let
+{ lib, pkgs, ... }:
+let
   pname = "crystal-forge-web-ui";
+  appName = "crystal-forge-ui";
   web-app = pkgs.rustPlatform.buildRustPackage {
     inherit pname;
     version = "0.1.0";
@@ -19,22 +17,29 @@
       pkgs.pkg-config
       pkgs.dioxus-cli
       pkgs.wasm-bindgen-cli
+      pkgs.tailwindcss
     ];
 
-    buildInputs = [pkgs.openssl.dev pkgs.zlib];
+    buildInputs = [ pkgs.openssl.dev pkgs.zlib ];
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
       ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.100
 
       dx bundle --platform web --release
+      ${pkgs.tailwindcss}/bin/tailwindcss -i ${
+        ./tailwind.css
+      } -o ./assets/tailwind.min.css --minify
     '';
 
     installPhase = ''
-            mkdir -p $out/public
-            cp -r target/dx/*/release/web/public/* $out/public/
+      mkdir -p $out/public
+      cp -r target/dx/${appName}/release/web/public/* $out/public/
+      cp ./assets/tailwind.min.css $out/public/tailwind.min.css
+      cp ./assets/tailwind.min.css $out/public/assets/tailwind.min.css
 
-            mkdir -p $out/bin
+      mkdir -p $out/bin
+
             cat > $out/bin/${pname} <<EOF
       #!${pkgs.bash}/bin/bash
       PORT=8080
@@ -100,7 +105,7 @@
       pkgs.wasm-bindgen-cli
     ];
 
-    buildInputs = [pkgs.openssl.dev pkgs.zlib];
+    buildInputs = [ pkgs.openssl.dev pkgs.zlib ];
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
@@ -115,5 +120,4 @@
 
     '';
   };
-in
-  web-app // {inherit desktop-app;}
+in web-app // { inherit desktop-app; }
