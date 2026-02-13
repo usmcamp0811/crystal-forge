@@ -10,7 +10,8 @@ reload_html = true
 watch_path = ["src"]
 
 [web.resource]
-script = ["https://cdn.tailwindcss.com"]
+style = ["/tailwind.min.css"]
 
 [web.resource.dev]
-style = []
+script = ["https://cdn.tailwindcss.com"]
+style = ["/tailwind.min.css"]
