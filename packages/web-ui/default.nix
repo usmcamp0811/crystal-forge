@@ -1,36 +1,88 @@
-{ lib, pkgs, ... }:
-let src = ./.;
-in pkgs.writeShellApplication {
-  name = "crystal-forge-ui";
-  runtimeInputs = with pkgs; [
-    dioxus-cli
-    rustc
-    cargo
-    wasm-bindgen-cli
-    binaryen
-  ];
-  text = ''
-    set -euo pipefail
+{
+  lib,
+  pkgs,
+  ...
+}: let
+  pname = "crystal-forge-web-ui";
+  web-app = pkgs.rustPlatform.buildRustPackage {
+    inherit pname;
+    version = "0.1.0";
+    src = ./.;
+    cargoLock.lockFile = ./Cargo.lock;
 
-    # Resolve the source directory — use $PROJECT_ROOT if set (dev shell),
-    # otherwise fall back to the Nix store copy of the source.
-    SRC_DIR="''${PROJECT_ROOT:-}"
-    if [ -n "$SRC_DIR" ] && [ -d "$SRC_DIR/packages/web-ui/src" ]; then
-      SRC_DIR="$SRC_DIR/packages/web-ui"
-    else
-      # Copy source to a writable temp directory since dx needs to write to target/
-      SRC_DIR="$(mktemp -d)"
-      trap 'rm -rf "$SRC_DIR"' EXIT
-      cp -r ${src}/. "$SRC_DIR/"
-      chmod -R u+w "$SRC_DIR"
-    fi
+    nativeBuildInputs = [
+      pkgs.rustc
+      pkgs.cargo
+      pkgs.binaryen
+      pkgs.lld
+      pkgs.openssl
+      pkgs.pkg-config
+      pkgs.dioxus-cli
+      pkgs.wasm-bindgen-cli
+    ];
 
-    echo "🌐 Starting Crystal Forge Web UI..."
-    echo "   Source: $SRC_DIR"
-    echo "   URL:    http://localhost:8080"
-    echo ""
+    buildInputs = [pkgs.openssl.dev pkgs.zlib];
+    buildPhase = ''
+      export XDG_DATA_HOME=$PWD
+      mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
+      ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.100
 
-    cd "$SRC_DIR"
-    dx serve "$@"
-  '';
-}
+      dx bundle --platform web --release
+    '';
+
+    installPhase = ''
+      mkdir -p $out/public
+      cp -r target/dx/*/release/web/public/* $out/public/
+
+      mkdir -p $out/bin
+      cat > $out/bin/${pname} <<EOF
+      #!${pkgs.bash}/bin/bash
+      PORT=8080
+      while [[ \$# -gt 0 ]]; do
+        case "\$1" in
+          -p|--port)
+            PORT="\$2"
+            shift 2
+            ;;
+          *)
+            shift
+            ;;
+        esac
+      done
+      echo "Running test server on Port: \$PORT" >&2
+      exec ${pkgs.python3}/bin/python3 -m http.server "\$PORT" --directory "$out/public"
+      EOF
+      chmod +x $out/bin/${pname}
+    '';
+  };
+  desktop-app = pkgs.rustPlatform.buildRustPackage {
+    inherit pname;
+    version = "0.1.0";
+    src = ./.;
+    cargoLock.lockFile = ./Cargo.lock;
+
+    nativeBuildInputs = [
+      pkgs.lld
+      pkgs.openssl
+      pkgs.pkg-config
+      pkgs.dioxus-cli
+      pkgs.wasm-bindgen-cli
+    ];
+
+    buildInputs = [pkgs.openssl.dev pkgs.zlib];
+    buildPhase = ''
+      export XDG_DATA_HOME=$PWD
+      mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
+      ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.100
+
+      dx bundle --platform desktop --release
+    '';
+
+    installPhase = ''
+      mkdir -p $out
+      cp -r target/dx/* $out/
+
+    '';
+  };
+in
+  web-app // {inherit desktop-app;}
