@@ -11,7 +11,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     nixos-compose = {
-      url = "github:oar-team/nixos-compose/25.05";
+      url = "github:oar-team/nixos-compose/25.11";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
