@@ -14,5 +14,7 @@ in {
   python3Packages = prev.python3Packages // {
     batsky = overrideBatsky prev.python3Packages;
   };
+
+  batsky = overrideBatsky prev.python3Packages;
 }
 
