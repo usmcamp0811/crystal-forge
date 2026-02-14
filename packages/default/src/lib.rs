@@ -10,3 +10,6 @@ pub mod models;
 pub mod queries;
 pub mod server;
 pub mod vulnix;
+
+#[cfg(test)]
+pub mod test_utils;
