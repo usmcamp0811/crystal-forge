@@ -312,52 +312,61 @@ fn TimelineGraph(
     let last_x = positioned_commits.last().map(|p| p.x_position).unwrap_or(0.0) as i32;
     let line_width = last_x - first_x;
 
-    // Line is at y=24px (centered), content hangs below to ~90px
+    // Line is at y=24px, nodes centered on it, content below
     let line_y = 24;
-    let container_height = 100;
+    let node_size = 12;
+    let container_height = 85;
 
     rsx! {
+        // Outer wrapper allows popups to overflow
         div {
-            // Custom scrollbar styling: thin, subtle, only horizontal
-            class: "overflow-x-auto overflow-y-hidden scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent",
-            style: "scrollbar-width: thin; scrollbar-color: #374151 transparent;",
+            class: "relative",
+            style: "overflow: visible;",
             "data-testid": "{testid}",
+
+            // Scrollable timeline area
             div {
-                class: "relative",
-                style: "width: {width_px}px; height: {container_height}px;",
+                class: "overflow-x-auto overflow-y-visible",
+                style: "scrollbar-width: thin; scrollbar-color: #374151 transparent;",
 
-                // Main horizontal line
                 div {
-                    class: "absolute h-0.5 bg-gray-600 rounded-full",
-                    style: "left: {first_x}px; width: {line_width}px; top: {line_y}px;"
-                }
+                    class: "relative",
+                    style: "width: {width_px}px; height: {container_height}px;",
 
-                // Colored segments on top of the gray line
-                for (i, pc) in positioned_commits.iter().enumerate() {
-                    if i > 0 {
-                        {
-                            let prev = &positioned_commits[i - 1];
-                            let seg_start = prev.x_position as i32;
-                            let seg_width = (pc.x_position - prev.x_position) as i32;
-                            let seg_color = commits_behind_bg(pc.commit.commits_behind);
-                            rsx! {
-                                div {
-                                    class: "absolute h-0.5 rounded-full {seg_color}",
-                                    style: "left: {seg_start}px; width: {seg_width}px; top: {line_y}px; z-index: 1;"
+                    // Main horizontal line - goes THROUGH the center of nodes
+                    div {
+                        class: "absolute bg-gray-600",
+                        style: "left: {first_x}px; width: {line_width}px; top: {line_y}px; height: 2px;"
+                    }
+
+                    // Colored segments on top of the gray line
+                    for (i, pc) in positioned_commits.iter().enumerate() {
+                        if i > 0 {
+                            {
+                                let prev = &positioned_commits[i - 1];
+                                let seg_start = prev.x_position as i32;
+                                let seg_width = (pc.x_position - prev.x_position) as i32;
+                                let seg_color = commits_behind_bg(pc.commit.commits_behind);
+                                rsx! {
+                                    div {
+                                        class: "absolute {seg_color}",
+                                        style: "left: {seg_start}px; width: {seg_width}px; top: {line_y}px; height: 2px; z-index: 1;"
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                // Commit nodes ON the line
-                for pc in positioned_commits.iter() {
-                    CommitNode {
-                        commit: pc.commit.clone(),
-                        flake_name: pc.flake_name.clone(),
-                        show_flake_label: show_flake_labels,
-                        x_position: pc.x_position,
-                        line_y: line_y
+                    // Commit nodes - line goes through their center
+                    for pc in positioned_commits.iter() {
+                        CommitNode {
+                            commit: pc.commit.clone(),
+                            flake_name: pc.flake_name.clone(),
+                            show_flake_label: show_flake_labels,
+                            x_position: pc.x_position,
+                            line_y: line_y,
+                            node_size: node_size
+                        }
                     }
                 }
             }
@@ -365,7 +374,7 @@ fn TimelineGraph(
     }
 }
 
-/// A single commit node centered ON the line with content below.
+/// A single commit node with the line passing through its center.
 #[component]
 fn CommitNode(
     commit: FlakeCommit,
@@ -373,6 +382,7 @@ fn CommitNode(
     show_flake_label: bool,
     x_position: f64,
     line_y: i32,
+    node_size: i32,
 ) -> Element {
     let short_hash = commit.hash.chars().take(7).collect::<String>();
     let node_bg = commits_behind_bg(commit.commits_behind);
@@ -387,11 +397,10 @@ fn CommitNode(
     let x_px = x_position as i32;
     let system_plural = if commit.system_count == 1 { "" } else { "s" };
 
-    // Node is 10px diameter, center it on the line
-    let node_size = 10;
+    // Center node on line: line is at line_y, node center should be at line_y
     let node_top = line_y - (node_size / 2);
-    // Content starts below the node
-    let content_top = line_y + (node_size / 2) + 4;
+    // Content starts below the node with small gap
+    let content_top = line_y + (node_size / 2) + 6;
 
     rsx! {
         div {
@@ -400,10 +409,10 @@ fn CommitNode(
             "data-testid": "commit-node",
             "data-commits-behind": "{commit.commits_behind}",
 
-            // Node circle centered ON the line
+            // Node circle - line passes through its center
             div {
-                class: "absolute left-1/2 -translate-x-1/2 z-10 rounded-full border-2 border-gray-900 cursor-pointer {node_bg}",
-                style: "width: {node_size}px; height: {node_size}px; top: {node_top}px;"
+                class: "absolute left-1/2 -translate-x-1/2 rounded-full border-2 border-gray-900 cursor-pointer {node_bg}",
+                style: "width: {node_size}px; height: {node_size}px; top: {node_top}px; z-index: 5;"
             }
 
             // Content below the node
@@ -436,10 +445,10 @@ fn CommitNode(
                 }
             }
 
-            // Hover popup - appears below the commit info
+            // Hover popup - floats above everything, not clipped by scroll container
             div {
-                class: "absolute left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50",
-                style: "top: 90px; min-width: 240px;",
+                class: "absolute left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none",
+                style: "top: 75px; min-width: 240px; z-index: 9999;",
 
                 div {
                     class: "bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg p-4 shadow-2xl",
