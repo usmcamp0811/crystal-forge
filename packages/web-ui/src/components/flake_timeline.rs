@@ -312,18 +312,24 @@ fn TimelineGraph(
     let last_x = positioned_commits.last().map(|p| p.x_position).unwrap_or(0.0) as i32;
     let line_width = last_x - first_x;
 
+    // Line is at y=24px (centered), content hangs below to ~90px
+    let line_y = 24;
+    let container_height = 100;
+
     rsx! {
         div {
-            class: "overflow-x-auto",
+            // Custom scrollbar styling: thin, subtle, only horizontal
+            class: "overflow-x-auto overflow-y-hidden scrollbar-thin scrollbar-thumb-gray-700 scrollbar-track-transparent",
+            style: "scrollbar-width: thin; scrollbar-color: #374151 transparent;",
             "data-testid": "{testid}",
             div {
                 class: "relative",
-                style: "width: {width_px}px; height: 160px; padding-top: 20px;",
+                style: "width: {width_px}px; height: {container_height}px;",
 
-                // Main horizontal line at the top
+                // Main horizontal line
                 div {
-                    class: "absolute h-1 bg-gray-700 rounded-full",
-                    style: "left: {first_x}px; width: {line_width}px; top: 20px;"
+                    class: "absolute h-0.5 bg-gray-600 rounded-full",
+                    style: "left: {first_x}px; width: {line_width}px; top: {line_y}px;"
                 }
 
                 // Colored segments on top of the gray line
@@ -336,21 +342,22 @@ fn TimelineGraph(
                             let seg_color = commits_behind_bg(pc.commit.commits_behind);
                             rsx! {
                                 div {
-                                    class: "absolute h-1 rounded-full {seg_color}",
-                                    style: "left: {seg_start}px; width: {seg_width}px; top: 20px; z-index: 1;"
+                                    class: "absolute h-0.5 rounded-full {seg_color}",
+                                    style: "left: {seg_start}px; width: {seg_width}px; top: {line_y}px; z-index: 1;"
                                 }
                             }
                         }
                     }
                 }
 
-                // Commit nodes with vertical stems
+                // Commit nodes ON the line
                 for pc in positioned_commits.iter() {
                     CommitNode {
                         commit: pc.commit.clone(),
                         flake_name: pc.flake_name.clone(),
                         show_flake_label: show_flake_labels,
-                        x_position: pc.x_position
+                        x_position: pc.x_position,
+                        line_y: line_y
                     }
                 }
             }
@@ -358,13 +365,14 @@ fn TimelineGraph(
     }
 }
 
-/// A single commit node with vertical stem hanging from the line.
+/// A single commit node centered ON the line with content below.
 #[component]
 fn CommitNode(
     commit: FlakeCommit,
     flake_name: Option<String>,
     show_flake_label: bool,
     x_position: f64,
+    line_y: i32,
 ) -> Element {
     let short_hash = commit.hash.chars().take(7).collect::<String>();
     let node_bg = commits_behind_bg(commit.commits_behind);
@@ -379,40 +387,41 @@ fn CommitNode(
     let x_px = x_position as i32;
     let system_plural = if commit.system_count == 1 { "" } else { "s" };
 
+    // Node is 10px diameter, center it on the line
+    let node_size = 10;
+    let node_top = line_y - (node_size / 2);
+    // Content starts below the node
+    let content_top = line_y + (node_size / 2) + 4;
+
     rsx! {
         div {
             class: "absolute group",
-            style: "left: {x_px}px; top: 14px; transform: translateX(-50%);",
+            style: "left: {x_px}px; top: 0; transform: translateX(-50%);",
             "data-testid": "commit-node",
             "data-commits-behind": "{commit.commits_behind}",
 
-            // Vertical stem from the line down
+            // Node circle centered ON the line
             div {
-                class: "absolute left-1/2 w-0.5 bg-gray-600",
-                style: "height: 24px; top: 12px; transform: translateX(-50%);"
+                class: "absolute left-1/2 -translate-x-1/2 z-10 rounded-full border-2 border-gray-900 cursor-pointer {node_bg}",
+                style: "width: {node_size}px; height: {node_size}px; top: {node_top}px;"
             }
 
-            // Node circle on the main line
+            // Content below the node
             div {
-                class: "relative z-10 w-3 h-3 rounded-full border-2 border-gray-900 cursor-pointer mx-auto {node_bg}",
-                style: "margin-top: 4px;"
-            }
-
-            // Content below the stem
-            div {
-                class: "mt-9 flex flex-col items-center cursor-pointer min-w-[60px]",
+                class: "absolute left-1/2 -translate-x-1/2 flex flex-col items-center cursor-pointer",
+                style: "top: {content_top}px; min-width: 50px;",
 
                 // System count badge
                 if commit.system_count > 0 {
                     div {
-                        class: "px-2 py-0.5 rounded-full text-[10px] font-bold {node_bg} text-gray-900 mb-1",
+                        class: "px-1.5 py-0.5 rounded-full text-[9px] font-bold {node_bg} text-gray-900 mb-0.5",
                         "{commit.system_count}"
                     }
                 }
 
                 // Commit hash
                 span {
-                    class: "text-[10px] font-mono {theme::text::MUTED} group-hover:text-white transition",
+                    class: "text-[9px] font-mono {theme::text::MUTED} group-hover:text-white transition",
                     "{short_hash}"
                 }
 
@@ -420,7 +429,7 @@ fn CommitNode(
                 if show_flake_label {
                     if let Some(ref name) = flake_name {
                         span {
-                            class: "text-[9px] {theme::text::MUTED} truncate max-w-[60px]",
+                            class: "text-[8px] {theme::text::MUTED} truncate max-w-[50px]",
                             "{name}"
                         }
                     }
@@ -430,7 +439,7 @@ fn CommitNode(
             // Hover popup - appears below the commit info
             div {
                 class: "absolute left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50",
-                style: "top: 115px; min-width: 240px;",
+                style: "top: 90px; min-width: 240px;",
 
                 div {
                     class: "bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg p-4 shadow-2xl",
