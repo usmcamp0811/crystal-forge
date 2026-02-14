@@ -12,7 +12,7 @@ pub fn SystemCard(system: SystemSummary) -> Element {
     let environment = system.environment.clone().unwrap_or_else(|| "Unknown".to_string());
     let pipeline_label = system
         .pipeline_stage
-        .map(PipelineStage::label)
+        .map(|stage| stage.label())
         .unwrap_or("Unknown");
 
     rsx! {

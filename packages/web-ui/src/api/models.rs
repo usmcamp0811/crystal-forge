@@ -241,7 +241,7 @@ impl DeploymentStatusSummary {
 }
 
 /// Fleet-wide CVE vulnerability counts by severity.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CveSummary {
     pub critical: i64,
     pub high: i64,
