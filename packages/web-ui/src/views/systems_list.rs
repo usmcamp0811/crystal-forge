@@ -143,6 +143,7 @@ pub fn SystemsListView() -> Element {
             } else if *view_mode.read() == SystemsViewMode::Cards {
                 div {
                     class: "grid grid-cols-1 xl:grid-cols-2 gap-6",
+                    "data-testid": "systems-cards",
                     for system in filtered_systems.clone() {
                         SystemCard { system }
                     }
@@ -236,6 +237,7 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
             children: rsx! {
                 div {
                     class: "overflow-x-auto",
+                    "data-testid": "systems-table",
                     table {
                         class: "w-full",
                         thead {
