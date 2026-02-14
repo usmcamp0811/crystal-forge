@@ -1,17 +1,18 @@
 ---
 id: TASK-10
 title: UI Components - System Card Component
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-05 14:25'
+updated_date: '2026-02-14 03:48'
 labels:
   - ui
   - components
+milestone: m-3
 dependencies:
   - TASK-8.4
   - TASK-8.5
 priority: high
-milestone: m-3
 ---
 
 ## Description
