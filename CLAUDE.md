@@ -264,6 +264,8 @@ Closes: TASK-1.1, TASK-1.2, TASK-1.3, TASK-1.4, TASK-1.5"
    git checkout -b feat/your-feature-name
    ```
 
+   **IMPORTANT**: Always create the branch off `refactor` when starting a task. All work for the task must happen on that branch and be reviewed before merging back to `refactor`.
+
 2. **Always `git add` new files immediately** after creating them:
    ```bash
    # Nix flake checks only see git-tracked files!
