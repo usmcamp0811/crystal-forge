@@ -66,6 +66,11 @@ let
           // Should show actual mock data values
           await assertTextVisible(page, '54', 'Total systems count (54)');
           await assertTextVisible(page, 'atlas-01', 'Recent deployment hostname');
+          // Flake commit timeline
+          await assertVisible(page, "[data-testid='flake-timeline-widget']", 'Flake timeline widget');
+          await assertVisible(page, "[data-testid='timeline-legend']", 'Timeline legend');
+          await assertTextVisible(page, 'Commit Timeline', 'Timeline title');
+          await assertTextVisible(page, 'infrastructure', 'First flake name');
         }
       },
       {

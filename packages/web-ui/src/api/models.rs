@@ -337,12 +337,44 @@ pub struct SystemSecurityInfo {
 }
 
 /// Flake context for a system.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlakeSummary {
     pub id: i32,
     pub name: String,
     pub repo_url: String,
     pub latest_commit: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flake Commit Timeline DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A flake with its commit timeline for the dashboard widget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeTimeline {
+    pub flake_id: i32,
+    pub flake_name: String,
+    pub repo_url: String,
+    pub commits: Vec<FlakeCommit>,
+}
+
+/// A single commit in a flake's history with deployment info.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeCommit {
+    /// Full commit hash.
+    pub hash: String,
+    /// Short commit message (first line).
+    pub message: String,
+    /// Commit author name.
+    pub author: String,
+    /// When the commit was made.
+    pub committed_at: DateTime<Utc>,
+    /// Number of systems currently deployed at this commit.
+    pub system_count: i64,
+    /// How many commits behind the latest this is (0 = latest).
+    pub commits_behind: i64,
+    /// Hostnames of systems at this commit (for tooltip/expansion).
+    pub systems: Vec<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
