@@ -1,19 +1,20 @@
 ---
 id: TASK-11
 title: Dashboard View - Fleet Summary
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-02-05 14:25'
+updated_date: '2026-02-14 05:34'
 labels:
   - ui
   - views
   - dashboard
+milestone: m-3
 dependencies:
   - TASK-8.7
   - TASK-8.8
   - TASK-9
 priority: high
-milestone: m-3
 ---
 
 ## Description
@@ -41,11 +42,24 @@ Expected: Dashboard shows all key fleet metrics with dark theme, responsive layo
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Dashboard view renders with fleet metrics
-- [ ] #2 System health counts displayed (healthy/warning/critical/offline)
-- [ ] #3 CVE summary displayed with severity-colored counters
-- [ ] #4 Recent deployments listed
-- [ ] #5 Responsive layout (mobile + desktop)
-- [ ] #6 Loading and error states handled
+- [x] #1 Dashboard view renders with fleet metrics
+- [x] #2 System health counts displayed (healthy/warning/critical/offline)
+- [x] #3 CVE summary displayed with severity-colored counters
+- [x] #4 Recent deployments listed
+- [x] #5 Responsive layout (mobile + desktop)
+- [x] #6 Loading and error states handled
 - [ ] #7 (Stretch) Donut chart for CVE breakdown
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implemented dashboard with mock data:
+- Fleet health breakdown with stacked bar visualization and legend
+- CVE summary with severity-colored badges (critical/high/medium/low)
+- Deployment status breakdown with stacked bar
+- Recent deployments list with relative timestamps
+- Responsive grid layout (1-col mobile, 2-col tablet, 4-col desktop for stats)
+- All data-testid attributes added for UI testing
+- Playwright assertions verify all components render correctly
+<!-- SECTION:NOTES:END -->

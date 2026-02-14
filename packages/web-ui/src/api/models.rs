@@ -199,7 +199,7 @@ impl PipelineStage {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Top-level dashboard response aggregating fleet-wide metrics.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DashboardSummary {
     pub fleet_health: FleetHealthSummary,
     pub deployment_status: DeploymentStatusSummary,
@@ -211,7 +211,7 @@ pub struct DashboardSummary {
 }
 
 /// System counts grouped by health status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetHealthSummary {
     pub healthy: i64,
     pub warning: i64,
@@ -226,7 +226,7 @@ impl FleetHealthSummary {
 }
 
 /// System counts grouped by deployment status.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeploymentStatusSummary {
     pub up_to_date: i64,
     pub behind: i64,
@@ -256,7 +256,7 @@ impl CveSummary {
 }
 
 /// A single recent deployment event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentDeployment {
     pub hostname: String,
     pub commit_hash: String,
