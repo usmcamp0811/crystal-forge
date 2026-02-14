@@ -167,22 +167,6 @@
         "type": "github"
       }
     },
-    "nixpkgs_2": {
-      "locked": {
-        "lastModified": 1770862046,
-        "narHash": "sha256-8kZaBJRo/KQv57ElpUsSFvrGzUqKDPM2Jqxc7Vs2sb8=",
-        "owner": "nixos",
-        "repo": "nixpkgs",
-        "rev": "fa304dda2e254712105dd5aeb63111870503a290",
-        "type": "github"
-      },
-      "original": {
-        "owner": "nixos",
-        "ref": "release-25.11",
-        "repo": "nixpkgs",
-        "type": "github"
-      }
-    },
     "nixpkgs-stable": {
       "locked": {
         "lastModified": 1767313136,
@@ -195,6 +179,22 @@
       "original": {
         "owner": "NixOS",
         "ref": "nixos-25.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
+      "locked": {
+        "lastModified": 1770862046,
+        "narHash": "sha256-8kZaBJRo/KQv57ElpUsSFvrGzUqKDPM2Jqxc7Vs2sb8=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "fa304dda2e254712105dd5aeb63111870503a290",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "release-25.11",
         "repo": "nixpkgs",
         "type": "github"
       }
@@ -219,6 +219,7 @@
         "flake-utils": "flake-utils",
         "nixos-compose": "nixos-compose",
         "nixpkgs": "nixpkgs_2",
+        "nixpkgs-stable": "nixpkgs-stable",
         "process-compose-flake": "process-compose-flake",
         "services-flake": "services-flake",
         "snowfall-lib": "snowfall-lib"
