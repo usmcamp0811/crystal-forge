@@ -3,11 +3,19 @@
 //! Displays a horizontal git graph-style timeline of commits for monitored flakes,
 //! showing how many systems are deployed at each commit with severity coloring
 //! based on how far behind the latest they are.
+//!
+//! The timeline uses time-proportional spacing between commits, normalized so
+//! that rapid commits are still visible while long gaps are compressed.
 
 use dioxus::prelude::*;
 
 use crate::api::models::{FlakeCommit, FlakeTimeline};
 use crate::theme;
+
+/// Minimum pixels between commit nodes.
+const MIN_GAP_PX: f64 = 40.0;
+/// Maximum pixels between commit nodes.
+const MAX_GAP_PX: f64 = 120.0;
 
 /// View mode for the timeline display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -19,6 +27,15 @@ pub enum TimelineViewMode {
     Stacked,
     /// Filtered to show only one flake.
     SingleFlake,
+}
+
+/// A commit with its calculated position for rendering.
+#[derive(Clone, PartialEq)]
+struct PositionedCommit {
+    commit: FlakeCommit,
+    flake_name: Option<String>,
+    /// X position in pixels from the left edge.
+    x_position: f64,
 }
 
 /// The main flake timeline widget for the dashboard.
@@ -128,40 +145,89 @@ fn ViewModeToggle(mode: TimelineViewMode, on_change: EventHandler<TimelineViewMo
     }
 }
 
+/// Calculate time-proportional positions for commits.
+/// Uses logarithmic scaling so rapid commits stay visible while long gaps compress.
+fn calculate_positions(commits: &[(Option<String>, FlakeCommit)]) -> Vec<PositionedCommit> {
+    if commits.is_empty() {
+        return vec![];
+    }
+
+    if commits.len() == 1 {
+        return vec![PositionedCommit {
+            commit: commits[0].1.clone(),
+            flake_name: commits[0].0.clone(),
+            x_position: MIN_GAP_PX,
+        }];
+    }
+
+    // Sort by time (oldest first)
+    let mut sorted: Vec<_> = commits.to_vec();
+    sorted.sort_by(|a, b| a.1.committed_at.cmp(&b.1.committed_at));
+
+    // Calculate time gaps between consecutive commits
+    let gaps: Vec<i64> = sorted
+        .windows(2)
+        .map(|w| {
+            let duration = w[1].1.committed_at.signed_duration_since(w[0].1.committed_at);
+            duration.num_seconds().max(1)
+        })
+        .collect();
+
+    // Use logarithmic scaling: gap_px = MIN + (MAX-MIN) * log(1 + seconds) / log(1 + max_seconds)
+    let max_gap_seconds = gaps.iter().copied().max().unwrap_or(1) as f64;
+    let log_max = (1.0 + max_gap_seconds).ln();
+
+    let scaled_gaps: Vec<f64> = gaps
+        .iter()
+        .map(|&secs| {
+            let log_secs = (1.0 + secs as f64).ln();
+            let normalized = log_secs / log_max; // 0.0 to 1.0
+            MIN_GAP_PX + (MAX_GAP_PX - MIN_GAP_PX) * normalized
+        })
+        .collect();
+
+    // Build positioned commits
+    let mut result = Vec::with_capacity(sorted.len());
+    let mut x = MIN_GAP_PX; // Start with some padding
+
+    for (i, (flake_name, commit)) in sorted.into_iter().enumerate() {
+        result.push(PositionedCommit {
+            commit,
+            flake_name,
+            x_position: x,
+        });
+
+        if i < scaled_gaps.len() {
+            x += scaled_gaps[i];
+        }
+    }
+
+    result
+}
+
 /// Combined timeline showing all flakes' commits merged chronologically.
 #[component]
 fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
-    // Merge all commits and sort by date (oldest first for left-to-right display)
-    let mut all_commits: Vec<(String, FlakeCommit)> = timelines
+    // Merge all commits
+    let all_commits: Vec<(Option<String>, FlakeCommit)> = timelines
         .iter()
         .flat_map(|t| {
             t.commits
                 .iter()
-                .map(|c| (t.flake_name.clone(), c.clone()))
+                .map(|c| (Some(t.flake_name.clone()), c.clone()))
                 .collect::<Vec<_>>()
         })
         .collect();
 
-    all_commits.sort_by(|a, b| a.1.committed_at.cmp(&b.1.committed_at));
+    let positioned = calculate_positions(&all_commits);
+    let total_width = positioned.last().map(|p| p.x_position + MIN_GAP_PX).unwrap_or(100.0);
 
     rsx! {
-        div {
-            class: "overflow-x-auto pb-2",
-            "data-testid": "combined-timeline",
-            div {
-                class: "flex items-center min-w-max py-4 px-2",
-                for (idx, (flake_name, commit)) in all_commits.iter().enumerate() {
-                    // Connector line (except for first node)
-                    if idx > 0 {
-                        div { class: "w-8 h-0.5 bg-gray-700" }
-                    }
-                    CommitNode {
-                        commit: commit.clone(),
-                        flake_name: Some(flake_name.clone()),
-                        show_flake_label: true
-                    }
-                }
-            }
+        TimelineGraph {
+            positioned_commits: positioned,
+            total_width: total_width,
+            show_flake_labels: true,
+            testid: "combined-timeline"
         }
     }
 }
@@ -183,9 +249,14 @@ fn StackedTimelines(timelines: Vec<FlakeTimeline>) -> Element {
 /// Timeline for a single flake.
 #[component]
 fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
-    // Sort commits oldest first (left-to-right)
-    let mut commits = timeline.commits.clone();
-    commits.sort_by(|a, b| a.committed_at.cmp(&b.committed_at));
+    let commits: Vec<(Option<String>, FlakeCommit)> = timeline
+        .commits
+        .iter()
+        .map(|c| (None, c.clone()))
+        .collect();
+
+    let positioned = calculate_positions(&commits);
+    let total_width = positioned.last().map(|p| p.x_position + MIN_GAP_PX).unwrap_or(100.0);
 
     rsx! {
         div {
@@ -197,21 +268,55 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
                 span { class: "{theme::text::MUTED} text-xs font-mono", "{timeline.repo_url}" }
             }
 
-            // Git graph timeline
+            TimelineGraph {
+                positioned_commits: positioned,
+                total_width: total_width,
+                show_flake_labels: false,
+                testid: "single-timeline"
+            }
+        }
+    }
+}
+
+/// The actual timeline graph with continuous line and positioned nodes.
+#[component]
+fn TimelineGraph(
+    positioned_commits: Vec<PositionedCommit>,
+    total_width: f64,
+    show_flake_labels: bool,
+    testid: &'static str,
+) -> Element {
+    if positioned_commits.is_empty() {
+        return rsx! {
+            p { class: "{theme::text::MUTED}", "No commits to display." }
+        };
+    }
+
+    let width_px = total_width.max(200.0) as i32;
+    let first_x = positioned_commits.first().map(|p| p.x_position).unwrap_or(0.0);
+    let last_x = positioned_commits.last().map(|p| p.x_position).unwrap_or(0.0);
+
+    rsx! {
+        div {
+            class: "overflow-x-auto pb-2",
+            "data-testid": "{testid}",
             div {
-                class: "overflow-x-auto pb-2",
+                class: "relative",
+                style: "width: {width_px}px; height: 100px;",
+
+                // Continuous timeline line
                 div {
-                    class: "flex items-center min-w-max py-4 px-2",
-                    for (idx, commit) in commits.iter().enumerate() {
-                        // Connector line (except for first node)
-                        if idx > 0 {
-                            div { class: "w-8 h-0.5 bg-gray-700" }
-                        }
-                        CommitNode {
-                            commit: commit.clone(),
-                            flake_name: None,
-                            show_flake_label: false
-                        }
+                    class: "absolute top-1/2 h-0.5 bg-gray-600 rounded",
+                    style: "left: {first_x}px; width: {last_x - first_x}px; transform: translateY(-50%);"
+                }
+
+                // Commit nodes positioned absolutely
+                for pc in positioned_commits.iter() {
+                    CommitNode {
+                        commit: pc.commit.clone(),
+                        flake_name: pc.flake_name.clone(),
+                        show_flake_label: show_flake_labels,
+                        x_position: pc.x_position
                     }
                 }
             }
@@ -221,93 +326,111 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
 
 /// A single commit node in the git graph timeline.
 #[component]
-fn CommitNode(commit: FlakeCommit, flake_name: Option<String>, show_flake_label: bool) -> Element {
+fn CommitNode(
+    commit: FlakeCommit,
+    flake_name: Option<String>,
+    show_flake_label: bool,
+    x_position: f64,
+) -> Element {
     let short_hash = commit.hash.chars().take(7).collect::<String>();
     let node_color = commits_behind_color(commit.commits_behind);
     let node_border = commits_behind_border(commit.commits_behind);
-    
+    let node_bg = commits_behind_bg(commit.commits_behind);
+
     // Build tooltip content
     let systems_list = if commit.systems.is_empty() {
         "No systems".to_string()
     } else if commit.systems.len() <= 5 {
         commit.systems.join(", ")
     } else {
-        format!("{}, +{} more", commit.systems[..5].join(", "), commit.systems.len() - 5)
+        format!(
+            "{}, +{} more",
+            commit.systems[..5].join(", "),
+            commit.systems.len() - 5
+        )
     };
-    
+
     let behind_text = if commit.commits_behind == 0 {
         "Latest".to_string()
     } else {
-        format!("{} commit{} behind", commit.commits_behind, if commit.commits_behind == 1 { "" } else { "s" })
+        let plural = if commit.commits_behind == 1 { "" } else { "s" };
+        format!("{} commit{} behind", commit.commits_behind, plural)
     };
 
-    let tooltip = format!(
-        "{}\n{}\nBy: {}\n\n{} system{}\n{}\n\n{}",
-        short_hash,
-        commit.message,
-        commit.author,
-        commit.system_count,
-        if commit.system_count == 1 { "" } else { "s" },
-        systems_list,
-        behind_text
-    );
-
     // Node size based on whether it has systems
-    let node_size = if commit.system_count > 0 { "w-5 h-5" } else { "w-3 h-3" };
+    let (node_w, node_h) = if commit.system_count > 0 {
+        (20, 20)
+    } else {
+        (12, 12)
+    };
+
+    let x_px = x_position as i32;
+    let system_plural = if commit.system_count == 1 { "" } else { "s" };
 
     rsx! {
         div {
-            class: "flex flex-col items-center gap-1 group relative",
+            class: "absolute flex flex-col items-center group",
+            style: "left: {x_px}px; top: 50%; transform: translate(-50%, -50%);",
             "data-testid": "commit-node",
             "data-commits-behind": "{commit.commits_behind}",
 
-            // Flake label (for combined view)
-            if show_flake_label {
-                if let Some(ref name) = flake_name {
-                    span {
-                        class: "text-[10px] {theme::text::MUTED} truncate max-w-[60px] mb-1",
-                        "{name}"
+            // Top section: flake label and system count
+            div {
+                class: "flex flex-col items-center mb-1",
+                style: "min-height: 32px;",
+
+                // Flake label (for combined view)
+                if show_flake_label {
+                    if let Some(ref name) = flake_name {
+                        span {
+                            class: "text-[10px] {theme::text::MUTED} truncate max-w-[60px]",
+                            "{name}"
+                        }
                     }
                 }
-            }
 
-            // System count badge (above node if has systems)
-            if commit.system_count > 0 {
-                span {
-                    class: "text-xs font-bold {node_color} mb-1",
-                    "{commit.system_count}"
+                // System count badge (above node if has systems)
+                if commit.system_count > 0 {
+                    span {
+                        class: "text-xs font-bold {node_color}",
+                        "{commit.system_count}"
+                    }
                 }
             }
 
             // The commit node circle
             div {
-                class: "rounded-full {node_size} {node_border} border-2 cursor-pointer transition-transform hover:scale-125",
-                title: "{tooltip}",
+                class: "rounded-full border-2 cursor-pointer transition-all hover:scale-125 {node_border}",
+                style: "width: {node_w}px; height: {node_h}px;",
                 // Inner fill for nodes with systems
                 if commit.system_count > 0 {
                     div {
-                        class: "w-full h-full rounded-full {commits_behind_bg(commit.commits_behind)}"
+                        class: "w-full h-full rounded-full {node_bg}"
                     }
                 }
             }
 
-            // Commit hash below node
-            span {
-                class: "text-[10px] font-mono {theme::text::MUTED} group-hover:text-white transition mt-1",
-                "{short_hash}"
+            // Bottom section: hash
+            div {
+                class: "mt-1",
+                style: "min-height: 16px;",
+                span {
+                    class: "text-[10px] font-mono {theme::text::MUTED} group-hover:text-white transition",
+                    "{short_hash}"
+                }
             }
 
-            // Hover tooltip with more info
+            // Hover tooltip
             div {
-                class: "absolute bottom-full mb-2 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10",
+                class: "absolute bottom-full mb-8 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-20",
                 div {
                     class: "bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg p-3 shadow-xl min-w-[200px] max-w-[280px]",
                     // Commit message
                     p {
-                        class: "text-sm text-white font-medium truncate",
+                        class: "text-sm text-white font-medium",
                         "{commit.message}"
                     }
-                    // Author
+                    // Author and time
                     p {
                         class: "text-xs {theme::text::MUTED} mt-1",
                         "by {commit.author}"
@@ -315,20 +438,15 @@ fn CommitNode(commit: FlakeCommit, flake_name: Option<String>, show_flake_label:
                     // Divider
                     div { class: "h-px bg-gray-700 my-2" }
                     // Systems info
-                    {
-                        let system_plural = if commit.system_count == 1 { "" } else { "s" };
-                        rsx! {
-                            div {
-                                class: "flex items-center justify-between",
-                                span {
-                                    class: "text-xs {theme::text::SECONDARY}",
-                                    "{commit.system_count} system{system_plural}"
-                                }
-                                span {
-                                    class: "text-xs {node_color}",
-                                    "{behind_text}"
-                                }
-                            }
+                    div {
+                        class: "flex items-center justify-between",
+                        span {
+                            class: "text-xs {theme::text::SECONDARY}",
+                            "{commit.system_count} system{system_plural}"
+                        }
+                        span {
+                            class: "text-xs {node_color}",
+                            "{behind_text}"
                         }
                     }
                     // System hostnames (if few enough)
