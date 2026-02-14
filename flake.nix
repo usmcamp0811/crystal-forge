@@ -11,26 +11,26 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     nixos-compose = {
-      url = "github:oar-team/nixos-compose/25.11";
+      url = "github:oar-team/nixos-compose/25.05";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
-  outputs = inputs:
-    let
-      lib = inputs.snowfall-lib.mkLib {
-        inherit inputs;
-        src = ./.;
-        snowfall = {
-          meta = {
-            name = "crystal-forge";
-            title = "Crystal Forge";
-          };
-          namespace = "crystal-forge";
+  outputs = inputs: let
+    lib = inputs.snowfall-lib.mkLib {
+      inherit inputs;
+      src = ./.;
+      snowfall = {
+        meta = {
+          name = "crystal-forge";
+          title = "Crystal Forge";
         };
+        namespace = "crystal-forge";
       };
-    in lib.mkFlake {
-      channels-config = { allowUnfree = true; };
+    };
+  in
+    lib.mkFlake {
+      channels-config = {allowUnfree = true;};
 
       outputs-builder = channels: {
         packages = {
