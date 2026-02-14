@@ -56,6 +56,16 @@ let
           // Dashboard should have the app title and navigation
           await assertTextVisible(page, 'Crystal Forge', 'App title');
           await assertVisible(page, 'nav', 'Navigation');
+          // Dashboard should show fleet metrics
+          await assertVisible(page, "[data-testid='dashboard']", 'Dashboard container');
+          await assertTextVisible(page, 'Total Systems', 'Total Systems stat card');
+          await assertTextVisible(page, 'Healthy', 'Healthy stat card');
+          await assertVisible(page, "[data-testid='fleet-health-breakdown']", 'Fleet health breakdown');
+          await assertVisible(page, "[data-testid='cve-summary']", 'CVE summary panel');
+          await assertVisible(page, "[data-testid='recent-deployments']", 'Recent deployments list');
+          // Should show actual mock data values
+          await assertTextVisible(page, '54', 'Total systems count (54)');
+          await assertTextVisible(page, 'atlas-01', 'Recent deployment hostname');
         }
       },
       {
