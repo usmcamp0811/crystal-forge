@@ -4,8 +4,7 @@ let
   overrideBatsky = batskyPkg:
     batskyPkg.overridePythonAttrs (_: {
       pyproject = true;
-      build-system =
-        [ prev.python3Packages.setuptools prev.python3Packages.wheel ];
+      build-system = [ prev.python3Packages.setuptools ];
     });
 
   nurRepos = prev.nur.repos // {
