@@ -50,16 +50,15 @@ in pkgs.testers.runNixOSTest {
     machine.succeed("curl -sf http://127.0.0.1:8080/systems | grep -q 'Crystal Forge'")
     print("Web root is being served correctly (SPA fallback working)")
 
-      # Routes to screenshot (matches packages/web-ui/src/routes.rs)
-      routes = [
-          ("/", "dashboard", "Dashboard (fleet overview)"),
-          ("/systems", "systems", "Systems list"),
-          ("/builds", "builds", "Builds pipeline"),
-          ("/cves", "cves", "CVE dashboard"),
-          ("/style-guide", "style-guide", "Design system style guide"),
-          ("/not-a-real-page", "not-found", "404 not found page"),
-      ]
-
+    # Routes to screenshot (matches packages/web-ui/src/routes.rs)
+    routes = [
+        ("/", "dashboard", "Dashboard (fleet overview)"),
+        ("/systems", "systems", "Systems list"),
+        ("/builds", "builds", "Builds pipeline"),
+        ("/cves", "cves", "CVE dashboard"),
+        ("/style-guide", "style-guide", "Design system style guide"),
+        ("/not-a-real-page", "not-found", "404 not found page"),
+    ]
 
     screenshot_results = []
 
