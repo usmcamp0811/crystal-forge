@@ -1,5 +1,8 @@
-{ lib, pkgs, ... }:
-let
+{
+  lib,
+  pkgs,
+  ...
+}: let
   pname = "crystal-forge-web-ui";
   appName = "crystal-forge-ui";
   web-app = pkgs.rustPlatform.buildRustPackage {
@@ -20,7 +23,7 @@ let
       pkgs.tailwindcss
     ];
 
-    buildInputs = [ pkgs.openssl.dev pkgs.zlib ];
+    buildInputs = [pkgs.openssl.dev pkgs.zlib];
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
@@ -127,7 +130,7 @@ let
       pkgs.wasm-bindgen-cli
     ];
 
-    buildInputs = [ pkgs.openssl.dev pkgs.zlib ];
+    buildInputs = [pkgs.openssl.dev pkgs.zlib];
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
@@ -142,4 +145,5 @@ let
 
     '';
   };
-in web-app // { inherit desktop-app; }
+in
+  web-app // {inherit desktop-app;}
