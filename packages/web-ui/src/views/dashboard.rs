@@ -4,9 +4,10 @@ use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 
 use crate::api::models::{
-    CveSummary, DashboardSummary, DeploymentStatus, DeploymentStatusSummary, FleetHealthSummary,
-    RecentDeployment,
+    CveSummary, DashboardSummary, DeploymentStatus, DeploymentStatusSummary, FlakeCommit,
+    FlakeTimeline, FleetHealthSummary, RecentDeployment,
 };
+use crate::components::flake_timeline::FlakeTimelineWidget;
 use crate::components::layout::Card;
 use crate::components::stat_card::StatCard;
 use crate::theme;
@@ -16,6 +17,7 @@ use crate::theme;
 pub fn DashboardView() -> Element {
     // TODO: Replace with real API call using use_resource + fetch_dashboard()
     let dashboard = mock_dashboard_summary();
+    let flake_timelines = mock_flake_timelines();
 
     rsx! {
         div {
@@ -85,6 +87,14 @@ pub fn DashboardView() -> Element {
                     children: rsx! {
                         RecentDeploymentsList { deployments: dashboard.recent_deployments.clone() }
                     }
+                }
+            }
+
+            // Flake Commit Timeline
+            Card {
+                title: None,
+                children: rsx! {
+                    FlakeTimelineWidget { timelines: flake_timelines }
                 }
             }
         }
@@ -398,4 +408,141 @@ fn mock_dashboard_summary() -> DashboardSummary {
         ],
         timestamp: now,
     }
+}
+
+/// Generate mock flake timeline data for development.
+fn mock_flake_timelines() -> Vec<FlakeTimeline> {
+    let now = Utc::now();
+
+    vec![
+        FlakeTimeline {
+            flake_id: 1,
+            flake_name: "infrastructure".to_string(),
+            repo_url: "github:acme/infra".to_string(),
+            commits: vec![
+                FlakeCommit {
+                    hash: "a1b2c3d4e5f6789012345678".to_string(),
+                    message: "feat: add monitoring stack".to_string(),
+                    author: "alice".to_string(),
+                    committed_at: now - Duration::hours(2),
+                    system_count: 12,
+                    commits_behind: 0,
+                    systems: vec!["atlas-01".to_string(), "atlas-02".to_string()],
+                },
+                FlakeCommit {
+                    hash: "b2c3d4e5f6789012345678ab".to_string(),
+                    message: "fix: nginx config reload".to_string(),
+                    author: "bob".to_string(),
+                    committed_at: now - Duration::hours(8),
+                    system_count: 8,
+                    commits_behind: 1,
+                    systems: vec!["luna-01".to_string(), "luna-02".to_string()],
+                },
+                FlakeCommit {
+                    hash: "c3d4e5f6789012345678abcd".to_string(),
+                    message: "chore: update nixpkgs".to_string(),
+                    author: "alice".to_string(),
+                    committed_at: now - Duration::days(1),
+                    system_count: 5,
+                    commits_behind: 2,
+                    systems: vec!["orion-01".to_string()],
+                },
+                FlakeCommit {
+                    hash: "d4e5f6789012345678abcdef".to_string(),
+                    message: "fix: postgres backup cron".to_string(),
+                    author: "charlie".to_string(),
+                    committed_at: now - Duration::days(3),
+                    system_count: 3,
+                    commits_behind: 3,
+                    systems: vec!["vega-01".to_string()],
+                },
+                FlakeCommit {
+                    hash: "e5f6789012345678abcdef01".to_string(),
+                    message: "feat: initial setup".to_string(),
+                    author: "alice".to_string(),
+                    committed_at: now - Duration::days(7),
+                    system_count: 2,
+                    commits_behind: 4,
+                    systems: vec!["legacy-01".to_string(), "legacy-02".to_string()],
+                },
+            ],
+        },
+        FlakeTimeline {
+            flake_id: 2,
+            flake_name: "workstations".to_string(),
+            repo_url: "github:acme/workstations".to_string(),
+            commits: vec![
+                FlakeCommit {
+                    hash: "f1a2b3c4d5e6f7890123456".to_string(),
+                    message: "feat: add vscode extensions".to_string(),
+                    author: "dave".to_string(),
+                    committed_at: now - Duration::hours(4),
+                    system_count: 15,
+                    commits_behind: 0,
+                    systems: vec!["ws-001".to_string(), "ws-002".to_string()],
+                },
+                FlakeCommit {
+                    hash: "a2b3c4d5e6f78901234567ab".to_string(),
+                    message: "fix: bluetooth audio".to_string(),
+                    author: "eve".to_string(),
+                    committed_at: now - Duration::days(1),
+                    system_count: 6,
+                    commits_behind: 1,
+                    systems: vec!["ws-003".to_string()],
+                },
+                FlakeCommit {
+                    hash: "b3c4d5e6f78901234567abcd".to_string(),
+                    message: "chore: cleanup old pkgs".to_string(),
+                    author: "dave".to_string(),
+                    committed_at: now - Duration::days(4),
+                    system_count: 0,
+                    commits_behind: 2,
+                    systems: vec![],
+                },
+                FlakeCommit {
+                    hash: "c4d5e6f78901234567abcdef".to_string(),
+                    message: "feat: add docker support".to_string(),
+                    author: "eve".to_string(),
+                    committed_at: now - Duration::days(10),
+                    system_count: 4,
+                    commits_behind: 3,
+                    systems: vec!["ws-old-01".to_string()],
+                },
+            ],
+        },
+        FlakeTimeline {
+            flake_id: 3,
+            flake_name: "edge-nodes".to_string(),
+            repo_url: "github:acme/edge".to_string(),
+            commits: vec![
+                FlakeCommit {
+                    hash: "1234567890abcdef12345678".to_string(),
+                    message: "fix: wireguard tunnel".to_string(),
+                    author: "frank".to_string(),
+                    committed_at: now - Duration::hours(1),
+                    system_count: 8,
+                    commits_behind: 0,
+                    systems: vec!["edge-us-east".to_string(), "edge-us-west".to_string()],
+                },
+                FlakeCommit {
+                    hash: "234567890abcdef123456789".to_string(),
+                    message: "feat: add metrics export".to_string(),
+                    author: "grace".to_string(),
+                    committed_at: now - Duration::hours(12),
+                    system_count: 4,
+                    commits_behind: 1,
+                    systems: vec!["edge-eu-west".to_string()],
+                },
+                FlakeCommit {
+                    hash: "34567890abcdef1234567890".to_string(),
+                    message: "chore: rotate certs".to_string(),
+                    author: "frank".to_string(),
+                    committed_at: now - Duration::days(2),
+                    system_count: 1,
+                    commits_behind: 2,
+                    systems: vec!["edge-ap-south".to_string()],
+                },
+            ],
+        },
+    ]
 }
