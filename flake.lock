@@ -134,9 +134,7 @@
       "inputs": {
         "flake-utils": "flake-utils_2",
         "kapack": "kapack",
-        "nixpkgs": [
-          "nixpkgs"
-        ]
+        "nixpkgs": "nixpkgs"
       },
       "locked": {
         "lastModified": 1757000851,
@@ -154,6 +152,22 @@
       }
     },
     "nixpkgs": {
+      "locked": {
+        "lastModified": 1768649915,
+        "narHash": "sha256-jc21hKogFnxU7KXSVTRmxC7u5D4RHwm9BAvDf5/Z1Uo=",
+        "owner": "nixos",
+        "repo": "nixpkgs",
+        "rev": "3e3f3c7f9977dc123c23ee21e8085ed63daf8c37",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nixos",
+        "ref": "release-25.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
       "locked": {
         "lastModified": 1770862046,
         "narHash": "sha256-8kZaBJRo/KQv57ElpUsSFvrGzUqKDPM2Jqxc7Vs2sb8=",
@@ -188,7 +202,7 @@
       "inputs": {
         "flake-utils": "flake-utils",
         "nixos-compose": "nixos-compose",
-        "nixpkgs": "nixpkgs",
+        "nixpkgs": "nixpkgs_2",
         "process-compose-flake": "process-compose-flake",
         "services-flake": "services-flake",
         "snowfall-lib": "snowfall-lib"
