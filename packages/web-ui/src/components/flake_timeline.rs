@@ -1,11 +1,7 @@
 //! Flake commit timeline component for the dashboard.
 //!
 //! Displays a horizontal git graph-style timeline of commits for monitored flakes,
-//! showing how many systems are deployed at each commit with severity coloring
-//! based on how far behind the latest they are.
-//!
-//! The timeline uses time-proportional spacing between commits, normalized so
-//! that rapid commits are still visible while long gaps are compressed.
+//! with commits hanging below the main line and details shown on hover.
 
 use dioxus::prelude::*;
 
@@ -13,9 +9,9 @@ use crate::api::models::{FlakeCommit, FlakeTimeline};
 use crate::theme;
 
 /// Minimum pixels between commit nodes.
-const MIN_GAP_PX: f64 = 40.0;
+const MIN_GAP_PX: f64 = 80.0;
 /// Maximum pixels between commit nodes.
-const MAX_GAP_PX: f64 = 120.0;
+const MAX_GAP_PX: f64 = 160.0;
 
 /// View mode for the timeline display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,7 +50,19 @@ pub fn FlakeTimelineWidget(timelines: Vec<FlakeTimeline>) -> Element {
             // Header with view mode toggle
             div {
                 class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3",
-                h3 { class: "{theme::typography::SECTION_TITLE} text-white", "Commit Timeline" }
+                div {
+                    class: "flex items-center gap-3",
+                    h3 { class: "{theme::typography::SECTION_TITLE} text-white", "Commit Timeline" }
+                    // Legend inline with title
+                    div {
+                        class: "flex items-center gap-3",
+                        "data-testid": "timeline-legend",
+                        LegendDot { color: "bg-emerald-500", label: "Latest" }
+                        LegendDot { color: "bg-yellow-500", label: "1 behind" }
+                        LegendDot { color: "bg-orange-500", label: "2 behind" }
+                        LegendDot { color: "bg-red-500", label: "3+ behind" }
+                    }
+                }
 
                 div {
                     class: "flex items-center gap-2",
@@ -97,9 +105,18 @@ pub fn FlakeTimelineWidget(timelines: Vec<FlakeTimeline>) -> Element {
                     }
                 },
             }
+        }
+    }
+}
 
-            // Legend
-            TimelineLegend {}
+/// Small legend dot with label.
+#[component]
+fn LegendDot(color: &'static str, label: &'static str) -> Element {
+    rsx! {
+        div {
+            class: "flex items-center gap-1",
+            div { class: "w-2 h-2 rounded-full {color}" }
+            span { class: "text-[10px] {theme::text::MUTED}", "{label}" }
         }
     }
 }
@@ -146,7 +163,6 @@ fn ViewModeToggle(mode: TimelineViewMode, on_change: EventHandler<TimelineViewMo
 }
 
 /// Calculate time-proportional positions for commits.
-/// Uses logarithmic scaling so rapid commits stay visible while long gaps compress.
 fn calculate_positions(commits: &[(Option<String>, FlakeCommit)]) -> Vec<PositionedCommit> {
     if commits.is_empty() {
         return vec![];
@@ -173,7 +189,7 @@ fn calculate_positions(commits: &[(Option<String>, FlakeCommit)]) -> Vec<Positio
         })
         .collect();
 
-    // Use logarithmic scaling: gap_px = MIN + (MAX-MIN) * log(1 + seconds) / log(1 + max_seconds)
+    // Use logarithmic scaling
     let max_gap_seconds = gaps.iter().copied().max().unwrap_or(1) as f64;
     let log_max = (1.0 + max_gap_seconds).ln();
 
@@ -181,14 +197,14 @@ fn calculate_positions(commits: &[(Option<String>, FlakeCommit)]) -> Vec<Positio
         .iter()
         .map(|&secs| {
             let log_secs = (1.0 + secs as f64).ln();
-            let normalized = log_secs / log_max; // 0.0 to 1.0
+            let normalized = log_secs / log_max;
             MIN_GAP_PX + (MAX_GAP_PX - MIN_GAP_PX) * normalized
         })
         .collect();
 
     // Build positioned commits
     let mut result = Vec::with_capacity(sorted.len());
-    let mut x = MIN_GAP_PX; // Start with some padding
+    let mut x = MIN_GAP_PX;
 
     for (i, (flake_name, commit)) in sorted.into_iter().enumerate() {
         result.push(PositionedCommit {
@@ -208,7 +224,6 @@ fn calculate_positions(commits: &[(Option<String>, FlakeCommit)]) -> Vec<Positio
 /// Combined timeline showing all flakes' commits merged chronologically.
 #[component]
 fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
-    // Merge all commits
     let all_commits: Vec<(Option<String>, FlakeCommit)> = timelines
         .iter()
         .flat_map(|t| {
@@ -220,7 +235,7 @@ fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
         .collect();
 
     let positioned = calculate_positions(&all_commits);
-    let total_width = positioned.last().map(|p| p.x_position + MIN_GAP_PX).unwrap_or(100.0);
+    let total_width = positioned.last().map(|p| p.x_position + MIN_GAP_PX).unwrap_or(200.0);
 
     rsx! {
         TimelineGraph {
@@ -237,7 +252,7 @@ fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
 fn StackedTimelines(timelines: Vec<FlakeTimeline>) -> Element {
     rsx! {
         div {
-            class: "space-y-6",
+            class: "space-y-8",
             "data-testid": "stacked-timelines",
             for timeline in timelines {
                 SingleFlakeTimeline { timeline }
@@ -256,7 +271,7 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
         .collect();
 
     let positioned = calculate_positions(&commits);
-    let total_width = positioned.last().map(|p| p.x_position + MIN_GAP_PX).unwrap_or(100.0);
+    let total_width = positioned.last().map(|p| p.x_position + MIN_GAP_PX).unwrap_or(200.0);
 
     rsx! {
         div {
@@ -278,17 +293,7 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
     }
 }
 
-/// A line segment between two commits with color based on "behind" status.
-#[derive(Clone, PartialEq)]
-struct LineSegment {
-    start_x: f64,
-    end_x: f64,
-    /// The "commits_behind" value of the commit this segment leads TO
-    /// (determines the color - how stale is this section of the graph)
-    commits_behind: i64,
-}
-
-/// The actual timeline graph with colored line segments and positioned nodes.
+/// The timeline graph with horizontal line and commits hanging below.
 #[component]
 fn TimelineGraph(
     positioned_commits: Vec<PositionedCommit>,
@@ -302,34 +307,44 @@ fn TimelineGraph(
         };
     }
 
-    let width_px = total_width.max(200.0) as i32;
-
-    // Build line segments between consecutive commits
-    // Each segment is colored based on the commit it leads TO
-    let segments: Vec<LineSegment> = positioned_commits
-        .windows(2)
-        .map(|w| LineSegment {
-            start_x: w[0].x_position,
-            end_x: w[1].x_position,
-            // Color based on the destination commit's "behind" status
-            commits_behind: w[1].commit.commits_behind,
-        })
-        .collect();
+    let width_px = total_width.max(300.0) as i32;
+    let first_x = positioned_commits.first().map(|p| p.x_position).unwrap_or(0.0) as i32;
+    let last_x = positioned_commits.last().map(|p| p.x_position).unwrap_or(0.0) as i32;
+    let line_width = last_x - first_x;
 
     rsx! {
         div {
-            class: "overflow-x-auto pb-2",
+            class: "overflow-x-auto",
             "data-testid": "{testid}",
             div {
                 class: "relative",
-                style: "width: {width_px}px; height: 120px;",
+                style: "width: {width_px}px; height: 160px; padding-top: 20px;",
 
-                // Colored line segments between commits
-                for segment in segments.iter() {
-                    TimelineSegment { segment: segment.clone() }
+                // Main horizontal line at the top
+                div {
+                    class: "absolute h-1 bg-gray-700 rounded-full",
+                    style: "left: {first_x}px; width: {line_width}px; top: 20px;"
                 }
 
-                // Commit nodes positioned absolutely (rendered on top of lines)
+                // Colored segments on top of the gray line
+                for (i, pc) in positioned_commits.iter().enumerate() {
+                    if i > 0 {
+                        {
+                            let prev = &positioned_commits[i - 1];
+                            let seg_start = prev.x_position as i32;
+                            let seg_width = (pc.x_position - prev.x_position) as i32;
+                            let seg_color = commits_behind_bg(pc.commit.commits_behind);
+                            rsx! {
+                                div {
+                                    class: "absolute h-1 rounded-full {seg_color}",
+                                    style: "left: {seg_start}px; width: {seg_width}px; top: 20px; z-index: 1;"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Commit nodes with vertical stems
                 for pc in positioned_commits.iter() {
                     CommitNode {
                         commit: pc.commit.clone(),
@@ -343,22 +358,7 @@ fn TimelineGraph(
     }
 }
 
-/// A single colored line segment in the timeline.
-#[component]
-fn TimelineSegment(segment: LineSegment) -> Element {
-    let bg_color = commits_behind_bg(segment.commits_behind);
-    let start = segment.start_x as i32;
-    let width = (segment.end_x - segment.start_x) as i32;
-
-    rsx! {
-        div {
-            class: "absolute h-2 rounded-full {bg_color}",
-            style: "left: {start}px; width: {width}px; top: 50%; transform: translateY(-50%); z-index: 1;"
-        }
-    }
-}
-
-/// A single commit node in the git graph timeline.
+/// A single commit node with vertical stem hanging from the line.
 #[component]
 fn CommitNode(
     commit: FlakeCommit,
@@ -367,22 +367,7 @@ fn CommitNode(
     x_position: f64,
 ) -> Element {
     let short_hash = commit.hash.chars().take(7).collect::<String>();
-    let node_color = commits_behind_color(commit.commits_behind);
-    let node_border = commits_behind_border(commit.commits_behind);
     let node_bg = commits_behind_bg(commit.commits_behind);
-
-    // Build tooltip content
-    let systems_list = if commit.systems.is_empty() {
-        "No systems".to_string()
-    } else if commit.systems.len() <= 5 {
-        commit.systems.join(", ")
-    } else {
-        format!(
-            "{}, +{} more",
-            commit.systems[..5].join(", "),
-            commit.systems.len() - 5
-        )
-    };
 
     let behind_text = if commit.commits_behind == 0 {
         "Latest".to_string()
@@ -391,164 +376,120 @@ fn CommitNode(
         format!("{} commit{} behind", commit.commits_behind, plural)
     };
 
-    // Node size based on whether it has systems
-    let (node_w, node_h) = if commit.system_count > 0 {
-        (24, 24)
-    } else {
-        (16, 16)
-    };
-
     let x_px = x_position as i32;
     let system_plural = if commit.system_count == 1 { "" } else { "s" };
 
     rsx! {
         div {
-            class: "absolute flex flex-col items-center group",
-            style: "left: {x_px}px; top: 50%; transform: translate(-50%, -50%); z-index: 10;",
+            class: "absolute group",
+            style: "left: {x_px}px; top: 14px; transform: translateX(-50%);",
             "data-testid": "commit-node",
             "data-commits-behind": "{commit.commits_behind}",
 
-            // Top section: flake label and system count
+            // Vertical stem from the line down
             div {
-                class: "flex flex-col items-center mb-1",
-                style: "min-height: 32px;",
+                class: "absolute left-1/2 w-0.5 bg-gray-600",
+                style: "height: 24px; top: 12px; transform: translateX(-50%);"
+            }
 
-                // Flake label (for combined view)
-                if show_flake_label {
-                    if let Some(ref name) = flake_name {
-                        span {
-                            class: "text-[10px] {theme::text::MUTED} truncate max-w-[60px]",
-                            "{name}"
-                        }
-                    }
-                }
+            // Node circle on the main line
+            div {
+                class: "relative z-10 w-3 h-3 rounded-full border-2 border-gray-900 cursor-pointer mx-auto {node_bg}",
+                style: "margin-top: 4px;"
+            }
 
-                // System count badge (above node if has systems)
+            // Content below the stem
+            div {
+                class: "mt-9 flex flex-col items-center cursor-pointer min-w-[60px]",
+
+                // System count badge
                 if commit.system_count > 0 {
-                    span {
-                        class: "text-xs font-bold {node_color}",
+                    div {
+                        class: "px-2 py-0.5 rounded-full text-[10px] font-bold {node_bg} text-gray-900 mb-1",
                         "{commit.system_count}"
                     }
                 }
-            }
 
-            // The commit node circle - with dark ring to cleanly separate from line
-            div {
-                class: "rounded-full border-4 border-gray-900 cursor-pointer transition-all hover:scale-110",
-                style: "width: {node_w}px; height: {node_h}px;",
-                // Inner colored circle
-                div {
-                    class: "w-full h-full rounded-full {node_bg}"
-                }
-            }
-
-            // Bottom section: hash
-            div {
-                class: "mt-1",
-                style: "min-height: 16px;",
+                // Commit hash
                 span {
                     class: "text-[10px] font-mono {theme::text::MUTED} group-hover:text-white transition",
                     "{short_hash}"
                 }
+
+                // Flake label
+                if show_flake_label {
+                    if let Some(ref name) = flake_name {
+                        span {
+                            class: "text-[9px] {theme::text::MUTED} truncate max-w-[60px]",
+                            "{name}"
+                        }
+                    }
+                }
             }
 
-            // Hover tooltip
+            // Hover popup - appears below the commit info
             div {
-                class: "absolute bottom-full mb-8 left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-20",
+                class: "absolute left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-50",
+                style: "top: 115px; min-width: 240px;",
+
                 div {
-                    class: "bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg p-3 shadow-xl min-w-[200px] max-w-[280px]",
-                    // Commit message
-                    p {
-                        class: "text-sm text-white font-medium",
-                        "{commit.message}"
-                    }
-                    // Author and time
-                    p {
-                        class: "text-xs {theme::text::MUTED} mt-1",
-                        "by {commit.author}"
-                    }
-                    // Divider
-                    div { class: "h-px bg-gray-700 my-2" }
-                    // Systems info
+                    class: "bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg p-4 shadow-2xl",
+
+                    // Header with hash and status badge
                     div {
-                        class: "flex items-center justify-between",
+                        class: "flex items-center justify-between mb-2",
                         span {
-                            class: "text-xs {theme::text::SECONDARY}",
-                            "{commit.system_count} system{system_plural}"
+                            class: "text-sm font-mono text-white font-medium",
+                            "{short_hash}"
                         }
                         span {
-                            class: "text-xs {node_color}",
+                            class: "text-[10px] px-2 py-0.5 rounded-full {node_bg} text-gray-900 font-semibold",
                             "{behind_text}"
                         }
                     }
-                    // System hostnames (if few enough)
-                    if !commit.systems.is_empty() && commit.systems.len() <= 8 {
+
+                    // Commit message
+                    p {
+                        class: "text-sm text-white mb-2",
+                        "{commit.message}"
+                    }
+
+                    // Author
+                    p {
+                        class: "text-xs {theme::text::MUTED} mb-3",
+                        "by {commit.author}"
+                    }
+
+                    // Divider
+                    div { class: "h-px bg-gray-700 mb-3" }
+
+                    // Systems info
+                    div {
+                        class: "text-xs {theme::text::SECONDARY} mb-2",
+                        "{commit.system_count} system{system_plural} deployed at this commit"
+                    }
+
+                    // System hostnames
+                    if !commit.systems.is_empty() && commit.systems.len() <= 10 {
                         div {
-                            class: "mt-2 flex flex-wrap gap-1",
+                            class: "flex flex-wrap gap-1",
                             for system in commit.systems.iter() {
                                 span {
-                                    class: "text-[10px] px-1.5 py-0.5 rounded bg-gray-700 {theme::text::SECONDARY} font-mono",
+                                    class: "text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 font-mono",
                                     "{system}"
                                 }
                             }
                         }
                     }
+                    if commit.systems.len() > 10 {
+                        div {
+                            class: "text-[10px] {theme::text::MUTED} mt-1",
+                            "+{commit.systems.len() - 10} more systems"
+                        }
+                    }
                 }
             }
         }
-    }
-}
-
-/// Legend explaining the severity colors.
-#[component]
-fn TimelineLegend() -> Element {
-    rsx! {
-        div {
-            class: "flex flex-wrap items-center gap-4 pt-3 border-t {theme::surface::CARD_BORDER}",
-            "data-testid": "timeline-legend",
-            LegendItem { filled: true, color: "bg-emerald-500", border: "border-emerald-500", label: "Latest" }
-            LegendItem { filled: true, color: "bg-yellow-500", border: "border-yellow-500", label: "1 behind" }
-            LegendItem { filled: true, color: "bg-orange-500", border: "border-orange-500", label: "2 behind" }
-            LegendItem { filled: true, color: "bg-red-500", border: "border-red-500", label: "3+ behind" }
-            LegendItem { filled: false, color: "", border: "border-gray-500", label: "No systems" }
-        }
-    }
-}
-
-/// A single legend item.
-#[component]
-fn LegendItem(filled: bool, color: &'static str, border: &'static str, label: &'static str) -> Element {
-    rsx! {
-        div {
-            class: "flex items-center gap-1.5",
-            div {
-                class: "w-3 h-3 rounded-full border-2 {border}",
-                if filled {
-                    div { class: "w-full h-full rounded-full {color}" }
-                }
-            }
-            span { class: "text-xs {theme::text::MUTED}", "{label}" }
-        }
-    }
-}
-
-/// Get the text color class based on how many commits behind.
-fn commits_behind_color(behind: i64) -> &'static str {
-    match behind {
-        0 => "text-emerald-400",
-        1 => "text-yellow-400",
-        2 => "text-orange-400",
-        _ => "text-red-400",
-    }
-}
-
-/// Get the border color class based on how many commits behind.
-fn commits_behind_border(behind: i64) -> &'static str {
-    match behind {
-        0 => "border-emerald-500",
-        1 => "border-yellow-500",
-        2 => "border-orange-500",
-        _ => "border-red-500",
     }
 }
 

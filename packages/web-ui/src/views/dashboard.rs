@@ -24,6 +24,14 @@ pub fn DashboardView() -> Element {
             class: "space-y-8",
             "data-testid": "dashboard",
 
+            // Flake Commit Timeline (at the top for visibility)
+            Card {
+                title: None,
+                children: rsx! {
+                    FlakeTimelineWidget { timelines: flake_timelines }
+                }
+            }
+
             // Top stats row
             div {
                 class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4",
@@ -87,14 +95,6 @@ pub fn DashboardView() -> Element {
                     children: rsx! {
                         RecentDeploymentsList { deployments: dashboard.recent_deployments.clone() }
                     }
-                }
-            }
-
-            // Flake Commit Timeline
-            Card {
-                title: None,
-                children: rsx! {
-                    FlakeTimelineWidget { timelines: flake_timelines }
                 }
             }
         }
