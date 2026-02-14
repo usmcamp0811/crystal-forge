@@ -1,17 +1,18 @@
 ---
 id: TASK-9
 title: UI Components - Layout Components
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-05 14:25'
+updated_date: '2026-02-14 03:26'
 labels:
   - ui
   - components
+milestone: m-3
 dependencies:
   - TASK-8
   - TASK-8.4
 priority: high
-milestone: m-3
 ---
 
 ## Description
