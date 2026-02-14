@@ -179,21 +179,38 @@ async fn build_task_description(pool: &PgPool, derivation: &Derivation) -> Strin
     format_task_description(&derivation.derivation_name, ctx)
 }
 
-/// Update worker status (helper to reduce boilerplate)
+/// Apply a worker status update to a slice of worker statuses.
 ///
-/// This function updates the global worker status in a non-blocking way
+/// This is a pure function (no I/O, no global state) for testability.
+/// Returns `true` if a matching worker was found and updated, `false` otherwise.
+pub(crate) fn apply_worker_status_update(
+    statuses: &mut [WorkerStatus],
+    worker_id: usize,
+    state: WorkerState,
+    current_task: Option<String>,
+) -> bool {
+    if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
+        status.state = state;
+        status.current_task = current_task;
+        status.started_at = if state == WorkerState::Idle {
+            None
+        } else {
+            Some(std::time::Instant::now())
+        };
+        true
+    } else {
+        false
+    }
+}
+
+/// Update worker status (helper to reduce boilerplate).
+///
+/// This is a non-blocking wrapper that spawns a task to update the global
+/// worker status. The actual mutation logic lives in [`apply_worker_status_update`].
 fn update_worker_status(worker_id: usize, state: WorkerState, current_task: Option<String>) {
     tokio::spawn(async move {
         let mut statuses = get_build_status().write().await;
-        if let Some(status) = statuses.iter_mut().find(|s| s.worker_id == worker_id) {
-            status.state = state;
-            status.current_task = current_task;
-            status.started_at = if state == WorkerState::Idle {
-                None
-            } else {
-                Some(std::time::Instant::now())
-            };
-        }
+        apply_worker_status_update(&mut statuses, worker_id, state, current_task);
     });
 }
 
@@ -1385,6 +1402,223 @@ mod tests {
         #[test]
         fn commit_context_variants_are_not_equal() {
             assert_ne!(CommitContext::None, CommitContext::Unresolved { commit_id: 1 });
+        }
+    }
+
+    // ── apply_worker_status_update ───────────────────────────────────────
+
+    mod apply_worker_status_update_tests {
+        use super::*;
+
+        /// Helper: create a Vec<WorkerStatus> with the given worker IDs, all Idle.
+        fn make_workers(ids: &[usize]) -> Vec<WorkerStatus> {
+            ids.iter()
+                .map(|&id| WorkerStatus {
+                    worker_id: id,
+                    current_task: None,
+                    started_at: None,
+                    state: WorkerState::Idle,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn idle_to_working_sets_state_and_task() {
+            let mut workers = make_workers(&[0]);
+            let updated = apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Working,
+                Some("building foo".into()),
+            );
+
+            assert!(updated);
+            assert_eq!(workers[0].state, WorkerState::Working);
+            assert_eq!(workers[0].current_task.as_deref(), Some("building foo"));
+            assert!(workers[0].started_at.is_some(), "started_at should be set when Working");
+        }
+
+        #[test]
+        fn working_to_idle_clears_task_and_started_at() {
+            let mut workers = make_workers(&[0]);
+            // First transition to Working
+            apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Working,
+                Some("building bar".into()),
+            );
+            assert!(workers[0].started_at.is_some());
+
+            // Then back to Idle
+            let updated = apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Idle,
+                None,
+            );
+
+            assert!(updated);
+            assert_eq!(workers[0].state, WorkerState::Idle);
+            assert_eq!(workers[0].current_task, None);
+            assert!(workers[0].started_at.is_none(), "started_at should be cleared when Idle");
+        }
+
+        #[test]
+        fn full_lifecycle_idle_working_idle() {
+            let mut workers = make_workers(&[0]);
+
+            // Start idle
+            assert_eq!(workers[0].state, WorkerState::Idle);
+            assert!(workers[0].started_at.is_none());
+
+            // Transition to Working
+            apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Working,
+                Some("claiming work".into()),
+            );
+            assert_eq!(workers[0].state, WorkerState::Working);
+            assert!(workers[0].started_at.is_some());
+
+            // Update task while still Working
+            apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Working,
+                Some("building nixos-system".into()),
+            );
+            assert_eq!(workers[0].state, WorkerState::Working);
+            assert_eq!(
+                workers[0].current_task.as_deref(),
+                Some("building nixos-system")
+            );
+
+            // Back to Idle
+            apply_worker_status_update(&mut workers, 0, WorkerState::Idle, None);
+            assert_eq!(workers[0].state, WorkerState::Idle);
+            assert!(workers[0].started_at.is_none());
+            assert_eq!(workers[0].current_task, None);
+        }
+
+        #[test]
+        fn unknown_worker_id_returns_false_and_is_noop() {
+            let mut workers = make_workers(&[0, 1, 2]);
+            let original_states: Vec<_> = workers.iter().map(|w| w.state).collect();
+
+            let updated = apply_worker_status_update(
+                &mut workers,
+                999,
+                WorkerState::Working,
+                Some("should not appear".into()),
+            );
+
+            assert!(!updated);
+            // All workers unchanged
+            for (i, w) in workers.iter().enumerate() {
+                assert_eq!(w.state, original_states[i]);
+                assert_eq!(w.current_task, None);
+                assert!(w.started_at.is_none());
+            }
+        }
+
+        #[test]
+        fn empty_worker_list_returns_false() {
+            let mut workers: Vec<WorkerStatus> = vec![];
+            let updated = apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Working,
+                Some("test".into()),
+            );
+            assert!(!updated);
+        }
+
+        #[test]
+        fn updates_correct_worker_in_multi_worker_pool() {
+            let mut workers = make_workers(&[0, 1, 2]);
+
+            // Update worker 1 only
+            apply_worker_status_update(
+                &mut workers,
+                1,
+                WorkerState::Working,
+                Some("building package-x".into()),
+            );
+
+            // Worker 0: unchanged
+            assert_eq!(workers[0].state, WorkerState::Idle);
+            assert_eq!(workers[0].current_task, None);
+
+            // Worker 1: updated
+            assert_eq!(workers[1].state, WorkerState::Working);
+            assert_eq!(workers[1].current_task.as_deref(), Some("building package-x"));
+            assert!(workers[1].started_at.is_some());
+
+            // Worker 2: unchanged
+            assert_eq!(workers[2].state, WorkerState::Idle);
+            assert_eq!(workers[2].current_task, None);
+        }
+
+        #[test]
+        fn multiple_workers_can_be_updated_independently() {
+            let mut workers = make_workers(&[0, 1, 2]);
+
+            apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Working,
+                Some("task-a".into()),
+            );
+            apply_worker_status_update(
+                &mut workers,
+                2,
+                WorkerState::Working,
+                Some("task-c".into()),
+            );
+
+            assert_eq!(workers[0].state, WorkerState::Working);
+            assert_eq!(workers[0].current_task.as_deref(), Some("task-a"));
+
+            assert_eq!(workers[1].state, WorkerState::Idle);
+            assert_eq!(workers[1].current_task, None);
+
+            assert_eq!(workers[2].state, WorkerState::Working);
+            assert_eq!(workers[2].current_task.as_deref(), Some("task-c"));
+        }
+
+        #[test]
+        fn sleeping_state_sets_started_at() {
+            let mut workers = make_workers(&[0]);
+            apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Sleeping,
+                Some("waiting for work".into()),
+            );
+
+            assert_eq!(workers[0].state, WorkerState::Sleeping);
+            assert!(
+                workers[0].started_at.is_some(),
+                "started_at should be set for non-Idle states"
+            );
+        }
+
+        #[test]
+        fn working_with_none_task_is_valid() {
+            let mut workers = make_workers(&[0]);
+            let updated = apply_worker_status_update(
+                &mut workers,
+                0,
+                WorkerState::Working,
+                None,
+            );
+
+            assert!(updated);
+            assert_eq!(workers[0].state, WorkerState::Working);
+            assert_eq!(workers[0].current_task, None);
+            assert!(workers[0].started_at.is_some());
         }
     }
 }
