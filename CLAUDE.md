@@ -37,12 +37,13 @@ Welcome to the Crystal Forge project! This document will help you understand the
 ## 📋 Table of Contents
 
 1. [Project Overview](#project-overview)
-2. [Task Management Workflow](#task-management-workflow)
-3. [Git Workflow](#git-workflow)
-4. [Development Environment](#development-environment)
-5. [Testing Strategy](#testing-strategy)
-6. [Common Pitfalls & Solutions](#common-pitfalls--solutions)
-7. [Quick Reference](#quick-reference)
+2. [Engineering Standards (TDD & Quality)](#engineering-standards-tdd--quality)
+3. [Task Management Workflow](#task-management-workflow)
+4. [Git Workflow](#git-workflow)
+5. [Development Environment](#development-environment)
+6. [Testing Strategy](#testing-strategy)
+7. [Common Pitfalls & Solutions](#common-pitfalls--solutions)
+8. [Quick Reference](#quick-reference)
 
 ---
 
@@ -55,11 +56,71 @@ Welcome to the Crystal Forge project! This document will help you understand the
 - CVE scanning and security monitoring
 
 **Tech Stack**:
-- **Language**: Rust
-- **Database**: PostgreSQL (with SQLx)
-- **Build System**: Nix
+- **Language**: Rust (edition 2024, rustc 1.91.1)
+- **Database**: PostgreSQL (with SQLx, compile-time verified queries)
+- **Build System**: Nix (Snowfall Lib, nixpkgs release-25.11)
+- **Web UI**: Dioxus 0.7 (WASM target, Tailwind CSS via CDN)
 - **Package Manager**: Cargo
 - **Task Management**: Backlog.md CLI
+
+**Project Structure** (key directories):
+```
+crystal-forge/
+├── packages/default/          # Server, agent, builder, keygen (Rust)
+│   ├── src/
+│   │   ├── api/models.rs      # Shared API DTOs
+│   │   ├── handlers/api/      # REST API handlers (dashboard, etc.)
+│   │   ├── builder/           # Build orchestration
+│   │   └── deployment/        # Deployment logic
+│   └── .sqlx/                 # SQLx offline query cache
+├── packages/web-ui/           # Dioxus 0.7 web UI (WASM)
+│   ├── src/
+│   │   ├── api/               # Client-side DTOs + fetch client
+│   │   ├── components/        # Reusable UI components
+│   │   ├── views/             # Route-level page components
+│   │   ├── state/             # App state with context provider
+│   │   ├── theme.rs           # Design system tokens
+│   │   └── routes.rs          # Dioxus Router enum
+│   ├── Dioxus.toml            # Dioxus build config
+│   └── Cargo.lock             # Separate lockfile (WASM deps)
+├── checks/                    # Nix flake checks (CI verification)
+│   ├── server/                # Server integration tests (NixOS VM)
+│   ├── web-ui/                # Web UI build verification
+│   └── database/              # Database migration tests
+├── backlog/                   # Task management (Backlog.md)
+├── flake.nix                  # Nix flake entry point
+└── CLAUDE.md                  # This file
+```
+
+---
+
+## 🏗️ Engineering Standards (TDD & Quality)
+
+### Test-Driven Development
+
+Every change MUST be verified before it is considered complete. This is non-negotiable.
+
+**Per-crate test expectations**:
+
+| Crate | Verification Command | Notes |
+|-------|---------------------|-------|
+| `packages/default` (lib) | `nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo test --lib"` | 35+ unit tests, SQLx offline mode |
+| `packages/default` (server) | `nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo check --bin server"` | Compile check (full test needs DB) |
+| `packages/web-ui` | `nix build .#checks.x86_64-linux.web-ui` | WASM build + output validation |
+| Full integration | `nix build .#checks.x86_64-linux.server` | NixOS VM test (slow, ~10min) |
+
+**Rules**:
+1. **New features MUST have corresponding tests** — or at minimum, the existing test suite must pass
+2. **Run verification before marking any task as Done** — no exceptions
+3. **If a check fails, fix it before moving on** — don't leave broken builds
+4. **Always `git add` new files immediately** — Nix flake checks only see git-tracked files
+
+### Code Quality Standards
+
+- Use `cargo clippy` for linting (in nix develop shell)
+- Use `cargo fmt` for formatting
+- Prefer `sqlx::query_as` over `sqlx::query!` for new queries (avoids compile-time DB dependency)
+- Keep web-ui DTOs in sync with server `api/models.rs` types
 
 ---
 
@@ -196,28 +257,42 @@ Closes: TASK-1.1, TASK-1.2, TASK-1.3, TASK-1.4, TASK-1.5"
 
 ### Workflow Steps
 
-1. **Create feature branch**:
+1. **Create feature branch** (one branch per task):
    ```bash
    git checkout refactor
    git pull origin refactor
-   git checkout -b fix/your-feature-name
+   git checkout -b feat/your-feature-name
    ```
 
-2. **Make changes and commit**:
+2. **Always `git add` new files immediately** after creating them:
+   ```bash
+   # Nix flake checks only see git-tracked files!
+   git add packages/web-ui/src/new_file.rs
+   ```
+
+3. **Make changes and commit**:
    ```bash
    git add <files>
    git commit -m "type: description"
    ```
 
-3. **Push to remote**:
+4. **Run verification** before considering work done:
    ```bash
-   git push origin fix/your-feature-name
+   # See "Engineering Standards" section for per-crate commands
+   nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo test --lib"
+   nix build .#checks.x86_64-linux.web-ui
    ```
 
-4. **Merge back to refactor** (after review):
+5. **STOP for review** — do NOT merge to `refactor` without user approval:
+   ```bash
+   git push origin feat/your-feature-name
+   # Wait for user to review the branch
+   ```
+
+6. **Merge back to refactor** (only after user approves):
    ```bash
    git checkout refactor
-   git merge fix/your-feature-name
+   git merge feat/your-feature-name
    git push origin refactor
    ```
 
@@ -395,13 +470,28 @@ crystal-forge/
 │   ├── README.md              # Backlog overview
 │   ├── tasks/                 # Individual task files
 │   └── milestones/            # Milestone documents
-├── packages/default/          # Main Rust package
+├── packages/default/          # Main Rust package (server, agent, builder)
 │   ├── src/
+│   │   ├── api/models.rs      # Shared API DTOs
+│   │   ├── handlers/api/      # REST API handlers
 │   │   ├── builder/           # Build orchestration
 │   │   ├── deployment/        # Deployment logic
-│   │   ├── config/            # Configuration
-│   │   └── handlers/          # HTTP handlers
+│   │   └── config/            # Configuration
 │   └── Cargo.toml
+├── packages/web-ui/           # Dioxus 0.7 web UI (WASM)
+│   ├── src/
+│   │   ├── api/               # Client DTOs + fetch client
+│   │   ├── components/        # Reusable UI components
+│   │   ├── views/             # Page components
+│   │   ├── state/             # App state management
+│   │   ├── theme.rs           # Design system tokens
+│   │   └── routes.rs          # Router definitions
+│   ├── Dioxus.toml            # Dioxus build config
+│   └── Cargo.lock             # Separate lockfile
+├── checks/                    # Nix flake checks
+│   ├── server/                # Server integration (NixOS VM)
+│   ├── web-ui/                # Web UI build verification
+│   └── database/              # DB migration tests
 ├── CLAUDE.md                  # This file (AI onboarding)
 ├── ROADMAP.md                 # Project roadmap
 └── flake.nix                  # Nix configuration

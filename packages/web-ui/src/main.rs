@@ -20,10 +20,13 @@ fn main() {
 }
 
 /// Root application component.
+#[component]
 fn app() -> Element {
     provide_app_state();
 
     rsx! {
+        // Load vendored Tailwind CSS (works offline).
+        document::Stylesheet { href: "/assets/tailwind.min.css" }
         Router::<Route> {}
     }
 }
