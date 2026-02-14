@@ -1,20 +1,21 @@
 ---
 id: TASK-12
 title: Systems List View - Table and Cards Toggle
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-05 14:25'
+updated_date: '2026-02-14 04:09'
 labels:
   - ui
   - views
   - systems
+milestone: m-3
 dependencies:
   - TASK-8.7
   - TASK-8.8
   - TASK-9
   - TASK-10
 priority: high
-milestone: m-3
 ---
 
 ## Description

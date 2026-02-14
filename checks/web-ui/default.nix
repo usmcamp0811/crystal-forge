@@ -4,7 +4,7 @@
 # then takes screenshots of every route using headless Chromium in a NixOS VM.
 #
 # Output ($out):
-#   screenshots/   — PNG screenshots of each route (dashboard, systems, builds, cves, style-guide, 404)
+#   screenshots/   — PNG screenshots of each route (dashboard, systems table, systems cards, builds, cves, style-guide, 404)
 #   result.txt     — Build verification summary
 #
 # Run: nix build .#checks.x86_64-linux.web-ui
@@ -53,7 +53,8 @@ in pkgs.testers.runNixOSTest {
     # Routes to screenshot (matches packages/web-ui/src/routes.rs)
     routes = [
         ("/", "dashboard", "Dashboard (fleet overview)"),
-        ("/systems", "systems", "Systems list"),
+        ("/systems?view=table", "systems-table", "Systems list (table view)"),
+        ("/systems?view=cards", "systems-cards", "Systems list (card view)"),
         ("/builds", "builds", "Builds pipeline"),
         ("/cves", "cves", "CVE dashboard"),
         ("/style-guide", "style-guide", "Design system style guide"),
