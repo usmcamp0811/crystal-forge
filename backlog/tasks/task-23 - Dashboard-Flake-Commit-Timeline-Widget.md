@@ -58,4 +58,13 @@ Implemented flake commit timeline widget:
 - Legend explains color coding
 - Mock data with 3 flakes (infrastructure, workstations, edge-nodes) and realistic commits
 - Playwright assertions verify timeline renders correctly
+
+**Redesign (2026-02-14):**
+- Redesigned as git graph with horizontal line at top, commits hanging below via vertical stems
+- Colored line segments between nodes based on commits_behind status
+- Hover popups showing: hash, message, author, system count, and system hostnames
+- Moved timeline to TOP of dashboard for visibility
+- Inline legend with title (Latest, 1 behind, 2 behind, 3+ behind)
+- Time-proportional spacing with logarithmic scaling (80-160px gaps)
+- System count badges displayed below each node
 <!-- SECTION:NOTES:END -->
