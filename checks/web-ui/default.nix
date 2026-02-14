@@ -25,7 +25,7 @@ in
       virtualisation.memorySize = 4096;
       virtualisation.cores = 2;
 
-      environment.systemPackages = [pkgs.chromium-stable pkgs.python3];
+      environment.systemPackages = [pkgs.chromium pkgs.python3];
 
       # Serve the web UI on port 8080 via a systemd service
       systemd.services.web-ui-server = {
