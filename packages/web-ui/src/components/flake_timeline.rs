@@ -278,7 +278,17 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
     }
 }
 
-/// The actual timeline graph with continuous line and positioned nodes.
+/// A line segment between two commits with color based on "behind" status.
+#[derive(Clone, PartialEq)]
+struct LineSegment {
+    start_x: f64,
+    end_x: f64,
+    /// The "commits_behind" value of the commit this segment leads TO
+    /// (determines the color - how stale is this section of the graph)
+    commits_behind: i64,
+}
+
+/// The actual timeline graph with colored line segments and positioned nodes.
 #[component]
 fn TimelineGraph(
     positioned_commits: Vec<PositionedCommit>,
@@ -293,8 +303,18 @@ fn TimelineGraph(
     }
 
     let width_px = total_width.max(200.0) as i32;
-    let first_x = positioned_commits.first().map(|p| p.x_position).unwrap_or(0.0);
-    let last_x = positioned_commits.last().map(|p| p.x_position).unwrap_or(0.0);
+
+    // Build line segments between consecutive commits
+    // Each segment is colored based on the commit it leads TO
+    let segments: Vec<LineSegment> = positioned_commits
+        .windows(2)
+        .map(|w| LineSegment {
+            start_x: w[0].x_position,
+            end_x: w[1].x_position,
+            // Color based on the destination commit's "behind" status
+            commits_behind: w[1].commit.commits_behind,
+        })
+        .collect();
 
     rsx! {
         div {
@@ -302,15 +322,14 @@ fn TimelineGraph(
             "data-testid": "{testid}",
             div {
                 class: "relative",
-                style: "width: {width_px}px; height: 100px;",
+                style: "width: {width_px}px; height: 120px;",
 
-                // Continuous timeline line
-                div {
-                    class: "absolute top-1/2 h-0.5 bg-gray-600 rounded",
-                    style: "left: {first_x}px; width: {last_x - first_x}px; transform: translateY(-50%);"
+                // Colored line segments between commits
+                for segment in segments.iter() {
+                    TimelineSegment { segment: segment.clone() }
                 }
 
-                // Commit nodes positioned absolutely
+                // Commit nodes positioned absolutely (rendered on top of lines)
                 for pc in positioned_commits.iter() {
                     CommitNode {
                         commit: pc.commit.clone(),
@@ -320,6 +339,21 @@ fn TimelineGraph(
                     }
                 }
             }
+        }
+    }
+}
+
+/// A single colored line segment in the timeline.
+#[component]
+fn TimelineSegment(segment: LineSegment) -> Element {
+    let bg_color = commits_behind_bg(segment.commits_behind);
+    let start = segment.start_x as i32;
+    let width = (segment.end_x - segment.start_x) as i32;
+
+    rsx! {
+        div {
+            class: "absolute h-2 rounded-full {bg_color}",
+            style: "left: {start}px; width: {width}px; top: 50%; transform: translateY(-50%); z-index: 1;"
         }
     }
 }
@@ -359,9 +393,9 @@ fn CommitNode(
 
     // Node size based on whether it has systems
     let (node_w, node_h) = if commit.system_count > 0 {
-        (20, 20)
+        (24, 24)
     } else {
-        (12, 12)
+        (16, 16)
     };
 
     let x_px = x_position as i32;
@@ -370,7 +404,7 @@ fn CommitNode(
     rsx! {
         div {
             class: "absolute flex flex-col items-center group",
-            style: "left: {x_px}px; top: 50%; transform: translate(-50%, -50%);",
+            style: "left: {x_px}px; top: 50%; transform: translate(-50%, -50%); z-index: 10;",
             "data-testid": "commit-node",
             "data-commits-behind": "{commit.commits_behind}",
 
@@ -398,15 +432,13 @@ fn CommitNode(
                 }
             }
 
-            // The commit node circle
+            // The commit node circle - with dark ring to cleanly separate from line
             div {
-                class: "rounded-full border-2 cursor-pointer transition-all hover:scale-125 {node_border}",
+                class: "rounded-full border-4 border-gray-900 cursor-pointer transition-all hover:scale-110",
                 style: "width: {node_w}px; height: {node_h}px;",
-                // Inner fill for nodes with systems
-                if commit.system_count > 0 {
-                    div {
-                        class: "w-full h-full rounded-full {node_bg}"
-                    }
+                // Inner colored circle
+                div {
+                    class: "w-full h-full rounded-full {node_bg}"
                 }
             }
 
