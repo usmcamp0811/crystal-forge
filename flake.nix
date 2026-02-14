@@ -12,7 +12,7 @@
     };
     nixos-compose = {
       url = "github:oar-team/nixos-compose/25.05";
-      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.nixpkgs.url = "github:nixos/nixpkgs/release-25.05";
     };
   };
 

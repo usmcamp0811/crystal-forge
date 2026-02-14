@@ -311,7 +311,9 @@ impl Derivation {
         Ok(store_path)
     }
 
-    /// Update the database with build progress information
+    /// Update the database with build progress information.
+    ///
+    /// Delegates to [`crate::queries::derivations::update_build_heartbeat`].
     async fn update_build_heartbeat(
         pool: &PgPool,
         derivation_id: i32,
@@ -319,25 +321,14 @@ impl Derivation {
         current_target: Option<&str>,
         last_activity_seconds: i32,
     ) -> Result<()> {
-        sqlx::query!(
-            r#"
-            UPDATE derivations
-            SET 
-                build_elapsed_seconds = $1,
-                build_current_target = $2,
-                build_last_activity_seconds = $3,
-                build_last_heartbeat = NOW()
-            WHERE id = $4
-            "#,
+        crate::queries::derivations::update_build_heartbeat(
+            pool,
+            derivation_id,
             elapsed_seconds,
             current_target,
             last_activity_seconds,
-            derivation_id
         )
-        .execute(pool)
-        .await?;
-
-        Ok(())
+        .await
     }
 
     /// Fallback: build directly without systemd isolation

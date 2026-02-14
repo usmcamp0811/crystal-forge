@@ -1,16 +1,14 @@
 use axum::{extract::State, response::Json};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 
 use crate::handlers::agent_request::CFState;
+use crate::queries::status::{check_database_health, get_basic_stats};
 
 pub async fn status(State(state): State<CFState>) -> Json<Value> {
-    let db_status = match sqlx::query("SELECT 1 as health_check")
-        .fetch_one(state.pool())
-        .await
-    {
-        Ok(_) => "healthy",
-        Err(_) => "unhealthy",
+    let db_status = if check_database_health(state.pool()).await {
+        "healthy"
+    } else {
+        "unhealthy"
     };
 
     let (total_systems, total_derivations, pending_evaluations) =
@@ -27,30 +25,4 @@ pub async fn status(State(state): State<CFState>) -> Json<Value> {
         },
         "timestamp": chrono::Utc::now().to_rfc3339()
     }))
-}
-
-async fn get_basic_stats(pool: &PgPool) -> (i64, i64, i64) {
-    let systems_count = sqlx::query_scalar!("SELECT COUNT(*) FROM systems")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
-
-    let derivations_count = sqlx::query_scalar!("SELECT COUNT(*) FROM derivations")
-        .fetch_one(pool)
-        .await
-        .unwrap_or(Some(0))
-        .unwrap_or(0);
-
-    let pending_count = sqlx::query_scalar!(
-        "SELECT COUNT(*) FROM derivations d 
-         JOIN derivation_statuses ds ON d.status_id = ds.id 
-         WHERE ds.is_terminal = false"
-    )
-    .fetch_one(pool)
-    .await
-    .unwrap_or(Some(0))
-    .unwrap_or(0);
-
-    (systems_count, derivations_count, pending_count)
 }

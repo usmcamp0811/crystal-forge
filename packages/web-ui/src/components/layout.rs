@@ -31,6 +31,7 @@ pub fn AppLayout() -> Element {
                     class: "flex-1 px-3 space-y-1",
                     NavLink { to: Route::DashboardView {}, label: "Dashboard", icon: "📊" }
                     NavLink { to: Route::SystemsView {}, label: "Systems", icon: "🖥️" }
+                    NavLink { to: Route::StyleGuideView {}, label: "Style Guide", icon: "🎨" }
                 }
                 div {
                     class: "p-4 border-t border-gray-800 text-xs text-gray-600",

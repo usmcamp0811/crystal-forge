@@ -26,23 +26,36 @@ pub enum HealthStatus {
 }
 
 impl HealthStatus {
-    /// CSS color class for Tailwind styling.
+    /// CSS text color class from the design system.
     pub fn color_class(&self) -> &'static str {
+        use crate::theme::health;
         match self {
-            Self::Healthy => "text-emerald-400",
-            Self::Warning => "text-amber-400",
-            Self::Critical => "text-red-400",
-            Self::Offline => "text-gray-500",
+            Self::Healthy => health::HEALTHY_TEXT,
+            Self::Warning => health::WARNING_TEXT,
+            Self::Critical => health::CRITICAL_TEXT,
+            Self::Offline => health::OFFLINE_TEXT,
         }
     }
 
-    /// Background color class for badges.
+    /// CSS background color class from the design system.
     pub fn bg_class(&self) -> &'static str {
+        use crate::theme::health;
         match self {
-            Self::Healthy => "bg-emerald-400/10",
-            Self::Warning => "bg-amber-400/10",
-            Self::Critical => "bg-red-400/10",
-            Self::Offline => "bg-gray-500/10",
+            Self::Healthy => health::HEALTHY_BG,
+            Self::Warning => health::WARNING_BG,
+            Self::Critical => health::CRITICAL_BG,
+            Self::Offline => health::OFFLINE_BG,
+        }
+    }
+
+    /// CSS dot (filled circle) color class from the design system.
+    pub fn dot_class(&self) -> &'static str {
+        use crate::theme::health;
+        match self {
+            Self::Healthy => health::HEALTHY_DOT,
+            Self::Warning => health::WARNING_DOT,
+            Self::Critical => health::CRITICAL_DOT,
+            Self::Offline => health::OFFLINE_DOT,
         }
     }
 
@@ -70,15 +83,29 @@ pub enum DeploymentStatus {
 }
 
 impl DeploymentStatus {
-    /// CSS color class for Tailwind styling.
+    /// CSS text color class from the design system.
     pub fn color_class(&self) -> &'static str {
+        use crate::theme::deployment;
         match self {
-            Self::UpToDate => "text-emerald-400",
-            Self::Behind => "text-amber-400",
-            Self::Ahead => "text-blue-400",
-            Self::NeverDeployed => "text-gray-500",
-            Self::NoCommitsAvailable => "text-gray-500",
-            Self::Unknown => "text-gray-500",
+            Self::UpToDate => deployment::UP_TO_DATE_TEXT,
+            Self::Behind => deployment::BEHIND_TEXT,
+            Self::Ahead => deployment::AHEAD_TEXT,
+            Self::NeverDeployed => deployment::NEVER_DEPLOYED_TEXT,
+            Self::NoCommitsAvailable => deployment::NO_COMMITS_TEXT,
+            Self::Unknown => deployment::UNKNOWN_TEXT,
+        }
+    }
+
+    /// CSS background color class from the design system.
+    pub fn bg_class(&self) -> &'static str {
+        use crate::theme::deployment;
+        match self {
+            Self::UpToDate => deployment::UP_TO_DATE_BG,
+            Self::Behind => deployment::BEHIND_BG,
+            Self::Ahead => deployment::AHEAD_BG,
+            Self::NeverDeployed => deployment::NEVER_DEPLOYED_BG,
+            Self::NoCommitsAvailable => deployment::NO_COMMITS_BG,
+            Self::Unknown => deployment::UNKNOWN_BG,
         }
     }
 
@@ -106,13 +133,24 @@ pub enum CveSeverity {
 }
 
 impl CveSeverity {
-    /// CSS color class for Tailwind styling.
+    /// CSS text color class from the design system.
     pub fn color_class(&self) -> &'static str {
+        use crate::theme::cve;
         match self {
-            Self::Critical => "text-red-400",
-            Self::High => "text-orange-400",
-            Self::Medium => "text-amber-400",
-            Self::Low => "text-gray-400",
+            Self::Critical => cve::CRITICAL_TEXT,
+            Self::High => cve::HIGH_TEXT,
+            Self::Medium => cve::MEDIUM_TEXT,
+            Self::Low => cve::LOW_TEXT,
+        }
+    }
+
+    /// Human-readable label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Critical => "Critical",
+            Self::High => "High",
+            Self::Medium => "Medium",
+            Self::Low => "Low",
         }
     }
 }
@@ -130,6 +168,19 @@ pub enum PipelineStage {
 }
 
 impl PipelineStage {
+    /// CSS text color class from the design system.
+    pub fn color_class(&self) -> &'static str {
+        use crate::theme::pipeline;
+        match self {
+            Self::DryRun => pipeline::DRY_RUN_TEXT,
+            Self::ReadyForBuild => pipeline::READY_FOR_BUILD_TEXT,
+            Self::Building => pipeline::BUILDING_TEXT,
+            Self::BuildComplete => pipeline::BUILD_COMPLETE_TEXT,
+            Self::ReadyForDeploy => pipeline::READY_FOR_DEPLOY_TEXT,
+            Self::Unknown => pipeline::UNKNOWN_TEXT,
+        }
+    }
+
     /// Human-readable label.
     pub fn label(&self) -> &'static str {
         match self {
