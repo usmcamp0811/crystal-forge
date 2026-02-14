@@ -4,7 +4,9 @@
 
 use dioxus::prelude::*;
 
-use crate::components::layout::AppLayout;
+use crate::components::layout::AppShell;
+use crate::views::builds::BuildsView;
+use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
 use crate::views::not_found::NotFoundView;
 use crate::views::style_guide::StyleGuideView;
@@ -17,7 +19,7 @@ use crate::views::systems::SystemsView;
 /// macro derives component names from enum variants.
 #[derive(Clone, Routable, Debug, PartialEq)]
 pub enum Route {
-    #[layout(AppLayout)]
+    #[layout(AppShell)]
     #[route("/")]
     DashboardView {},
 
@@ -27,10 +29,30 @@ pub enum Route {
     #[route("/systems/:id")]
     SystemDetailView { id: String },
 
+    #[route("/builds")]
+    BuildsView {},
+
+    #[route("/cves")]
+    CvesView {},
+
     #[route("/style-guide")]
     StyleGuideView {},
 
     #[end_layout]
     #[route("/:..route")]
     NotFoundView { route: Vec<String> },
+}
+
+impl Route {
+    pub fn title(&self) -> String {
+        match self {
+            Route::DashboardView { .. } => "Dashboard".to_string(),
+            Route::SystemsView { .. } => "Systems".to_string(),
+            Route::SystemDetailView { id } => format!("System: {id}"),
+            Route::BuildsView { .. } => "Builds".to_string(),
+            Route::CvesView { .. } => "CVEs".to_string(),
+            Route::StyleGuideView { .. } => "Style Guide".to_string(),
+            Route::NotFoundView { .. } => "Not Found".to_string(),
+        }
+    }
 }
