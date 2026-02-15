@@ -1575,7 +1575,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "ws-007".to_string(),
                         "ws-008".to_string(),
                     ],
-                    build_status: Some(BuildStatus::Building),
+                    build_status: Some(BuildStatus::Queued),
                 },
                 FlakeCommit {
                     hash: "a2b3c4d5e6f78901234567ab".to_string(),
@@ -1683,7 +1683,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "edge-us-south".to_string(),
                         "edge-us-north".to_string(),
                     ],
-                    build_status: Some(BuildStatus::Building),
+                    build_status: Some(BuildStatus::Queued),
                 },
                 FlakeCommit {
                     hash: "234567890abcdef123456789".to_string(),
