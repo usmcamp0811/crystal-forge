@@ -272,6 +272,33 @@ async fn get_commits_with_timestamps(
         .await
         .context("Failed to spawn git log")?;
 
+    let mut log_output = log_output;
+
+    if !log_output.status.success() {
+        let stderr = String::from_utf8_lossy(&log_output.stderr);
+
+        if since_commit.is_some() && stderr.contains("Invalid revision range") {
+            let fetch_output = tokio::process::Command::new("git")
+                .args(&["fetch", "--unshallow", "--tags", "origin", branch])
+                .current_dir(clone_path)
+                .output()
+                .await
+                .context("Failed to spawn git fetch --unshallow")?;
+
+            if !fetch_output.status.success() {
+                let fetch_stderr = String::from_utf8_lossy(&fetch_output.stderr);
+                bail!("git fetch failed: {}", fetch_stderr.trim());
+            }
+
+            log_output = tokio::process::Command::new("git")
+                .args(&args)
+                .current_dir(clone_path)
+                .output()
+                .await
+                .context("Failed to spawn git log (retry)")?;
+        }
+    }
+
     if !log_output.status.success() {
         let stderr = String::from_utf8_lossy(&log_output.stderr);
         bail!("git log failed: {}", stderr.trim());
