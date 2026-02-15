@@ -7,6 +7,7 @@ use dioxus::prelude::*;
 
 use crate::api::models::{FlakeCommit, FlakeTimeline};
 use crate::theme;
+use chrono::TimeZone;
 
 /// Minimum pixels between commit nodes (prevents overlap during bursts).
 const MIN_GAP_PX: f64 = 32.0;
@@ -38,10 +39,6 @@ struct PositionedCommit {
 
 #[derive(Clone, PartialEq)]
 struct TimelineScale {
-    start: chrono::DateTime<chrono::Utc>,
-    end: chrono::DateTime<chrono::Utc>,
-    total_width: f64,
-    tick_seconds: i64,
     ticks: Vec<TimelineTick>,
 }
 
@@ -198,10 +195,14 @@ fn calculate_positions_with_scale(
             flake_name: commits[0].0.clone(),
             x_position: MIN_GAP_PX,
         };
-        let start = commits[0].1.committed_at;
         return (
-            vec![only],
-            Some(build_scale(start, start, MIN_GAP_PX * 2.0)),
+            vec![only.clone()],
+            Some(TimelineScale {
+                ticks: vec![TimelineTick {
+                    x_position: only.x_position,
+                    label: format_tick_label(only.commit.committed_at, 0),
+                }],
+            }),
         );
     }
 
@@ -209,14 +210,14 @@ fn calculate_positions_with_scale(
     let mut sorted: Vec<_> = commits.to_vec();
     sorted.sort_by(|a, b| a.1.committed_at.cmp(&b.1.committed_at));
 
-    let start_time = sorted.first().map(|c| c.1.committed_at).unwrap();
-    let end_time = sorted.last().map(|c| c.1.committed_at).unwrap();
-
     // Calculate time gaps between consecutive commits
     let gaps: Vec<i64> = sorted
         .windows(2)
         .map(|w| {
-            let duration = w[1].1.committed_at.signed_duration_since(w[0].1.committed_at);
+            let duration = w[1]
+                .1
+                .committed_at
+                .signed_duration_since(w[0].1.committed_at);
             duration.num_seconds().max(1)
         })
         .collect();
@@ -246,25 +247,23 @@ fn calculate_positions_with_scale(
         }
     }
 
-    let scale = build_scale(start_time, end_time, x + MIN_GAP_PX);
+    let scale = build_scale(&result);
     (result, Some(scale))
 }
 
-fn build_scale(
-    start: chrono::DateTime<chrono::Utc>,
-    end: chrono::DateTime<chrono::Utc>,
-    total_width: f64,
-) -> TimelineScale {
+fn build_scale(positions: &[PositionedCommit]) -> TimelineScale {
+    let start = positions
+        .first()
+        .map(|p| p.commit.committed_at)
+        .unwrap_or_else(chrono::Utc::now);
+    let end = positions
+        .last()
+        .map(|p| p.commit.committed_at)
+        .unwrap_or_else(chrono::Utc::now);
     let span_seconds = end.signed_duration_since(start).num_seconds().max(1);
     let tick_seconds = pick_tick_interval(span_seconds);
-    let ticks = build_ticks(start, end, total_width, tick_seconds);
-    TimelineScale {
-        start,
-        end,
-        total_width,
-        tick_seconds,
-        ticks,
-    }
+    let ticks = build_ticks(positions, tick_seconds);
+    TimelineScale { ticks }
 }
 
 fn pick_tick_interval(span_seconds: i64) -> i64 {
@@ -292,38 +291,57 @@ fn pick_tick_interval(span_seconds: i64) -> i64 {
     30 * 24 * 60 * 60
 }
 
-fn build_ticks(
-    start: chrono::DateTime<chrono::Utc>,
-    end: chrono::DateTime<chrono::Utc>,
-    total_width: f64,
-    tick_seconds: i64,
-) -> Vec<TimelineTick> {
-    let span_seconds = end.signed_duration_since(start).num_seconds().max(1) as f64;
-    let mut ticks = Vec::new();
-    let mut current = start.timestamp();
+fn build_ticks(positions: &[PositionedCommit], tick_seconds: i64) -> Vec<TimelineTick> {
+    let start = positions
+        .first()
+        .map(|p| p.commit.committed_at)
+        .unwrap_or_else(chrono::Utc::now);
+    let end = positions
+        .last()
+        .map(|p| p.commit.committed_at)
+        .unwrap_or_else(chrono::Utc::now);
+    let start_ts = start.timestamp();
     let end_ts = end.timestamp();
+    let mut ticks = Vec::new();
+    let mut current = start_ts;
+    let mut idx = 0usize;
 
     while current <= end_ts {
-        let offset_seconds = (current - start.timestamp()) as f64;
-        let x_position = MIN_GAP_PX + (offset_seconds / span_seconds) * (total_width - MIN_GAP_PX * 2.0);
-        let label = format_tick_label(current, tick_seconds);
-        ticks.push(TimelineTick { x_position, label });
+        while idx + 1 < positions.len()
+            && positions[idx + 1].commit.committed_at.timestamp() < current
+        {
+            idx += 1;
+        }
+
+        let left = &positions[idx];
+        let left_ts = left.commit.committed_at.timestamp();
+        let right = positions.get(idx + 1).unwrap_or(left);
+        let right_ts = right.commit.committed_at.timestamp();
+        let span = (right_ts - left_ts).max(1) as f64;
+        let ratio = ((current - left_ts) as f64 / span).clamp(0.0, 1.0);
+        let x_position = left.x_position + (right.x_position - left.x_position) * ratio;
+
+        ticks.push(TimelineTick {
+            x_position,
+            label: format_tick_label(
+                chrono::Utc.timestamp_opt(current, 0).unwrap(),
+                tick_seconds,
+            ),
+        });
+
         current += tick_seconds;
     }
 
     ticks
 }
 
-fn format_tick_label(timestamp: i64, tick_seconds: i64) -> String {
-    use chrono::{TimeZone, Utc};
-    let dt = Utc.timestamp_opt(timestamp, 0).single().unwrap_or_else(Utc::now);
-
+fn format_tick_label(timestamp: chrono::DateTime<chrono::Utc>, tick_seconds: i64) -> String {
     match tick_seconds {
-        s if s < 60 * 60 => dt.format("%H:%M").to_string(),
-        s if s < 24 * 60 * 60 => dt.format("%b %-d %H:%M").to_string(),
-        s if s < 7 * 24 * 60 * 60 => dt.format("%b %-d").to_string(),
-        s if s < 30 * 24 * 60 * 60 => dt.format("%b %-d").to_string(),
-        _ => dt.format("%Y-%m-%d").to_string(),
+        s if s < 60 * 60 => timestamp.format("%H:%M").to_string(),
+        s if s < 24 * 60 * 60 => timestamp.format("%b %-d %H:%M").to_string(),
+        s if s < 7 * 24 * 60 * 60 => timestamp.format("%b %-d").to_string(),
+        s if s < 30 * 24 * 60 * 60 => timestamp.format("%b %-d").to_string(),
+        _ => timestamp.format("%Y-%m-%d").to_string(),
     }
 }
 
@@ -362,7 +380,7 @@ fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
 fn StackedTimelines(timelines: Vec<FlakeTimeline>) -> Element {
     rsx! {
         div {
-            class: "space-y-8",
+            class: "space-y-4",
             "data-testid": "stacked-timelines",
             for timeline in timelines {
                 SingleFlakeTimeline { timeline }
@@ -374,11 +392,8 @@ fn StackedTimelines(timelines: Vec<FlakeTimeline>) -> Element {
 /// Timeline for a single flake.
 #[component]
 fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
-    let commits: Vec<(Option<String>, FlakeCommit)> = timeline
-        .commits
-        .iter()
-        .map(|c| (None, c.clone()))
-        .collect();
+    let commits: Vec<(Option<String>, FlakeCommit)> =
+        timeline.commits.iter().map(|c| (None, c.clone())).collect();
 
     let (positioned, scale) = calculate_positions_with_scale(&commits);
     let total_width = positioned
@@ -423,20 +438,23 @@ fn TimelineGraph(
     }
 
     let width_px = total_width.max(300.0) as i32;
-    let first_x = positioned_commits.first().map(|p| p.x_position).unwrap_or(0.0) as i32;
-    let last_x = positioned_commits.last().map(|p| p.x_position).unwrap_or(0.0) as i32;
+    let first_x = positioned_commits
+        .first()
+        .map(|p| p.x_position)
+        .unwrap_or(0.0) as i32;
+    let last_x = positioned_commits
+        .last()
+        .map(|p| p.x_position)
+        .unwrap_or(0.0) as i32;
     let line_width = last_x - first_x;
-    let scale = scale.unwrap_or_else(|| {
-        let now = chrono::Utc::now();
-        build_scale(now, now, total_width)
-    });
+    let scale = scale.unwrap_or_else(|| TimelineScale { ticks: vec![] });
 
     // Layout: nodes are 20px circles with count inside, line passes through center
     let node_size = 20;
-    let node_top = 4;  // Node starts at y=4
-    let node_center = node_top + (node_size / 2);  // Center at y=14
-    let line_thickness = 3;
-    let line_top = node_center - 1;  // Line at y=13, 3px thick, centers at y=14.5 (close enough)
+    let node_top = 4; // Node starts at y=4
+    let node_center = node_top + (node_size / 2); // Center at y=14
+    let line_thickness = 5;
+    let line_top = node_center - 2; // Line at y=12, 5px thick, centers at y=14
     // Height for node + text labels only
     let container_height = 65;
 
@@ -474,11 +492,13 @@ fn TimelineGraph(
                                     let prev = &positioned_commits[i - 1];
                                     let seg_start = prev.x_position as i32;
                                     let seg_width = (pc.x_position - prev.x_position) as i32;
-                                    let seg_color = commits_behind_bg(pc.commit.commits_behind);
+                                    let seg_color = segment_color(&prev.commit, &pc.commit);
                                     rsx! {
-                                        div {
-                                            class: "absolute {seg_color}",
-                                            style: "left: {seg_start}px; width: {seg_width}px; top: {line_top}px; height: {line_thickness}px;"
+                                        if let Some(color) = seg_color {
+                                            div {
+                                                class: "absolute {color}",
+                                                style: "left: {seg_start}px; width: {seg_width}px; top: {line_top}px; height: {line_thickness}px;"
+                                            }
                                         }
                                     }
                                 }
@@ -537,7 +557,7 @@ fn CommitNode(
     node_size: i32,
 ) -> Element {
     let short_hash = commit.hash.chars().take(7).collect::<String>();
-    let node_bg = commits_behind_bg(commit.commits_behind);
+    let node_bg = commit_node_bg(commit.system_count, commit.commits_behind);
 
     let behind_text = if commit.commits_behind == 0 {
         "Latest".to_string()
@@ -566,7 +586,7 @@ fn CommitNode(
 
             // Main node - colored circle with system count, centered ON the line
             div {
-                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2 border-gray-900",
+                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2 border-gray-900 ring-2 ring-gray-700",
                 style: "width: {node_size}px; height: {node_size}px; top: {badge_top}px;",
                 span {
                     class: "text-[9px] font-bold text-gray-900",
@@ -614,5 +634,21 @@ fn commits_behind_bg(behind: i64) -> &'static str {
         1 => "bg-yellow-500",
         2 => "bg-orange-500",
         _ => "bg-red-500",
+    }
+}
+
+fn commit_node_bg(system_count: i64, behind: i64) -> &'static str {
+    if system_count == 0 {
+        "bg-gray-700"
+    } else {
+        commits_behind_bg(behind)
+    }
+}
+
+fn segment_color(_prev: &FlakeCommit, next: &FlakeCommit) -> Option<&'static str> {
+    if next.system_count > 0 {
+        Some(commits_behind_bg(next.commits_behind))
+    } else {
+        None
     }
 }
