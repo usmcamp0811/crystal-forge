@@ -10,7 +10,29 @@ use crate::api::models::{
 use crate::components::flake_timeline::FlakeTimelineWidget;
 use crate::components::layout::Card;
 use crate::components::stat_card::StatCard;
+use crate::components::widget_grid::{GridWidget, WidgetGrid};
 use crate::theme;
+
+/// Widget position in the grid
+#[derive(Clone, Debug, PartialEq)]
+struct WidgetPosition {
+    id: &'static str,
+    title: &'static str,
+    col: usize,
+    row: usize,
+    width: usize,
+    height: usize,
+}
+
+/// Default widget layout
+fn default_widget_positions() -> Vec<WidgetPosition> {
+    vec![
+        WidgetPosition { id: "fleet-health", title: "Fleet Health", col: 0, row: 0, width: 2, height: 2 },
+        WidgetPosition { id: "deployment-status", title: "Deployment Status", col: 2, row: 0, width: 2, height: 2 },
+        WidgetPosition { id: "cve-summary", title: "CVE Summary", col: 0, row: 2, width: 2, height: 2 },
+        WidgetPosition { id: "recent-deployments", title: "Recent Deployments", col: 2, row: 2, width: 2, height: 3 },
+    ]
+}
 
 /// The main dashboard page.
 #[component]
@@ -18,6 +40,80 @@ pub fn DashboardView() -> Element {
     // TODO: Replace with real API call using use_resource + fetch_dashboard()
     let dashboard = mock_dashboard_summary();
     let flake_timelines = mock_flake_timelines();
+
+    // Widget layout state
+    let mut widget_positions = use_signal(default_widget_positions);
+    let mut dragging_id: Signal<Option<&'static str>> = use_signal(|| None);
+    let mut drop_target_id: Signal<Option<&'static str>> = use_signal(|| None);
+
+    // Handle drag start
+    let on_drag_start = move |id: String| {
+        // Find the static str for this id
+        let positions = widget_positions.read();
+        if let Some(pos) = positions.iter().find(|p| p.id == id) {
+            dragging_id.set(Some(pos.id));
+        }
+    };
+
+    // Handle drag over (highlight drop target)
+    let on_drag_over = move |id: String| {
+        let positions = widget_positions.read();
+        if let Some(pos) = positions.iter().find(|p| p.id == id) {
+            let current_dragging = *dragging_id.read();
+            if current_dragging.is_some() && current_dragging != Some(pos.id) {
+                drop_target_id.set(Some(pos.id));
+            }
+        }
+    };
+
+    // Handle drag leave (clear highlight)
+    let on_drag_leave = move |_: ()| {
+        drop_target_id.set(None);
+    };
+
+    // Handle drop (swap positions)
+    let on_drop = move |target_id: String| {
+        let dragging = *dragging_id.read();
+        if let Some(source_id) = dragging {
+            if source_id != target_id {
+                // Swap positions of the two widgets
+                let mut positions = widget_positions.write();
+                let source_idx = positions.iter().position(|p| p.id == source_id);
+                let target_idx = positions.iter().position(|p| p.id == target_id);
+
+                if let (Some(src), Some(tgt)) = (source_idx, target_idx) {
+                    // Swap col/row positions
+                    let src_col = positions[src].col;
+                    let src_row = positions[src].row;
+                    positions[src].col = positions[tgt].col;
+                    positions[src].row = positions[tgt].row;
+                    positions[tgt].col = src_col;
+                    positions[tgt].row = src_row;
+                }
+            }
+        }
+        dragging_id.set(None);
+        drop_target_id.set(None);
+    };
+
+    // Render widget content based on id
+    let render_widget_content = |id: &str| -> Element {
+        match id {
+            "fleet-health" => rsx! {
+                FleetHealthBreakdown { health: dashboard.fleet_health.clone() }
+            },
+            "deployment-status" => rsx! {
+                DeploymentStatusBreakdown { status: dashboard.deployment_status.clone() }
+            },
+            "cve-summary" => rsx! {
+                CveSummaryPanel { cves: dashboard.cve_summary.clone() }
+            },
+            "recent-deployments" => rsx! {
+                RecentDeploymentsList { deployments: dashboard.recent_deployments.clone() }
+            },
+            _ => rsx! { div { "Unknown widget" } },
+        }
+    };
 
     rsx! {
         div {
@@ -56,44 +152,44 @@ pub fn DashboardView() -> Element {
                 }
             }
 
-            // Two-column layout for health breakdown and CVE summary
+            // Widget grid header with reset button
             div {
-                class: "grid grid-cols-1 lg:grid-cols-2 gap-6",
-
-                // Fleet Health Breakdown
-                Card {
-                    title: Some("Fleet Health".to_string()),
-                    children: rsx! {
-                        FleetHealthBreakdown { health: dashboard.fleet_health.clone() }
-                    }
+                class: "flex items-center justify-between",
+                h2 {
+                    class: "text-lg font-semibold text-white",
+                    "Dashboard Widgets"
                 }
-
-                // CVE Summary
-                Card {
-                    title: Some("CVE Summary".to_string()),
-                    children: rsx! {
-                        CveSummaryPanel { cves: dashboard.cve_summary.clone() }
-                    }
+                button {
+                    class: "px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg transition-colors",
+                    onclick: move |_| {
+                        widget_positions.set(default_widget_positions());
+                    },
+                    "Reset Layout"
                 }
             }
 
-            // Deployment Status + Recent Deployments
-            div {
-                class: "grid grid-cols-1 lg:grid-cols-2 gap-6",
+            // Widget grid with draggable widgets
+            WidgetGrid {
+                columns: 4,
+                gap: 16,
+                row_height: 100,
 
-                // Deployment Status Breakdown
-                Card {
-                    title: Some("Deployment Status".to_string()),
-                    children: rsx! {
-                        DeploymentStatusBreakdown { status: dashboard.deployment_status.clone() }
-                    }
-                }
-
-                // Recent Deployments
-                Card {
-                    title: Some("Recent Deployments".to_string()),
-                    children: rsx! {
-                        RecentDeploymentsList { deployments: dashboard.recent_deployments.clone() }
+                for pos in widget_positions.read().iter() {
+                    GridWidget {
+                        key: "{pos.id}",
+                        id: pos.id.to_string(),
+                        title: pos.title.to_string(),
+                        col: pos.col,
+                        row: pos.row,
+                        width: pos.width,
+                        height: pos.height,
+                        is_dragging: dragging_id.read().map_or(false, |d| d == pos.id),
+                        is_drop_target: drop_target_id.read().map_or(false, |d| d == pos.id),
+                        on_drag_start: on_drag_start,
+                        on_drag_over: on_drag_over,
+                        on_drag_leave: on_drag_leave,
+                        on_drop: on_drop,
+                        children: render_widget_content(pos.id)
                     }
                 }
             }
@@ -101,66 +197,82 @@ pub fn DashboardView() -> Element {
     }
 }
 
-/// Fleet health breakdown with colored progress bars.
+/// Fleet health breakdown with colored donut chart.
 #[component]
 fn FleetHealthBreakdown(health: FleetHealthSummary) -> Element {
     let total = health.total().max(1) as f64;
+    let total_count = health.total();
+    
+    // Mock system lists for each category
+    let healthy_systems: Vec<String> = (1..=health.healthy.min(50)).map(|i| format!("server-{:02}", i)).collect();
+    let warning_systems: Vec<String> = vec!["db-replica-01".into(), "cache-02".into(), "worker-07".into(), "api-staging".into(), "monitor-01".into(), "backup-srv".into(), "dev-box".into()];
+    let critical_systems: Vec<String> = vec!["db-primary".into(), "api-prod-01".into(), "lb-main".into()];
+    let offline_systems: Vec<String> = vec!["legacy-app".into(), "test-vm-03".into()];
+    
+    let segments = vec![
+        DonutSegment {
+            percent: health.healthy as f64 / total * 100.0,
+            color: "#10b981",
+            label: "Healthy",
+            count: health.healthy,
+            systems: healthy_systems,
+        },
+        DonutSegment {
+            percent: health.warning as f64 / total * 100.0,
+            color: "#f59e0b",
+            label: "Warning",
+            count: health.warning,
+            systems: warning_systems,
+        },
+        DonutSegment {
+            percent: health.critical as f64 / total * 100.0,
+            color: "#ef4444",
+            label: "Critical",
+            count: health.critical,
+            systems: critical_systems,
+        },
+        DonutSegment {
+            percent: health.offline as f64 / total * 100.0,
+            color: "#6b7280",
+            label: "Offline",
+            count: health.offline,
+            systems: offline_systems,
+        },
+    ];
 
     rsx! {
         div {
-            class: "space-y-4",
+            class: "h-full",
             "data-testid": "fleet-health-breakdown",
-
-            // Stacked bar visualization
-            div {
-                class: "h-4 rounded-full overflow-hidden flex {theme::surface::SUBTLE_BG}",
-                if health.healthy > 0 {
-                    div {
-                        class: "bg-emerald-500 transition-all",
-                        style: "width: {(health.healthy as f64 / total * 100.0):.1}%"
-                    }
-                }
-                if health.warning > 0 {
-                    div {
-                        class: "bg-amber-500 transition-all",
-                        style: "width: {(health.warning as f64 / total * 100.0):.1}%"
-                    }
-                }
-                if health.critical > 0 {
-                    div {
-                        class: "bg-red-500 transition-all",
-                        style: "width: {(health.critical as f64 / total * 100.0):.1}%"
-                    }
-                }
-                if health.offline > 0 {
-                    div {
-                        class: "bg-gray-600 transition-all",
-                        style: "width: {(health.offline as f64 / total * 100.0):.1}%"
-                    }
-                }
-            }
-
-            // Legend
-            div {
-                class: "grid grid-cols-2 gap-3",
-                HealthLegendItem { label: "Healthy", count: health.healthy, dot_class: theme::health::HEALTHY_DOT }
-                HealthLegendItem { label: "Warning", count: health.warning, dot_class: theme::health::WARNING_DOT }
-                HealthLegendItem { label: "Critical", count: health.critical, dot_class: theme::health::CRITICAL_DOT }
-                HealthLegendItem { label: "Offline", count: health.offline, dot_class: theme::health::OFFLINE_DOT }
+            DonutChartWithLegend { 
+                segments: segments,
+                center_value: total_count,
+                center_label: "SYSTEMS"
             }
         }
     }
 }
 
-/// A single legend item with dot and count.
+/// A single legend item with color box and count.
 #[component]
-fn HealthLegendItem(label: &'static str, count: i64, dot_class: &'static str) -> Element {
-    rsx! {
-        div {
-            class: "flex items-center gap-2",
-            span { class: "w-3 h-3 rounded-full {dot_class}" }
-            span { class: "{theme::text::SECONDARY} text-sm", "{label}" }
-            span { class: "ml-auto text-white font-medium", "{count}" }
+fn HealthLegendItem(label: &'static str, count: i64, dot_class: &'static str, #[props(default = false)] align_right: bool) -> Element {
+    if align_right {
+        rsx! {
+            div {
+                class: "flex items-center gap-2",
+                span { class: "text-white font-bold text-sm tabular-nums", "{count}" }
+                span { class: "{theme::text::SECONDARY} text-sm", "{label}" }
+                span { class: "w-3 h-3 rounded shrink-0 {dot_class}" }
+            }
+        }
+    } else {
+        rsx! {
+            div {
+                class: "flex items-center gap-2",
+                span { class: "w-3 h-3 rounded shrink-0 {dot_class}" }
+                span { class: "{theme::text::SECONDARY} text-sm", "{label}" }
+                span { class: "text-white font-bold text-sm tabular-nums", "{count}" }
+            }
         }
     }
 }
@@ -215,48 +327,53 @@ fn CveSeverityBadge(
 #[component]
 fn DeploymentStatusBreakdown(status: DeploymentStatusSummary) -> Element {
     let total = status.total().max(1) as f64;
+    let total_count = status.total();
+    
+    // Mock system lists
+    let up_to_date_systems: Vec<String> = (1..=status.up_to_date.min(50)).map(|i| format!("prod-{:02}", i)).collect();
+    let behind_systems: Vec<String> = vec!["staging-01".into(), "staging-02".into(), "dev-server".into(), "qa-box".into(), "perf-test".into(), "sandbox-01".into(), "demo-server".into(), "training-vm".into(), "backup-01".into(), "backup-02".into(), "dr-site".into(), "edge-node".into()];
+    let never_deployed_systems: Vec<String> = vec!["new-server-01".into(), "pending-setup".into(), "future-prod".into()];
+    let unknown_systems: Vec<String> = vec!["mystery-box".into()];
+    
+    let segments = vec![
+        DonutSegment {
+            percent: status.up_to_date as f64 / total * 100.0,
+            color: "#10b981",
+            label: "Up to Date",
+            count: status.up_to_date,
+            systems: up_to_date_systems,
+        },
+        DonutSegment {
+            percent: status.behind as f64 / total * 100.0,
+            color: "#f59e0b",
+            label: "Behind",
+            count: status.behind,
+            systems: behind_systems,
+        },
+        DonutSegment {
+            percent: status.never_deployed as f64 / total * 100.0,
+            color: "#4b5563",
+            label: "Never Deployed",
+            count: status.never_deployed,
+            systems: never_deployed_systems,
+        },
+        DonutSegment {
+            percent: status.unknown as f64 / total * 100.0,
+            color: "#6b7280",
+            label: "Unknown",
+            count: status.unknown,
+            systems: unknown_systems,
+        },
+    ];
 
     rsx! {
         div {
-            class: "space-y-4",
+            class: "h-full",
             "data-testid": "deployment-status",
-
-            // Stacked bar visualization
-            div {
-                class: "h-4 rounded-full overflow-hidden flex {theme::surface::SUBTLE_BG}",
-                if status.up_to_date > 0 {
-                    div {
-                        class: "bg-emerald-500 transition-all",
-                        style: "width: {(status.up_to_date as f64 / total * 100.0):.1}%"
-                    }
-                }
-                if status.behind > 0 {
-                    div {
-                        class: "bg-amber-500 transition-all",
-                        style: "width: {(status.behind as f64 / total * 100.0):.1}%"
-                    }
-                }
-                if status.never_deployed > 0 {
-                    div {
-                        class: "bg-gray-600 transition-all",
-                        style: "width: {(status.never_deployed as f64 / total * 100.0):.1}%"
-                    }
-                }
-                if status.unknown > 0 {
-                    div {
-                        class: "bg-gray-500 transition-all",
-                        style: "width: {(status.unknown as f64 / total * 100.0):.1}%"
-                    }
-                }
-            }
-
-            // Legend
-            div {
-                class: "grid grid-cols-2 gap-3",
-                DeploymentLegendItem { label: "Up to Date", count: status.up_to_date, dot_class: "bg-emerald-500" }
-                DeploymentLegendItem { label: "Behind", count: status.behind, dot_class: "bg-amber-500" }
-                DeploymentLegendItem { label: "Never Deployed", count: status.never_deployed, dot_class: "bg-gray-600" }
-                DeploymentLegendItem { label: "Unknown", count: status.unknown, dot_class: "bg-gray-500" }
+            DonutChartWithLegend { 
+                segments: segments,
+                center_value: total_count,
+                center_label: "DEPLOYED"
             }
         }
     }
@@ -264,15 +381,286 @@ fn DeploymentStatusBreakdown(status: DeploymentStatusSummary) -> Element {
 
 /// A single deployment legend item.
 #[component]
-fn DeploymentLegendItem(label: &'static str, count: i64, dot_class: &'static str) -> Element {
-    rsx! {
-        div {
-            class: "flex items-center gap-2",
-            span { class: "w-3 h-3 rounded-full {dot_class}" }
-            span { class: "{theme::text::SECONDARY} text-sm", "{label}" }
-            span { class: "ml-auto text-white font-medium", "{count}" }
+fn DeploymentLegendItem(label: &'static str, count: i64, dot_class: &'static str, #[props(default = false)] align_right: bool) -> Element {
+    if align_right {
+        rsx! {
+            div {
+                class: "flex items-center gap-2",
+                span { class: "text-white font-bold text-sm tabular-nums", "{count}" }
+                span { class: "{theme::text::SECONDARY} text-sm", "{label}" }
+                span { class: "w-3 h-3 rounded shrink-0 {dot_class}" }
+            }
+        }
+    } else {
+        rsx! {
+            div {
+                class: "flex items-center gap-2",
+                span { class: "w-3 h-3 rounded shrink-0 {dot_class}" }
+                span { class: "{theme::text::SECONDARY} text-sm", "{label}" }
+                span { class: "text-white font-bold text-sm tabular-nums", "{count}" }
+            }
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DonutSegment {
+    percent: f64,
+    color: &'static str,
+    label: &'static str,
+    count: i64,
+    systems: Vec<String>,
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct DonutChartWithLegendProps {
+    segments: Vec<DonutSegment>,
+    center_value: i64,
+    center_label: &'static str,
+}
+
+/// Donut chart with legend on right side, hover shows system list in place of legend
+#[component]
+fn DonutChartWithLegend(props: DonutChartWithLegendProps) -> Element {
+    let DonutChartWithLegendProps { segments, center_value, center_label } = props;
+    let arcs = donut_arcs(&segments);
+    
+    // Track which segment is hovered
+    let mut hovered_idx: Signal<Option<usize>> = use_signal(|| None);
+
+    rsx! {
+        div {
+            class: "flex items-center justify-center h-full gap-4",
+            
+            // Donut chart on the left
+            div {
+                class: "shrink-0",
+                style: "width: 120px; height: 120px;",
+                
+                svg {
+                    width: "120",
+                    height: "120",
+                    view_box: "0 0 100 100",
+                    role: "img",
+                    
+                    // Background circle
+                    circle {
+                        cx: "50",
+                        cy: "50",
+                        r: "40",
+                        fill: "none",
+                        stroke: "#374151",
+                        stroke_width: "14"
+                    }
+                    
+                    // Donut segments with hover
+                    for (idx, arc) in arcs.iter().enumerate() {
+                        circle {
+                            cx: "50",
+                            cy: "50",
+                            r: "40",
+                            fill: "none",
+                            stroke: "{arc.color}",
+                            stroke_width: if hovered_idx.read().map_or(false, |h| h == idx) { "18" } else { "14" },
+                            stroke_dasharray: "{arc.dash_length} {arc.gap_length}",
+                            stroke_dashoffset: "{arc.offset}",
+                            stroke_linecap: "butt",
+                            transform: "rotate(-90 50 50)",
+                            style: "cursor: pointer; transition: stroke-width 0.15s ease;",
+                            onmouseenter: move |_| {
+                                hovered_idx.set(Some(idx));
+                            },
+                            onmouseleave: move |_| {
+                                hovered_idx.set(None);
+                            }
+                        }
+                    }
+                    
+                    // Center text - value
+                    text {
+                        x: "50",
+                        y: "46",
+                        text_anchor: "middle",
+                        dominant_baseline: "middle",
+                        fill: "white",
+                        font_size: "18",
+                        font_weight: "bold",
+                        "{center_value}"
+                    }
+                    
+                    // Center text - label
+                    text {
+                        x: "50",
+                        y: "60",
+                        text_anchor: "middle",
+                        dominant_baseline: "middle",
+                        fill: "#9ca3af",
+                        font_size: "8",
+                        "{center_label}"
+                    }
+                }
+            }
+            
+            // Right side: either legend or system list on hover
+            div {
+                class: "flex-1 min-w-0",
+                
+                if let Some(idx) = *hovered_idx.read() {
+                    // Show system list for hovered segment
+                    if let Some(segment) = segments.get(idx) {
+                        {
+                            // Calculate how many to show (max 12 in 2 columns of 6)
+                            let max_display = 12;
+                            let show_count = segment.systems.len().min(max_display);
+                            let remaining = segment.systems.len().saturating_sub(max_display);
+                            
+                            rsx! {
+                                div {
+                                    class: "bg-gray-800/50 rounded-lg p-2 h-full",
+                                    
+                                    // Header
+                                    div {
+                                        class: "flex items-center gap-2 mb-1.5 pb-1 border-b border-gray-700",
+                                        span {
+                                            class: "w-3 h-3 rounded shrink-0",
+                                            style: "background-color: {segment.color};"
+                                        }
+                                        span { class: "text-white font-semibold text-xs", "{segment.label}" }
+                                        span { class: "text-gray-400 text-xs ml-auto", "{segment.count}" }
+                                    }
+                                    
+                                    // System list - 2 column grid
+                                    div {
+                                        class: "grid grid-cols-2 gap-x-2 gap-y-0.5",
+                                        for system in segment.systems.iter().take(show_count) {
+                                            div {
+                                                class: "text-gray-300 text-xs font-mono truncate",
+                                                "{system}"
+                                            }
+                                        }
+                                    }
+                                    
+                                    if remaining > 0 {
+                                        div {
+                                            class: "text-gray-500 text-xs italic mt-1",
+                                            "+{remaining} more..."
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Show legend when not hovering
+                    div {
+                        class: "flex flex-col gap-2",
+                        for segment in segments.iter() {
+                            div {
+                                class: "flex items-center gap-2",
+                                span {
+                                    class: "w-3 h-3 rounded shrink-0",
+                                    style: "background-color: {segment.color};"
+                                }
+                                span { class: "text-gray-400 text-sm", "{segment.label}" }
+                                span { class: "text-white font-bold text-sm tabular-nums ml-auto", "{segment.count}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Arc data for donut chart rendering using stroke-dasharray technique
+#[derive(Clone, Debug, PartialEq)]
+struct DonutArc {
+    color: &'static str,
+    dash_length: f64,
+    gap_length: f64,
+    offset: f64,
+}
+
+fn donut_arcs(segments: &[DonutSegment]) -> Vec<DonutArc> {
+    let mut arcs = Vec::new();
+    let circumference = 2.0 * std::f64::consts::PI * 40.0; // r=40
+    let mut offset = 0.0;
+
+    for segment in segments {
+        if segment.percent <= 0.0 {
+            continue;
+        }
+
+        let dash_length = (segment.percent / 100.0) * circumference;
+        let gap_length = circumference - dash_length;
+
+        arcs.push(DonutArc {
+            color: segment.color,
+            dash_length,
+            gap_length,
+            offset: -offset, // negative because we rotate -90deg
+        });
+
+        offset += dash_length;
+    }
+
+    arcs
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq)]
+struct PieSlice {
+    path: String,
+    color: &'static str,
+}
+
+#[allow(dead_code)]
+fn pie_slices(segments: &[DonutSegment]) -> Vec<PieSlice> {
+    let mut slices = Vec::new();
+    let mut current_angle = -90.0_f64;
+    let mut remaining = 100.0_f64;
+    let cx = 60.0;
+    let cy = 60.0;
+    let r = 58.0;
+
+    for segment in segments {
+        if segment.percent <= 0.0 || remaining <= 0.0 {
+            continue;
+        }
+
+        let percent = segment.percent.min(remaining);
+        remaining -= percent;
+        let sweep = percent / 100.0 * 360.0;
+        let start = current_angle;
+        let end = current_angle + sweep;
+        current_angle = end;
+
+        if sweep >= 359.9 {
+            slices.push(PieSlice {
+                path: format!("M {cx} {cy} m -{r} 0 a {r} {r} 0 1 0 {} 0 a {r} {r} 0 1 0 -{} 0", r * 2.0, r * 2.0),
+                color: segment.color,
+            });
+            break;
+        }
+
+        let (x1, y1) = polar_to_cartesian(cx, cy, r, start);
+        let (x2, y2) = polar_to_cartesian(cx, cy, r, end);
+        let large_arc = if sweep > 180.0 { 1 } else { 0 };
+
+        let path = format!("M {cx} {cy} L {x1:.2} {y1:.2} A {r} {r} 0 {large_arc} 1 {x2:.2} {y2:.2} Z");
+
+        slices.push(PieSlice {
+            path,
+            color: segment.color,
+        });
+    }
+
+    slices
+}
+
+fn polar_to_cartesian(cx: f64, cy: f64, r: f64, angle_deg: f64) -> (f64, f64) {
+    let rad = angle_deg.to_radians();
+    (cx + r * rad.cos(), cy + r * rad.sin())
 }
 
 /// Recent deployments list.
