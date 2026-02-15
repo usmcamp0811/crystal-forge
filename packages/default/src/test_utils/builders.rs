@@ -17,8 +17,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::api::models::{
-    CveSummary, DashboardSummary, DeploymentStatus, DeploymentStatusSummary, FleetHealthSummary,
-    HealthStatus, PipelineStage, RecentDeployment, SystemSummary,
+    BuildQueueSummary, CveSummary, DashboardSummary, DeploymentStatus, DeploymentStatusSummary,
+    FleetHealthSummary, HealthStatus, PipelineStage, RecentDeployment, SystemSummary,
 };
 use crate::derivations::{Derivation, DerivationType};
 use crate::models::commits::Commit;
@@ -403,6 +403,7 @@ pub struct DashboardSummaryBuilder {
     cve_summary: CveSummary,
     total_systems: i64,
     active_builds: i64,
+    build_queue: Option<BuildQueueSummary>,
     recent_deployments: Vec<RecentDeployment>,
 }
 
@@ -429,6 +430,12 @@ impl DashboardSummaryBuilder {
             },
             total_systems: 6,
             active_builds: 1,
+            build_queue: Some(BuildQueueSummary {
+                building_count: 1,
+                queued_count: 0,
+                items: vec![],
+                timestamp: Utc::now(),
+            }),
             recent_deployments: vec![],
         }
     }
@@ -439,6 +446,10 @@ impl DashboardSummaryBuilder {
     }
     pub fn active_builds(&mut self, n: i64) -> &mut Self {
         self.active_builds = n;
+        self
+    }
+    pub fn build_queue(&mut self, queue: BuildQueueSummary) -> &mut Self {
+        self.build_queue = Some(queue);
         self
     }
     pub fn fleet_health(&mut self, fh: FleetHealthSummary) -> &mut Self {
@@ -457,6 +468,7 @@ impl DashboardSummaryBuilder {
             cve_summary: self.cve_summary.clone(),
             total_systems: self.total_systems,
             active_builds: self.active_builds,
+            build_queue: self.build_queue.clone(),
             recent_deployments: self.recent_deployments.clone(),
             timestamp: Utc::now(),
         }

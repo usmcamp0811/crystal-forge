@@ -46,6 +46,8 @@ pub struct GridWidgetProps {
     pub is_dragging: bool,
     #[props(default = false)]
     pub is_drop_target: bool,
+    #[props(default = false)]
+    pub is_invalid_drop_target: bool,
     #[props(default)]
     pub on_drag_start: Option<EventHandler<String>>,
     #[props(default)]
@@ -69,6 +71,7 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
         children,
         is_dragging,
         is_drop_target,
+        is_invalid_drop_target,
         on_drag_start,
         on_drag_over,
         on_drag_leave,
@@ -87,6 +90,8 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
     };
     let drop_class = if is_drop_target { 
         "ring-2 ring-blue-400 ring-offset-2 ring-offset-gray-900 scale-[1.02] bg-blue-900/20" 
+    } else if is_invalid_drop_target {
+        "ring-2 ring-red-400 ring-offset-2 ring-offset-gray-900 bg-red-900/20"
     } else { 
         "" 
     };

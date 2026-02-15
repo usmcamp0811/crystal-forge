@@ -206,6 +206,7 @@ pub struct DashboardSummary {
     pub cve_summary: CveSummary,
     pub total_systems: i64,
     pub active_builds: i64,
+    pub build_queue: Option<BuildQueueSummary>,
     pub recent_deployments: Vec<RecentDeployment>,
     pub timestamp: DateTime<Utc>,
 }
@@ -260,6 +261,7 @@ impl CveSummary {
 pub struct RecentDeployment {
     pub hostname: String,
     pub commit_hash: String,
+    pub commit_message: Option<String>,
     pub deployed_at: DateTime<Utc>,
     pub status: DeploymentStatus,
 }
@@ -358,8 +360,54 @@ pub struct FlakeTimeline {
     pub commits: Vec<FlakeCommit>,
 }
 
+/// Build status for a commit/derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildStatus {
+    /// No build in progress or queued.
+    Idle,
+    /// Build is queued and waiting for a worker.
+    Queued,
+    /// Build is currently in progress.
+    Building,
+    /// Build completed successfully.
+    Complete,
+    /// Build failed.
+    Failed,
+}
+
+impl BuildStatus {
+    /// Returns true if this status represents an active build (queued or building).
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Queued | Self::Building)
+    }
+
+    /// Human-readable label.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Queued => "Queued",
+            Self::Building => "Building",
+            Self::Complete => "Complete",
+            Self::Failed => "Failed",
+        }
+    }
+
+    /// CSS color class for the status.
+    pub fn color_class(&self) -> &'static str {
+        match self {
+            Self::Idle => "text-gray-400",
+            Self::Queued => "text-blue-400",
+            Self::Building => "text-cyan-400",
+            Self::Complete => "text-emerald-400",
+            Self::Failed => "text-red-400",
+        }
+    }
+}
+
 /// A single commit in a flake's history with deployment info.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FlakeCommit {
     /// Full commit hash.
     pub hash: String,
@@ -375,6 +423,48 @@ pub struct FlakeCommit {
     pub commits_behind: i64,
     /// Hostnames of systems at this commit (for tooltip/expansion).
     pub systems: Vec<String>,
+    /// Current build status for this commit (if any build is in progress).
+    #[serde(default)]
+    pub build_status: Option<BuildStatus>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Build Queue DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Summary of the build queue for the dashboard widget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildQueueSummary {
+    /// Number of builds currently in progress.
+    pub building_count: i64,
+    /// Number of builds waiting in the queue.
+    pub queued_count: i64,
+    /// List of active build items (building + queued, limited).
+    pub items: Vec<BuildQueueItem>,
+    /// Server timestamp for freshness.
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A single item in the build queue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildQueueItem {
+    /// The hostname/system being built.
+    pub hostname: String,
+    /// The flake name this build belongs to.
+    pub flake_name: String,
+    /// Short commit hash being built.
+    pub commit_hash: String,
+    /// Commit message (first line).
+    pub commit_message: Option<String>,
+    /// Current status (Queued or Building).
+    pub status: BuildStatus,
+    /// When the build was queued.
+    pub queued_at: DateTime<Utc>,
+    /// When the build started (None if still queued).
+    pub started_at: Option<DateTime<Utc>>,
+    /// Elapsed time in seconds since started (for display).
+    #[serde(default)]
+    pub elapsed_secs: Option<i64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
