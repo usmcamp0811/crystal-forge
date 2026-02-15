@@ -79,8 +79,8 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
             height: 2,
         },
         WidgetPosition {
-            id: "cve-summary",
-            title: "CVE Summary",
+            id: "build-summary",
+            title: "Build Summary",
             col: 0,
             row: 2,
             width: 2,
@@ -98,8 +98,16 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
             id: "build-queue",
             title: "Build Queue",
             col: 0,
+            row: 4,
+            width: 2,
+            height: 3,
+        },
+        WidgetPosition {
+            id: "cve-summary",
+            title: "CVE Summary",
+            col: 2,
             row: 5,
-            width: 4,
+            width: 2,
             height: 2,
         },
     ]
@@ -294,6 +302,12 @@ pub fn DashboardView() -> Element {
             "deployment-status" => rsx! {
                 DeploymentStatusBreakdown {
                     status: dashboard.deployment_status.clone(),
+                    flake_filter: filter_display.clone()
+                }
+            },
+            "build-summary" => rsx! {
+                BuildSummaryPanel {
+                    queue: build_queue.clone(),
                     flake_filter: filter_display.clone()
                 }
             },
@@ -793,6 +807,89 @@ struct DonutSegment {
     systems: Vec<String>,
 }
 
+#[component]
+fn BuildSummaryPanel(
+    queue: BuildQueueSummary,
+    #[props(default)] flake_filter: Option<String>,
+) -> Element {
+    let building = queue.building_count;
+    let queued = queue.queued_count;
+    let total = (building + queued).max(1) as f64;
+
+    let building_systems: Vec<String> = queue
+        .items
+        .iter()
+        .filter(|item| item.status == BuildStatus::Building)
+        .map(|item| item.hostname.clone())
+        .collect();
+    let queued_systems: Vec<String> = queue
+        .items
+        .iter()
+        .filter(|item| item.status == BuildStatus::Queued)
+        .map(|item| item.hostname.clone())
+        .collect();
+
+    let segments = vec![
+        DonutSegment {
+            percent: building as f64 / total * 100.0,
+            color: "#42ff65",
+            label: "Building",
+            count: building,
+            systems: if building_systems.is_empty() {
+                vec!["No active builds".to_string()]
+            } else {
+                building_systems
+            },
+        },
+        DonutSegment {
+            percent: queued as f64 / total * 100.0,
+            color: "#e57c00",
+            label: "Queued",
+            count: queued,
+            systems: if queued_systems.is_empty() {
+                vec!["No queued builds".to_string()]
+            } else {
+                queued_systems
+            },
+        },
+    ];
+
+    rsx! {
+        div {
+            class: "h-full flex flex-col",
+            "data-testid": "build-summary-panel",
+
+            if let Some(ref flake_name) = flake_filter {
+                div {
+                    class: "text-xs text-blue-400 mb-1 flex items-center gap-1",
+                    svg {
+                        class: "w-3 h-3",
+                        fill: "none",
+                        stroke: "currentColor",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            stroke_width: "2",
+                            d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
+                        }
+                    }
+                    span { "{flake_name}" }
+                }
+            }
+
+            div {
+                class: "flex-1",
+                DonutChartWithLegend {
+                    segments: segments,
+                    center_value: building + queued,
+                    center_label: "BUILDS"
+                }
+            }
+        }
+    }
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct DonutChartWithLegendProps {
     segments: Vec<DonutSegment>,
@@ -994,7 +1091,10 @@ fn donut_arcs(segments: &[DonutSegment]) -> Vec<DonutArc> {
 
 /// Build queue panel with active build items.
 #[component]
-fn BuildQueuePanel(queue: BuildQueueSummary, #[props(default)] flake_filter: Option<String>) -> Element {
+fn BuildQueuePanel(
+    queue: BuildQueueSummary,
+    #[props(default)] flake_filter: Option<String>,
+) -> Element {
     let total_active = queue.building_count + queue.queued_count;
     let mut active_items: Vec<BuildQueueItem> = queue
         .items
@@ -1011,11 +1111,10 @@ fn BuildQueuePanel(queue: BuildQueueSummary, #[props(default)] flake_filter: Opt
         }
     });
 
-    let filtered_items: Vec<BuildQueueItem> = if flake_filter.is_some() {
-        active_items.into_iter().take(4).collect()
-    } else {
-        active_items
-    };
+    let max_items = if flake_filter.is_some() { 4 } else { 5 };
+    let total_items = active_items.len();
+    let filtered_items: Vec<BuildQueueItem> = active_items.into_iter().take(max_items).collect();
+    let remaining_count = total_items.saturating_sub(filtered_items.len());
 
     let mut queued_rank = 0;
     let ordered_rows: Vec<(BuildQueueItem, Option<String>)> = filtered_items
@@ -1062,18 +1161,12 @@ fn BuildQueuePanel(queue: BuildQueueSummary, #[props(default)] flake_filter: Opt
             div {
                 class: "flex items-center justify-between mb-3",
                 div {
-                    class: "flex flex-col",
-                    div {
-                        class: "flex items-center gap-2",
-                        span { class: "text-xl font-semibold text-white", "{total_active}" }
-                        span { class: "text-xs text-gray-400 uppercase tracking-wide", "active builds" }
-                    }
-                    span { class: "text-[10px] text-gray-500", "Ordered by next build" }
+                    class: "text-xs text-gray-400 uppercase tracking-wide",
+                    "Build queue"
                 }
                 div {
-                    class: "flex items-center gap-3",
-                    BuildQueueMetric { label: "Building", count: queue.building_count, dot_class: "bg-cyan-400" }
-                    BuildQueueMetric { label: "Queued", count: queue.queued_count, dot_class: "bg-blue-400" }
+                    class: "text-[10px] text-gray-500",
+                    "Ordered by next build"
                 }
             }
 
@@ -1081,9 +1174,15 @@ fn BuildQueuePanel(queue: BuildQueueSummary, #[props(default)] flake_filter: Opt
                 p { class: "text-sm text-gray-400", "No builds running or queued." }
             } else {
                 div {
-                    class: "grid grid-cols-1 md:grid-cols-2 gap-2 flex-1 min-h-0",
+                    class: "flex-1 min-h-0 overflow-hidden space-y-2",
                     for (item, label) in ordered_rows {
                         BuildQueueRow { item, position_label: label }
+                    }
+                }
+                if remaining_count > 0 {
+                    p {
+                        class: "text-[10px] text-gray-500 mt-2",
+                        "+{remaining_count} more builds queued"
                     }
                 }
             }
@@ -1104,7 +1203,10 @@ fn BuildQueueMetric(label: &'static str, count: i64, dot_class: &'static str) ->
 }
 
 #[component]
-fn BuildQueueRow(item: BuildQueueItem, #[props(default)] position_label: Option<String>) -> Element {
+fn BuildQueueRow(
+    item: BuildQueueItem,
+    #[props(default)] position_label: Option<String>,
+) -> Element {
     let status_class = match item.status {
         BuildStatus::Building => "text-cyan-400",
         BuildStatus::Queued => "text-blue-400",
@@ -1112,33 +1214,49 @@ fn BuildQueueRow(item: BuildQueueItem, #[props(default)] position_label: Option<
         BuildStatus::Failed => "text-red-400",
         BuildStatus::Idle => "text-gray-400",
     };
+    let status_dot_color = match item.status {
+        BuildStatus::Building => "#42ff65",
+        BuildStatus::Queued => "#e57c00",
+        BuildStatus::Complete => "#10b981",
+        BuildStatus::Failed => "#ef4444",
+        BuildStatus::Idle => "#6b7280",
+    };
     let status_label = item.status.label();
     let short_hash = item.commit_hash.chars().take(7).collect::<String>();
     let elapsed = item.elapsed_secs.map(format_elapsed);
 
     rsx! {
-        div {
-            class: "flex items-center justify-between p-2 rounded-lg bg-gray-900/40 border border-gray-800",
+        Link {
+            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition hover:bg-gray-800/80 hover:border hover:border-gray-600",
+            to: crate::routes::Route::SystemsView {},
             div {
-                class: "min-w-0",
+                class: "flex items-center gap-3 min-w-0 flex-1",
+                svg {
+                    class: "w-2 h-2 shrink-0",
+                    view_box: "0 0 8 8",
+                    circle { cx: "4", cy: "4", r: "4", fill: "{status_dot_color}" }
+                }
                 div {
-                    class: "flex items-center gap-2",
-                    span { class: "text-white text-sm font-medium", "{item.hostname}" }
-                    span { class: "text-[10px] font-mono text-gray-500", "{short_hash}" }
-                    if let Some(ref label) = position_label {
-                        span { class: "text-[10px] uppercase tracking-wide text-gray-400", "{label}" }
+                    class: "min-w-0 flex-1",
+                    div {
+                        class: "flex items-center gap-2",
+                        span { class: "text-white text-sm font-medium truncate", "{item.hostname}" }
+                        span { class: "text-[10px] font-mono text-gray-500", "{short_hash}" }
+                    }
+                    if let Some(ref msg) = item.commit_message {
+                        p { class: "text-xs text-gray-400 truncate", "{msg}" }
                     }
                 }
-                if let Some(ref msg) = item.commit_message {
-                    p { class: "text-xs text-gray-400 truncate", "{msg}" }
-                }
-                p { class: "text-[11px] text-gray-500", "{item.flake_name}" }
             }
             div {
-                class: "text-right",
-                p { class: "text-xs font-semibold {status_class}", "{status_label}" }
+                class: "text-right shrink-0 ml-3",
                 if let Some(ref elapsed) = elapsed {
-                    p { class: "text-[10px] text-gray-500", "{elapsed}" }
+                    p { class: "text-xs text-white font-semibold tabular-nums", "{elapsed}" }
+                }
+                if let Some(ref label) = position_label {
+                    p { class: "text-[10px] uppercase tracking-wide {status_class}", "{label}" }
+                } else {
+                    p { class: "text-[10px] uppercase tracking-wide {status_class}", "{status_label}" }
                 }
             }
         }
@@ -1281,8 +1399,9 @@ fn RecentDeploymentRow(deployment: RecentDeployment) -> Element {
     });
 
     rsx! {
-        div {
-            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG}",
+        Link {
+            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition hover:bg-gray-800/80 hover:border hover:border-gray-600",
+            to: crate::routes::Route::SystemsView {},
             div {
                 class: "flex items-center gap-3 min-w-0 flex-1",
                 // Status indicator dot
@@ -1294,22 +1413,18 @@ fn RecentDeploymentRow(deployment: RecentDeployment) -> Element {
                     class: "min-w-0 flex-1",
                     div {
                         class: "flex items-center gap-2",
-                        p { class: "text-white font-medium", "{deployment.hostname}" }
-                        p { class: "{theme::text::MUTED} text-xs font-mono", "{short_hash}" }
+                        span { class: "text-white text-sm font-medium truncate", "{deployment.hostname}" }
+                        span { class: "text-[10px] font-mono text-gray-500", "{short_hash}" }
                     }
                     if let Some(ref msg) = commit_msg {
-                        p {
-                            class: "{theme::text::SECONDARY} text-xs truncate",
-                            title: "{deployment.commit_message.as_deref().unwrap_or_default()}",
-                            "{msg}"
-                        }
+                        p { class: "text-xs text-gray-400 truncate", "{msg}" }
                     }
                 }
             }
             div {
-                class: "text-right shrink-0 ml-2",
-                p { class: "{status_color} text-sm", "{deployment.status.label()}" }
-                p { class: "{theme::text::MUTED} text-xs", "{time_ago}" }
+                class: "text-right shrink-0 ml-3",
+                p { class: "text-xs text-gray-400", "{time_ago}" }
+                p { class: "text-[10px] uppercase tracking-wide {status_color}", "{deployment.status.label()}" }
             }
         }
     }
@@ -1376,7 +1491,7 @@ fn mock_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> BuildQueueSum
             queued_at: now - Duration::minutes(3),
             started_at: None,
             elapsed_secs: None,
-        }
+        },
     ];
 
     let building_count = items
@@ -1424,7 +1539,6 @@ fn mock_dashboard_summary() -> DashboardSummary {
         active_builds: build_queue.building_count,
         build_queue: Some(build_queue),
         recent_deployments: vec![
-
             RecentDeployment {
                 hostname: "atlas-01".to_string(),
                 commit_hash: "a1b2c3d4e5f6789".to_string(),
