@@ -328,14 +328,15 @@ fn TimelineGraph(
             class: "relative",
             "data-testid": "{testid}",
 
-            // Scrollable timeline area
+            // Scrollable timeline area - uses CSS to start scrolled right
+            // direction: rtl on container + ltr on content makes it scroll to "end" (right) by default
             div {
-                class: "overflow-x-auto",
-                style: "scrollbar-width: thin; scrollbar-color: #374151 transparent;",
+                class: "overflow-x-auto scrollbar-hide",
+                style: "scrollbar-width: none; direction: rtl; -ms-overflow-style: none;",
 
                 div {
                     class: "relative",
-                    style: "width: {width_px}px; height: {container_height}px;",
+                    style: "width: {width_px}px; height: {container_height}px; direction: ltr;",
 
                     // Layer 1: Lines (behind everything)
                     div {
