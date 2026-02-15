@@ -1,6 +1,2 @@
 @import "tailwindcss";
 @source "./src/**/*.{rs,html,css}";
-
-body {
-  background: red !important;
-}
