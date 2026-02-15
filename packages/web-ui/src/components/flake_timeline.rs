@@ -116,8 +116,8 @@ pub fn FlakeTimelineWidget(
                         LegendDot { color: "bg-yellow-500", label: "1 behind" }
                         LegendDot { color: "bg-orange-500", label: "2 behind" }
                         LegendDot { color: "bg-red-500", label: "3+ behind" }
-                        RingLegendSwatch { style: "box-shadow: 0 0 0 3px #f59e0b", label: "Building" }
-                        RingLegendSwatch { style: "box-shadow: 0 0 0 2px #2563eb", label: "Queued" }
+                        RingLegendSwatch { style: "box-shadow: 0 0 0 3px #42ff65", label: "Building" }
+                        RingLegendSwatch { style: "box-shadow: 0 0 0 2px #e57c00", label: "Queued" }
                     }
                 }
 
@@ -772,8 +772,16 @@ fn CommitNode(
                     "{commit.system_count}"
                 }
 
+                if build_status == BuildStatus::Building {
+                    span {
+                        class: "absolute inset-[-4px] rounded-full animate-spin",
+                        style: "background: conic-gradient(#42ff65 0deg, rgba(66, 255, 101, 0.2) 120deg, transparent 360deg);"
+                    }
+                }
+
                 if build_status == BuildStatus::Queued {
-                    span { class: "absolute text-[7px] text-blue-200 font-semibold", "Q" }
+                    span { class: "absolute text-[7px] text-orange-300 font-semibold", "Q" }
+                    span { class: "absolute inset-[-4px] rounded-full animate-pulse", style: "box-shadow: 0 0 0 2px rgba(228, 124, 0, 0.6);" }
                 }
             }
 
@@ -832,8 +840,8 @@ fn commit_node_bg(system_count: i64, behind: i64) -> &'static str {
 
 fn build_ring_style(status: BuildStatus) -> &'static str {
     match status {
-        BuildStatus::Queued => "0 0 0 2px #2563eb, 0 0 0 4px rgba(17, 24, 39, 0.9)",
-        BuildStatus::Building => "0 0 0 4px #f59e0b, 0 0 12px rgba(251, 191, 36, 0.6)",
+        BuildStatus::Queued => "0 0 0 2px #e57c00",
+        BuildStatus::Building => "0 0 0 3px #42ff65",
         _ => "0 0 0 2px #9ca3af",
     }
 }
