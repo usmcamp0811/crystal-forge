@@ -32,11 +32,84 @@ pub fn SidebarNav() -> Element {
             }
             div {
                 class: "flex-1 px-3 space-y-1",
-                NavLink { to: Route::DashboardView {}, label: "Dashboard", icon: "📊" }
-                NavLink { to: Route::SystemsView {}, label: "Systems", icon: "🖥️" }
-                NavLink { to: Route::BuildsView {}, label: "Builds", icon: "🧱" }
-                NavLink { to: Route::CvesView {}, label: "CVEs", icon: "🛡️" }
-                NavLink { to: Route::StyleGuideView {}, label: "Style Guide", icon: "🎨" }
+                NavLink {
+                    to: Route::DashboardView {},
+                    label: "Dashboard",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M3 11l9-7 9 7" }
+                            path { d: "M5 10v10h5v-6h4v6h5V10" }
+                        }
+                    )
+                }
+                NavLink {
+                    to: Route::SystemsView {},
+                    label: "Systems",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            rect { x: "3", y: "5", width: "18", height: "12", rx: "2" }
+                            path { d: "M7 21h10" }
+                            path { d: "M12 17v4" }
+                        }
+                    )
+                }
+                NavLink {
+                    to: Route::BuildsView {},
+                    label: "Builds",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            rect { x: "4", y: "4", width: "7", height: "7", rx: "1" }
+                            rect { x: "13", y: "4", width: "7", height: "7", rx: "1" }
+                            rect { x: "4", y: "13", width: "7", height: "7", rx: "1" }
+                            rect { x: "13", y: "13", width: "7", height: "7", rx: "1" }
+                        }
+                    )
+                }
+                NavLink {
+                    to: Route::CvesView {},
+                    label: "CVEs",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                        }
+                    )
+                }
+                NavLink {
+                    to: Route::StyleGuideView {},
+                    label: "Style Guide",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M4 6h16" }
+                            path { d: "M4 12h16" }
+                            path { d: "M4 18h16" }
+                        }
+                    )
+                }
             }
             div {
                 class: "p-4 border-t {theme::surface::CARD_BORDER} text-xs {theme::text::MUTED}",
@@ -48,13 +121,13 @@ pub fn SidebarNav() -> Element {
 
 /// A sidebar navigation link.
 #[component]
-fn NavLink(to: Route, label: &'static str, icon: &'static str) -> Element {
+fn NavLink(to: Route, label: &'static str, icon: Element) -> Element {
     // TODO: highlight active route
     rsx! {
         Link {
             to,
             class: "flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors",
-            span { "{icon}" }
+            {icon}
             span { "{label}" }
         }
     }
