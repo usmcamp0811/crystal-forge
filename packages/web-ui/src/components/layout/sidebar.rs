@@ -14,7 +14,8 @@ pub fn SidebarNav() -> Element {
             div {
                 class: "p-6 flex items-center gap-3",
                 img {
-                    class: "h-8 w-8 scale-105",
+                    class: "h-8 w-8",
+                    style: "transform: scale(1.67);",
                     src: asset!("assets/crystal-forge-icon.png"),
                     alt: "Crystal Forge"
                 }
