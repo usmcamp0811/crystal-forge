@@ -51,7 +51,7 @@ struct TimelineTick {
 /// The main flake timeline widget for the dashboard.
 #[component]
 pub fn FlakeTimelineWidget(timelines: Vec<FlakeTimeline>) -> Element {
-    let mut view_mode = use_signal(|| TimelineViewMode::Combined);
+    let mut view_mode = use_signal(|| TimelineViewMode::SingleFlake);
     let mut selected_flake = use_signal(|| 0usize);
 
     let flake_names: Vec<String> = timelines.iter().map(|t| t.flake_name.clone()).collect();
@@ -323,10 +323,7 @@ fn build_ticks(positions: &[PositionedCommit], tick_seconds: i64) -> Vec<Timelin
 
         ticks.push(TimelineTick {
             x_position,
-            label: format_tick_label(
-                chrono::Utc.timestamp_opt(current, 0).unwrap(),
-                tick_seconds,
-            ),
+            label: format_tick_label(chrono::Utc.timestamp_opt(current, 0).unwrap(), tick_seconds),
         });
 
         current += tick_seconds;
