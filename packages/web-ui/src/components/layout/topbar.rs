@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::theme;
+use crate::routes::Route;
 
 /// Header bar displaying the current page title and optional actions.
 #[component]
@@ -12,9 +13,18 @@ pub fn TopBar(title: String) -> Element {
             class: "flex items-center justify-between h-16 px-6 border-b {theme::surface::CARD_BORDER} {theme::surface::SIDEBAR_BG}",
             div {
                 class: "flex items-center gap-3",
-                h1 {
-                    class: "text-lg font-semibold",
-                    "{title}"
+                Link {
+                    class: "flex items-center gap-2",
+                    to: Route::DashboardView {},
+                    img {
+                        class: "h-6 w-6",
+                        src: asset!("assets/crystal-forge-icon.png"),
+                        alt: "Crystal Forge"
+                    }
+                    span {
+                        class: "text-sm font-semibold tracking-wide text-white",
+                        "Crystal Forge"
+                    }
                 }
             }
             div {
