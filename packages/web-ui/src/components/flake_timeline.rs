@@ -45,6 +45,7 @@ pub fn FlakeTimelineWidget(timelines: Vec<FlakeTimeline>) -> Element {
     rsx! {
         div {
             class: "space-y-4",
+            style: "overflow: visible;",
             "data-testid": "flake-timeline-widget",
 
             // Header with view mode toggle
@@ -312,60 +313,73 @@ fn TimelineGraph(
     let last_x = positioned_commits.last().map(|p| p.x_position).unwrap_or(0.0) as i32;
     let line_width = last_x - first_x;
 
-    // Line is at y=24px, nodes centered on it, content below
-    let line_y = 24;
-    let node_size = 12;
-    let container_height = 85;
+    // Layout: nodes are 20px circles with count inside, line passes through center
+    let node_size = 20;
+    let node_top = 4;  // Node starts at y=4
+    let node_center = node_top + (node_size / 2);  // Center at y=14
+    let line_thickness = 3;
+    let line_top = node_center - 1;  // Line at y=13, 3px thick, centers at y=14.5 (close enough)
+    let container_height = 70;
 
     rsx! {
-        // Outer wrapper allows popups to overflow
+        // Outer wrapper
         div {
             class: "relative",
-            style: "overflow: visible;",
             "data-testid": "{testid}",
 
             // Scrollable timeline area
             div {
-                class: "overflow-x-auto overflow-y-visible",
+                class: "overflow-x-auto",
                 style: "scrollbar-width: thin; scrollbar-color: #374151 transparent;",
 
                 div {
                     class: "relative",
                     style: "width: {width_px}px; height: {container_height}px;",
 
-                    // Main horizontal line - goes THROUGH the center of nodes
+                    // Layer 1: Lines (behind everything)
                     div {
-                        class: "absolute bg-gray-600",
-                        style: "left: {first_x}px; width: {line_width}px; top: {line_y}px; height: 2px;"
-                    }
+                        class: "absolute inset-0",
+                        style: "z-index: 1;",
 
-                    // Colored segments on top of the gray line
-                    for (i, pc) in positioned_commits.iter().enumerate() {
-                        if i > 0 {
-                            {
-                                let prev = &positioned_commits[i - 1];
-                                let seg_start = prev.x_position as i32;
-                                let seg_width = (pc.x_position - prev.x_position) as i32;
-                                let seg_color = commits_behind_bg(pc.commit.commits_behind);
-                                rsx! {
-                                    div {
-                                        class: "absolute {seg_color}",
-                                        style: "left: {seg_start}px; width: {seg_width}px; top: {line_y}px; height: 2px; z-index: 1;"
+                        // Main horizontal line
+                        div {
+                            class: "absolute bg-gray-600",
+                            style: "left: {first_x}px; width: {line_width}px; top: {line_top}px; height: {line_thickness}px;"
+                        }
+
+                        // Colored segments
+                        for (i, pc) in positioned_commits.iter().enumerate() {
+                            if i > 0 {
+                                {
+                                    let prev = &positioned_commits[i - 1];
+                                    let seg_start = prev.x_position as i32;
+                                    let seg_width = (pc.x_position - prev.x_position) as i32;
+                                    let seg_color = commits_behind_bg(pc.commit.commits_behind);
+                                    rsx! {
+                                        div {
+                                            class: "absolute {seg_color}",
+                                            style: "left: {seg_start}px; width: {seg_width}px; top: {line_top}px; height: {line_thickness}px;"
+                                        }
                                     }
                                 }
                             }
                         }
                     }
 
-                    // Commit nodes - line goes through their center
-                    for pc in positioned_commits.iter() {
-                        CommitNode {
-                            commit: pc.commit.clone(),
-                            flake_name: pc.flake_name.clone(),
-                            show_flake_label: show_flake_labels,
-                            x_position: pc.x_position,
-                            line_y: line_y,
-                            node_size: node_size
+                    // Layer 2: Nodes (on top of lines)
+                    div {
+                        class: "absolute inset-0",
+                        style: "z-index: 2;",
+
+                        for pc in positioned_commits.iter() {
+                            CommitNode {
+                                commit: pc.commit.clone(),
+                                flake_name: pc.flake_name.clone(),
+                                show_flake_label: show_flake_labels,
+                                x_position: pc.x_position,
+                                node_top: node_top,
+                                node_size: node_size
+                            }
                         }
                     }
                 }
@@ -381,7 +395,7 @@ fn CommitNode(
     flake_name: Option<String>,
     show_flake_label: bool,
     x_position: f64,
-    line_y: i32,
+    node_top: i32,
     node_size: i32,
 ) -> Element {
     let short_hash = commit.hash.chars().take(7).collect::<String>();
@@ -397,10 +411,13 @@ fn CommitNode(
     let x_px = x_position as i32;
     let system_plural = if commit.system_count == 1 { "" } else { "s" };
 
-    // Center node on line: line is at line_y, node center should be at line_y
-    let node_top = line_y - (node_size / 2);
-    // Content starts below the node with small gap
-    let content_top = line_y + (node_size / 2) + 6;
+    // Content starts below the node
+    let content_top = node_top + node_size + 4;
+
+    // The main node (colored circle with count) sits centered on the line
+    // Text content appears below it
+    let badge_top = node_top;
+    let text_top = node_top + node_size + 4;
 
     rsx! {
         div {
@@ -409,24 +426,20 @@ fn CommitNode(
             "data-testid": "commit-node",
             "data-commits-behind": "{commit.commits_behind}",
 
-            // Node circle - line passes through its center
+            // Main node - colored circle with system count, centered ON the line
             div {
-                class: "absolute left-1/2 -translate-x-1/2 rounded-full border-2 border-gray-900 cursor-pointer {node_bg}",
-                style: "width: {node_size}px; height: {node_size}px; top: {node_top}px; z-index: 5;"
+                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2 border-gray-900",
+                style: "width: {node_size}px; height: {node_size}px; top: {badge_top}px;",
+                span {
+                    class: "text-[9px] font-bold text-gray-900",
+                    "{commit.system_count}"
+                }
             }
 
-            // Content below the node
+            // Text content below the node
             div {
                 class: "absolute left-1/2 -translate-x-1/2 flex flex-col items-center cursor-pointer",
-                style: "top: {content_top}px; min-width: 50px;",
-
-                // System count badge
-                if commit.system_count > 0 {
-                    div {
-                        class: "px-1.5 py-0.5 rounded-full text-[9px] font-bold {node_bg} text-gray-900 mb-0.5",
-                        "{commit.system_count}"
-                    }
-                }
+                style: "top: {text_top}px; min-width: 50px;",
 
                 // Commit hash
                 span {
@@ -445,64 +458,55 @@ fn CommitNode(
                 }
             }
 
-            // Hover popup - floats above everything, not clipped by scroll container
+            // Hover popup - compact tooltip above the node
             div {
                 class: "absolute left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none",
-                style: "top: 75px; min-width: 240px; z-index: 9999;",
+                style: "bottom: 75px; min-width: 200px; max-width: 280px; z-index: 9999;",
 
                 div {
-                    class: "bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg p-4 shadow-2xl",
+                    class: "bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg p-2 shadow-2xl text-xs",
 
-                    // Header with hash and status badge
+                    // Header row: hash + status
                     div {
-                        class: "flex items-center justify-between mb-2",
+                        class: "flex items-center gap-2 mb-1",
                         span {
-                            class: "text-sm font-mono text-white font-medium",
+                            class: "font-mono text-white font-medium",
                             "{short_hash}"
                         }
                         span {
-                            class: "text-[10px] px-2 py-0.5 rounded-full {node_bg} text-gray-900 font-semibold",
+                            class: "text-[9px] px-1.5 py-0.5 rounded-full {node_bg} text-gray-900 font-semibold",
                             "{behind_text}"
                         }
                     }
 
-                    // Commit message
+                    // Message (truncated)
                     p {
-                        class: "text-sm text-white mb-2",
+                        class: "text-white mb-1 truncate",
                         "{commit.message}"
                     }
 
-                    // Author
+                    // Author + systems count inline
                     p {
-                        class: "text-xs {theme::text::MUTED} mb-3",
-                        "by {commit.author}"
+                        class: "{theme::text::MUTED}",
+                        "{commit.author} · {commit.system_count} system{system_plural}"
                     }
 
-                    // Divider
-                    div { class: "h-px bg-gray-700 mb-3" }
-
-                    // Systems info
-                    div {
-                        class: "text-xs {theme::text::SECONDARY} mb-2",
-                        "{commit.system_count} system{system_plural} deployed at this commit"
-                    }
-
-                    // System hostnames
-                    if !commit.systems.is_empty() && commit.systems.len() <= 10 {
+                    // System hostnames (compact, max 5 shown)
+                    if !commit.systems.is_empty() {
                         div {
-                            class: "flex flex-wrap gap-1",
-                            for system in commit.systems.iter() {
+                            class: "flex flex-wrap gap-1 mt-1",
+                            for system in commit.systems.iter().take(5) {
                                 span {
-                                    class: "text-[10px] px-1.5 py-0.5 rounded bg-gray-700 text-gray-300 font-mono",
+                                    class: "text-[9px] px-1 py-0.5 rounded bg-gray-700 text-gray-300 font-mono",
                                     "{system}"
                                 }
                             }
-                        }
-                    }
-                    if commit.systems.len() > 10 {
-                        div {
-                            class: "text-[10px] {theme::text::MUTED} mt-1",
-                            "+{commit.systems.len() - 10} more systems"
+                            if commit.systems.len() > 5 {
+                                span {
+                                    class: "text-[9px] {theme::text::MUTED}",
+                                    "+{commit.systems.len() - 5}"
+                                }
+                            }
                         }
                     }
                 }
