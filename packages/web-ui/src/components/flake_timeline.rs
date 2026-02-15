@@ -8,10 +8,12 @@ use dioxus::prelude::*;
 use crate::api::models::{FlakeCommit, FlakeTimeline};
 use crate::theme;
 
-/// Minimum pixels between commit nodes.
-const MIN_GAP_PX: f64 = 80.0;
-/// Maximum pixels between commit nodes.
-const MAX_GAP_PX: f64 = 160.0;
+/// Minimum pixels between commit nodes (prevents overlap during bursts).
+const MIN_GAP_PX: f64 = 32.0;
+/// Base time scale (seconds) for log spacing.
+const TIME_SCALE_SECONDS: f64 = 60.0 * 60.0;
+/// Pixels per log-scaled time unit.
+const TIME_SCALE_PX: f64 = 80.0;
 
 /// View mode for the timeline display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -32,6 +34,21 @@ struct PositionedCommit {
     flake_name: Option<String>,
     /// X position in pixels from the left edge.
     x_position: f64,
+}
+
+#[derive(Clone, PartialEq)]
+struct TimelineScale {
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    total_width: f64,
+    tick_seconds: i64,
+    ticks: Vec<TimelineTick>,
+}
+
+#[derive(Clone, PartialEq)]
+struct TimelineTick {
+    x_position: f64,
+    label: String,
 }
 
 /// The main flake timeline widget for the dashboard.
@@ -165,21 +182,35 @@ fn ViewModeToggle(mode: TimelineViewMode, on_change: EventHandler<TimelineViewMo
 
 /// Calculate time-proportional positions for commits.
 fn calculate_positions(commits: &[(Option<String>, FlakeCommit)]) -> Vec<PositionedCommit> {
+    calculate_positions_with_scale(commits).0
+}
+
+fn calculate_positions_with_scale(
+    commits: &[(Option<String>, FlakeCommit)],
+) -> (Vec<PositionedCommit>, Option<TimelineScale>) {
     if commits.is_empty() {
-        return vec![];
+        return (vec![], None);
     }
 
     if commits.len() == 1 {
-        return vec![PositionedCommit {
+        let only = PositionedCommit {
             commit: commits[0].1.clone(),
             flake_name: commits[0].0.clone(),
             x_position: MIN_GAP_PX,
-        }];
+        };
+        let start = commits[0].1.committed_at;
+        return (
+            vec![only],
+            Some(build_scale(start, start, MIN_GAP_PX * 2.0)),
+        );
     }
 
     // Sort by time (oldest first)
     let mut sorted: Vec<_> = commits.to_vec();
     sorted.sort_by(|a, b| a.1.committed_at.cmp(&b.1.committed_at));
+
+    let start_time = sorted.first().map(|c| c.1.committed_at).unwrap();
+    let end_time = sorted.last().map(|c| c.1.committed_at).unwrap();
 
     // Calculate time gaps between consecutive commits
     let gaps: Vec<i64> = sorted
@@ -190,16 +221,12 @@ fn calculate_positions(commits: &[(Option<String>, FlakeCommit)]) -> Vec<Positio
         })
         .collect();
 
-    // Use logarithmic scaling
-    let max_gap_seconds = gaps.iter().copied().max().unwrap_or(1) as f64;
-    let log_max = (1.0 + max_gap_seconds).ln();
-
+    // Log-scaled spacing with a minimum floor for dense bursts.
     let scaled_gaps: Vec<f64> = gaps
         .iter()
         .map(|&secs| {
-            let log_secs = (1.0 + secs as f64).ln();
-            let normalized = log_secs / log_max;
-            MIN_GAP_PX + (MAX_GAP_PX - MIN_GAP_PX) * normalized
+            let log_units = (1.0 + secs as f64 / TIME_SCALE_SECONDS).ln();
+            MIN_GAP_PX + TIME_SCALE_PX * log_units
         })
         .collect();
 
@@ -219,7 +246,85 @@ fn calculate_positions(commits: &[(Option<String>, FlakeCommit)]) -> Vec<Positio
         }
     }
 
-    result
+    let scale = build_scale(start_time, end_time, x + MIN_GAP_PX);
+    (result, Some(scale))
+}
+
+fn build_scale(
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    total_width: f64,
+) -> TimelineScale {
+    let span_seconds = end.signed_duration_since(start).num_seconds().max(1);
+    let tick_seconds = pick_tick_interval(span_seconds);
+    let ticks = build_ticks(start, end, total_width, tick_seconds);
+    TimelineScale {
+        start,
+        end,
+        total_width,
+        tick_seconds,
+        ticks,
+    }
+}
+
+fn pick_tick_interval(span_seconds: i64) -> i64 {
+    let candidates = [
+        60,
+        5 * 60,
+        15 * 60,
+        30 * 60,
+        60 * 60,
+        2 * 60 * 60,
+        6 * 60 * 60,
+        12 * 60 * 60,
+        24 * 60 * 60,
+        7 * 24 * 60 * 60,
+        14 * 24 * 60 * 60,
+        30 * 24 * 60 * 60,
+    ];
+
+    for candidate in candidates {
+        if span_seconds / candidate <= 6 {
+            return candidate;
+        }
+    }
+
+    30 * 24 * 60 * 60
+}
+
+fn build_ticks(
+    start: chrono::DateTime<chrono::Utc>,
+    end: chrono::DateTime<chrono::Utc>,
+    total_width: f64,
+    tick_seconds: i64,
+) -> Vec<TimelineTick> {
+    let span_seconds = end.signed_duration_since(start).num_seconds().max(1) as f64;
+    let mut ticks = Vec::new();
+    let mut current = start.timestamp();
+    let end_ts = end.timestamp();
+
+    while current <= end_ts {
+        let offset_seconds = (current - start.timestamp()) as f64;
+        let x_position = MIN_GAP_PX + (offset_seconds / span_seconds) * (total_width - MIN_GAP_PX * 2.0);
+        let label = format_tick_label(current, tick_seconds);
+        ticks.push(TimelineTick { x_position, label });
+        current += tick_seconds;
+    }
+
+    ticks
+}
+
+fn format_tick_label(timestamp: i64, tick_seconds: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    let dt = Utc.timestamp_opt(timestamp, 0).single().unwrap_or_else(Utc::now);
+
+    match tick_seconds {
+        s if s < 60 * 60 => dt.format("%H:%M").to_string(),
+        s if s < 24 * 60 * 60 => dt.format("%b %-d %H:%M").to_string(),
+        s if s < 7 * 24 * 60 * 60 => dt.format("%b %-d").to_string(),
+        s if s < 30 * 24 * 60 * 60 => dt.format("%b %-d").to_string(),
+        _ => dt.format("%Y-%m-%d").to_string(),
+    }
 }
 
 /// Combined timeline showing all flakes' commits merged chronologically.
@@ -235,13 +340,17 @@ fn CombinedTimeline(timelines: Vec<FlakeTimeline>) -> Element {
         })
         .collect();
 
-    let positioned = calculate_positions(&all_commits);
-    let total_width = positioned.last().map(|p| p.x_position + MIN_GAP_PX).unwrap_or(200.0);
+    let (positioned, scale) = calculate_positions_with_scale(&all_commits);
+    let total_width = positioned
+        .last()
+        .map(|p| p.x_position + MIN_GAP_PX)
+        .unwrap_or(200.0);
 
     rsx! {
         TimelineGraph {
             positioned_commits: positioned,
             total_width: total_width,
+            scale: scale,
             show_flake_labels: true,
             testid: "combined-timeline"
         }
@@ -271,8 +380,11 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
         .map(|c| (None, c.clone()))
         .collect();
 
-    let positioned = calculate_positions(&commits);
-    let total_width = positioned.last().map(|p| p.x_position + MIN_GAP_PX).unwrap_or(200.0);
+    let (positioned, scale) = calculate_positions_with_scale(&commits);
+    let total_width = positioned
+        .last()
+        .map(|p| p.x_position + MIN_GAP_PX)
+        .unwrap_or(200.0);
 
     rsx! {
         div {
@@ -287,6 +399,7 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
             TimelineGraph {
                 positioned_commits: positioned,
                 total_width: total_width,
+                scale: scale,
                 show_flake_labels: false,
                 testid: "single-timeline"
             }
@@ -299,6 +412,7 @@ fn SingleFlakeTimeline(timeline: FlakeTimeline) -> Element {
 fn TimelineGraph(
     positioned_commits: Vec<PositionedCommit>,
     total_width: f64,
+    scale: Option<TimelineScale>,
     show_flake_labels: bool,
     testid: &'static str,
 ) -> Element {
@@ -312,6 +426,10 @@ fn TimelineGraph(
     let first_x = positioned_commits.first().map(|p| p.x_position).unwrap_or(0.0) as i32;
     let last_x = positioned_commits.last().map(|p| p.x_position).unwrap_or(0.0) as i32;
     let line_width = last_x - first_x;
+    let scale = scale.unwrap_or_else(|| {
+        let now = chrono::Utc::now();
+        build_scale(now, now, total_width)
+    });
 
     // Layout: nodes are 20px circles with count inside, line passes through center
     let node_size = 20;
@@ -381,6 +499,24 @@ fn TimelineGraph(
                                 x_position: pc.x_position,
                                 node_top: node_top,
                                 node_size: node_size
+                            }
+                        }
+                    }
+
+                    // Layer 3: Time scale
+                    div {
+                        class: "absolute inset-0",
+                        style: "z-index: 0;",
+
+                        for tick in scale.ticks.iter() {
+                            div {
+                                class: "absolute text-[9px] {theme::text::MUTED}",
+                                style: "left: {tick.x_position as i32}px; top: {container_height - 14}px; transform: translateX(-50%);",
+                                "{tick.label}"
+                            }
+                            div {
+                                class: "absolute bg-gray-700",
+                                style: "left: {tick.x_position as i32}px; top: {line_top + 8}px; width: 1px; height: 6px;"
                             }
                         }
                     }
