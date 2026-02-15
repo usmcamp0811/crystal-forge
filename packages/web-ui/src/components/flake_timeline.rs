@@ -4,6 +4,7 @@
 //! with commits hanging below the main line and details shown on hover.
 
 use dioxus::prelude::*;
+use std::collections::HashSet;
 
 use crate::api::models::{FlakeCommit, FlakeTimeline};
 use crate::theme;
@@ -19,12 +20,12 @@ const TIME_SCALE_PX: f64 = 80.0;
 /// View mode for the timeline display.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TimelineViewMode {
-    /// Single combined timeline showing all flakes.
+    /// Single combined timeline showing all flakes (or filtered subset).
     #[default]
     Combined,
     /// Stacked timelines, one per flake.
     Stacked,
-    /// Filtered to show only one flake.
+    /// Filtered to show only one flake (legacy, kept for compatibility).
     SingleFlake,
 }
 
@@ -49,12 +50,50 @@ struct TimelineTick {
 }
 
 /// The main flake timeline widget for the dashboard.
+///
+/// Props:
+/// - `timelines`: The list of flake timelines to display
+/// - `selected_flake_indices`: Set of selected flake indices (empty = all selected)
+/// - `on_filter_change`: Callback when filter selection changes
 #[component]
-pub fn FlakeTimelineWidget(timelines: Vec<FlakeTimeline>) -> Element {
-    let mut view_mode = use_signal(|| TimelineViewMode::SingleFlake);
-    let mut selected_flake = use_signal(|| 0usize);
+pub fn FlakeTimelineWidget(
+    timelines: Vec<FlakeTimeline>,
+    #[props(default)] selected_flake_indices: HashSet<usize>,
+    #[props(default)] on_filter_change: Option<EventHandler<HashSet<usize>>>,
+) -> Element {
+    // Local state for dropdown visibility
+    let mut dropdown_open = use_signal(|| false);
+    // Local state for view mode (Stacked vs Combined)
+    let mut view_mode = use_signal(|| TimelineViewMode::Combined);
 
     let flake_names: Vec<String> = timelines.iter().map(|t| t.flake_name.clone()).collect();
+    let flake_count = flake_names.len();
+    let is_all_selected = selected_flake_indices.is_empty();
+
+    // Get display label for the filter button
+    let filter_label = if is_all_selected {
+        "All Flakes".to_string()
+    } else if selected_flake_indices.len() == 1 {
+        let idx = *selected_flake_indices.iter().next().unwrap();
+        flake_names
+            .get(idx)
+            .cloned()
+            .unwrap_or_else(|| "1 flake".to_string())
+    } else {
+        format!("{} flakes", selected_flake_indices.len())
+    };
+
+    // Filter timelines based on selection
+    let filtered_timelines: Vec<FlakeTimeline> = if is_all_selected {
+        timelines.clone()
+    } else {
+        timelines
+            .iter()
+            .enumerate()
+            .filter(|(idx, _)| selected_flake_indices.contains(idx))
+            .map(|(_, t)| t.clone())
+            .collect()
+    };
 
     rsx! {
         div {
@@ -62,9 +101,10 @@ pub fn FlakeTimelineWidget(timelines: Vec<FlakeTimeline>) -> Element {
             style: "overflow: visible;",
             "data-testid": "flake-timeline-widget",
 
-            // Header with view mode toggle
+            // Header with filter dropdown and view mode toggle
+            // z-20 ensures dropdown appears above timeline content
             div {
-                class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3",
+                class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 relative z-20",
                 div {
                     class: "flex items-center gap-3",
                     h3 { class: "{theme::typography::SECTION_TITLE} text-white", "Commit Timeline" }
@@ -82,24 +122,156 @@ pub fn FlakeTimelineWidget(timelines: Vec<FlakeTimeline>) -> Element {
                 div {
                     class: "flex items-center gap-2",
 
-                    // View mode toggle
+                    // View mode toggle (Stacked only - Combined is default, no button needed)
                     ViewModeToggle {
                         mode: *view_mode.read(),
                         on_change: move |mode| view_mode.set(mode)
                     }
 
-                    // Flake selector (only visible in SingleFlake mode)
-                    if *view_mode.read() == TimelineViewMode::SingleFlake {
-                        select {
-                            class: "rounded-lg px-3 py-1.5 text-sm {theme::interactive::INPUT} {theme::text::SECONDARY}",
-                            value: "{selected_flake}",
-                            onchange: move |evt| {
-                                if let Ok(idx) = evt.value().parse::<usize>() {
-                                    selected_flake.set(idx);
-                                }
+                    // Multi-select flake filter dropdown (Grafana-style)
+                    div {
+                        class: "relative z-30",
+
+                        // Dropdown trigger button
+                        button {
+                            class: "flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm border transition-colors",
+                            class: if !is_all_selected {
+                                "bg-blue-900/30 border-blue-500 text-blue-300"
+                            } else {
+                                "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
                             },
-                            for (idx, name) in flake_names.iter().enumerate() {
-                                option { value: "{idx}", "{name}" }
+                            onclick: move |_| {
+                                let current = *dropdown_open.read();
+                                dropdown_open.set(!current);
+                            },
+
+                            // Filter icon
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
+                                }
+                            }
+                            span { "{filter_label}" }
+                            // Chevron
+                            svg {
+                                class: "w-4 h-4 transition-transform",
+                                class: if *dropdown_open.read() { "rotate-180" } else { "" },
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M19 9l-7 7-7-7"
+                                }
+                            }
+                        }
+
+                        // Dropdown menu - very high z-index to appear above timeline
+                        if *dropdown_open.read() {
+                            div {
+                                class: "absolute right-0 top-full mt-1 min-w-[200px] rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl",
+                                style: "z-index: 9999;",
+
+                                // "All Flakes" option
+                                button {
+                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-700/50 transition-colors",
+                                    onclick: {
+                                        let on_filter_change = on_filter_change.clone();
+                                        move |_| {
+                                            if let Some(handler) = &on_filter_change {
+                                                handler.call(HashSet::new());
+                                            }
+                                            dropdown_open.set(false);
+                                        }
+                                    },
+
+                                    // Checkbox
+                                    div {
+                                        class: "w-4 h-4 rounded border flex items-center justify-center",
+                                        class: if is_all_selected { "bg-blue-500 border-blue-500" } else { "border-gray-500" },
+                                        if is_all_selected {
+                                            svg {
+                                                class: "w-3 h-3 text-white",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                view_box: "0 0 24 24",
+                                                path {
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    stroke_width: "3",
+                                                    d: "M5 13l4 4L19 7"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    span { class: "text-white font-medium", "All Flakes" }
+                                }
+
+                                // Divider
+                                div { class: "border-t border-gray-700 my-1" }
+
+                                // Individual flake options
+                                for (idx, name) in flake_names.iter().enumerate() {
+                                    {
+                                        let is_selected = selected_flake_indices.contains(&idx);
+                                        let name = name.clone();
+                                        rsx! {
+                                            button {
+                                                key: "{idx}",
+                                                class: "w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-700/50 transition-colors",
+                                                onclick: {
+                                                    let on_filter_change = on_filter_change.clone();
+                                                    let selected = selected_flake_indices.clone();
+                                                    move |_| {
+                                                        let mut new_selection = selected.clone();
+                                                        if new_selection.contains(&idx) {
+                                                            new_selection.remove(&idx);
+                                                        } else {
+                                                            new_selection.insert(idx);
+                                                        }
+                                                        // If all are selected individually, treat as "All"
+                                                        if new_selection.len() == flake_count {
+                                                            new_selection.clear();
+                                                        }
+                                                        if let Some(handler) = &on_filter_change {
+                                                            handler.call(new_selection);
+                                                        }
+                                                    }
+                                                },
+
+                                                // Checkbox
+                                                div {
+                                                    class: "w-4 h-4 rounded border flex items-center justify-center",
+                                                    class: if is_selected || is_all_selected { "bg-blue-500 border-blue-500" } else { "border-gray-500" },
+                                                    if is_selected || is_all_selected {
+                                                        svg {
+                                                            class: "w-3 h-3 text-white",
+                                                            fill: "none",
+                                                            stroke: "currentColor",
+                                                            view_box: "0 0 24 24",
+                                                            path {
+                                                                stroke_linecap: "round",
+                                                                stroke_linejoin: "round",
+                                                                stroke_width: "3",
+                                                                d: "M5 13l4 4L19 7"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                span { class: "{theme::text::SECONDARY}", "{name}" }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -107,18 +279,17 @@ pub fn FlakeTimelineWidget(timelines: Vec<FlakeTimeline>) -> Element {
             }
 
             // Timeline content based on view mode
-            match *view_mode.read() {
-                TimelineViewMode::Combined => rsx! {
-                    CombinedTimeline { timelines: timelines.clone() }
-                },
-                TimelineViewMode::Stacked => rsx! {
-                    StackedTimelines { timelines: timelines.clone() }
-                },
-                TimelineViewMode::SingleFlake => rsx! {
-                    if let Some(timeline) = timelines.get(*selected_flake.read()) {
-                        SingleFlakeTimeline { timeline: timeline.clone() }
-                    }
-                },
+            // z-10 is lower than header's z-20, so dropdown appears above
+            div {
+                class: "relative z-10",
+                match *view_mode.read() {
+                    TimelineViewMode::Combined | TimelineViewMode::SingleFlake => rsx! {
+                        CombinedTimeline { timelines: filtered_timelines.clone() }
+                    },
+                    TimelineViewMode::Stacked => rsx! {
+                        StackedTimelines { timelines: filtered_timelines.clone() }
+                    },
+                }
             }
         }
     }
@@ -136,20 +307,17 @@ fn LegendDot(color: &'static str, label: &'static str) -> Element {
     }
 }
 
-/// Toggle buttons for switching between view modes.
+/// Toggle buttons for switching between Combined and Stacked view modes.
 #[component]
 fn ViewModeToggle(mode: TimelineViewMode, on_change: EventHandler<TimelineViewMode>) -> Element {
-    let combined_class = if mode == TimelineViewMode::Combined {
+    let is_stacked = mode == TimelineViewMode::Stacked;
+
+    let combined_class = if !is_stacked {
         "px-3 py-1.5 text-xs font-medium transition bg-gray-700 text-white"
     } else {
         "px-3 py-1.5 text-xs font-medium transition text-gray-400 hover:text-white hover:bg-gray-800"
     };
-    let stacked_class = if mode == TimelineViewMode::Stacked {
-        "px-3 py-1.5 text-xs font-medium transition bg-gray-700 text-white"
-    } else {
-        "px-3 py-1.5 text-xs font-medium transition text-gray-400 hover:text-white hover:bg-gray-800"
-    };
-    let filter_class = if mode == TimelineViewMode::SingleFlake {
+    let stacked_class = if is_stacked {
         "px-3 py-1.5 text-xs font-medium transition bg-gray-700 text-white"
     } else {
         "px-3 py-1.5 text-xs font-medium transition text-gray-400 hover:text-white hover:bg-gray-800"
@@ -161,17 +329,12 @@ fn ViewModeToggle(mode: TimelineViewMode, on_change: EventHandler<TimelineViewMo
             button {
                 class: "{combined_class}",
                 onclick: move |_| on_change.call(TimelineViewMode::Combined),
-                "Combined"
+                "Timeline"
             }
             button {
                 class: "{stacked_class}",
                 onclick: move |_| on_change.call(TimelineViewMode::Stacked),
                 "Stacked"
-            }
-            button {
-                class: "{filter_class}",
-                onclick: move |_| on_change.call(TimelineViewMode::SingleFlake),
-                "Filter"
             }
         }
     }
@@ -566,13 +729,14 @@ fn CommitNode(
     let x_px = x_position as i32;
     let system_plural = if commit.system_count == 1 { "" } else { "s" };
 
-    // Content starts below the node
-    let content_top = node_top + node_size + 4;
-
-    // The main node (colored circle with count) sits centered on the line
-    // Text content appears below it
     let badge_top = node_top;
     let text_top = node_top + node_size + 4;
+
+    // Build tooltip text
+    let tooltip = format!(
+        "{}\n\nby {}\n{}\n{} system{}",
+        commit.message, commit.author, behind_text, commit.system_count, system_plural
+    );
 
     rsx! {
         div {
@@ -580,6 +744,7 @@ fn CommitNode(
             style: "left: {x_px}px; top: 0; transform: translateX(-50%);",
             "data-testid": "commit-node",
             "data-commits-behind": "{commit.commits_behind}",
+            title: "{tooltip}",
 
             // Main node - colored circle with system count, centered ON the line
             div {
@@ -612,14 +777,6 @@ fn CommitNode(
                     }
                 }
             }
-
-            // Tooltip - shows commit message on hover via title attribute
-            // Using native browser tooltip for simplicity (works across all containers)
-            div {
-                class: "absolute left-1/2 -translate-x-1/2 cursor-help",
-                style: "top: {badge_top}px; width: {node_size}px; height: {node_size}px;",
-                title: "{commit.message}\n\nby {commit.author}\n{behind_text}\n{commit.system_count} system{system_plural}"
-            }
         }
     }
 }
@@ -631,6 +788,16 @@ fn commits_behind_bg(behind: i64) -> &'static str {
         1 => "bg-yellow-500",
         2 => "bg-orange-500",
         _ => "bg-red-500",
+    }
+}
+
+/// Get the status badge color classes based on how many commits behind.
+fn commits_behind_color(behind: i64) -> &'static str {
+    match behind {
+        0 => "bg-emerald-500/20 text-emerald-400",
+        1 => "bg-yellow-500/20 text-yellow-400",
+        2 => "bg-orange-500/20 text-orange-400",
+        _ => "bg-red-500/20 text-red-400",
     }
 }
 
