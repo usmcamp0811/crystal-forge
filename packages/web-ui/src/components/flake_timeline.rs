@@ -6,7 +6,7 @@
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-use crate::api::models::{FlakeCommit, FlakeTimeline};
+use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
 use crate::theme;
 use chrono::TimeZone;
 
@@ -110,12 +110,14 @@ pub fn FlakeTimelineWidget(
                     h3 { class: "{theme::typography::SECTION_TITLE} text-white", "Commit Timeline" }
                     // Legend inline with title
                     div {
-                        class: "flex items-center gap-3",
+                        class: "flex flex-wrap items-center gap-3",
                         "data-testid": "timeline-legend",
                         LegendDot { color: "bg-emerald-500", label: "Latest" }
                         LegendDot { color: "bg-yellow-500", label: "1 behind" }
                         LegendDot { color: "bg-orange-500", label: "2 behind" }
                         LegendDot { color: "bg-red-500", label: "3+ behind" }
+                        RingLegendSwatch { style: "box-shadow: 0 0 0 3px #f59e0b", label: "Building" }
+                        RingLegendSwatch { style: "box-shadow: 0 0 0 2px #2563eb", label: "Queued" }
                     }
                 }
 
@@ -183,7 +185,7 @@ pub fn FlakeTimelineWidget(
 
                                 // "All Flakes" option
                                 button {
-                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-700/50 transition-colors",
+                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-md hover:bg-gray-700 transition-colors",
                                     onclick: {
                                         let on_filter_change = on_filter_change.clone();
                                         move |_| {
@@ -227,7 +229,7 @@ pub fn FlakeTimelineWidget(
                                         rsx! {
                                             button {
                                                 key: "{idx}",
-                                                class: "w-full flex items-center gap-2 px-3 py-2 text-sm text-left hover:bg-gray-700/50 transition-colors",
+                                                class: "group w-full flex items-center gap-2 px-3 py-2 text-sm text-left rounded-md hover:bg-gray-700 transition-colors",
                                                 onclick: {
                                                     let on_filter_change = on_filter_change.clone();
                                                     let selected = selected_flake_indices.clone();
@@ -267,7 +269,7 @@ pub fn FlakeTimelineWidget(
                                                         }
                                                     }
                                                 }
-                                                span { class: "{theme::text::SECONDARY}", "{name}" }
+                                                span { class: "{theme::text::SECONDARY} group-hover:text-white transition-colors", "{name}" }
                                             }
                                         }
                                     }
@@ -302,6 +304,18 @@ fn LegendDot(color: &'static str, label: &'static str) -> Element {
         div {
             class: "flex items-center gap-1",
             div { class: "w-2 h-2 rounded-full {color}" }
+            span { class: "text-[10px] {theme::text::MUTED}", "{label}" }
+        }
+    }
+}
+
+/// Ring legend marker for build status.
+#[component]
+fn RingLegendSwatch(style: &'static str, label: &'static str) -> Element {
+    rsx! {
+        div {
+            class: "flex items-center gap-1",
+            div { class: "w-2 h-2 rounded-full", style: "{style}" }
             span { class: "text-[10px] {theme::text::MUTED}", "{label}" }
         }
     }
@@ -718,6 +732,8 @@ fn CommitNode(
 ) -> Element {
     let short_hash = commit.hash.chars().take(7).collect::<String>();
     let node_bg = commit_node_bg(commit.system_count, commit.commits_behind);
+    let build_status = commit.build_status.unwrap_or(BuildStatus::Idle);
+    let build_ring = build_ring_style(build_status);
 
     let behind_text = if commit.commits_behind == 0 {
         "Latest".to_string()
@@ -748,11 +764,16 @@ fn CommitNode(
 
             // Main node - colored circle with system count, centered ON the line
             div {
-                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2 border-gray-900 ring-2 ring-gray-700",
-                style: "width: {node_size}px; height: {node_size}px; top: {badge_top}px;",
+                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2 border-gray-900",
+                style: "width: {node_size}px; height: {node_size}px; top: {badge_top}px; box-shadow: {build_ring};",
+                title: "{build_status.label()}",
                 span {
                     class: "text-[9px] font-bold text-gray-900",
                     "{commit.system_count}"
+                }
+
+                if build_status == BuildStatus::Queued {
+                    span { class: "absolute text-[7px] text-blue-200 font-semibold", "Q" }
                 }
             }
 
@@ -806,6 +827,14 @@ fn commit_node_bg(system_count: i64, behind: i64) -> &'static str {
         "bg-gray-700"
     } else {
         commits_behind_bg(behind)
+    }
+}
+
+fn build_ring_style(status: BuildStatus) -> &'static str {
+    match status {
+        BuildStatus::Queued => "0 0 0 2px #2563eb, 0 0 0 4px rgba(17, 24, 39, 0.9)",
+        BuildStatus::Building => "0 0 0 4px #f59e0b, 0 0 12px rgba(251, 191, 36, 0.6)",
+        _ => "0 0 0 2px #9ca3af",
     }
 }
 

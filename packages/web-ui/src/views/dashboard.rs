@@ -5,8 +5,9 @@ use dioxus::prelude::*;
 use std::collections::HashSet;
 
 use crate::api::models::{
-    CveSummary, DashboardSummary, DeploymentStatus, DeploymentStatusSummary, FlakeCommit,
-    FlakeTimeline, FleetHealthSummary, RecentDeployment,
+    BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary,
+    DeploymentStatus, DeploymentStatusSummary, FlakeCommit, FlakeTimeline, FleetHealthSummary,
+    RecentDeployment,
 };
 use crate::components::flake_timeline::FlakeTimelineWidget;
 use crate::components::layout::Card;
@@ -85,13 +86,20 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
             width: 2,
             height: 2,
         },
-        // Reduced from height: 3 to height: 2 to prevent overlap when moved
         WidgetPosition {
             id: "recent-deployments",
             title: "Recent Deployments",
             col: 2,
             row: 2,
             width: 2,
+            height: 3,
+        },
+        WidgetPosition {
+            id: "build-queue",
+            title: "Build Queue",
+            col: 0,
+            row: 5,
+            width: 4,
             height: 2,
         },
     ]
@@ -103,6 +111,10 @@ pub fn DashboardView() -> Element {
     // TODO: Replace with real API call using use_resource + fetch_dashboard()
     let dashboard = mock_dashboard_summary();
     let flake_timelines = mock_flake_timelines();
+    let build_queue = dashboard
+        .build_queue
+        .clone()
+        .unwrap_or_else(|| mock_build_queue_summary(dashboard.timestamp));
 
     // Global filter state - shared across all widgets (multi-select)
     let mut dashboard_filter = use_signal(DashboardFilter::default);
@@ -111,6 +123,8 @@ pub fn DashboardView() -> Element {
     let mut widget_positions = use_signal(default_widget_positions);
     let mut dragging_id: Signal<Option<&'static str>> = use_signal(|| None);
     let mut drop_target_id: Signal<Option<&'static str>> = use_signal(|| None);
+    let mut invalid_drop_target_id: Signal<Option<&'static str>> = use_signal(|| None);
+    let mut drag_over_index: Signal<Option<usize>> = use_signal(|| None);
 
     // Handle drag start
     let on_drag_start = move |id: String| {
@@ -126,40 +140,121 @@ pub fn DashboardView() -> Element {
         let positions = widget_positions.read();
         if let Some(pos) = positions.iter().find(|p| p.id == id) {
             let current_dragging = *dragging_id.read();
-            if current_dragging.is_some() && current_dragging != Some(pos.id) {
-                drop_target_id.set(Some(pos.id));
+            if let Some(source_id) = current_dragging {
+                if source_id != pos.id {
+                    if let Some(source) = positions.iter().find(|p| p.id == source_id) {
+                        let fits = pos.col + source.width <= 4;
+                        if fits {
+                            drop_target_id.set(Some(pos.id));
+                            invalid_drop_target_id.set(None);
+                        } else {
+                            invalid_drop_target_id.set(Some(pos.id));
+                            drop_target_id.set(None);
+                        }
+                    }
+                }
             }
+        }
+
+        if let Some(index) = positions.iter().position(|p| p.id == id) {
+            drag_over_index.set(Some(index));
         }
     };
 
     // Handle drag leave (clear highlight)
     let on_drag_leave = move |_: ()| {
         drop_target_id.set(None);
+        invalid_drop_target_id.set(None);
+        drag_over_index.set(None);
     };
 
-    // Handle drop (swap positions)
+    // Handle drop (reorder by target index and repack to avoid overlaps)
     let on_drop = move |target_id: String| {
         let dragging = *dragging_id.read();
         if let Some(source_id) = dragging {
             if source_id != target_id {
-                // Swap positions of the two widgets
                 let mut positions = widget_positions.write();
                 let source_idx = positions.iter().position(|p| p.id == source_id);
                 let target_idx = positions.iter().position(|p| p.id == target_id);
 
                 if let (Some(src), Some(tgt)) = (source_idx, target_idx) {
-                    // Swap col/row positions
-                    let src_col = positions[src].col;
-                    let src_row = positions[src].row;
-                    positions[src].col = positions[tgt].col;
-                    positions[src].row = positions[tgt].row;
-                    positions[tgt].col = src_col;
-                    positions[tgt].row = src_row;
+                    let columns = 4usize;
+                    let fits = |col: usize, width: usize| col + width <= columns;
+
+                    if !fits(positions[tgt].col, positions[src].width) {
+                        dragging_id.set(None);
+                        drop_target_id.set(None);
+                        invalid_drop_target_id.set(None);
+                        drag_over_index.set(None);
+                        return;
+                    }
+
+                    let mut ordered: Vec<WidgetPosition> = positions.iter().cloned().collect();
+                    let dragged = ordered.remove(src);
+
+                    let mut insert_at = drag_over_index.read().unwrap_or(tgt);
+                    if src < insert_at {
+                        insert_at = insert_at.saturating_sub(1);
+                    }
+                    insert_at = insert_at.min(ordered.len());
+                    ordered.insert(insert_at, dragged);
+
+                    let mut occupancy: Vec<Vec<bool>> = Vec::new();
+
+                    for widget in &mut ordered {
+                        let mut row = 0usize;
+                        let width = widget.width;
+                        let height = widget.height;
+
+                        loop {
+                            if occupancy.len() < row + height {
+                                occupancy.resize_with(row + height, || vec![false; columns]);
+                            }
+
+                            let mut placed = false;
+                            for col in 0..=columns.saturating_sub(width) {
+                                let mut can_place = true;
+                                for check_row in row..row + height {
+                                    for check_col in col..col + width {
+                                        if occupancy[check_row][check_col] {
+                                            can_place = false;
+                                            break;
+                                        }
+                                    }
+                                    if !can_place {
+                                        break;
+                                    }
+                                }
+
+                                if can_place {
+                                    widget.col = col;
+                                    widget.row = row;
+                                    for mark_row in row..row + height {
+                                        for mark_col in col..col + width {
+                                            occupancy[mark_row][mark_col] = true;
+                                        }
+                                    }
+                                    placed = true;
+                                    break;
+                                }
+                            }
+
+                            if placed {
+                                break;
+                            }
+
+                            row += 1;
+                        }
+                    }
+
+                    *positions = ordered;
                 }
             }
         }
         dragging_id.set(None);
         drop_target_id.set(None);
+        invalid_drop_target_id.set(None);
+        drag_over_index.set(None);
     };
 
     // Get the current filter state
@@ -214,6 +309,12 @@ pub fn DashboardView() -> Element {
                     flake_filter: filter_display.clone()
                 }
             },
+            "build-queue" => rsx! {
+                BuildQueuePanel {
+                    queue: build_queue.clone(),
+                    flake_filter: filter_display.clone()
+                }
+            },
             _ => rsx! { div { "Unknown widget" } },
         }
     };
@@ -231,19 +332,19 @@ pub fn DashboardView() -> Element {
                     value: dashboard.total_systems.to_string()
                 }
                 StatCard {
-                    label: "Healthy".to_string(),
-                    value: dashboard.fleet_health.healthy.to_string(),
-                    color_class: theme::health::HEALTHY_TEXT.to_string()
+                    label: "Up to Date".to_string(),
+                    value: dashboard.deployment_status.up_to_date.to_string(),
+                    color_class: theme::deployment::UP_TO_DATE_TEXT.to_string()
                 }
                 StatCard {
-                    label: "Critical".to_string(),
-                    value: dashboard.fleet_health.critical.to_string(),
-                    color_class: theme::health::CRITICAL_TEXT.to_string()
+                    label: "Behind Latest".to_string(),
+                    value: dashboard.deployment_status.behind.to_string(),
+                    color_class: theme::deployment::BEHIND_TEXT.to_string()
                 }
                 StatCard {
-                    label: "Active Builds".to_string(),
-                    value: dashboard.active_builds.to_string(),
-                    color_class: "text-blue-400".to_string()
+                    label: "No Recent Heartbeat".to_string(),
+                    value: dashboard.fleet_health.offline.to_string(),
+                    color_class: theme::health::OFFLINE_TEXT.to_string()
                 }
             }
 
@@ -303,6 +404,7 @@ pub fn DashboardView() -> Element {
                         height: pos.height,
                         is_dragging: dragging_id.read().map_or(false, |d| d == pos.id),
                         is_drop_target: drop_target_id.read().map_or(false, |d| d == pos.id),
+                        is_invalid_drop_target: invalid_drop_target_id.read().map_or(false, |d| d == pos.id),
                         on_drag_start: on_drag_start,
                         on_drag_over: on_drag_over,
                         on_drag_leave: on_drag_leave,
@@ -475,13 +577,13 @@ fn CveSummaryPanel(cves: CveSummary, #[props(default)] flake_filter: Option<Stri
 
     rsx! {
         div {
-            class: "space-y-4",
+            class: "flex flex-col h-full",
             "data-testid": "cve-summary",
 
             // Show filter indicator if filtered
             if let Some(ref flake_name) = flake_filter {
                 div {
-                    class: "text-xs text-blue-400 mb-1 flex items-center gap-1",
+                    class: "text-xs text-blue-400 mb-2 flex items-center gap-1 shrink-0",
                     svg {
                         class: "w-3 h-3",
                         fill: "none",
@@ -500,14 +602,14 @@ fn CveSummaryPanel(cves: CveSummary, #[props(default)] flake_filter: Option<Stri
 
             // Total count header
             div {
-                class: "flex items-baseline gap-2",
-                span { class: "text-3xl font-bold text-white", "{total}" }
-                span { class: "{theme::text::SECONDARY}", "total vulnerabilities" }
+                class: "flex items-baseline gap-2 mb-3 shrink-0",
+                span { class: "text-2xl font-bold text-white", "{total}" }
+                span { class: "{theme::text::SECONDARY} text-sm", "vulnerabilities" }
             }
 
-            // Severity breakdown
+            // Severity breakdown - fills remaining space
             div {
-                class: "grid grid-cols-2 gap-3",
+                class: "grid grid-cols-2 gap-2 flex-1 min-h-0",
                 CveSeverityBadge { label: "Critical", count: display_cves.critical, text_class: theme::cve::CRITICAL_TEXT, bg_class: theme::cve::CRITICAL_BG }
                 CveSeverityBadge { label: "High", count: display_cves.high, text_class: theme::cve::HIGH_TEXT, bg_class: theme::cve::HIGH_BG }
                 CveSeverityBadge { label: "Medium", count: display_cves.medium, text_class: theme::cve::MEDIUM_TEXT, bg_class: theme::cve::MEDIUM_BG }
@@ -527,9 +629,9 @@ fn CveSeverityBadge(
 ) -> Element {
     rsx! {
         div {
-            class: "flex items-center justify-between p-3 rounded-lg {bg_class}",
-            span { class: "{text_class} font-medium", "{label}" }
-            span { class: "{text_class} text-xl font-bold", "{count}" }
+            class: "flex items-center justify-between px-3 py-2 rounded-lg {bg_class}",
+            span { class: "{text_class} font-medium text-sm", "{label}" }
+            span { class: "{text_class} text-lg font-bold", "{count}" }
         }
     }
 }
@@ -890,6 +992,169 @@ fn donut_arcs(segments: &[DonutSegment]) -> Vec<DonutArc> {
     arcs
 }
 
+/// Build queue panel with active build items.
+#[component]
+fn BuildQueuePanel(queue: BuildQueueSummary, #[props(default)] flake_filter: Option<String>) -> Element {
+    let total_active = queue.building_count + queue.queued_count;
+    let mut active_items: Vec<BuildQueueItem> = queue
+        .items
+        .iter()
+        .filter(|item| item.status.is_active())
+        .cloned()
+        .collect();
+
+    active_items.sort_by_key(|item| {
+        if item.status == BuildStatus::Building {
+            (0i32, item.started_at.unwrap_or(item.queued_at))
+        } else {
+            (1i32, item.queued_at)
+        }
+    });
+
+    let filtered_items: Vec<BuildQueueItem> = if flake_filter.is_some() {
+        active_items.into_iter().take(4).collect()
+    } else {
+        active_items
+    };
+
+    let mut queued_rank = 0;
+    let ordered_rows: Vec<(BuildQueueItem, Option<String>)> = filtered_items
+        .into_iter()
+        .map(|item| {
+            let label = if item.status == BuildStatus::Building {
+                Some("Active".to_string())
+            } else {
+                queued_rank += 1;
+                if queued_rank == 1 {
+                    Some("Next".to_string())
+                } else {
+                    Some(format!("Queued #{queued_rank}"))
+                }
+            };
+            (item, label)
+        })
+        .collect();
+
+    rsx! {
+        div {
+            class: "flex flex-col h-full",
+            "data-testid": "build-queue",
+
+            if let Some(ref flake_name) = flake_filter {
+                div {
+                    class: "text-xs text-blue-400 mb-2 flex items-center gap-1 shrink-0",
+                    svg {
+                        class: "w-3 h-3",
+                        fill: "none",
+                        stroke: "currentColor",
+                        view_box: "0 0 24 24",
+                        path {
+                            stroke_linecap: "round",
+                            stroke_linejoin: "round",
+                            stroke_width: "2",
+                            d: "M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"
+                        }
+                    }
+                    span { "{flake_name}" }
+                }
+            }
+
+            div {
+                class: "flex items-center justify-between mb-3",
+                div {
+                    class: "flex flex-col",
+                    div {
+                        class: "flex items-center gap-2",
+                        span { class: "text-xl font-semibold text-white", "{total_active}" }
+                        span { class: "text-xs text-gray-400 uppercase tracking-wide", "active builds" }
+                    }
+                    span { class: "text-[10px] text-gray-500", "Ordered by next build" }
+                }
+                div {
+                    class: "flex items-center gap-3",
+                    BuildQueueMetric { label: "Building", count: queue.building_count, dot_class: "bg-cyan-400" }
+                    BuildQueueMetric { label: "Queued", count: queue.queued_count, dot_class: "bg-blue-400" }
+                }
+            }
+
+            if ordered_rows.is_empty() {
+                p { class: "text-sm text-gray-400", "No builds running or queued." }
+            } else {
+                div {
+                    class: "grid grid-cols-1 md:grid-cols-2 gap-2 flex-1 min-h-0",
+                    for (item, label) in ordered_rows {
+                        BuildQueueRow { item, position_label: label }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn BuildQueueMetric(label: &'static str, count: i64, dot_class: &'static str) -> Element {
+    rsx! {
+        div {
+            class: "flex items-center gap-1",
+            span { class: "w-2 h-2 rounded-full {dot_class}" }
+            span { class: "text-xs text-gray-400", "{label}" }
+            span { class: "text-xs text-white font-semibold tabular-nums", "{count}" }
+        }
+    }
+}
+
+#[component]
+fn BuildQueueRow(item: BuildQueueItem, #[props(default)] position_label: Option<String>) -> Element {
+    let status_class = match item.status {
+        BuildStatus::Building => "text-cyan-400",
+        BuildStatus::Queued => "text-blue-400",
+        BuildStatus::Complete => "text-emerald-400",
+        BuildStatus::Failed => "text-red-400",
+        BuildStatus::Idle => "text-gray-400",
+    };
+    let status_label = item.status.label();
+    let short_hash = item.commit_hash.chars().take(7).collect::<String>();
+    let elapsed = item.elapsed_secs.map(format_elapsed);
+
+    rsx! {
+        div {
+            class: "flex items-center justify-between p-2 rounded-lg bg-gray-900/40 border border-gray-800",
+            div {
+                class: "min-w-0",
+                div {
+                    class: "flex items-center gap-2",
+                    span { class: "text-white text-sm font-medium", "{item.hostname}" }
+                    span { class: "text-[10px] font-mono text-gray-500", "{short_hash}" }
+                    if let Some(ref label) = position_label {
+                        span { class: "text-[10px] uppercase tracking-wide text-gray-400", "{label}" }
+                    }
+                }
+                if let Some(ref msg) = item.commit_message {
+                    p { class: "text-xs text-gray-400 truncate", "{msg}" }
+                }
+                p { class: "text-[11px] text-gray-500", "{item.flake_name}" }
+            }
+            div {
+                class: "text-right",
+                p { class: "text-xs font-semibold {status_class}", "{status_label}" }
+                if let Some(ref elapsed) = elapsed {
+                    p { class: "text-[10px] text-gray-500", "{elapsed}" }
+                }
+            }
+        }
+    }
+}
+
+fn format_elapsed(seconds: i64) -> String {
+    let hours = seconds / 3600;
+    let minutes = (seconds % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m", minutes)
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq)]
 struct PieSlice {
@@ -1006,23 +1271,43 @@ fn RecentDeploymentRow(deployment: RecentDeployment) -> Element {
     let time_ago = format_time_ago(deployment.deployed_at);
     let short_hash = deployment.commit_hash.chars().take(7).collect::<String>();
 
+    // Truncate commit message to ~50 chars for display
+    let commit_msg = deployment.commit_message.as_ref().map(|msg| {
+        if msg.len() > 50 {
+            format!("{}...", &msg[..47])
+        } else {
+            msg.clone()
+        }
+    });
+
     rsx! {
         div {
             class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG}",
             div {
-                class: "flex items-center gap-3",
+                class: "flex items-center gap-3 min-w-0 flex-1",
                 // Status indicator dot
                 span {
-                    class: "w-2 h-2 rounded-full",
+                    class: "w-2 h-2 rounded-full shrink-0",
                     class: if deployment.status == DeploymentStatus::UpToDate { "bg-emerald-500" } else { "bg-amber-500" }
                 }
                 div {
-                    p { class: "text-white font-medium", "{deployment.hostname}" }
-                    p { class: "{theme::text::MUTED} text-xs font-mono", "{short_hash}" }
+                    class: "min-w-0 flex-1",
+                    div {
+                        class: "flex items-center gap-2",
+                        p { class: "text-white font-medium", "{deployment.hostname}" }
+                        p { class: "{theme::text::MUTED} text-xs font-mono", "{short_hash}" }
+                    }
+                    if let Some(ref msg) = commit_msg {
+                        p {
+                            class: "{theme::text::SECONDARY} text-xs truncate",
+                            title: "{deployment.commit_message.as_deref().unwrap_or_default()}",
+                            "{msg}"
+                        }
+                    }
                 }
             }
             div {
-                class: "text-right",
+                class: "text-right shrink-0 ml-2",
                 p { class: "{status_color} text-sm", "{deployment.status.label()}" }
                 p { class: "{theme::text::MUTED} text-xs", "{time_ago}" }
             }
@@ -1049,22 +1334,85 @@ fn format_time_ago(dt: chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
+/// Generate mock build queue data for development.
+fn mock_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> BuildQueueSummary {
+    let items = vec![
+        BuildQueueItem {
+            hostname: "atlas-02".to_string(),
+            flake_name: "infrastructure".to_string(),
+            commit_hash: "a1b2c3d".to_string(),
+            commit_message: Some("feat: add monitoring stack".to_string()),
+            status: BuildStatus::Building,
+            queued_at: now - Duration::minutes(14),
+            started_at: Some(now - Duration::minutes(9)),
+            elapsed_secs: Some(9 * 60),
+        },
+        BuildQueueItem {
+            hostname: "ws-009".to_string(),
+            flake_name: "workstations".to_string(),
+            commit_hash: "a2b3c4d".to_string(),
+            commit_message: Some("fix: bluetooth audio".to_string()),
+            status: BuildStatus::Queued,
+            queued_at: now - Duration::minutes(6),
+            started_at: None,
+            elapsed_secs: None,
+        },
+        BuildQueueItem {
+            hostname: "edge-us-west".to_string(),
+            flake_name: "edge-nodes".to_string(),
+            commit_hash: "1234567".to_string(),
+            commit_message: Some("fix: wireguard tunnel".to_string()),
+            status: BuildStatus::Queued,
+            queued_at: now - Duration::minutes(22),
+            started_at: None,
+            elapsed_secs: None,
+        },
+        BuildQueueItem {
+            hostname: "luna-01".to_string(),
+            flake_name: "infrastructure".to_string(),
+            commit_hash: "b2c3d4e".to_string(),
+            commit_message: Some("fix: nginx config reload".to_string()),
+            status: BuildStatus::Queued,
+            queued_at: now - Duration::minutes(3),
+            started_at: None,
+            elapsed_secs: None,
+        }
+    ];
+
+    let building_count = items
+        .iter()
+        .filter(|item| item.status == BuildStatus::Building)
+        .count() as i64;
+    let queued_count = items
+        .iter()
+        .filter(|item| item.status == BuildStatus::Queued)
+        .count() as i64;
+
+    BuildQueueSummary {
+        building_count,
+        queued_count,
+        items,
+        timestamp: now,
+    }
+}
+
 /// Generate mock dashboard data for development.
 fn mock_dashboard_summary() -> DashboardSummary {
     let now = Utc::now();
+    let build_queue = mock_build_queue_summary(now);
 
     DashboardSummary {
         fleet_health: FleetHealthSummary {
-            healthy: 42,
-            warning: 7,
-            critical: 3,
+            healthy: 17,
+            warning: 2,
+            critical: 0,
             offline: 2,
         },
         deployment_status: DeploymentStatusSummary {
-            up_to_date: 38,
-            behind: 12,
-            never_deployed: 3,
-            unknown: 1,
+            up_to_date: 7,
+            behind: 0,
+            never_deployed: 12,
+            unknown: 2,
         },
         cve_summary: CveSummary {
             critical: 5,
@@ -1072,36 +1420,43 @@ fn mock_dashboard_summary() -> DashboardSummary {
             medium: 67,
             low: 142,
         },
-        total_systems: 54,
-        active_builds: 3,
+        total_systems: 21,
+        active_builds: build_queue.building_count,
+        build_queue: Some(build_queue),
         recent_deployments: vec![
+
             RecentDeployment {
                 hostname: "atlas-01".to_string(),
                 commit_hash: "a1b2c3d4e5f6789".to_string(),
+                commit_message: Some("fix: update nginx config for TLS 1.3".to_string()),
                 deployed_at: now - Duration::minutes(15),
                 status: DeploymentStatus::UpToDate,
             },
             RecentDeployment {
                 hostname: "nova-05".to_string(),
                 commit_hash: "f9e8d7c6b5a4321".to_string(),
+                commit_message: Some("feat: add prometheus metrics endpoint".to_string()),
                 deployed_at: now - Duration::hours(2),
                 status: DeploymentStatus::UpToDate,
             },
             RecentDeployment {
                 hostname: "luna-02".to_string(),
                 commit_hash: "1234567890abcdef".to_string(),
+                commit_message: Some("chore: bump nixpkgs to 24.11".to_string()),
                 deployed_at: now - Duration::hours(5),
                 status: DeploymentStatus::Behind,
             },
             RecentDeployment {
                 hostname: "orion-03".to_string(),
                 commit_hash: "deadbeefcafe1234".to_string(),
+                commit_message: Some("refactor: migrate to systemd hardening options".to_string()),
                 deployed_at: now - Duration::days(1),
                 status: DeploymentStatus::UpToDate,
             },
             RecentDeployment {
                 hostname: "vega-04".to_string(),
                 commit_hash: "cafe1234deadbeef".to_string(),
+                commit_message: Some("fix: resolve CVE-2024-1234 in openssl".to_string()),
                 deployed_at: now - Duration::days(2),
                 status: DeploymentStatus::Behind,
             },
@@ -1134,6 +1489,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "atlas-04".to_string(),
                         "atlas-05".to_string(),
                     ],
+                    build_status: Some(BuildStatus::Building),
                 },
                 FlakeCommit {
                     hash: "b2c3d4e5f6789012345678ab".to_string(),
@@ -1143,6 +1499,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 2,
                     commits_behind: 1,
                     systems: vec!["luna-01".to_string(), "luna-02".to_string()],
+                    build_status: Some(BuildStatus::Queued),
                 },
                 FlakeCommit {
                     hash: "c3d4e5f6789012345678abcd".to_string(),
@@ -1152,6 +1509,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 1,
                     commits_behind: 2,
                     systems: vec!["orion-01".to_string()],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "d4e5f6789012345678abcdef".to_string(),
@@ -1161,6 +1519,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 3,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "e5f6789012345678abcdef01".to_string(),
@@ -1170,6 +1529,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 4,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "f6a7890123456789abcdef01".to_string(),
@@ -1179,6 +1539,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 5,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "0a1b2c3d4e5f6789abcdef12".to_string(),
@@ -1188,6 +1549,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 6,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
             ],
         },
@@ -1213,6 +1575,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "ws-007".to_string(),
                         "ws-008".to_string(),
                     ],
+                    build_status: Some(BuildStatus::Building),
                 },
                 FlakeCommit {
                     hash: "a2b3c4d5e6f78901234567ab".to_string(),
@@ -1222,6 +1585,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 2,
                     commits_behind: 1,
                     systems: vec!["ws-009".to_string(), "ws-010".to_string()],
+                    build_status: Some(BuildStatus::Queued),
                 },
                 FlakeCommit {
                     hash: "b3c4d5e6f78901234567abcd".to_string(),
@@ -1231,6 +1595,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 1,
                     commits_behind: 2,
                     systems: vec!["ws-011".to_string()],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "c4d5e6f78901234567abcdef".to_string(),
@@ -1240,6 +1605,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 3,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "d5e6f78901234567abcdef01".to_string(),
@@ -1249,6 +1615,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 4,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "e6f78901234567abcdef0123".to_string(),
@@ -1258,6 +1625,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 5,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "f78901234567abcdef012345".to_string(),
@@ -1267,6 +1635,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 6,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "a8901234567abcdef0123456".to_string(),
@@ -1276,6 +1645,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 7,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "b901234567abcdef01234567".to_string(),
@@ -1285,6 +1655,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 8,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
             ],
         },
@@ -1312,6 +1683,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "edge-us-south".to_string(),
                         "edge-us-north".to_string(),
                     ],
+                    build_status: Some(BuildStatus::Building),
                 },
                 FlakeCommit {
                     hash: "234567890abcdef123456789".to_string(),
@@ -1326,6 +1698,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "edge-sa-east".to_string(),
                         "edge-us-north".to_string(),
                     ],
+                    build_status: Some(BuildStatus::Queued),
                 },
                 FlakeCommit {
                     hash: "34567890abcdef1234567890".to_string(),
@@ -1335,6 +1708,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 2,
                     commits_behind: 2,
                     systems: vec!["edge-ap-south".to_string(), "edge-us-west".to_string()],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "4567890abcdef12345678901".to_string(),
@@ -1344,6 +1718,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 1,
                     commits_behind: 3,
                     systems: vec!["edge-eu-central".to_string()],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "567890abcdef123456789012".to_string(),
@@ -1353,6 +1728,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 4,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "67890abcdef1234567890123".to_string(),
@@ -1362,6 +1738,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 5,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
                 FlakeCommit {
                     hash: "7890abcdef12345678901234".to_string(),
@@ -1371,6 +1748,7 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     system_count: 0,
                     commits_behind: 6,
                     systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
                 },
             ],
         },

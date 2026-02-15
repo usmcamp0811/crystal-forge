@@ -71,6 +71,22 @@ pub enum PipelineStage {
     Unknown,
 }
 
+/// Build status for a commit/derivation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildStatus {
+    /// No build in progress or queued.
+    Idle,
+    /// Build is queued and waiting for a worker.
+    Queued,
+    /// Build is currently in progress.
+    Building,
+    /// Build completed successfully.
+    Complete,
+    /// Build failed.
+    Failed,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Dashboard DTOs — GET /api/v1/dashboard/summary
 // ─────────────────────────────────────────────────────────────────────────────
@@ -92,6 +108,9 @@ pub struct DashboardSummary {
 
     /// Number of active builds (in-progress derivations).
     pub active_builds: i64,
+
+    /// Summary of builds in progress and queued.
+    pub build_queue: Option<BuildQueueSummary>,
 
     /// Recent deployment events (newest first, capped).
     pub recent_deployments: Vec<RecentDeployment>,
@@ -155,6 +174,41 @@ pub struct RecentDeployment {
     pub commit_hash: String,
     pub deployed_at: DateTime<Utc>,
     pub status: DeploymentStatus,
+}
+
+/// Summary of the build queue for the dashboard widget.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildQueueSummary {
+    /// Number of builds currently in progress.
+    pub building_count: i64,
+    /// Number of builds waiting in the queue.
+    pub queued_count: i64,
+    /// List of active build items (building + queued, limited).
+    pub items: Vec<BuildQueueItem>,
+    /// Server timestamp for freshness.
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A single item in the build queue.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildQueueItem {
+    /// The hostname/system being built.
+    pub hostname: String,
+    /// The flake name this build belongs to.
+    pub flake_name: String,
+    /// Short commit hash being built.
+    pub commit_hash: String,
+    /// Commit message (first line).
+    pub commit_message: Option<String>,
+    /// Current status (Queued or Building).
+    pub status: BuildStatus,
+    /// When the build was queued.
+    pub queued_at: DateTime<Utc>,
+    /// When the build started (None if still queued).
+    pub started_at: Option<DateTime<Utc>>,
+    /// Elapsed time in seconds since started (for display).
+    #[serde(default)]
+    pub elapsed_secs: Option<i64>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -443,6 +497,12 @@ mod tests {
             },
             total_systems: 6,
             active_builds: 1,
+            build_queue: Some(BuildQueueSummary {
+                building_count: 1,
+                queued_count: 0,
+                items: vec![],
+                timestamp: Utc::now(),
+            }),
             recent_deployments: vec![],
             timestamp: Utc::now(),
         };

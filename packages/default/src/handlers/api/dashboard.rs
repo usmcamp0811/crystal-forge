@@ -11,7 +11,7 @@ use chrono::Utc;
 use sqlx::PgPool;
 use tracing::error;
 
-use crate::api::models::DashboardSummary;
+use crate::api::models::{BuildQueueSummary, DashboardSummary};
 use crate::queries::dashboard::{
     fetch_active_builds, fetch_cve_summary, fetch_deployment_status, fetch_fleet_health,
     fetch_recent_deployments, fetch_total_systems,
@@ -58,6 +58,12 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         cve_summary,
         total_systems,
         active_builds,
+        build_queue: Some(BuildQueueSummary {
+            building_count: active_builds,
+            queued_count: 0,
+            items: vec![],
+            timestamp: Utc::now(),
+        }),
         recent_deployments,
         timestamp: Utc::now(),
     })
