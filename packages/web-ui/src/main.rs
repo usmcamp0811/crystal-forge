@@ -26,7 +26,7 @@ fn app() -> Element {
 
     rsx! {
         // Load vendored Tailwind CSS (works offline).
-        document::Stylesheet { href: "/assets/tailwind.min.css" }
+        document::Stylesheet { href: asset!("assets/tailwind.min.css") }
         Router::<Route> {}
     }
 }

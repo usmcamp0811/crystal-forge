@@ -1,4 +1,6 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 @source "./src/**/*.{rs,html,css}";
+
+body {
+  background: red !important;
+}
