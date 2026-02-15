@@ -24,7 +24,7 @@ let
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
-      ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.100
+      ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108
 
       ${pkgs.tailwindcss_4}/bin/tailwindcss \
         -i ${./tailwind.css} \
@@ -130,7 +130,7 @@ let
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
-      ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.100
+      ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108
 
       dx bundle --platform desktop --release
     '';
@@ -144,7 +144,8 @@ let
 
   dx-serve = pkgs.writeShellApplication {
     name = "dx-serve-web-ui";
-    runtimeInputs = [ pkgs.dioxus-cli pkgs.tailwindcss_4 ];
+    runtimeInputs =
+      [ pkgs.dioxus-cli pkgs.tailwindcss_4 pkgs.wasm-bindgen-cli ];
     text = ''
       set -euo pipefail
 
@@ -152,6 +153,11 @@ let
         echo "Run from packages/web-ui so assets resolve correctly." >&2
         exit 1
       fi
+
+      # Set up XDG_DATA_HOME for dioxus wasm-bindgen lookup
+      export XDG_DATA_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}"
+      mkdir -p "$XDG_DATA_HOME/dioxus/wasm-bindgen"
+      ln -sf "${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen" "$XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.108"
 
       mkdir -p assets
       ln -sf ../tailwind.css assets/tailwind.css

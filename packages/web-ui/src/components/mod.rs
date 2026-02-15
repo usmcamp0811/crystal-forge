@@ -6,3 +6,4 @@ pub mod loading;
 pub mod stat_card;
 pub mod status_badge;
 pub mod system;
+pub mod widget_grid;
