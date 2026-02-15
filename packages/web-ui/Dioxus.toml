@@ -10,8 +10,7 @@ reload_html = true
 watch_path = ["src"]
 
 [web.resource]
-style = ["/assets/tailwind.min.css"]
+style = []
 
 [web.resource.dev]
-# Use the same vendored CSS in dev so styling matches offline + release.
-style = ["/assets/tailwind.min.css"]
+style = []

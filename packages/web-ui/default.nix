@@ -1,8 +1,5 @@
-{
-  lib,
-  pkgs,
-  ...
-}: let
+{ lib, pkgs, ... }:
+let
   pname = "crystal-forge-web-ui";
   appName = "crystal-forge-ui";
   web-app = pkgs.rustPlatform.buildRustPackage {
@@ -20,20 +17,19 @@
       pkgs.pkg-config
       pkgs.dioxus-cli
       pkgs.wasm-bindgen-cli
-      pkgs.tailwindcss
+      pkgs.tailwindcss_4
     ];
 
-    buildInputs = [pkgs.openssl.dev pkgs.zlib];
+    buildInputs = [ pkgs.openssl.dev pkgs.zlib ];
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
       ln -s ${pkgs.wasm-bindgen-cli}/bin/wasm-bindgen $XDG_DATA_HOME/dioxus/wasm-bindgen/wasm-bindgen-0.2.100
 
-      ${pkgs.tailwindcss}/bin/tailwindcss \
-        -i ${./assets/tailwind.css} \
+      ${pkgs.tailwindcss_4}/bin/tailwindcss \
+        -i ${./tailwind.css} \
         -o ./assets/tailwind.min.css \
-        --minify \
-        --content "./src/**/*.rs"
+        --minify
 
       dx bundle --platform web --release
     '';
@@ -130,7 +126,7 @@
       pkgs.wasm-bindgen-cli
     ];
 
-    buildInputs = [pkgs.openssl.dev pkgs.zlib];
+    buildInputs = [ pkgs.openssl.dev pkgs.zlib ];
     buildPhase = ''
       export XDG_DATA_HOME=$PWD
       mkdir -p $XDG_DATA_HOME/dioxus/wasm-bindgen
@@ -145,5 +141,28 @@
 
     '';
   };
-in
-  web-app // {inherit desktop-app;}
+
+  dx-serve = pkgs.writeShellApplication {
+    name = "dx-serve-web-ui";
+    runtimeInputs = [ pkgs.dioxus-cli pkgs.tailwindcss_4 ];
+    text = ''
+      set -euo pipefail
+
+      if [ "$(basename "$PWD")" != "web-ui" ]; then
+        echo "Run from packages/web-ui so assets resolve correctly." >&2
+        exit 1
+      fi
+
+      mkdir -p assets
+      ln -sf ../tailwind.css assets/tailwind.css
+
+      tailwindcss \
+        -i ./tailwind.css \
+        -o ./assets/tailwind.min.css \
+        --minify
+
+      exec dx serve "$@"
+    '';
+  };
+
+in web-app // { inherit desktop-app dx-serve; }
