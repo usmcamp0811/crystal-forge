@@ -747,6 +747,8 @@ fn CommitNode(
 
     let badge_top = node_top;
     let text_top = node_top + node_size + 4;
+    let overlay_size = node_size + 8;
+    let overlay_top = -(overlay_size - node_size) / 2 - 1;
 
     // Build tooltip text
     let tooltip = format!(
@@ -773,15 +775,75 @@ fn CommitNode(
                 }
 
                 if build_status == BuildStatus::Building {
-                    span {
-                        class: "absolute inset-[-4px] rounded-full animate-spin",
-                        style: "background: conic-gradient(#42ff65 0deg, rgba(66, 255, 101, 0.2) 120deg, transparent 360deg);"
+                    svg {
+                        class: "absolute left-1/2 -translate-x-1/2 pointer-events-none",
+                        width: "{overlay_size}",
+                        height: "{overlay_size}",
+                        style: "top: {overlay_top}px;",
+                        view_box: "0 0 100 100",
+                        circle {
+                            cx: "50",
+                            cy: "50",
+                            r: "48",
+                            fill: "none",
+                            stroke: "#42ff65",
+                            stroke_width: "3",
+                            stroke_dasharray: "26 180",
+                            stroke_dashoffset: "0",
+                            stroke_linecap: "round",
+                            animate {
+                                attribute_name: "stroke-dashoffset",
+                                values: "0;-206",
+                                dur: "2.4s",
+                                repeat_count: "indefinite"
+                            }
+                            animateTransform {
+                                attribute_name: "transform",
+                                attribute_type: "XML",
+                                type: "rotate",
+                                from: "0 50 50",
+                                to: "360 50 50",
+                                dur: "2.4s",
+                                repeat_count: "indefinite"
+                            }
+                        }
                     }
                 }
 
                 if build_status == BuildStatus::Queued {
-                    span { class: "absolute text-[7px] text-orange-300 font-semibold", "Q" }
-                    span { class: "absolute inset-[-4px] rounded-full animate-pulse", style: "box-shadow: 0 0 0 2px rgba(228, 124, 0, 0.6);" }
+                    svg {
+                        class: "absolute left-1/2 -translate-x-1/2 pointer-events-none",
+                        width: "{overlay_size}",
+                        height: "{overlay_size}",
+                        style: "top: {overlay_top}px;",
+                        view_box: "0 0 100 100",
+                        circle {
+                            cx: "50",
+                            cy: "50",
+                            r: "48",
+                            fill: "none",
+                            stroke: "#e57c00",
+                            stroke_width: "3",
+                            stroke_dasharray: "26 180",
+                            stroke_dashoffset: "0",
+                            stroke_linecap: "round",
+                            animate {
+                                attribute_name: "stroke-dashoffset",
+                                values: "0;-206",
+                                dur: "2.4s",
+                                repeat_count: "indefinite"
+                            }
+                            animateTransform {
+                                attribute_name: "transform",
+                                attribute_type: "XML",
+                                type: "rotate",
+                                from: "0 50 50",
+                                to: "360 50 50",
+                                dur: "2.4s",
+                                repeat_count: "indefinite"
+                            }
+                        }
+                    }
                 }
             }
 
