@@ -12,14 +12,21 @@ pub fn SidebarNav() -> Element {
         nav {
             class: "hidden lg:flex w-64 {theme::surface::SIDEBAR_BG} border-r {theme::surface::CARD_BORDER} flex-col",
             div {
-                class: "p-6",
-                h1 {
-                    class: "text-xl font-bold text-white",
-                    "Crystal Forge"
+                class: "p-6 flex items-center gap-3",
+                img {
+                    class: "h-8 w-8 scale-105",
+                    src: asset!("assets/crystal-forge-icon.png"),
+                    alt: "Crystal Forge"
                 }
-                p {
-                    class: "text-xs {theme::text::MUTED} mt-1",
-                    "Fleet Management"
+                div {
+                    h1 {
+                        class: "text-xl font-bold text-white",
+                        "Crystal Forge"
+                    }
+                    p {
+                        class: "text-xs {theme::text::MUTED} mt-1",
+                        "Fleet Management"
+                    }
                 }
             }
             div {
