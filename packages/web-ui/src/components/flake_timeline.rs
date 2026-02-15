@@ -116,8 +116,8 @@ pub fn FlakeTimelineWidget(
                         LegendDot { color: "bg-yellow-500", label: "1 behind" }
                         LegendDot { color: "bg-orange-500", label: "2 behind" }
                         LegendDot { color: "bg-red-500", label: "3+ behind" }
-                        RingLegendSwatch { style: "box-shadow: 0 0 0 3px #42ff65", label: "Building" }
-                        RingLegendSwatch { style: "box-shadow: 0 0 0 2px #e57c00", label: "Queued" }
+                        RingLegendSpinner { color: "#42ff65", label: "Building" }
+                        RingLegendSpinner { color: "#e57c00", label: "Queued" }
                     }
                 }
 
@@ -311,11 +311,15 @@ fn LegendDot(color: &'static str, label: &'static str) -> Element {
 
 /// Ring legend marker for build status.
 #[component]
-fn RingLegendSwatch(style: &'static str, label: &'static str) -> Element {
+fn RingLegendSpinner(color: &'static str, label: &'static str) -> Element {
+    let ring_style = format!(
+        "box-shadow: 0 0 0 2px {color}; background: conic-gradient({color} 0deg, rgba(0,0,0,0) 160deg, transparent 360deg);"
+    );
+
     rsx! {
         div {
             class: "flex items-center gap-1",
-            div { class: "w-2 h-2 rounded-full", style: "{style}" }
+            div { class: "w-2 h-2 rounded-full", style: "{ring_style}" }
             span { class: "text-[10px] {theme::text::MUTED}", "{label}" }
         }
     }
@@ -747,8 +751,8 @@ fn CommitNode(
 
     let badge_top = node_top;
     let text_top = node_top + node_size + 4;
-    let overlay_size = node_size + 8;
-    let overlay_top = -(overlay_size - node_size) / 2 - 1;
+    let overlay_size = node_size + 9;
+    let overlay_top = -(overlay_size - node_size) / 2 - 2;
 
     // Build tooltip text
     let tooltip = format!(
