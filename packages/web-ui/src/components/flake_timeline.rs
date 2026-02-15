@@ -319,7 +319,8 @@ fn TimelineGraph(
     let node_center = node_top + (node_size / 2);  // Center at y=14
     let line_thickness = 3;
     let line_top = node_center - 1;  // Line at y=13, 3px thick, centers at y=14.5 (close enough)
-    let container_height = 70;
+    // Height for node + text labels only
+    let container_height = 65;
 
     rsx! {
         // Outer wrapper
@@ -458,58 +459,12 @@ fn CommitNode(
                 }
             }
 
-            // Hover popup - compact tooltip above the node
+            // Tooltip - shows commit message on hover via title attribute
+            // Using native browser tooltip for simplicity (works across all containers)
             div {
-                class: "absolute left-1/2 -translate-x-1/2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none",
-                style: "bottom: 75px; min-width: 200px; max-width: 280px; z-index: 9999;",
-
-                div {
-                    class: "bg-gray-800 border {theme::surface::CARD_BORDER} rounded-lg p-2 shadow-2xl text-xs",
-
-                    // Header row: hash + status
-                    div {
-                        class: "flex items-center gap-2 mb-1",
-                        span {
-                            class: "font-mono text-white font-medium",
-                            "{short_hash}"
-                        }
-                        span {
-                            class: "text-[9px] px-1.5 py-0.5 rounded-full {node_bg} text-gray-900 font-semibold",
-                            "{behind_text}"
-                        }
-                    }
-
-                    // Message (truncated)
-                    p {
-                        class: "text-white mb-1 truncate",
-                        "{commit.message}"
-                    }
-
-                    // Author + systems count inline
-                    p {
-                        class: "{theme::text::MUTED}",
-                        "{commit.author} · {commit.system_count} system{system_plural}"
-                    }
-
-                    // System hostnames (compact, max 5 shown)
-                    if !commit.systems.is_empty() {
-                        div {
-                            class: "flex flex-wrap gap-1 mt-1",
-                            for system in commit.systems.iter().take(5) {
-                                span {
-                                    class: "text-[9px] px-1 py-0.5 rounded bg-gray-700 text-gray-300 font-mono",
-                                    "{system}"
-                                }
-                            }
-                            if commit.systems.len() > 5 {
-                                span {
-                                    class: "text-[9px] {theme::text::MUTED}",
-                                    "+{commit.systems.len() - 5}"
-                                }
-                            }
-                        }
-                    }
-                }
+                class: "absolute left-1/2 -translate-x-1/2 cursor-help",
+                style: "top: {badge_top}px; width: {node_size}px; height: {node_size}px;",
+                title: "{commit.message}\n\nby {commit.author}\n{behind_text}\n{commit.system_count} system{system_plural}"
             }
         }
     }
