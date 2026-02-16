@@ -5,9 +5,8 @@ use dioxus::prelude::*;
 use std::collections::HashSet;
 
 use crate::api::models::{
-    BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary,
-    DeploymentStatus, DeploymentStatusSummary, FlakeCommit, FlakeTimeline, FleetHealthSummary,
-    RecentDeployment,
+    BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary, DeploymentStatus,
+    DeploymentStatusSummary, FlakeCommit, FlakeTimeline, FleetHealthSummary, RecentDeployment,
 };
 use crate::components::flake_timeline::FlakeTimelineWidget;
 use crate::components::layout::Card;
@@ -1580,7 +1579,7 @@ fn mock_dashboard_summary() -> DashboardSummary {
 }
 
 /// Generate mock flake timeline data for development.
-fn mock_flake_timelines() -> Vec<FlakeTimeline> {
+pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
     let now = Utc::now();
 
     vec![
@@ -1768,6 +1767,56 @@ fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     committed_at: now - Duration::days(90),
                     system_count: 0,
                     commits_behind: 8,
+                    systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
+                },
+                FlakeCommit {
+                    hash: "c0123456789abcdef01234567".to_string(),
+                    message: "feat: add remote dev containers".to_string(),
+                    author: "riley".to_string(),
+                    committed_at: now - Duration::days(120),
+                    system_count: 0,
+                    commits_behind: 9,
+                    systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
+                },
+                FlakeCommit {
+                    hash: "d123456789abcdef01234567".to_string(),
+                    message: "fix: sleep/resume glitches".to_string(),
+                    author: "sam".to_string(),
+                    committed_at: now - Duration::days(150),
+                    system_count: 0,
+                    commits_behind: 10,
+                    systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
+                },
+                FlakeCommit {
+                    hash: "e23456789abcdef012345678".to_string(),
+                    message: "chore: pin mesa".to_string(),
+                    author: "riley".to_string(),
+                    committed_at: now - Duration::days(180),
+                    system_count: 0,
+                    commits_behind: 11,
+                    systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
+                },
+                FlakeCommit {
+                    hash: "f3456789abcdef0123456789".to_string(),
+                    message: "feat: add laptop profile".to_string(),
+                    author: "sam".to_string(),
+                    committed_at: now - Duration::days(210),
+                    system_count: 0,
+                    commits_behind: 12,
+                    systems: vec![],
+                    build_status: Some(BuildStatus::Idle),
+                },
+                FlakeCommit {
+                    hash: "0123456789abcdef01234567".to_string(),
+                    message: "chore: baseline config".to_string(),
+                    author: "riley".to_string(),
+                    committed_at: now - Duration::days(240),
+                    system_count: 0,
+                    commits_behind: 13,
                     systems: vec![],
                     build_status: Some(BuildStatus::Idle),
                 },

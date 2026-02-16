@@ -73,7 +73,6 @@ impl SystemsViewMode {
     }
 }
 
-
 /// Systems list with toggles and filters.
 #[component]
 pub fn SystemsListView() -> Element {
@@ -114,16 +113,16 @@ pub fn SystemsListView() -> Element {
                     Err(_) => return,
                 };
                 let container_id = container_id.read();
-                if let Some(container) = document_for_listener.get_element_by_id(container_id.as_str()) {
+                if let Some(container) =
+                    document_for_listener.get_element_by_id(container_id.as_str())
+                {
                     if !container.contains(Some(&node)) {
                         open_dropdown.set(None);
                     }
                 }
             });
-            let _ = document.add_event_listener_with_callback(
-                "mousedown",
-                handler.as_ref().unchecked_ref(),
-            );
+            let _ = document
+                .add_event_listener_with_callback("mousedown", handler.as_ref().unchecked_ref());
             handler.forget();
         });
     }
@@ -266,7 +265,9 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
             let dir = *sort_direction.read();
             sorted.sort_by(|a, b| {
                 let cmp = match column {
-                    SortColumn::Hostname => a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()),
+                    SortColumn::Hostname => {
+                        a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase())
+                    }
                     SortColumn::Ip => {
                         let a_ip = a.primary_ip.as_deref().unwrap_or("");
                         let b_ip = b.primary_ip.as_deref().unwrap_or("");
@@ -278,10 +279,18 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                         a_env.to_lowercase().cmp(&b_env.to_lowercase())
                     }
                     SortColumn::Health => a.health_status.label().cmp(b.health_status.label()),
-                    SortColumn::Deployment => a.deployment_status.label().cmp(b.deployment_status.label()),
+                    SortColumn::Deployment => {
+                        a.deployment_status.label().cmp(b.deployment_status.label())
+                    }
                     SortColumn::Cves => {
-                        let a_total = a.cve_counts.critical + a.cve_counts.high + a.cve_counts.medium + a.cve_counts.low;
-                        let b_total = b.cve_counts.critical + b.cve_counts.high + b.cve_counts.medium + b.cve_counts.low;
+                        let a_total = a.cve_counts.critical
+                            + a.cve_counts.high
+                            + a.cve_counts.medium
+                            + a.cve_counts.low;
+                        let b_total = b.cve_counts.critical
+                            + b.cve_counts.high
+                            + b.cve_counts.medium
+                            + b.cve_counts.low;
                         a_total.cmp(&b_total)
                     }
                 };
@@ -407,10 +416,7 @@ fn environment_label(system: &SystemSummary) -> String {
 }
 
 fn ip_label(system: &SystemSummary) -> String {
-    system
-        .primary_ip
-        .clone()
-        .unwrap_or_else(|| "-".to_string())
+    system.primary_ip.clone().unwrap_or_else(|| "-".to_string())
 }
 
 fn format_multi_label(values: &[String], placeholder: &str) -> String {
@@ -448,10 +454,11 @@ fn matches_environment(system: &SystemSummary, filters: &[String]) -> bool {
         return true;
     }
 
-    system
-        .environment
-        .as_deref()
-        .is_some_and(|env| filters.iter().any(|filter| env.eq_ignore_ascii_case(filter)))
+    system.environment.as_deref().is_some_and(|env| {
+        filters
+            .iter()
+            .any(|filter| env.eq_ignore_ascii_case(filter))
+    })
 }
 
 fn matches_health(system: &SystemSummary, filters: &[HealthStatus]) -> bool {
@@ -559,7 +566,12 @@ fn HealthFilterDropdown(
     open_dropdown: Signal<Option<FilterDropdown>>,
 ) -> Element {
     let label = format_status_label(&selected.read());
-    let options = vec![HealthStatus::Healthy, HealthStatus::Warning, HealthStatus::Critical, HealthStatus::Offline];
+    let options = vec![
+        HealthStatus::Healthy,
+        HealthStatus::Warning,
+        HealthStatus::Critical,
+        HealthStatus::Offline,
+    ];
     let is_open = *open_dropdown.read() == Some(FilterDropdown::Health);
 
     rsx! {
@@ -723,7 +735,6 @@ fn DeploymentFilterDropdown(
     }
 }
 
-
 fn matches_search(system: &SystemSummary, query: &str) -> bool {
     if query.trim().is_empty() {
         return true;
@@ -776,21 +787,21 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
     let base_time = Utc.with_ymd_and_hms(2026, 2, 8, 15, 19, 29).unwrap();
     let flake_core = FlakeSummary {
         id: 1,
-        name: "nixos-configs".to_string(),
-        repo_url: "https://github.com/example/nixos-configs".to_string(),
-        latest_commit: Some("04af6a5".to_string()),
+        name: "infrastructure".to_string(),
+        repo_url: "github:acme/infra".to_string(),
+        latest_commit: Some("a1b2c3d".to_string()),
     };
     let flake_staging = FlakeSummary {
         id: 2,
-        name: "nixos-staging".to_string(),
-        repo_url: "https://github.com/example/nixos-staging".to_string(),
-        latest_commit: Some("a12ce19".to_string()),
+        name: "edge-nodes".to_string(),
+        repo_url: "github:acme/edge".to_string(),
+        latest_commit: Some("1234567".to_string()),
     };
     let flake_dev = FlakeSummary {
         id: 3,
         name: "workstations".to_string(),
-        repo_url: "https://github.com/example/workstations".to_string(),
-        latest_commit: Some("9bd421f".to_string()),
+        repo_url: "github:acme/workstations".to_string(),
+        latest_commit: Some("f1a2b3c".to_string()),
     };
 
     vec![
@@ -820,7 +831,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             true,
             false,
             Some("enforcing"),
-            CveSummary { critical: 0, high: 1, medium: 4, low: 12 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 4,
+                low: 12,
+            },
             Some(flake_core.clone()),
             2,
         ),
@@ -850,7 +866,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             true,
             false,
             Some("enforcing"),
-            CveSummary { critical: 0, high: 2, medium: 5, low: 10 },
+            CveSummary {
+                critical: 0,
+                high: 2,
+                medium: 5,
+                low: 10,
+            },
             Some(flake_core.clone()),
             1,
         ),
@@ -880,7 +901,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             true,
             false,
             Some("enforcing"),
-            CveSummary { critical: 0, high: 1, medium: 3, low: 8 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 3,
+                low: 8,
+            },
             Some(flake_core.clone()),
             4,
         ),
@@ -910,7 +936,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("permissive"),
-            CveSummary { critical: 0, high: 1, medium: 2, low: 6 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 2,
+                low: 6,
+            },
             Some(flake_core.clone()),
             6,
         ),
@@ -940,7 +971,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("disabled"),
-            CveSummary { critical: 0, high: 0, medium: 2, low: 5 },
+            CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 2,
+                low: 5,
+            },
             Some(flake_core.clone()),
             8,
         ),
@@ -970,7 +1006,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("enforcing"),
-            CveSummary { critical: 0, high: 1, medium: 3, low: 7 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 3,
+                low: 7,
+            },
             Some(flake_staging.clone()),
             3,
         ),
@@ -1000,7 +1041,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("enforcing"),
-            CveSummary { critical: 1, high: 2, medium: 4, low: 8 },
+            CveSummary {
+                critical: 1,
+                high: 2,
+                medium: 4,
+                low: 8,
+            },
             Some(flake_staging.clone()),
             12,
         ),
@@ -1030,7 +1076,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             true,
             false,
             Some("enforcing"),
-            CveSummary { critical: 0, high: 1, medium: 3, low: 6 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 3,
+                low: 6,
+            },
             Some(flake_core.clone()),
             1,
         ),
@@ -1043,11 +1094,11 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             "e8:2f:2a:44:11:01",
             "10.42.3.1",
             HealthStatus::Healthy,
-            DeploymentStatus::UpToDate,
+            DeploymentStatus::Behind,
             Some(PipelineStage::BuildComplete),
             "24.05",
             "6.9.12",
-            "Immediate",
+            "Manual",
             "0.2.1",
             "d10c01f3fda6b36b845e",
             "AMD Ryzen 7 5800X 8-Core Processor",
@@ -1060,7 +1111,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("disabled"),
-            CveSummary { critical: 0, high: 1, medium: 2, low: 4 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 2,
+                low: 4,
+            },
             Some(flake_dev.clone()),
             2,
         ),
@@ -1090,7 +1146,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             None,
-            CveSummary { critical: 0, high: 0, medium: 2, low: 3 },
+            CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 2,
+                low: 3,
+            },
             Some(flake_dev.clone()),
             5,
         ),
@@ -1120,7 +1181,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             None,
-            CveSummary { critical: 0, high: 1, medium: 2, low: 3 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 2,
+                low: 3,
+            },
             Some(flake_dev.clone()),
             10,
         ),
@@ -1150,7 +1216,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             None,
-            CveSummary { critical: 0, high: 1, medium: 2, low: 3 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 2,
+                low: 3,
+            },
             Some(flake_dev.clone()),
             14,
         ),
@@ -1180,7 +1251,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             None,
-            CveSummary { critical: 0, high: 1, medium: 1, low: 2 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 1,
+                low: 2,
+            },
             Some(flake_dev.clone()),
             20,
         ),
@@ -1210,7 +1286,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             None,
-            CveSummary { critical: 0, high: 0, medium: 1, low: 2 },
+            CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 1,
+                low: 2,
+            },
             Some(flake_dev.clone()),
             28,
         ),
@@ -1240,7 +1321,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             None,
-            CveSummary { critical: 0, high: 0, medium: 1, low: 2 },
+            CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 1,
+                low: 2,
+            },
             Some(flake_dev.clone()),
             30,
         ),
@@ -1270,7 +1356,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             None,
-            CveSummary { critical: 0, high: 0, medium: 1, low: 1 },
+            CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 1,
+                low: 1,
+            },
             Some(flake_dev.clone()),
             240,
         ),
@@ -1300,7 +1391,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("enforcing"),
-            CveSummary { critical: 0, high: 1, medium: 3, low: 6 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 3,
+                low: 6,
+            },
             Some(flake_core.clone()),
             4,
         ),
@@ -1330,7 +1426,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("enforcing"),
-            CveSummary { critical: 1, high: 1, medium: 3, low: 5 },
+            CveSummary {
+                critical: 1,
+                high: 1,
+                medium: 3,
+                low: 5,
+            },
             Some(flake_core.clone()),
             18,
         ),
@@ -1360,7 +1461,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("enforcing"),
-            CveSummary { critical: 0, high: 1, medium: 2, low: 4 },
+            CveSummary {
+                critical: 0,
+                high: 1,
+                medium: 2,
+                low: 4,
+            },
             Some(flake_core.clone()),
             20,
         ),
@@ -1390,7 +1496,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("disabled"),
-            CveSummary { critical: 0, high: 0, medium: 1, low: 2 },
+            CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 1,
+                low: 2,
+            },
             Some(flake_core.clone()),
             26,
         ),
@@ -1420,7 +1531,12 @@ pub fn mock_system_details() -> Vec<SystemDetail> {
             false,
             false,
             Some("disabled"),
-            CveSummary { critical: 0, high: 0, medium: 1, low: 2 },
+            CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 1,
+                low: 2,
+            },
             Some(flake_core.clone()),
             360,
         ),

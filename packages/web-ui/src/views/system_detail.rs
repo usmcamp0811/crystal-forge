@@ -10,9 +10,9 @@ use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 
 use crate::api::models::{
-    CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel, PipelineStage,
-    SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
-    SystemVulnerability,
+    BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
+    PipelineStage, SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo,
+    SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::layout::Card;
 use crate::theme;
@@ -60,6 +60,10 @@ pub fn SystemDetailView(id: String) -> Element {
     // Confirmation dialog state for Sync
     let mut show_sync_dialog = use_signal(|| false);
     let mut sync_in_progress = use_signal(|| false);
+
+    // Confirmation dialog state for rollback/deploying a historical commit
+    let mut show_rollback_dialog = use_signal(|| false);
+    let mut rollback_target: Signal<Option<SystemCommitHistory>> = use_signal(|| None);
 
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
@@ -261,7 +265,13 @@ pub fn SystemDetailView(id: String) -> Element {
                         OverviewTab { system: system.clone() }
                     },
                     Tab::History => rsx! {
-                        HistoryTab { commits: commit_history.clone() }
+                        HistoryTab {
+                            commits: commit_history.clone(),
+                            on_rollback: move |commit| {
+                                rollback_target.set(Some(commit));
+                                show_rollback_dialog.set(true);
+                            }
+                        }
                     },
                     Tab::Cves => rsx! {
                         CvesTab {
@@ -342,6 +352,36 @@ pub fn SystemDetailView(id: String) -> Element {
                 }
             }
         }
+
+        // Rollback confirmation dialog
+        if *show_rollback_dialog.read() {
+            if let Some(ref commit) = *rollback_target.read() {
+                RollbackConfirmDialog {
+                    hostname: system.hostname.clone(),
+                    commit: commit.clone(),
+                    on_confirm: {
+                        let hostname = system.hostname.clone();
+                        let commit = commit.clone();
+                        let toast_message = toast_message.clone();
+                        move |_| {
+                            show_rollback_dialog.set(false);
+                            // TODO: Implement policy override (temporary disable or switch to manual).
+                            let message = format!(
+                                "Requested rollback of {} to {}",
+                                hostname,
+                                commit.hash.chars().take(7).collect::<String>()
+                            );
+                            spawn(async move {
+                                let _ = dispatch_sync_notification(message, true, toast_message).await;
+                            });
+                        }
+                    },
+                    on_cancel: move |_| {
+                        show_rollback_dialog.set(false);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -407,10 +447,10 @@ fn OverviewTab(system: SystemDetail) -> Element {
 }
 
 #[component]
-fn HistoryTab(commits: Vec<SystemCommitHistory>) -> Element {
+fn HistoryTab(commits: Vec<SystemCommitHistory>, on_rollback: EventHandler<SystemCommitHistory>) -> Element {
     rsx! {
         div {
-            class: "pt-6",
+            class: "pt-6 flex flex-col max-h-[70vh] overflow-hidden",
 
             // Legend
             div {
@@ -439,25 +479,31 @@ fn HistoryTab(commits: Vec<SystemCommitHistory>) -> Element {
 
             // Git graph container - relative positioning for the continuous vertical line
             div {
-                class: "relative",
-                style: "padding-left: 3rem;",
+                class: "flex-1 min-h-0 overflow-y-auto",
 
-                // Continuous vertical line running the full height (z-index 1 so nodes render on top)
+                // Inner content wrapper - line sized to full content height
                 div {
-                    class: "absolute bg-gray-600",
-                    style: "left: 0.875rem; top: 0; bottom: 0; width: 4px; border-radius: 2px; z-index: 1;",
-                }
+                    class: "relative",
+                    style: "padding-left: 3rem;",
 
-                // Commit entries
-                div {
-                    class: "space-y-4",
+                    // Continuous vertical line running the full content height
+                    div {
+                        class: "absolute bg-gray-600",
+                        style: "left: 0.875rem; top: 0; bottom: 0; width: 4px; border-radius: 2px; z-index: 1;",
+                    }
+
+                    // Commit entries
+                    div {
+                        class: "space-y-4",
                     for (idx, commit) in commits.iter().enumerate() {
                         CommitTimelineNode {
                             key: "{commit.hash}",
                             commit: commit.clone(),
                             is_first: idx == 0,
-                            is_last: idx == commits.len() - 1
+                            is_last: idx == commits.len() - 1,
+                            on_rollback: on_rollback.clone()
                         }
+                    }
                     }
                 }
             }
@@ -466,7 +512,12 @@ fn HistoryTab(commits: Vec<SystemCommitHistory>) -> Element {
 }
 
 #[component]
-fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bool, #[allow(unused)] is_last: bool) -> Element {
+fn CommitTimelineNode(
+    commit: SystemCommitHistory,
+    #[allow(unused)] is_first: bool,
+    #[allow(unused)] is_last: bool,
+    on_rollback: EventHandler<SystemCommitHistory>,
+) -> Element {
     let mut expanded = use_signal(|| false);
     let chevron_class = if *expanded.read() { "rotate-90" } else { "" };
 
@@ -502,6 +553,12 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
         .deployed_at
         .map(|dt| format!("Deployed {}", dt.format("%b %d at %H:%M")));
 
+    let build_status = commit
+        .build_status
+        .filter(|status| matches!(status, BuildStatus::Queued | BuildStatus::Building));
+
+    let commit_for_action = commit.clone();
+
     // Connector color matches node
     let connector_color = if commit.is_current {
         "bg-emerald-500"
@@ -510,7 +567,7 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
     } else if commit.is_ready_to_deploy {
         "bg-orange-500"
     } else {
-        "bg-gray-600"
+        "bg-gray-500"
     };
 
     // Node dimensions and positioning math:
@@ -520,7 +577,7 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
 
     rsx! {
         div {
-            class: "relative",
+            class: "relative overflow-visible",
             style: "min-height: 3rem;",
 
             // Node (circle) - positioned on the vertical line, filled solid
@@ -548,18 +605,18 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
             // Horizontal connector from node to card - centered vertically with node
             div {
                 class: "{connector_color}",
-                style: "position: absolute; left: -1rem; top: 22px; width: 1rem; height: 4px; border-radius: 2px;",
+                style: "position: absolute; left: -1rem; top: 22px; width: 1rem; height: 4px; border-radius: 2px; z-index: 5;",
             }
 
             // Arrow/pointer (diamond) on the card - centered with connector
             div {
                 class: "{connector_color}",
-                style: "position: absolute; left: -4px; top: 20px; width: 8px; height: 8px; transform: rotate(45deg);",
+                style: "position: absolute; left: -4px; top: 20px; width: 8px; height: 8px; transform: rotate(45deg); z-index: 6;",
             }
 
             // Content card
             div {
-                class: "rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER}",
+                class: "group relative rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} overflow-visible",
 
                 // Main content area
                 div {
@@ -575,27 +632,66 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
                             "{commit.message}"
                         }
 
-                        // Status badge
-                        if commit.is_current {
-                            span {
-                                class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-blue-500/20 text-blue-400",
-                                "Current"
+                        // Right side badges + action
+                        div {
+                            class: "flex items-center gap-2 shrink-0",
+
+                            // Status badge
+                            if commit.is_current {
+                                span {
+                                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-blue-500/20 text-blue-400",
+                                    "Current"
+                                }
+                            } else if commit.was_deployed {
+                                span {
+                                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400",
+                                    "Deployed"
+                                }
+                            } else if commit.is_ready_to_deploy {
+                                span {
+                                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-orange-500/20 text-orange-400",
+                                    "Ready"
+                                }
+                            } else {
+                                span {
+                                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-gray-700/50 text-gray-500",
+                                    "Skipped"
+                                }
                             }
-                        } else if commit.was_deployed {
-                            span {
-                                class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400",
-                                "Deployed"
+
+                            // Build status badge
+                            if let Some(status) = build_status {
+                                span {
+                                    class: match status {
+                                        BuildStatus::Queued => "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-orange-500/20 text-orange-400",
+                                        BuildStatus::Building => "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400",
+                                        _ => "hidden",
+                                    },
+                                    "{status.label()}"
+                                }
                             }
-                        } else if commit.is_ready_to_deploy {
-                            span {
-                                class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-orange-500/20 text-orange-400",
-                                "Ready"
+
+                            // Rollback action (icon-only, hover)
+                            if !commit.is_current {
+                                button {
+                                    class: "shrink-0 p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 transition-colors opacity-0 group-hover:opacity-100",
+                                    title: "Deploy this commit",
+                                    onclick: move |_| on_rollback.call(commit_for_action.clone()),
+                                    svg {
+                                        class: "w-4 h-4",
+                                        fill: "none",
+                                        stroke: "currentColor",
+                                        view_box: "0 0 24 24",
+                                        path {
+                                            stroke_linecap: "round",
+                                            stroke_linejoin: "round",
+                                            stroke_width: "2",
+                                            d: "M12 8v4l-3 3m6-11a9 9 0 11-9 9"
+                                        }
+                                    }
+                                }
                             }
-                        } else {
-                            span {
-                                class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-gray-700/50 text-gray-500",
-                                "Skipped"
-                            }
+
                         }
                     }
 
@@ -1221,6 +1317,86 @@ fn SyncConfirmDialog(
     }
 }
 
+#[component]
+fn RollbackConfirmDialog(
+    hostname: String,
+    commit: SystemCommitHistory,
+    on_confirm: EventHandler<()>,
+    on_cancel: EventHandler<()>,
+) -> Element {
+    let short_hash = commit.hash.chars().take(7).collect::<String>();
+
+    rsx! {
+        // Backdrop
+        div {
+            class: "bg-black/60 flex items-center justify-center p-4",
+            style: "position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 60; backdrop-filter: blur(6px);",
+            onclick: move |_| on_cancel.call(()),
+
+            // Dialog
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
+                style: "width: 100%; max-width: 32rem;",
+                onclick: |evt| evt.stop_propagation(),
+
+                // Icon
+                div {
+                    class: "flex justify-center mb-4",
+                    div {
+                        class: "w-12 h-12 rounded-full bg-amber-500/20 flex items-center justify-center",
+                        svg {
+                            class: "w-6 h-6 text-amber-400",
+                            fill: "none",
+                            stroke: "currentColor",
+                            view_box: "0 0 24 24",
+                            path {
+                                stroke_linecap: "round",
+                                stroke_linejoin: "round",
+                                stroke_width: "2",
+                                d: "M3 12a9 9 0 1018 0 9 9 0 00-18 0zm9-4v4l-3 3"
+                            }
+                        }
+                    }
+                }
+
+                // Title
+                h3 {
+                    class: "text-lg font-semibold text-white text-center mb-2",
+                    "Deploy historical commit?"
+                }
+
+                // Description
+                p {
+                    class: "text-sm {theme::text::SECONDARY} text-center mb-4",
+                    "This will roll back {hostname} to commit {short_hash}. This may pause automatic deployment policies."
+                }
+
+                // Commit summary
+                div {
+                    class: "rounded-lg border border-gray-700 bg-gray-900/60 p-3 mb-5",
+                    div { class: "text-xs text-gray-400", "Commit" }
+                    div { class: "text-sm text-white font-medium", "{commit.message}" }
+                }
+
+                // Buttons
+                div {
+                    class: "flex gap-3",
+                    button {
+                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-amber-500 hover:bg-amber-400 text-gray-900",
+                        onclick: move |_| on_confirm.call(()),
+                        "Deploy commit"
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Card Components (from original)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1465,93 +1641,30 @@ fn environment_style(environment: &str) -> EnvStyle {
 // Mock Data
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn base_commit_history(now: chrono::DateTime<chrono::Utc>) -> Vec<SystemCommitHistory> {
-    use chrono::Duration;
-    vec![
-        SystemCommitHistory {
-            hash: "e6d5c4b3a2901234567890abcdef1234567890".to_string(),
-            message: "Add deployment policy rules for maintenance windows".to_string(),
-            author: "alice".to_string(),
-            committed_at: now - Duration::hours(3),
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            diff_summary: Some("policies.nix: +32 -6 lines\nNew: window constraints".to_string()),
-        },
-        SystemCommitHistory {
-            hash: "d4c3b2a190abcdef1234567890abcdef123456".to_string(),
-            message: "Update nginx configuration for new API endpoints".to_string(),
-            author: "alice".to_string(),
-            committed_at: now - Duration::hours(6),
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            diff_summary: Some("nginx.nix: +15 -3 lines\nChanged: server blocks, upstream config".to_string()),
-        },
-        SystemCommitHistory {
-            hash: "c2b1a090abcdef1234567890abcdef12345678".to_string(),
-            message: "Add redis caching layer".to_string(),
-            author: "bob".to_string(),
-            committed_at: now - Duration::hours(10),
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            diff_summary: Some("redis.nix: +45 lines (new file)\nservices.nix: +5 -1 lines".to_string()),
-        },
-        SystemCommitHistory {
-            hash: "b0a9f8e7d6c5b4a31234567890abcdef123456".to_string(),
-            message: "Fix PostgreSQL connection pool settings".to_string(),
-            author: "alice".to_string(),
-            committed_at: now - Duration::days(1),
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            diff_summary: Some("postgresql.nix: +8 -4 lines\nChanged: max_connections, shared_buffers".to_string()),
-        },
-        SystemCommitHistory {
-            hash: "9f8e7d6c5b4a3210abcdef1234567890abcdef".to_string(),
-            message: "Rotate builder cache credentials".to_string(),
-            author: "carol".to_string(),
-            committed_at: now - Duration::days(2),
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            diff_summary: Some("secrets.nix: +12 -5 lines\nRotated cache key".to_string()),
-        },
-        SystemCommitHistory {
-            hash: "8e7d6c5b4a3210abcdef1234567890abcdef12".to_string(),
-            message: "Enable auditd rules for privileged actions".to_string(),
-            author: "dana".to_string(),
-            committed_at: now - Duration::days(4),
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            diff_summary: Some("auditd.nix: +20 -2 lines".to_string()),
-        },
-        SystemCommitHistory {
-            hash: "7d6c5b4a3210abcdef1234567890abcdef1234".to_string(),
-            message: "Initial system configuration".to_string(),
-            author: "alice".to_string(),
-            committed_at: now - Duration::days(7),
-            was_deployed: false,
-            deployed_at: None,
-            is_current: false,
-            is_ready_to_deploy: false,
-            diff_summary: None,
-        },
-    ]
-}
-
 fn mock_commit_history_for_system(system: &SystemDetail) -> Vec<SystemCommitHistory> {
     use chrono::Duration;
-    let now = Utc::now();
-    let mut commits = base_commit_history(now);
+    let flake_name = system.flake.as_ref().map(|flake| flake.name.as_str());
+    let timelines = crate::views::dashboard::mock_flake_timelines();
+    let Some(timeline) = flake_name.and_then(|name| timelines.iter().find(|t| t.flake_name == name)) else {
+        return Vec::new();
+    };
+
+    let mut commits: Vec<SystemCommitHistory> = timeline
+        .commits
+        .iter()
+        .map(|commit| SystemCommitHistory {
+            hash: commit.hash.clone(),
+            message: commit.message.clone(),
+            author: commit.author.clone(),
+            committed_at: commit.committed_at,
+            was_deployed: false,
+            deployed_at: None,
+            is_current: false,
+            is_ready_to_deploy: false,
+            build_status: commit.build_status,
+            diff_summary: None,
+        })
+        .collect();
 
     if commits.is_empty() {
         return commits;
@@ -1565,6 +1678,10 @@ fn mock_commit_history_for_system(system: &SystemDetail) -> Vec<SystemCommitHist
         DeploymentStatus::NoCommitsAvailable => return Vec::new(),
         DeploymentStatus::Unknown => Some(1.min(commits.len() - 1)),
     };
+
+    if system.hostname == "ws-001" {
+        current_idx = Some(3.min(commits.len().saturating_sub(1)));
+    }
 
     if let Some(idx) = current_idx {
         commits[idx].is_current = true;
