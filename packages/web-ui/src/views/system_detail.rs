@@ -9,6 +9,7 @@
 use chrono::Utc;
 use dioxus::prelude::*;
 use serde_json::Value as JsonValue;
+use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 #[cfg(target_arch = "wasm32")]
@@ -1175,10 +1176,52 @@ enum PolicyFormat {
 
 #[component]
 fn PolicyTab(system: SystemDetail) -> Element {
-    let mut format = use_signal(|| PolicyFormat::Toml);
-    let mut policy_text = use_signal(|| POLICY_TOML_SAMPLE.to_string());
+    let mut policy_library = use_signal(initial_policy_definitions);
+    let mut active_policy_ids = use_signal(initial_active_policy_ids);
+    let mut drag_policy_id: Signal<Option<Uuid>> = use_signal(|| None);
+
     let mut show_editor = use_signal(|| false);
-    let mut edit_text = use_signal(|| POLICY_TOML_SAMPLE.to_string());
+    let mut show_combined = use_signal(|| false);
+    let mut editing_policy_id: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut edit_name = use_signal(String::new);
+    let mut edit_description = use_signal(String::new);
+    let mut edit_body = use_signal(String::new);
+    let mut edit_format = use_signal(|| PolicyFormat::Toml);
+    let mut add_to_system = use_signal(|| true);
+    let mut preset_query = use_signal(String::new);
+
+    let query = preset_query.read().to_lowercase();
+    let visible_policies: Vec<PolicyDefinition> = policy_library
+        .read()
+        .iter()
+        .cloned()
+        .filter(|policy| {
+            if active_policy_ids.read().contains(&policy.id) {
+                return false;
+            }
+            if query.trim().is_empty() {
+                return true;
+            }
+            policy.name.to_lowercase().contains(&query)
+                || policy.description.to_lowercase().contains(&query)
+        })
+        .collect();
+    let library_count = visible_policies.len();
+    let active_ids = active_policy_ids.read().clone();
+    let active_policies = resolve_active_policies(&policy_library.read(), &active_ids);
+    let combined_policy = compile_policy_sections(&active_policies);
+    let policy_library_rows = build_policy_library_rows(
+        &visible_policies,
+        &active_ids,
+        drag_policy_id.clone(),
+        editing_policy_id.clone(),
+        edit_name.clone(),
+        edit_description.clone(),
+        edit_body.clone(),
+        edit_format.clone(),
+        add_to_system.clone(),
+        show_editor.clone(),
+    );
 
     rsx! {
         div {
@@ -1186,121 +1229,150 @@ fn PolicyTab(system: SystemDetail) -> Element {
 
             div {
                 class: "flex flex-col gap-2",
-                h3 { class: "{theme::typography::SECTION_TITLE} text-white", "Deployment Policy" }
+                div { class: "flex items-center justify-between",
+                    h3 { class: "{theme::typography::SECTION_TITLE} text-white", "Deployment Policy" }
+                    button {
+                        class: "px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700",
+                        onclick: move |_| show_combined.set(true),
+                        "View combined policy"
+                    }
+                }
                 p {
                     class: "text-sm {theme::text::SECONDARY}",
-                    "Define policy rules for {system.hostname}. Policies are parsed using the server model in deployment_policies.rs."
+                    "Drag policies from the library to enable them for {system.hostname}. Edit any policy to change its name, description, or TOML/JSON definition."
                 }
             }
 
             div {
-                class: "flex items-center gap-2",
-                button {
-                    class: "px-3 py-1.5 rounded-md text-sm border transition-colors",
-                    class: if *format.read() == PolicyFormat::Toml {
-                        "bg-blue-500/20 border-blue-500 text-blue-300"
-                    } else {
-                        "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
-                    },
-                    onclick: move |_| {
-                        format.set(PolicyFormat::Toml);
-                        policy_text.set(POLICY_TOML_SAMPLE.to_string());
-                        if *show_editor.read() {
-                            edit_text.set(POLICY_TOML_SAMPLE.to_string());
-                        }
-                    },
-                    "TOML"
-                }
-                button {
-                    class: "px-3 py-1.5 rounded-md text-sm border transition-colors",
-                    class: if *format.read() == PolicyFormat::Json {
-                        "bg-blue-500/20 border-blue-500 text-blue-300"
-                    } else {
-                        "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
-                    },
-                    onclick: move |_| {
-                        format.set(PolicyFormat::Json);
-                        policy_text.set(POLICY_JSON_SAMPLE.to_string());
-                        if *show_editor.read() {
-                            edit_text.set(POLICY_JSON_SAMPLE.to_string());
-                        }
-                    },
-                    "JSON"
-                }
-            }
+                class: "grid grid-cols-1 lg:grid-cols-2 gap-6",
 
-            Card {
-                title: Some("Policy Definition".to_string()),
-                header_actions: Some(rsx!(
-                    button {
-                        class: "px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-500/20 text-blue-200 border border-blue-500/40 hover:bg-blue-500/30 transition-colors",
-                        onclick: move |_| {
-                            edit_text.set(policy_text.read().clone());
-                            show_editor.set(true);
-                        },
-                        "Edit Policy"
-                    }
-                )),
-                children: rsx! {
-                    div { class: "text-xs {theme::text::MUTED}", "Current policy" }
-                    div { class: "max-h-[520px] overflow-y-auto",
-                        PolicyPreview { format: *format.read(), text: policy_text.read().clone() }
-                    }
-                    p {
-                        class: "mt-3 text-xs {theme::text::MUTED}",
-                        "This is a stub UI; saving will wire to policy evaluation and policy override behavior."
-                    }
-                }
-            }
-            if *show_editor.read() {
+                // Policy library column
                 div {
-                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
-                    style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
-                    div {
-                        class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6",
-                        style: "height: 45vh; width: 70vw; max-width: 56rem; display: flex; flex-direction: column; gap: 1rem;",
-                        div {
-                            class: "flex items-center justify-between",
-                            h3 { class: "text-white text-lg font-semibold", "Edit Policy" }
+                    class: "space-y-4 border-l-4 border-l-blue-500/40 pl-4",
+                    Card {
+                        title: Some("Policy Library".to_string()),
+                        header_actions: Some(rsx!(
                             button {
-                                class: "text-xs text-gray-400 hover:text-white",
-                                onclick: move |_| show_editor.set(false),
-                                "Close"
+                                class: "px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700",
+                                onclick: move |_| {
+                                    editing_policy_id.set(None);
+                                    edit_name.set(String::new());
+                                    edit_description.set(String::new());
+                                    edit_body.set(POLICY_TOML_SAMPLE.to_string());
+                                    edit_format.set(PolicyFormat::Toml);
+                                    add_to_system.set(true);
+                                    show_editor.set(true);
+                                },
+                                "New Policy"
+                            }
+                        )),
+                        children: rsx! {
+                            div { class: "flex items-center gap-3",
+                                input {
+                                    class: "flex-1 rounded-lg border border-gray-700 bg-gray-900/70 px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40",
+                                    placeholder: "Search policy library",
+                                    value: "{preset_query}",
+                                    oninput: move |event| preset_query.set(event.value()),
+                                }
+                                span { class: "text-xs {theme::text::MUTED}", "{library_count} policies" }
+                            }
+                            div { class: "space-y-3",
+                                for row in policy_library_rows {
+                                    {row}
+                                }
+                                if visible_policies.is_empty() {
+                                    div { class: "text-sm text-gray-400 text-center py-6", "No policies match this search." }
+                                }
                             }
                         }
-                        PolicyEditor { policy_text: edit_text.clone() }
-                        div {
-                            class: "flex justify-end gap-3 pt-2",
+                    }
+                }
+
+                // Active policies column
+                div {
+                    class: "space-y-4",
+                    Card {
+                        title: Some("Active Policies".to_string()),
+                        header_actions: Some(rsx!(
                             button {
-                                class: "px-4 py-2 rounded-md text-sm text-gray-300 border border-gray-700 hover:bg-gray-800",
-                                onclick: move |_| show_editor.set(false),
-                                "Cancel"
-                            }
-                            button {
-                                class: "px-4 py-2 rounded-md text-sm font-semibold bg-blue-500/20 text-blue-200 border border-blue-500/40 hover:bg-blue-500/30",
+                                class: "px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-500/20 text-blue-200 border border-blue-500/40 hover:bg-blue-500/30",
                                 onclick: move |_| {
-                                    policy_text.set(edit_text.read().clone());
-                                    show_editor.set(false);
+                                    editing_policy_id.set(None);
+                                    edit_name.set(String::new());
+                                    edit_description.set(String::new());
+                                    edit_body.set(POLICY_TOML_SAMPLE.to_string());
+                                    edit_format.set(PolicyFormat::Toml);
+                                    add_to_system.set(true);
+                                    show_editor.set(true);
                                 },
-                                "Save Policy"
+                                "Add Policy"
+                            }
+                        )),
+                        children: rsx! {
+                            div {
+                                class: "space-y-3 rounded-xl border border-gray-800 bg-gray-950/40 p-3",
+                                ondragover: move |evt| {
+                                    evt.prevent_default();
+                                },
+                                ondrop: move |evt| {
+                                    evt.prevent_default();
+                                    let dropped = *drag_policy_id.read();
+                                    if let Some(id) = dropped {
+                                        if !active_policy_ids.read().contains(&id) {
+                                            let mut ids = active_policy_ids.read().clone();
+                                            ids.push(id);
+                                            active_policy_ids.set(ids);
+                                        }
+                                        drag_policy_id.set(None);
+                                    }
+                                },
+                                for policy in active_policies.iter().cloned() {
+                                    ActivePolicyRow {
+                                        policy: policy,
+                                        on_edit: move |policy: PolicyDefinition| {
+                                            editing_policy_id.set(Some(policy.id));
+                                            edit_name.set(policy.name.clone());
+                                            edit_description.set(policy.description.clone());
+                                            edit_body.set(policy.body.clone());
+                                            edit_format.set(policy.format);
+                                            add_to_system.set(true);
+                                            show_editor.set(true);
+                                        },
+                                        on_remove: move |id| {
+                                            let mut ids = active_policy_ids.read().clone();
+                                            ids.retain(|item| *item != id);
+                                            active_policy_ids.set(ids);
+                                        }
+                                    }
+                                }
+                                if active_policies.is_empty() {
+                                    div { class: "text-sm text-gray-400 text-center py-6", "Drag policies here to enable them." }
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-    }
-}
 
-#[component]
-fn PolicyEditor(policy_text: Signal<String>) -> Element {
-    rsx! {
-        textarea {
-            class: "w-full bg-gray-950 text-gray-100 font-mono text-sm rounded-lg border border-gray-800 p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/40 leading-5",
-            style: "flex: 1 1 auto; min-height: 0;",
-            value: "{policy_text}",
-            oninput: move |event| policy_text.set(event.value()),
-            spellcheck: "false",
+            if *show_editor.read() {
+                PolicyEditorModal {
+                    editing_policy_id: editing_policy_id.clone(),
+                    edit_name: edit_name.clone(),
+                    edit_description: edit_description.clone(),
+                    edit_body: edit_body.clone(),
+                    edit_format: edit_format.clone(),
+                    add_to_system: add_to_system.clone(),
+                    policy_library: policy_library.clone(),
+                    active_policy_ids: active_policy_ids.clone(),
+                    on_close: move || show_editor.set(false),
+                }
+            }
+            if *show_combined.read() {
+                CombinedPolicyModal {
+                    text: combined_policy.clone(),
+                    on_close: move || show_combined.set(false),
+                }
+            }
         }
     }
 }
@@ -1331,6 +1403,463 @@ fn format_policy_preview(format: PolicyFormat, text: &str) -> String {
             .unwrap_or_else(|_| text.to_string()),
         PolicyFormat::Toml => text.to_string(),
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicyPreset {
+    RequireAgent,
+    RequirePackages,
+    CustomCheck,
+    Other,
+}
+
+impl PolicyPreset {
+    fn policy_type(self) -> &'static str {
+        match self {
+            PolicyPreset::RequireAgent => "require_crystal_forge_agent",
+            PolicyPreset::RequirePackages => "require_packages",
+            PolicyPreset::CustomCheck | PolicyPreset::Other => "custom_check",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PolicyPresetMeta {
+    id: Uuid,
+    title: &'static str,
+    description: &'static str,
+    summary: &'static str,
+    kind: PolicyPreset,
+    format: PolicyFormat,
+    body: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PolicyDefinition {
+    id: Uuid,
+    name: String,
+    description: String,
+    format: PolicyFormat,
+    body: String,
+}
+
+fn policy_presets() -> Vec<PolicyPresetMeta> {
+    vec![
+        PolicyPresetMeta {
+            id: Uuid::from_u128(1),
+            title: "Require Crystal Forge Agent",
+            summary: "Agent services enabled",
+            description: "This policy ensures the Crystal Forge agent and client services are enabled on the target system. It is a common baseline for production environments where you expect managed telemetry and deployments.",
+            kind: PolicyPreset::RequireAgent,
+            format: PolicyFormat::Toml,
+            body: r#"[[policy]]
+type = \"require_crystal_forge_agent\"
+strict = true
+"#
+            .to_string(),
+        },
+        PolicyPresetMeta {
+            id: Uuid::from_u128(2),
+            title: "Require Packages",
+            summary: "Package list guardrail",
+            description: "Use this policy to guarantee specific system packages are present. It is useful for fleets where shared tooling (like git or vim) must be installed before deployments run.",
+            kind: PolicyPreset::RequirePackages,
+            format: PolicyFormat::Toml,
+            body: r#"[[policy]]
+type = \"require_packages\"
+packages = [\"git\", \"vim\"]
+strict = false
+"#
+            .to_string(),
+        },
+        PolicyPresetMeta {
+            id: Uuid::from_u128(3),
+            title: "Custom Check",
+            summary: "Nix expression validation",
+            description: "This policy lets you encode a custom Nix expression and description. It works well for environment-specific checks like enforcing SSH, ensuring a module is enabled, or validating configuration flags.",
+            kind: PolicyPreset::CustomCheck,
+            format: PolicyFormat::Toml,
+            body: r#"[[policy]]
+type = \"custom_check\"
+expression = \"(cfg.config.services.openssh.enable or false)\"
+description = \"SSH must be enabled\"
+field_name = \"sshEnabled\"
+strict = true
+"#
+            .to_string(),
+        },
+        PolicyPresetMeta {
+            id: Uuid::from_u128(4),
+            title: "Other Template",
+            summary: "Flexible starter",
+            description: "A flexible starting point for policies that do not fit the built-in templates. Use this when you want to annotate your own intent or create a specialized guardrail.",
+            kind: PolicyPreset::Other,
+            format: PolicyFormat::Toml,
+            body: r#"[[policy]]
+# Add your custom policy here
+type = \"custom_check\"
+expression = \"(cfg.config.services.openssh.enable or false)\"
+description = \"Describe requirement\"
+field_name = \"customField\"
+strict = false
+"#
+            .to_string(),
+        },
+    ]
+}
+
+#[component]
+fn PolicyLibraryRow(
+    policy: PolicyDefinition,
+    is_active: bool,
+    drag_policy_id: Signal<Option<Uuid>>,
+    on_edit: EventHandler<PolicyDefinition>,
+) -> Element {
+    let row_class = if is_active {
+        "rounded-xl border border-blue-500/40 bg-blue-500/10 p-4"
+    } else {
+        "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 hover:border-blue-500/40 transition"
+    };
+    let policy_id = policy.id;
+
+    rsx! {
+        div {
+            class: "{row_class}",
+            draggable: "true",
+            ondragstart: move |evt| {
+                drag_policy_id.set(Some(policy_id));
+                evt.data_transfer().set_data("text/plain", &policy_id.to_string()).ok();
+            },
+            ondragend: move |_| {
+                drag_policy_id.set(None);
+            },
+            div { class: "flex items-start justify-between gap-4",
+                div {
+                    span { class: "text-sm font-semibold text-white", "{policy.name}" }
+                    p { class: "text-xs text-gray-500", "{policy.description}" }
+                }
+                div { class: "flex items-center gap-2",
+                    span { class: "text-xs text-gray-500", if is_active { "Active" } else { "Library" } }
+                    button {
+                        class: "text-xs text-blue-300 hover:text-blue-200",
+                        onclick: move |_| on_edit.call(policy.clone()),
+                        "Edit"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn ActivePolicyRow(
+    policy: PolicyDefinition,
+    on_edit: EventHandler<PolicyDefinition>,
+    on_remove: EventHandler<Uuid>,
+) -> Element {
+    let policy_id = policy.id;
+
+    rsx! {
+        div {
+            class: "rounded-xl border border-gray-800 bg-gray-900/40 p-4",
+            div { class: "flex items-start justify-between gap-4",
+                div {
+                    span { class: "text-sm font-semibold text-white", "{policy.name}" }
+                    p { class: "text-xs text-gray-500", "{policy.description}" }
+                }
+                div { class: "flex items-center gap-2",
+                    button {
+                        class: "text-xs text-blue-300 hover:text-blue-200",
+                        onclick: move |_| on_edit.call(policy.clone()),
+                        "Edit"
+                    }
+                    button {
+                        class: "text-xs text-red-300 hover:text-red-200",
+                        onclick: move |_| on_remove.call(policy_id),
+                        "Remove"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CombinedPolicyPreview(text: String) -> Element {
+    rsx! {
+        pre {
+            class: "text-xs font-mono bg-gray-950/70 rounded-lg border border-gray-800 p-3 overflow-x-auto",
+            "{text}"
+        }
+    }
+}
+
+#[component]
+fn PolicyEditorModal(
+    editing_policy_id: Signal<Option<Uuid>>,
+    edit_name: Signal<String>,
+    edit_description: Signal<String>,
+    edit_body: Signal<String>,
+    edit_format: Signal<PolicyFormat>,
+    add_to_system: Signal<bool>,
+    policy_library: Signal<Vec<PolicyDefinition>>,
+    active_policy_ids: Signal<Vec<Uuid>>,
+    on_close: EventHandler<()>,
+) -> Element {
+    let is_editing = editing_policy_id.read().is_some();
+    let action_label = if is_editing { "Save Policy" } else { "Add Policy" };
+
+    rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
+            style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            div {
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6",
+                style: "width: 85vw; max-width: 64rem; display: flex; flex-direction: column; gap: 1.5rem; overflow: visible; align-items: stretch;",
+                div {
+                    class: "flex items-center justify-between",
+                    div {
+                        h3 { class: "text-white text-lg font-semibold", "Edit Policy" }
+                        p { class: "text-xs {theme::text::MUTED}", "Define the policy metadata and the TOML/JSON body." }
+                    }
+                    button {
+                        class: "text-xs text-gray-400 hover:text-white",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+                div { class: "grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6 items-start",
+                    div { class: "space-y-4",
+                        div {
+                            class: "space-y-2",
+                            label { class: "text-xs text-gray-400", "Policy Name" }
+                            input {
+                                class: "w-full rounded-lg border border-gray-700 bg-gray-900/70 px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-blue-500/40",
+                                value: "{edit_name}",
+                                oninput: move |event| edit_name.set(event.value()),
+                            }
+                        }
+                        div {
+                            class: "space-y-2",
+                            label { class: "text-xs text-gray-400", "Description" }
+                            textarea {
+                                class: "w-full rounded-lg border border-gray-700 bg-gray-900/70 px-3 py-2 text-sm text-gray-100 min-h-[140px] focus:outline-none focus:ring-2 focus:ring-blue-500/40",
+                                value: "{edit_description}",
+                                oninput: move |event| edit_description.set(event.value()),
+                            }
+                        }
+                        div {
+                            class: "space-y-2",
+                            label { class: "text-xs text-gray-400", "Format" }
+                            div { class: "flex gap-2",
+                                button {
+                                    class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
+                                    class: if *edit_format.read() == PolicyFormat::Toml {
+                                        "bg-blue-500/20 border-blue-500 text-blue-300"
+                                    } else {
+                                        "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
+                                    },
+                                    onclick: move |_| edit_format.set(PolicyFormat::Toml),
+                                    "TOML"
+                                }
+                                button {
+                                    class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
+                                    class: if *edit_format.read() == PolicyFormat::Json {
+                                        "bg-blue-500/20 border-blue-500 text-blue-300"
+                                    } else {
+                                        "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
+                                    },
+                                    onclick: move |_| edit_format.set(PolicyFormat::Json),
+                                    "JSON"
+                                }
+                            }
+                        }
+                        div {
+                            class: "flex items-center gap-2",
+                            input {
+                                r#type: "checkbox",
+                                checked: "{add_to_system}",
+                                onchange: move |event| add_to_system.set(event.checked()),
+                            }
+                            span { class: "text-xs text-gray-400", "Add to active policies" }
+                        }
+                    }
+                    div { class: "space-y-3 flex flex-col",
+                        label { class: "text-xs text-gray-400", "Policy Definition" }
+                        div { class: "rounded-lg border border-gray-700 bg-gray-900/70",
+                            textarea {
+                                class: "w-full bg-transparent px-3 py-2 text-sm text-gray-100 font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/40 resize-none",
+                                rows: "12",
+                                value: "{edit_body}",
+                                oninput: move |event| edit_body.set(event.value()),
+                                spellcheck: "false",
+                            }
+                        }
+                    }
+                }
+                div { class: "flex justify-between items-center gap-3",
+                    span { class: "text-xs {theme::text::MUTED}", "Save adds the policy to the library."
+                    }
+                    div { class: "flex gap-3",
+                        button {
+                            class: "px-4 py-2 rounded-md text-sm text-gray-300 border border-gray-700 hover:bg-gray-800",
+                            onclick: move |_| on_close.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "px-4 py-2 rounded-md text-sm font-semibold bg-blue-500/20 text-blue-200 border border-blue-500/40 hover:bg-blue-500/30",
+                            onclick: move |_| {
+                                let name = edit_name.read().clone();
+                                let description = edit_description.read().clone();
+                                let body = edit_body.read().clone();
+                                let format = *edit_format.read();
+                                let new_id = editing_policy_id.read().unwrap_or_else(Uuid::new_v4);
+                                let mut library = policy_library.read().clone();
+                                let is_existing = library.iter().any(|policy| policy.id == new_id);
+                                if is_existing {
+                                    library = library
+                                        .into_iter()
+                                        .map(|policy| {
+                                            if policy.id == new_id {
+                                                PolicyDefinition {
+                                                    id: new_id,
+                                                    name: name.clone(),
+                                                    description: description.clone(),
+                                                    format,
+                                                    body: body.clone(),
+                                                }
+                                            } else {
+                                                policy
+                                            }
+                                        })
+                                        .collect();
+                                } else {
+                                    library.push(PolicyDefinition {
+                                        id: new_id,
+                                        name: name.clone(),
+                                        description: description.clone(),
+                                        format,
+                                        body: body.clone(),
+                                    });
+                                }
+                                policy_library.set(library);
+                                if *add_to_system.read() {
+                                    let mut active = active_policy_ids.read().clone();
+                                    if !active.contains(&new_id) {
+                                        active.push(new_id);
+                                        active_policy_ids.set(active);
+                                    }
+                                }
+                                on_close.call(());
+                            },
+                            "{action_label}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn CombinedPolicyModal(text: String, on_close: EventHandler<()>) -> Element {
+    rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
+            style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            div {
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6",
+                style: "height: 70vh; width: 80vw; max-width: 72rem; display: flex; flex-direction: column; gap: 1.5rem;",
+                div {
+                    class: "flex items-center justify-between",
+                    div {
+                        h3 { class: "text-white text-lg font-semibold", "Combined Policy" }
+                        p { class: "text-xs {theme::text::MUTED}", "Read-only compiled view of all active policies." }
+                    }
+                    button {
+                        class: "text-xs text-gray-400 hover:text-white",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                }
+                PolicyPreview { format: PolicyFormat::Toml, text: text }
+            }
+        }
+    }
+}
+
+fn compile_policy_sections(policies: &[PolicyDefinition]) -> String {
+    policies
+        .iter()
+        .map(|policy| policy.body.clone())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn resolve_active_policies(
+    library: &[PolicyDefinition],
+    active_ids: &[Uuid],
+) -> Vec<PolicyDefinition> {
+    active_ids
+        .iter()
+        .filter_map(|id| library.iter().find(|policy| policy.id == *id).cloned())
+        .collect()
+}
+
+fn build_policy_library_rows(
+    policies: &[PolicyDefinition],
+    active_ids: &[Uuid],
+    drag_policy_id: Signal<Option<Uuid>>,
+    mut editing_policy_id: Signal<Option<Uuid>>,
+    mut edit_name: Signal<String>,
+    mut edit_description: Signal<String>,
+    mut edit_body: Signal<String>,
+    mut edit_format: Signal<PolicyFormat>,
+    mut add_to_system: Signal<bool>,
+    mut show_editor: Signal<bool>,
+) -> Vec<Element> {
+    policies
+        .iter()
+        .cloned()
+        .map(|policy| {
+            let policy_id = policy.id;
+            let is_active = active_ids.contains(&policy_id);
+            let active_ids_snapshot = active_ids.to_vec();
+            rsx! {
+                PolicyLibraryRow {
+                    policy: policy.clone(),
+                    is_active: is_active,
+                    drag_policy_id: drag_policy_id.clone(),
+                    on_edit: move |policy: PolicyDefinition| {
+                        editing_policy_id.set(Some(policy.id));
+                        edit_name.set(policy.name.clone());
+                        edit_description.set(policy.description.clone());
+                        edit_body.set(policy.body.clone());
+                        edit_format.set(policy.format);
+                        add_to_system.set(active_ids_snapshot.contains(&policy.id));
+                        show_editor.set(true);
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+fn initial_policy_definitions() -> Vec<PolicyDefinition> {
+    policy_presets()
+        .into_iter()
+        .map(|preset| PolicyDefinition {
+            id: preset.id,
+            name: preset.title.to_string(),
+            description: preset.description.to_string(),
+            format: preset.format,
+            body: preset.body,
+        })
+        .collect()
+}
+
+fn initial_active_policy_ids() -> Vec<Uuid> {
+    vec![Uuid::from_u128(1), Uuid::from_u128(2)]
 }
 
 fn escape_html(input: &str) -> String {
