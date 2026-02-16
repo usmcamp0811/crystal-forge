@@ -73,9 +73,11 @@ pub fn SidebarNav() -> Element {
                             stroke: "currentColor",
                             stroke_width: "1.75",
                             view_box: "0 0 24 24",
-                            path { d: "M7 4a2 2 0 1 0 4 0a2 2 0 0 0-4 0" }
-                            path { d: "M13 7h4a2 2 0 1 0 0-4" }
-                            path { d: "M9 6v9a3 3 0 1 0 2 0V10h6a3 3 0 1 0 2 0" }
+                            path { d: "M3 7h18" }
+                            path { d: "M3 12h18" }
+                            path { d: "M3 17h18" }
+                            path { d: "M7 7v10" }
+                            path { d: "M17 7v10" }
                         }
                     )
                 }

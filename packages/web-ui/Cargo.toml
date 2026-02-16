@@ -11,7 +11,8 @@ serde_urlencoded = "0.7"
 chrono = { version = "0.4", features = ["serde"] }
 gloo-storage = "0.3"
 gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys = "0.3"
 uuid = { version = "1", features = ["v4", "serde", "js"] }
-web-sys = { version = "0.3", features = ["Window", "Location", "Response", "Headers", "Notification"] }
+web-sys = { version = "0.3", features = ["Document", "Element", "Headers", "Location", "Notification", "Response", "Window"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

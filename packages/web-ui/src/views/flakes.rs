@@ -1,4 +1,4 @@
-//! Flakes list view.
+//! Flakes list view — table of configured flakes.
 
 use dioxus::prelude::*;
 

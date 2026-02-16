@@ -8,6 +8,11 @@
 
 use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
+use serde_json::Value as JsonValue;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::{JsCast, JsValue};
+#[cfg(target_arch = "wasm32")]
+use web_sys::Element;
 
 use crate::api::models::{
     BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
@@ -1173,6 +1178,8 @@ enum PolicyFormat {
 fn PolicyTab(system: SystemDetail) -> Element {
     let mut format = use_signal(|| PolicyFormat::Toml);
     let mut policy_text = use_signal(|| POLICY_TOML_SAMPLE.to_string());
+    let mut show_editor = use_signal(|| false);
+    let mut edit_text = use_signal(|| POLICY_TOML_SAMPLE.to_string());
 
     rsx! {
         div {
@@ -1199,6 +1206,9 @@ fn PolicyTab(system: SystemDetail) -> Element {
                     onclick: move |_| {
                         format.set(PolicyFormat::Toml);
                         policy_text.set(POLICY_TOML_SAMPLE.to_string());
+                        if *show_editor.read() {
+                            edit_text.set(POLICY_TOML_SAMPLE.to_string());
+                        }
                     },
                     "TOML"
                 }
@@ -1212,6 +1222,9 @@ fn PolicyTab(system: SystemDetail) -> Element {
                     onclick: move |_| {
                         format.set(PolicyFormat::Json);
                         policy_text.set(POLICY_JSON_SAMPLE.to_string());
+                        if *show_editor.read() {
+                            edit_text.set(POLICY_JSON_SAMPLE.to_string());
+                        }
                     },
                     "JSON"
                 }
@@ -1219,11 +1232,20 @@ fn PolicyTab(system: SystemDetail) -> Element {
 
             Card {
                 title: Some("Policy Definition".to_string()),
+                header_actions: Some(rsx!(
+                    button {
+                        class: "px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-500/20 text-blue-200 border border-blue-500/40 hover:bg-blue-500/30 transition-colors",
+                        onclick: move |_| {
+                            edit_text.set(policy_text.read().clone());
+                            show_editor.set(true);
+                        },
+                        "Edit Policy"
+                    }
+                )),
                 children: rsx! {
-                    textarea {
-                        class: "w-full min-h-[280px] bg-gray-950 text-gray-100 font-mono text-xs rounded-lg border border-gray-800 p-4 focus:outline-none focus:ring-2 focus:ring-blue-500/40",
-                        value: "{policy_text}",
-                        oninput: move |event| policy_text.set(event.value()),
+                    div { class: "text-xs {theme::text::MUTED}", "Current policy" }
+                    div { class: "max-h-[520px] overflow-y-auto",
+                        PolicyPreview { format: *format.read(), text: policy_text.read().clone() }
                     }
                     p {
                         class: "mt-3 text-xs {theme::text::MUTED}",
@@ -1231,8 +1253,118 @@ fn PolicyTab(system: SystemDetail) -> Element {
                     }
                 }
             }
+            if *show_editor.read() {
+                div {
+                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
+                    style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+                    div {
+                        class: "w-full max-w-5xl {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6 space-y-4",
+                        div {
+                            class: "flex items-center justify-between",
+                            h3 { class: "text-white text-lg font-semibold", "Edit Policy" }
+                            button {
+                                class: "text-xs text-gray-400 hover:text-white",
+                                onclick: move |_| show_editor.set(false),
+                                "Close"
+                            }
+                        }
+                        PolicyEditor { policy_text: edit_text.clone() }
+                        div {
+                            class: "flex justify-end gap-3 pt-2",
+                            button {
+                                class: "px-4 py-2 rounded-md text-sm text-gray-300 border border-gray-700 hover:bg-gray-800",
+                                onclick: move |_| show_editor.set(false),
+                                "Cancel"
+                            }
+                            button {
+                                class: "px-4 py-2 rounded-md text-sm font-semibold bg-blue-500/20 text-blue-200 border border-blue-500/40 hover:bg-blue-500/30",
+                                onclick: move |_| {
+                                    policy_text.set(edit_text.read().clone());
+                                    show_editor.set(false);
+                                },
+                                "Save Policy"
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+#[component]
+fn PolicyEditor(policy_text: Signal<String>) -> Element {
+    rsx! {
+        textarea {
+            class: "w-full min-h-[80vh] bg-gray-950 text-gray-100 font-mono text-sm rounded-lg border border-gray-800 p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/40 leading-5",
+            value: "{policy_text}",
+            oninput: move |event| policy_text.set(event.value()),
+            spellcheck: "false",
+        }
+    }
+}
+
+#[component]
+fn PolicyPreview(format: PolicyFormat, text: String) -> Element {
+    let display_text = format_policy_preview(format, &text);
+    let language_class = match format {
+        PolicyFormat::Json => "language-json",
+        PolicyFormat::Toml => "language-toml",
+    };
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = display_text.clone();
+        use_effect(move || {
+            highlight_policy_block("policy-preview-code");
+        });
+    }
+    rsx! {
+        pre {
+            class: "text-xs font-mono bg-gray-950/70 rounded-lg border border-gray-800 p-3 overflow-x-auto",
+            code {
+                id: "policy-preview-code",
+                class: "{language_class}",
+                "{display_text}"
+            }
+        }
+    }
+}
+
+fn format_policy_preview(format: PolicyFormat, text: &str) -> String {
+    match format {
+        PolicyFormat::Json => serde_json::from_str::<JsonValue>(text)
+            .and_then(|value| serde_json::to_string_pretty(&value))
+            .unwrap_or_else(|_| text.to_string()),
+        PolicyFormat::Toml => text.to_string(),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn highlight_policy_block(element_id: &str) {
+    let Some(window) = web_sys::window() else {
+        return;
+    };
+    let Some(document) = window.document() else {
+        return;
+    };
+    let Some(element) = document.get_element_by_id(element_id) else {
+        return;
+    };
+    let _ = element.remove_attribute("data-highlighted");
+    let Ok(hljs) = js_sys::Reflect::get(&window, &JsValue::from_str("hljs")) else {
+        return;
+    };
+    if hljs.is_undefined() || hljs.is_null() {
+        return;
+    }
+    let Ok(highlight_fn) = js_sys::Reflect::get(&hljs, &JsValue::from_str("highlightElement")) else {
+        return;
+    };
+    let Ok(highlight_fn) = highlight_fn.dyn_into::<js_sys::Function>() else {
+        return;
+    };
+    let element: Element = element;
+    let _ = highlight_fn.call1(&hljs, &element);
 }
 
 #[component]

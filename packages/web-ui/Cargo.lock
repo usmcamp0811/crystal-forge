@@ -446,6 +446,7 @@ dependencies = [
  "dioxus",
  "gloo-storage",
  "gloo-timers",
+ "js-sys",
  "serde",
  "serde_json",
  "serde_urlencoded",
