@@ -1174,15 +1174,6 @@ fn PolicyTab(system: SystemDetail) -> Element {
     let mut format = use_signal(|| PolicyFormat::Toml);
     let mut policy_text = use_signal(|| POLICY_TOML_SAMPLE.to_string());
 
-    let on_format_change = move |next: PolicyFormat| {
-        format.set(next);
-        let content = match next {
-            PolicyFormat::Toml => POLICY_TOML_SAMPLE,
-            PolicyFormat::Json => POLICY_JSON_SAMPLE,
-        };
-        policy_text.set(content.to_string());
-    };
-
     rsx! {
         div {
             class: "pt-6 space-y-6",
@@ -1205,7 +1196,10 @@ fn PolicyTab(system: SystemDetail) -> Element {
                     } else {
                         "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
                     },
-                    onclick: move |_| on_format_change(PolicyFormat::Toml),
+                    onclick: move |_| {
+                        format.set(PolicyFormat::Toml);
+                        policy_text.set(POLICY_TOML_SAMPLE.to_string());
+                    },
                     "TOML"
                 }
                 button {
@@ -1215,7 +1209,10 @@ fn PolicyTab(system: SystemDetail) -> Element {
                     } else {
                         "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
                     },
-                    onclick: move |_| on_format_change(PolicyFormat::Json),
+                    onclick: move |_| {
+                        format.set(PolicyFormat::Json);
+                        policy_text.set(POLICY_JSON_SAMPLE.to_string());
+                    },
                     "JSON"
                 }
             }
@@ -1264,6 +1261,97 @@ fn DiffViewer(diff: String) -> Element {
                 }
             }
         }
+    }
+}
+
+fn diff_for_commit(hash: &str, message: &str) -> String {
+    let selector = hash
+        .bytes()
+        .last()
+        .unwrap_or(b'0')
+        .wrapping_sub(b'0')
+        % 3;
+
+    match selector {
+        0 => format!(
+            "diff --git a/modules/storage.nix b/modules/storage.nix\n\
+index 13f3a11..7b2c9e1 100644\n\
+--- a/modules/storage.nix\n\
++++ b/modules/storage.nix\n\
+@@ -42,6 +42,7 @@\n\
+   # Bind mount home directories to /persist\n\
++  fileSystems.\"/persist\".neededForBoot = true;\n\
+   fileSystems.\"/home/admin\" = {{\n\
+     device = \"/persist/home/admin\";\n\
+     options = [ \"bind\" \"noatime\" ];\n\
+     depends = [ \"/persist\" ];\n\
+     neededForBoot = true;\n\
+   }};\n\
+\n\
+@@ -93,15 +87,12 @@\n\
+   warnings = if config.environment.persistence ? \"/persist/system\" then\n\
+     [ ]\n\
+   else [''\n\
+     Impermanence is configured but environment.persistence is not available.\n\
+     Make sure the impermanence module is imported.\n\
+   ''];\n\
+\n\
+// {message}\n"
+        ),
+        1 => format!(
+            "diff --git a/systems/x86_64-linux/reckless/default.nix b/systems/x86_64-linux/reckless/default.nix\n\
+index 49cffc7..8d318fe 100755\n\
+--- a/systems/x86_64-linux/reckless/default.nix\n\
++++ b/systems/x86_64-linux/reckless/default.nix\n\
+@@ -259,10 +259,10 @@ in {{\n\
+       crystal-forge = {{\n\
+         enable = true;\n\
+-        # log_level = \"debug\";\n\
++        log_level = \"debug\";\n\
+         deployment = {{\n\
+-          deployment_poll_interval = mkForce \"30\";\n\
++          deployment_poll_interval = mkForce \"15\";\n\
+           fallback_to_local_build = false;\n\
+         }};\n\
+       }};\n\
+\n\
+// {message}\n"
+        ),
+        _ => format!(
+            "diff --git a/services/web.nix b/services/web.nix\n\
+index 77d3a10..e4b2c15 100644\n\
+--- a/services/web.nix\n\
++++ b/services/web.nix\n\
+@@ -12,9 +12,13 @@\n\
+ {{ config, pkgs, ... }}:\n\
+ {{\n\
+   services.nginx = {{\n\
+     enable = true;\n\
+     recommendedGzipSettings = true;\n\
+     recommendedOptimisation = true;\n\
++    clientMaxBodySize = \"50m\";\n\
+   }};\n\
+\n\
+   services.prometheus.exporters.nginx = {{\n\
+     enable = true;\n\
+-    port = 9113;\n\
++    port = 9113;\n\
++    listenAddress = \"127.0.0.1\";\n\
+   }};\n\
+\n\
+@@ -42,6 +46,18 @@\n\
+   systemd.services.web-reload = {{\n\
+     description = \"Reload web stack on config changes\";\n\
+     serviceConfig.Type = \"oneshot\";\n\
+     script = ''\n\
+       set -euo pipefail\n\
+       nginx -t\n\
+       systemctl reload nginx\n\
+     '';\n\
+   }};\n\
+\n\
+// {message}\n"
+        ),
     }
 }
 
