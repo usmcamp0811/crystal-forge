@@ -26,6 +26,31 @@ enum FilterDropdown {
     Deployment,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortColumn {
+    Hostname,
+    Ip,
+    Environment,
+    Health,
+    Deployment,
+    Cves,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortDirection {
+    Asc,
+    Desc,
+}
+
+impl SortDirection {
+    fn toggle(self) -> Self {
+        match self {
+            SortDirection::Asc => SortDirection::Desc,
+            SortDirection::Desc => SortDirection::Asc,
+        }
+    }
+}
+
 impl SystemsViewMode {
     fn from_storage(value: Option<String>) -> Self {
         match value.as_deref() {
@@ -158,7 +183,7 @@ pub fn SystemsListView() -> Element {
                     }
                 }
             } else {
-                SystemsTable { systems: filtered_systems }
+                SystemsTable { systems: filtered_systems.clone() }
             }
         }
     }
@@ -225,6 +250,46 @@ fn FiltersBar(
 
 #[component]
 fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
+    let mut sort_column = use_signal(|| None::<SortColumn>);
+    let mut sort_direction = use_signal(|| SortDirection::Asc);
+
+    let sorted_systems = {
+        let mut sorted = systems.clone();
+        if let Some(column) = *sort_column.read() {
+            let dir = *sort_direction.read();
+            sorted.sort_by(|a, b| {
+                let cmp = match column {
+                    SortColumn::Hostname => a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()),
+                    SortColumn::Ip => {
+                        let a_ip = a.primary_ip.as_deref().unwrap_or("");
+                        let b_ip = b.primary_ip.as_deref().unwrap_or("");
+                        a_ip.cmp(b_ip)
+                    }
+                    SortColumn::Environment => {
+                        let a_env = a.environment.as_deref().unwrap_or("");
+                        let b_env = b.environment.as_deref().unwrap_or("");
+                        a_env.to_lowercase().cmp(&b_env.to_lowercase())
+                    }
+                    SortColumn::Health => a.health_status.label().cmp(b.health_status.label()),
+                    SortColumn::Deployment => a.deployment_status.label().cmp(b.deployment_status.label()),
+                    SortColumn::Cves => {
+                        let a_total = a.cve_counts.critical + a.cve_counts.high + a.cve_counts.medium + a.cve_counts.low;
+                        let b_total = b.cve_counts.critical + b.cve_counts.high + b.cve_counts.medium + b.cve_counts.low;
+                        a_total.cmp(&b_total)
+                    }
+                };
+                match dir {
+                    SortDirection::Asc => cmp,
+                    SortDirection::Desc => cmp.reverse(),
+                }
+            });
+        }
+        sorted
+    };
+
+    let current_col = *sort_column.read();
+    let current_dir = *sort_direction.read();
+
     rsx! {
         Card {
             title: Some("Fleet Systems".to_string()),
@@ -237,17 +302,59 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                         thead {
                             class: "{theme::surface::SUBTLE_BG}",
                             tr {
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "Hostname" } }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "IP" } }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "Environment" } }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "Health" } }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "Deployment" } }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "CVEs" } }
+                                SortableHeader {
+                                    label: "Hostname",
+                                    column: SortColumn::Hostname,
+                                    current_col: current_col,
+                                    current_dir: current_dir,
+                                    sort_column: sort_column,
+                                    sort_direction: sort_direction,
+                                }
+                                SortableHeader {
+                                    label: "IP",
+                                    column: SortColumn::Ip,
+                                    current_col: current_col,
+                                    current_dir: current_dir,
+                                    sort_column: sort_column,
+                                    sort_direction: sort_direction,
+                                }
+                                SortableHeader {
+                                    label: "Environment",
+                                    column: SortColumn::Environment,
+                                    current_col: current_col,
+                                    current_dir: current_dir,
+                                    sort_column: sort_column,
+                                    sort_direction: sort_direction,
+                                }
+                                SortableHeader {
+                                    label: "Health",
+                                    column: SortColumn::Health,
+                                    current_col: current_col,
+                                    current_dir: current_dir,
+                                    sort_column: sort_column,
+                                    sort_direction: sort_direction,
+                                }
+                                SortableHeader {
+                                    label: "Deployment",
+                                    column: SortColumn::Deployment,
+                                    current_col: current_col,
+                                    current_dir: current_dir,
+                                    sort_column: sort_column,
+                                    sort_direction: sort_direction,
+                                }
+                                SortableHeader {
+                                    label: "CVEs",
+                                    column: SortColumn::Cves,
+                                    current_col: current_col,
+                                    current_dir: current_dir,
+                                    sort_column: sort_column,
+                                    sort_direction: sort_direction,
+                                }
                             }
                         }
                         tbody {
                             class: "divide-y {theme::surface::DIVIDER}",
-                            for system in systems {
+                            for system in sorted_systems {
                                 tr {
                                     class: "hover:bg-gray-900/60 transition",
                                     td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{system.hostname}" }
@@ -262,8 +369,15 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                                     td { class: "{theme::spacing::TABLE_CELL}",
                                         span { class: "text-xs {system.deployment_status.color_class()}", "{system.deployment_status.label()}" }
                                     }
-                                    td { class: "{theme::spacing::TABLE_CELL} text-xs {theme::text::SECONDARY}",
-                                        "C {system.cve_counts.critical} · H {system.cve_counts.high} · M {system.cve_counts.medium} · L {system.cve_counts.low}"
+                                    td { class: "{theme::spacing::TABLE_CELL} text-xs",
+                                        span { class: "{theme::cve::CRITICAL_TEXT} font-semibold", "{system.cve_counts.critical}" }
+                                        span { class: "text-gray-500", " C  " }
+                                        span { class: "{theme::cve::HIGH_TEXT} font-semibold", "{system.cve_counts.high}" }
+                                        span { class: "text-gray-500", " H  " }
+                                        span { class: "{theme::cve::MEDIUM_TEXT} font-semibold", "{system.cve_counts.medium}" }
+                                        span { class: "text-gray-500", " M  " }
+                                        span { class: "{theme::cve::LOW_TEXT} font-semibold", "{system.cve_counts.low}" }
+                                        span { class: "text-gray-500", " L" }
                                     }
                                 }
                             }
@@ -670,6 +784,46 @@ fn table_class(is_active: bool) -> &'static str {
         "bg-gray-800 text-white"
     } else {
         ""
+    }
+}
+
+#[component]
+fn SortableHeader(
+    label: &'static str,
+    column: SortColumn,
+    current_col: Option<SortColumn>,
+    current_dir: SortDirection,
+    mut sort_column: Signal<Option<SortColumn>>,
+    mut sort_direction: Signal<SortDirection>,
+) -> Element {
+    let is_active = current_col == Some(column);
+    let icon = if is_active {
+        match current_dir {
+            SortDirection::Asc => "↑",
+            SortDirection::Desc => "↓",
+        }
+    } else {
+        "↕"
+    };
+
+    rsx! {
+        th {
+            class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider cursor-pointer hover:text-white transition select-none",
+            onclick: move |_| {
+                if current_col == Some(column) {
+                    // Toggle direction - use the passed-in value, not a fresh read
+                    let new_dir = current_dir.toggle();
+                    sort_direction.set(new_dir);
+                } else {
+                    sort_column.set(Some(column));
+                    sort_direction.set(SortDirection::Asc);
+                }
+            },
+            span { class: "inline-flex items-center gap-1",
+                "{label}"
+                span { class: if is_active { "text-blue-400" } else { "text-gray-600" }, "{icon}" }
+            }
+        }
     }
 }
 
