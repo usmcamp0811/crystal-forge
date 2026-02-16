@@ -12,7 +12,7 @@ use serde_json::Value as JsonValue;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 #[cfg(target_arch = "wasm32")]
-use web_sys::Element as DomElement;
+use js_sys::Object;
 
 use crate::api::models::{
     BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
@@ -1256,7 +1256,8 @@ fn PolicyTab(system: SystemDetail) -> Element {
                     class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
                     style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
                     div {
-                        class: "w-full max-w-5xl {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6 space-y-4",
+                        class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6",
+                        style: "height: 45vh; width: 70vw; max-width: 56rem; display: flex; flex-direction: column; gap: 1rem;",
                         div {
                             class: "flex items-center justify-between",
                             h3 { class: "text-white text-lg font-semibold", "Edit Policy" }
@@ -1294,7 +1295,8 @@ fn PolicyTab(system: SystemDetail) -> Element {
 fn PolicyEditor(policy_text: Signal<String>) -> Element {
     rsx! {
         textarea {
-            class: "w-full min-h-[85vh] bg-gray-950 text-gray-100 font-mono text-sm rounded-lg border border-gray-800 p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/40 leading-5",
+            class: "w-full bg-gray-950 text-gray-100 font-mono text-sm rounded-lg border border-gray-800 p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/40 leading-5",
+            style: "flex: 1 1 auto; min-height: 0;",
             value: "{policy_text}",
             oninput: move |event| policy_text.set(event.value()),
             spellcheck: "false",
@@ -1305,24 +1307,17 @@ fn PolicyEditor(policy_text: Signal<String>) -> Element {
 #[component]
 fn PolicyPreview(format: PolicyFormat, text: String) -> Element {
     let display_text = format_policy_preview(format, &text);
-    let language_class = match format {
-        PolicyFormat::Json => "language-json",
-        PolicyFormat::Toml => "language-toml",
+    let language = match format {
+        PolicyFormat::Json => "json",
+        PolicyFormat::Toml => "toml",
     };
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = display_text.clone();
-        use_effect(move || {
-            highlight_policy_block("policy-preview-code");
-        });
-    }
+    let highlighted_html = highlight_policy_html(language, &display_text);
     rsx! {
         pre {
             class: "text-xs font-mono bg-gray-950/70 rounded-lg border border-gray-800 p-3 overflow-x-auto",
             code {
-                id: "policy-preview-code",
-                class: "{language_class}",
-                "{display_text}"
+                class: "hljs language-{language}",
+                dangerous_inner_html: "{highlighted_html}"
             }
         }
     }
@@ -1335,6 +1330,48 @@ fn format_policy_preview(format: PolicyFormat, text: &str) -> String {
             .unwrap_or_else(|_| text.to_string()),
         PolicyFormat::Toml => text.to_string(),
     }
+}
+
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
+#[cfg(target_arch = "wasm32")]
+fn highlight_policy_html(language: &str, text: &str) -> String {
+    let Some(window) = web_sys::window() else {
+        return escape_html(text);
+    };
+    let Ok(hljs) = js_sys::Reflect::get(&window, &JsValue::from_str("hljs")) else {
+        return escape_html(text);
+    };
+    if hljs.is_undefined() || hljs.is_null() {
+        return escape_html(text);
+    }
+    let Ok(highlight_fn) = js_sys::Reflect::get(&hljs, &JsValue::from_str("highlight")) else {
+        return escape_html(text);
+    };
+    let Ok(highlight_fn) = highlight_fn.dyn_into::<js_sys::Function>() else {
+        return escape_html(text);
+    };
+    let options = Object::new();
+    let _ = js_sys::Reflect::set(&options, &JsValue::from_str("language"), &JsValue::from_str(language));
+    let Ok(result) = highlight_fn.call2(&hljs, &JsValue::from_str(text), &options.into()) else {
+        return escape_html(text);
+    };
+    let Ok(value) = js_sys::Reflect::get(&result, &JsValue::from_str("value")) else {
+        return escape_html(text);
+    };
+    value.as_string().unwrap_or_else(|| escape_html(text))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn highlight_policy_html(_: &str, text: &str) -> String {
+    escape_html(text)
 }
 
 #[cfg(target_arch = "wasm32")]
