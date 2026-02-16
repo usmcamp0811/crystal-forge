@@ -468,11 +468,11 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
 
     // Determine node color based on status - current is filled blue with glow
     let node_color = if commit.is_current {
-        "bg-blue-500"
+        "#10b981"
     } else if commit.was_deployed {
-        "bg-emerald-500"
+        "#3b82f6"
     } else {
-        "bg-gray-800"
+        "#1f2937"
     };
 
     // Border style - solid for deployed/current, dashed for skipped
@@ -484,7 +484,7 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
 
     // Glow effect for current commit
     let node_glow = if commit.is_current {
-        "box-shadow: 0 0 16px 4px rgba(59, 130, 246, 0.7);"
+        "box-shadow: 0 0 16px 4px rgba(16, 185, 129, 0.7);"
     } else {
         ""
     };
@@ -496,9 +496,9 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
 
     // Connector color matches node
     let connector_color = if commit.is_current {
-        "bg-blue-500"
-    } else if commit.was_deployed {
         "bg-emerald-500"
+    } else if commit.was_deployed {
+        "bg-blue-500"
     } else {
         "bg-gray-600"
     };
@@ -515,8 +515,8 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
 
             // Node (circle) - positioned on the vertical line, filled solid
             div {
-                class: "absolute rounded-full {node_color} {node_border} flex items-center justify-center",
-                style: "left: -3rem; top: 8px; width: 32px; height: 32px; z-index: 10; {node_glow}",
+                class: "absolute rounded-full {node_border} flex items-center justify-center",
+                style: "left: -3rem; top: 8px; width: 32px; height: 32px; z-index: 10; background-color: {node_color}; {node_glow}",
 
                 // Checkmark icon for deployed commits
                 if commit.is_current || commit.was_deployed {
