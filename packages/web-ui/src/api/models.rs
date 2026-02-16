@@ -512,6 +512,99 @@ pub enum SortOrder {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// System History / Events DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A commit in the system's flake history with deployment status for this specific system.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCommitHistory {
+    /// Full commit hash.
+    pub hash: String,
+    /// Short commit message (first line).
+    pub message: String,
+    /// Commit author name.
+    pub author: String,
+    /// When the commit was made.
+    pub committed_at: DateTime<Utc>,
+    /// Whether this commit was deployed to this system.
+    pub was_deployed: bool,
+    /// When this commit was deployed to this system (if it was).
+    pub deployed_at: Option<DateTime<Utc>>,
+    /// Whether this is the currently running config on the system.
+    pub is_current: bool,
+    /// Config diff summary (e.g., "+5 -3 lines" or "nginx, redis changed").
+    pub diff_summary: Option<String>,
+}
+
+/// Deployment log entry for the Logs tab.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentLogEntry {
+    /// Log line content.
+    pub message: String,
+    /// Timestamp of the log entry.
+    pub timestamp: DateTime<Utc>,
+    /// Log level (info, warn, error).
+    pub level: LogLevel,
+    /// Optional phase/stage this log belongs to.
+    pub phase: Option<String>,
+}
+
+/// Log severity level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+    Debug,
+}
+
+impl LogLevel {
+    pub fn color_class(&self) -> &'static str {
+        match self {
+            Self::Info => "text-gray-400",
+            Self::Warn => "text-yellow-400",
+            Self::Error => "text-red-400",
+            Self::Debug => "text-gray-500",
+        }
+    }
+}
+
+/// A CVE vulnerability detail for the CVE drilldown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemVulnerability {
+    /// CVE ID (e.g., CVE-2024-1234).
+    pub cve_id: String,
+    /// Severity level.
+    pub severity: CveSeverity,
+    /// CVSS score if available.
+    pub cvss_score: Option<f32>,
+    /// Short description.
+    pub description: String,
+    /// Affected package name.
+    pub package_name: String,
+    /// Installed version.
+    pub installed_version: String,
+    /// Fixed version (if known).
+    pub fixed_version: Option<String>,
+    /// When this CVE was published.
+    pub published_at: Option<DateTime<Utc>>,
+}
+
+impl CveSeverity {
+    /// CSS background color class from the design system.
+    pub fn bg_class(&self) -> &'static str {
+        use crate::theme::cve;
+        match self {
+            Self::Critical => cve::CRITICAL_BG,
+            Self::High => cve::HIGH_BG,
+            Self::Medium => cve::MEDIUM_BG,
+            Self::Low => cve::LOW_BG,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────────────────
 
