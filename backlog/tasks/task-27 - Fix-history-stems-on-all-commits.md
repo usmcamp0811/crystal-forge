@@ -4,7 +4,7 @@ title: Fix history stems on all commits
 status: Done
 assignee: []
 created_date: '2026-02-16 17:09'
-updated_date: '2026-02-16 17:13'
+updated_date: '2026-02-16 18:21'
 labels: []
 dependencies: []
 ---
@@ -21,4 +21,6 @@ Ensure connector stems render for every commit in system History tab; investigat
 Goal: stems/connector lines must render for all commits in History tab. Investigate overflow/stacking and ensure connectors/diamonds render across full list.
 
 Stems/connector lines render correctly across all commits (user confirmed).
+
+User confirmed stems look good; task marked done.
 <!-- SECTION:NOTES:END -->
