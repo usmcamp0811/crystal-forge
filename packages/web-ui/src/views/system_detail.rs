@@ -10,8 +10,9 @@ use chrono::{DateTime, Utc};
 use dioxus::prelude::*;
 
 use crate::api::models::{
-    CveSeverity, CveSummary, DeploymentLogEntry, LogLevel, SystemCommitHistory, SystemDetail,
-    SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, SystemVulnerability,
+    CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel, PipelineStage,
+    SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
+    SystemVulnerability,
 };
 use crate::components::layout::Card;
 use crate::theme;
@@ -68,7 +69,7 @@ pub fn SystemDetailView(id: String) -> Element {
 
     // TODO: Replace with real API call using use_resource + fetch_system()
     let system = mock_system_detail_by_id(&id).unwrap_or_else(|| fallback_system_detail());
-    let commit_history = mock_commit_history();
+    let commit_history = mock_commit_history_for_system(&system);
     let vulnerabilities = mock_vulnerabilities();
     let deployment_logs = mock_deployment_logs();
 
@@ -1464,62 +1465,132 @@ fn environment_style(environment: &str) -> EnvStyle {
 // Mock Data
 // ─────────────────────────────────────────────────────────────────────────────
 
-fn mock_commit_history() -> Vec<SystemCommitHistory> {
+fn base_commit_history(now: chrono::DateTime<chrono::Utc>) -> Vec<SystemCommitHistory> {
     use chrono::Duration;
-    let now = Utc::now();
-
     vec![
         SystemCommitHistory {
-            hash: "a1b2c3d4e5f6789012345678901234567890abcd".to_string(),
-            message: "Update nginx configuration for new API endpoints".to_string(),
+            hash: "e6d5c4b3a2901234567890abcdef1234567890".to_string(),
+            message: "Add deployment policy rules for maintenance windows".to_string(),
             author: "alice".to_string(),
-            committed_at: now - Duration::hours(2),
-            was_deployed: true,
-            deployed_at: Some(now - Duration::hours(1)),
-            is_current: true,
+            committed_at: now - Duration::hours(3),
+            was_deployed: false,
+            deployed_at: None,
+            is_current: false,
             is_ready_to_deploy: false,
-            diff_summary: Some(
-                "nginx.nix: +15 -3 lines\nChanged: server blocks, upstream config".to_string(),
-            ),
+            diff_summary: Some("policies.nix: +32 -6 lines\nNew: window constraints".to_string()),
         },
         SystemCommitHistory {
-            hash: "b2c3d4e5f67890123456789012345678901abcde".to_string(),
-            message: "Add redis caching layer".to_string(),
-            author: "bob".to_string(),
+            hash: "d4c3b2a190abcdef1234567890abcdef123456".to_string(),
+            message: "Update nginx configuration for new API endpoints".to_string(),
+            author: "alice".to_string(),
             committed_at: now - Duration::hours(6),
             was_deployed: false,
             deployed_at: None,
             is_current: false,
-            is_ready_to_deploy: true,
-            diff_summary: Some(
-                "redis.nix: +45 lines (new file)\nservices.nix: +5 -1 lines".to_string(),
-            ),
+            is_ready_to_deploy: false,
+            diff_summary: Some("nginx.nix: +15 -3 lines\nChanged: server blocks, upstream config".to_string()),
         },
         SystemCommitHistory {
-            hash: "c3d4e5f678901234567890123456789012abcdef".to_string(),
+            hash: "c2b1a090abcdef1234567890abcdef12345678".to_string(),
+            message: "Add redis caching layer".to_string(),
+            author: "bob".to_string(),
+            committed_at: now - Duration::hours(10),
+            was_deployed: false,
+            deployed_at: None,
+            is_current: false,
+            is_ready_to_deploy: false,
+            diff_summary: Some("redis.nix: +45 lines (new file)\nservices.nix: +5 -1 lines".to_string()),
+        },
+        SystemCommitHistory {
+            hash: "b0a9f8e7d6c5b4a31234567890abcdef123456".to_string(),
             message: "Fix PostgreSQL connection pool settings".to_string(),
             author: "alice".to_string(),
             committed_at: now - Duration::days(1),
-            was_deployed: true,
-            deployed_at: Some(now - Duration::hours(20)),
+            was_deployed: false,
+            deployed_at: None,
             is_current: false,
             is_ready_to_deploy: false,
-            diff_summary: Some(
-                "postgresql.nix: +8 -4 lines\nChanged: max_connections, shared_buffers".to_string(),
-            ),
+            diff_summary: Some("postgresql.nix: +8 -4 lines\nChanged: max_connections, shared_buffers".to_string()),
         },
         SystemCommitHistory {
-            hash: "d4e5f6789012345678901234567890123abcdefg".to_string(),
+            hash: "9f8e7d6c5b4a3210abcdef1234567890abcdef".to_string(),
+            message: "Rotate builder cache credentials".to_string(),
+            author: "carol".to_string(),
+            committed_at: now - Duration::days(2),
+            was_deployed: false,
+            deployed_at: None,
+            is_current: false,
+            is_ready_to_deploy: false,
+            diff_summary: Some("secrets.nix: +12 -5 lines\nRotated cache key".to_string()),
+        },
+        SystemCommitHistory {
+            hash: "8e7d6c5b4a3210abcdef1234567890abcdef12".to_string(),
+            message: "Enable auditd rules for privileged actions".to_string(),
+            author: "dana".to_string(),
+            committed_at: now - Duration::days(4),
+            was_deployed: false,
+            deployed_at: None,
+            is_current: false,
+            is_ready_to_deploy: false,
+            diff_summary: Some("auditd.nix: +20 -2 lines".to_string()),
+        },
+        SystemCommitHistory {
+            hash: "7d6c5b4a3210abcdef1234567890abcdef1234".to_string(),
             message: "Initial system configuration".to_string(),
             author: "alice".to_string(),
             committed_at: now - Duration::days(7),
-            was_deployed: true,
-            deployed_at: Some(now - Duration::days(7) + Duration::hours(1)),
+            was_deployed: false,
+            deployed_at: None,
             is_current: false,
             is_ready_to_deploy: false,
             diff_summary: None,
         },
     ]
+}
+
+fn mock_commit_history_for_system(system: &SystemDetail) -> Vec<SystemCommitHistory> {
+    use chrono::Duration;
+    let now = Utc::now();
+    let mut commits = base_commit_history(now);
+
+    if commits.is_empty() {
+        return commits;
+    }
+
+    let mut current_idx: Option<usize> = match system.deployment_status {
+        DeploymentStatus::UpToDate => Some(0),
+        DeploymentStatus::Behind => Some(2.min(commits.len() - 1)),
+        DeploymentStatus::Ahead => Some(0),
+        DeploymentStatus::NeverDeployed => None,
+        DeploymentStatus::NoCommitsAvailable => return Vec::new(),
+        DeploymentStatus::Unknown => Some(1.min(commits.len() - 1)),
+    };
+
+    if let Some(idx) = current_idx {
+        commits[idx].is_current = true;
+        commits[idx].was_deployed = true;
+        commits[idx].deployed_at = Some(commits[idx].committed_at + Duration::hours(1));
+
+        for i in (idx + 1)..commits.len() {
+            commits[i].was_deployed = true;
+            commits[i].deployed_at = Some(commits[i].committed_at + Duration::hours(1));
+        }
+    }
+
+    // Mark ready-to-deploy commit when pipeline is ready
+    if matches!(system.pipeline_stage, Some(PipelineStage::ReadyForDeploy)) {
+        let ready_idx = current_idx
+            .and_then(|idx| if idx > 0 { Some(idx - 1) } else { None })
+            .unwrap_or(0);
+        if ready_idx < commits.len() {
+            commits[ready_idx].is_ready_to_deploy = true;
+            commits[ready_idx].was_deployed = false;
+            commits[ready_idx].deployed_at = None;
+            commits[ready_idx].is_current = false;
+        }
+    }
+
+    commits
 }
 
 fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
