@@ -12,7 +12,7 @@ use serde_json::Value as JsonValue;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 #[cfg(target_arch = "wasm32")]
-use web_sys::Element;
+use web_sys::Element as DomElement;
 
 use crate::api::models::{
     BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
@@ -22,8 +22,6 @@ use crate::api::models::{
 use crate::components::layout::Card;
 use crate::theme;
 use crate::views::systems_list::{mock_system_detail_by_id, mock_system_details};
-#[cfg(target_arch = "wasm32")]
-use wasm_bindgen::JsValue;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
@@ -1296,7 +1294,7 @@ fn PolicyTab(system: SystemDetail) -> Element {
 fn PolicyEditor(policy_text: Signal<String>) -> Element {
     rsx! {
         textarea {
-            class: "w-full min-h-[80vh] bg-gray-950 text-gray-100 font-mono text-sm rounded-lg border border-gray-800 p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/40 leading-5",
+            class: "w-full min-h-[85vh] bg-gray-950 text-gray-100 font-mono text-sm rounded-lg border border-gray-800 p-4 resize-none focus:outline-none focus:ring-2 focus:ring-blue-500/40 leading-5",
             value: "{policy_text}",
             oninput: move |event| policy_text.set(event.value()),
             spellcheck: "false",
@@ -1363,7 +1361,7 @@ fn highlight_policy_block(element_id: &str) {
     let Ok(highlight_fn) = highlight_fn.dyn_into::<js_sys::Function>() else {
         return;
     };
-    let element: Element = element;
+    let element: DomElement = element;
     let _ = highlight_fn.call1(&hljs, &element);
 }
 
