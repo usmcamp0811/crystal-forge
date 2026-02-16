@@ -6,10 +6,16 @@ use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{window, Node};
 
-use crate::api::models::{CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemSummary};
+use crate::api::models::{
+    CveSummary, DeploymentStatus, FlakeSummary, HealthStatus, PipelineStage, SystemDetail,
+    SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, SystemSummary,
+};
 use crate::components::layout::Card;
 use crate::components::system::SystemCard;
+use crate::routes::Route;
 use crate::theme;
+use chrono::{Duration, TimeZone, Utc};
+use uuid::Uuid;
 
 const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
 
@@ -250,6 +256,7 @@ fn FiltersBar(
 
 #[component]
 fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
+    let navigator = use_navigator();
     let mut sort_column = use_signal(|| None::<SortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
 
