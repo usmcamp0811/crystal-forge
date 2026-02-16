@@ -17,6 +17,13 @@ enum SystemsViewMode {
     Cards,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FilterDropdown {
+    Environment,
+    Health,
+    Deployment,
+}
+
 impl SystemsViewMode {
     fn from_storage(value: Option<String>) -> Self {
         match value.as_deref() {
@@ -51,6 +58,7 @@ pub fn SystemsListView() -> Element {
     let environment_filter = use_signal(Vec::<String>::new);
     let health_filter = use_signal(Vec::<HealthStatus>::new);
     let deployment_filter = use_signal(Vec::<DeploymentStatus>::new);
+    let open_dropdown = use_signal(|| None::<FilterDropdown>);
 
     let mock_systems = mock_systems();
 
@@ -88,6 +96,7 @@ pub fn SystemsListView() -> Element {
                 environment_filter: environment_filter,
                 health_filter: health_filter,
                 deployment_filter: deployment_filter,
+                open_dropdown: open_dropdown,
             }
 
             if filtered_systems.is_empty() {
@@ -141,6 +150,7 @@ fn FiltersBar(
     environment_filter: Signal<Vec<String>>,
     health_filter: Signal<Vec<HealthStatus>>,
     deployment_filter: Signal<Vec<DeploymentStatus>>,
+    open_dropdown: Signal<Option<FilterDropdown>>,
 ) -> Element {
     rsx! {
         div {
@@ -153,9 +163,19 @@ fn FiltersBar(
                 value: "{search.read()}",
                 oninput: move |evt| search.set(evt.value()),
             }
-            EnvironmentFilterDropdown { environments, selected: environment_filter }
-            HealthFilterDropdown { selected: health_filter }
-            DeploymentFilterDropdown { selected: deployment_filter }
+            EnvironmentFilterDropdown {
+                environments,
+                selected: environment_filter,
+                open_dropdown: open_dropdown,
+            }
+            HealthFilterDropdown {
+                selected: health_filter,
+                open_dropdown: open_dropdown,
+            }
+            DeploymentFilterDropdown {
+                selected: deployment_filter,
+                open_dropdown: open_dropdown,
+            }
         }
     }
 }
@@ -284,9 +304,13 @@ fn matches_deployment(system: &SystemSummary, filters: &[DeploymentStatus]) -> b
 }
 
 #[component]
-fn EnvironmentFilterDropdown(environments: Vec<String>, selected: Signal<Vec<String>>) -> Element {
-    let mut open = use_signal(|| false);
+fn EnvironmentFilterDropdown(
+    environments: Vec<String>,
+    selected: Signal<Vec<String>>,
+    open_dropdown: Signal<Option<FilterDropdown>>,
+) -> Element {
     let label = format_multi_label(&selected.read(), "All environments");
+    let is_open = *open_dropdown.read() == Some(FilterDropdown::Environment);
 
     rsx! {
         div {
@@ -294,11 +318,12 @@ fn EnvironmentFilterDropdown(environments: Vec<String>, selected: Signal<Vec<Str
             button {
                 class: "w-full flex items-center justify-between rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                 onclick: move |_| {
-                    let next = !*open.read();
-                    open.set(next);
+                    if is_open {
+                        open_dropdown.set(None);
+                    } else {
+                        open_dropdown.set(Some(FilterDropdown::Environment));
+                    }
                 },
-
-
                 span { "{label}" }
                 svg {
                     class: "w-4 h-4",
@@ -309,14 +334,14 @@ fn EnvironmentFilterDropdown(environments: Vec<String>, selected: Signal<Vec<Str
                 }
             }
 
-            if open() {
+            if is_open {
                 div {
                     class: "absolute left-0 right-0 mt-1 rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl z-[3000]",
                     button {
                         class: "w-full text-left px-3 py-2 text-sm hover:bg-gray-700",
                         onclick: move |_| {
                             selected.set(Vec::new());
-                            open.set(false);
+                            open_dropdown.set(None);
                         },
                         "All environments"
                     }
@@ -362,10 +387,13 @@ fn EnvironmentFilterDropdown(environments: Vec<String>, selected: Signal<Vec<Str
 }
 
 #[component]
-fn HealthFilterDropdown(selected: Signal<Vec<HealthStatus>>) -> Element {
-    let mut open = use_signal(|| false);
+fn HealthFilterDropdown(
+    selected: Signal<Vec<HealthStatus>>,
+    open_dropdown: Signal<Option<FilterDropdown>>,
+) -> Element {
     let label = format_status_label(&selected.read());
     let options = vec![HealthStatus::Healthy, HealthStatus::Warning, HealthStatus::Critical, HealthStatus::Offline];
+    let is_open = *open_dropdown.read() == Some(FilterDropdown::Health);
 
     rsx! {
         div {
@@ -373,8 +401,11 @@ fn HealthFilterDropdown(selected: Signal<Vec<HealthStatus>>) -> Element {
             button {
                 class: "w-full flex items-center justify-between rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                 onclick: move |_| {
-                    let next = !*open.read();
-                    open.set(next);
+                    if is_open {
+                        open_dropdown.set(None);
+                    } else {
+                        open_dropdown.set(Some(FilterDropdown::Health));
+                    }
                 },
                 span { "{label}" }
                 svg {
@@ -385,14 +416,14 @@ fn HealthFilterDropdown(selected: Signal<Vec<HealthStatus>>) -> Element {
                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M19 9l-7 7-7-7" }
                 }
             }
-            if open() {
+            if is_open {
                 div {
                     class: "absolute left-0 right-0 mt-1 rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl z-[3000]",
                     button {
                         class: "w-full text-left px-3 py-2 text-sm hover:bg-gray-700",
                         onclick: move |_| {
                             selected.set(Vec::new());
-                            open.set(false);
+                            open_dropdown.set(None);
                         },
                         "All health"
                     }
@@ -438,8 +469,10 @@ fn HealthFilterDropdown(selected: Signal<Vec<HealthStatus>>) -> Element {
 }
 
 #[component]
-fn DeploymentFilterDropdown(selected: Signal<Vec<DeploymentStatus>>) -> Element {
-    let mut open = use_signal(|| false);
+fn DeploymentFilterDropdown(
+    selected: Signal<Vec<DeploymentStatus>>,
+    open_dropdown: Signal<Option<FilterDropdown>>,
+) -> Element {
     let label = format_deployment_label(&selected.read());
     let options = vec![
         DeploymentStatus::UpToDate,
@@ -448,6 +481,7 @@ fn DeploymentFilterDropdown(selected: Signal<Vec<DeploymentStatus>>) -> Element 
         DeploymentStatus::NeverDeployed,
         DeploymentStatus::Unknown,
     ];
+    let is_open = *open_dropdown.read() == Some(FilterDropdown::Deployment);
 
     rsx! {
         div {
@@ -455,8 +489,11 @@ fn DeploymentFilterDropdown(selected: Signal<Vec<DeploymentStatus>>) -> Element 
             button {
                 class: "w-full flex items-center justify-between rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                 onclick: move |_| {
-                    let next = !*open.read();
-                    open.set(next);
+                    if is_open {
+                        open_dropdown.set(None);
+                    } else {
+                        open_dropdown.set(Some(FilterDropdown::Deployment));
+                    }
                 },
                 span { "{label}" }
                 svg {
@@ -467,14 +504,14 @@ fn DeploymentFilterDropdown(selected: Signal<Vec<DeploymentStatus>>) -> Element 
                     path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M19 9l-7 7-7-7" }
                 }
             }
-            if open() {
+            if is_open {
                 div {
                     class: "absolute left-0 right-0 mt-1 rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl z-[3000]",
                     button {
                         class: "w-full text-left px-3 py-2 text-sm hover:bg-gray-700",
                         onclick: move |_| {
                             selected.set(Vec::new());
-                            open.set(false);
+                            open_dropdown.set(None);
                         },
                         "All deployment"
                     }
