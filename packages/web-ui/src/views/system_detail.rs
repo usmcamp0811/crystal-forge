@@ -146,6 +146,7 @@ pub fn SystemDetailView(id: String) -> Element {
     rsx! {
         div {
             class: "space-y-6",
+            "data-testid": "system-detail",
 
             // Back link
             div {
