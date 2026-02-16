@@ -7,13 +7,13 @@ use crate::api::models::{
 };
 use crate::components::layout::Card;
 use crate::theme;
-use crate::views::systems_list::mock_system_detail_by_id;
+use crate::views::systems_list::{mock_system_detail_by_id, mock_system_details};
 
 /// The system detail page, reached via `/systems/:id`.
 #[component]
 pub fn SystemDetailView(id: String) -> Element {
     // TODO: Replace with real API call using use_resource + fetch_system()
-    let system = mock_system_detail_by_id(&id).unwrap_or_else(|| fallback_system_detail(&id));
+    let system = mock_system_detail_by_id(&id).unwrap_or_else(|| fallback_system_detail());
 
     let environment = system
         .environment
@@ -395,62 +395,52 @@ fn environment_style(environment: &str) -> EnvStyle {
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Mock Data
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn mock_system_detail(_id: &str) -> SystemDetail {
-    use chrono::{TimeZone, Utc};
-
-    SystemDetail {
-        id: uuid::Uuid::new_v4(),
-        hostname: "reckless".to_string(),
-        environment: Some("production".to_string()),
-        is_active: true,
-        deployment_policy: "Immediate".to_string(),
-        health_status: HealthStatus::Healthy,
-        deployment_status: DeploymentStatus::UpToDate,
-        pipeline_stage: None,
-        nixos_version: Some("25.11 (Xantusia)".to_string()),
-        kernel: Some("6.12.66".to_string()),
-        agent_version: Some("0.2.1".to_string()),
-        current_store_path: Some(
-            "/nix/store/m6wc1njr09pbpv49q60c1lwfsb84s953-nixos-system-reckless-25.11.20260121.04af6a5"
-                .to_string(),
-        ),
-        hardware: SystemHardwareInfo {
-            cpu_brand: Some("AMD Ryzen 9 7950X3D 16-Core Processor".to_string()),
-            cpu_cores: Some(32),
-            memory_gb: Some(128.0),
-            uptime_secs: Some(177536),
-            board_serial: Some("230215915300552".to_string()),
-            bios_version: Some("1905".to_string()),
-        },
-        network: SystemNetworkInfo {
-            primary_ip: Some("10.8.0.176".to_string()),
-            primary_mac: Some("c8:7f:54:5d:ae:02".to_string()),
-            gateway_ip: Some("10.8.0.1".to_string()),
-        },
-        security: SystemSecurityInfo {
-            tpm_present: Some(true),
-            secure_boot_enabled: Some(false),
-            fips_mode: Some(false),
-            selinux_status: None,
-        },
-        cve_counts: CveSummary {
-            critical: 0,
-            high: 1,
-            medium: 4,
-            low: 12,
-        },
-        flake: Some(FlakeSummary {
-            id: 1,
-            name: "nixos-configs".to_string(),
-            repo_url: "https://github.com/example/nixos-configs".to_string(),
-            latest_commit: Some("04af6a5".to_string()),
-        }),
-        last_seen: Some(Utc.with_ymd_and_hms(2026, 2, 8, 15, 19, 29).unwrap()),
-        created_at: Utc.with_ymd_and_hms(2024, 1, 1, 0, 0, 0).unwrap(),
-        updated_at: Utc.with_ymd_and_hms(2026, 2, 8, 15, 19, 29).unwrap(),
-    }
+fn fallback_system_detail() -> SystemDetail {
+    mock_system_details()
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| SystemDetail {
+            id: uuid::Uuid::new_v4(),
+            hostname: "unknown".to_string(),
+            environment: None,
+            is_active: false,
+            deployment_policy: "Unknown".to_string(),
+            health_status: crate::api::models::HealthStatus::Offline,
+            deployment_status: crate::api::models::DeploymentStatus::Unknown,
+            pipeline_stage: None,
+            nixos_version: None,
+            kernel: None,
+            agent_version: None,
+            current_store_path: None,
+            hardware: SystemHardwareInfo {
+                cpu_brand: None,
+                cpu_cores: None,
+                memory_gb: None,
+                uptime_secs: None,
+                board_serial: None,
+                bios_version: None,
+            },
+            network: SystemNetworkInfo {
+                primary_ip: None,
+                primary_mac: None,
+                gateway_ip: None,
+            },
+            security: SystemSecurityInfo {
+                tpm_present: None,
+                secure_boot_enabled: None,
+                fips_mode: None,
+                selinux_status: None,
+            },
+            cve_counts: CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 0,
+                low: 0,
+            },
+            flake: None,
+            last_seen: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        })
 }
+
