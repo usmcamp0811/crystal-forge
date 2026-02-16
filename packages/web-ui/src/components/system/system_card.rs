@@ -37,7 +37,7 @@ pub fn SystemCard(system: SystemSummary) -> Element {
 
             // Status section
             div {
-                class: "px-5 py-3 bg-gray-800/50",
+                class: "px-6 py-3 bg-gray-800/50",
                 p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Status" }
                 div {
                     class: "flex flex-wrap gap-2",
@@ -48,26 +48,31 @@ pub fn SystemCard(system: SystemSummary) -> Element {
 
             // Details section
             div {
-                class: "px-5 py-3 bg-gray-900",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Details" }
+                class: "px-6 py-3 bg-gray-900",
+                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3", "Details" }
                 div {
-                    class: "flex flex-wrap gap-2 text-xs {theme::text::MUTED}",
-                    span { "{pipeline_label}" }
-                    span { "•" }
-                    span { "{primary_ip}" }
-                    span { "•" }
-                    span { "{deployment_label}" }
+                    class: "grid grid-cols-2 gap-3 text-sm",
+                    div {
+                        span { class: "text-gray-500 text-xs block mb-0.5", "IP Address" }
+                        span { class: "font-mono text-gray-200", "{primary_ip}" }
+                    }
+                    div {
+                        span { class: "text-gray-500 text-xs block mb-0.5", "Deploy Policy" }
+                        span { class: "text-gray-300", "{deployment_label}" }
+                    }
                     if let Some(nixos_version) = system.nixos_version {
-                        span { "•" }
-                        span { "NixOS {nixos_version}" }
+                        div {
+                            span { class: "text-gray-500 text-xs block mb-0.5", "Operating System" }
+                            span { class: "text-gray-200", "NixOS {nixos_version}" }
+                        }
                     }
                 }
             }
 
             // Vulnerabilities section
             div {
-                class: "px-5 py-3 bg-gray-800/50",
-                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Vulnerabilities" }
+                class: "px-6 py-3 bg-gray-800/50",
+                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3", "Vulnerabilities" }
                 CveSummaryRow { cve_counts: system.cve_counts }
             }
         }
