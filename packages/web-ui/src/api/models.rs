@@ -535,6 +535,9 @@ pub struct SystemCommitHistory {
     /// Whether this build is ready to deploy but not yet deployed.
     #[serde(default)]
     pub is_ready_to_deploy: bool,
+    /// Build status for this commit (queued/building/etc).
+    #[serde(default)]
+    pub build_status: Option<BuildStatus>,
     /// Config diff summary (e.g., "+5 -3 lines" or "nginx, redis changed").
     pub diff_summary: Option<String>,
 }

@@ -1,4 +1,3 @@
-
 <!-- BACKLOG.MD MCP GUIDELINES START -->
 
 <CRITICAL_INSTRUCTION>
@@ -17,6 +16,7 @@ This project uses Backlog.md MCP for all task and project management activities.
 - **When to read it**: BEFORE creating tasks, or when you're unsure whether to track work
 
 These guides cover:
+
 - Decision framework for when to create tasks
 - Search-first workflow to avoid duplicates
 - Links to detailed guides for task creation, execution, and finalization
@@ -26,7 +26,9 @@ You MUST read the overview resource to understand the complete workflow. The inf
 
 </CRITICAL_INSTRUCTION>
 
-<!-- BACKLOG.MD MCP GUIDELINES END -->
+<!--
+BACKLOG.MD MCP GUIDELINES END
+-->
 
 ---
 
@@ -50,12 +52,14 @@ Welcome to the Crystal Forge project! This document will help you understand the
 ## 🎯 Project Overview
 
 **Crystal Forge** is a NixOS fleet management system that enables:
+
 - Centralized management of NixOS systems
 - Automated deployments with rollback capabilities
 - Build orchestration and caching
 - CVE scanning and security monitoring
 
 **Tech Stack**:
+
 - **Language**: Rust (edition 2024, rustc 1.91.1)
 - **Database**: PostgreSQL (with SQLx, compile-time verified queries)
 - **Build System**: Nix (Snowfall Lib, nixpkgs release-25.11)
@@ -64,6 +68,7 @@ Welcome to the Crystal Forge project! This document will help you understand the
 - **Task Management**: Backlog.md CLI
 
 **Project Structure** (key directories):
+
 ```
 crystal-forge/
 ├── packages/default/          # Server, agent, builder, keygen (Rust)
@@ -102,14 +107,15 @@ Every change MUST be verified before it is considered complete. This is non-nego
 
 **Per-crate test expectations**:
 
-| Crate | Verification Command | Notes |
-|-------|---------------------|-------|
-| `packages/default` (lib) | `nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo test --lib"` | 35+ unit tests, SQLx offline mode |
+| Crate                       | Verification Command                                                                         | Notes                              |
+| --------------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------- |
+| `packages/default` (lib)    | `nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo test --lib"`         | 35+ unit tests, SQLx offline mode  |
 | `packages/default` (server) | `nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo check --bin server"` | Compile check (full test needs DB) |
-| `packages/web-ui` | `nix build .#checks.x86_64-linux.web-ui` | WASM build + output validation |
-| Full integration | `nix build .#checks.x86_64-linux.server` | NixOS VM test (slow, ~10min) |
+| `packages/web-ui`           | `nix build .#checks.x86_64-linux.web-ui`                                                     | WASM build + output validation     |
+| Full integration            | `nix build .#checks.x86_64-linux.server`                                                     | NixOS VM test (slow, ~10min)       |
 
 **Rules**:
+
 1. **New features MUST have corresponding tests** — or at minimum, the existing test suite must pass
 2. **Run verification before marking any task as Done** — no exceptions
 3. **If a check fails, fix it before moving on** — don't leave broken builds
@@ -175,20 +181,22 @@ backlog task edit TASK-X.Y --check-ac 1
 > 4. **DO** reference the new task in your notes if relevant
 >
 > **Example**: While fixing a deployment bug, you notice a typo in documentation:
+>
 > ```bash
 > # Create a new task for the typo
 > backlog task create "Fix typo in deployment documentation" \
 >   -d "Found typo in docs/deployment.md line 42 while working on TASK-1.6" \
 >   -l documentation,typo \
 >   --priority low
-> 
+>
 > # Add note to current task
 > backlog task edit TASK-1.6 --append-notes "Created TASK-X for documentation typo"
-> 
+>
 > # Continue with current task
 > ```
 >
 > **Why this matters**:
+>
 > - Keeps work focused and traceable
 > - Prevents scope creep
 > - Ensures nothing is forgotten
@@ -241,6 +249,7 @@ Closes: TASK-X.Y, TASK-X.Z
 **Types**: `fix`, `feat`, `refactor`, `docs`, `test`, `chore`, `perf`, `ci`
 
 **Example**:
+
 ```bash
 git commit -m "fix: add configurable deployment strategy with generation creation
 
@@ -258,6 +267,7 @@ Closes: TASK-1.1, TASK-1.2, TASK-1.3, TASK-1.4, TASK-1.5"
 ### Workflow Steps
 
 1. **Create feature branch** (one branch per task):
+
    ```bash
    git checkout refactor
    git pull origin refactor
@@ -267,18 +277,21 @@ Closes: TASK-1.1, TASK-1.2, TASK-1.3, TASK-1.4, TASK-1.5"
    **IMPORTANT**: Always create the branch off `refactor` when starting a task. All work for the task must happen on that branch and be reviewed before merging back to `refactor`.
 
 2. **Always `git add` new files immediately** after creating them:
+
    ```bash
    # Nix flake checks only see git-tracked files!
    git add packages/web-ui/src/new_file.rs
    ```
 
 3. **Make changes and commit**:
+
    ```bash
    git add <files>
    git commit -m "type: description"
    ```
 
 4. **Run verification** before considering work done:
+
    ```bash
    # See "Engineering Standards" section for per-crate commands
    nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo test --lib"
@@ -286,6 +299,7 @@ Closes: TASK-1.1, TASK-1.2, TASK-1.3, TASK-1.4, TASK-1.5"
    ```
 
 5. **STOP for review** — do NOT merge to `refactor` without user approval:
+
    ```bash
    git push origin feat/your-feature-name
    # Wait for user to review the branch
@@ -357,12 +371,14 @@ sqlx-prepare
 **CRITICAL**: This project uses SQLx with compile-time query verification.
 
 **What this means**:
+
 - `cargo test` and `cargo build` require a running PostgreSQL database
 - SQLx macros (`sqlx::query!`) verify SQL against the actual schema at compile time
 
 **Solutions**:
 
 1. **Start the database first**:
+
    ```bash
    nix develop
    db-only up
@@ -371,6 +387,7 @@ sqlx-prepare
    ```
 
 2. **Use offline mode** (if `.sqlx/` directory exists):
+
    ```bash
    SQLX_OFFLINE=true cargo test
    ```
@@ -383,11 +400,13 @@ sqlx-prepare
 ### Test Types
 
 1. **Unit Tests**: Test individual functions/modules
+
    ```bash
    cargo test --lib
    ```
 
 2. **Integration Tests**: Test full workflows
+
    ```bash
    cargo test --test integration_tests
    ```
@@ -405,6 +424,7 @@ sqlx-prepare
 **Problem**: `replace_file_content` fails with "target content not found"
 
 **Solution**:
+
 ```bash
 # Check exact whitespace
 sed -n 'START,ENDp' file.rs | cat -A
@@ -418,6 +438,7 @@ sed -n 'START,ENDp' file.rs | cat -A
 **Problem**: `error communicating with database: Connection refused`
 
 **Solution**:
+
 ```bash
 # Start PostgreSQL
 nix develop
@@ -432,6 +453,7 @@ sqlx-prepare
 **Problem**: `Could not find directory of OpenSSL installation`
 
 **Solution**:
+
 ```bash
 # Always use nix develop
 nix develop -c bash -c "cargo build"
@@ -444,6 +466,7 @@ nix develop -c bash -c "cargo build"
 **Problem**: Creating `.rs` files outside project structure fails
 
 **Solution**:
+
 - Work within existing project structure
 - Use `cargo test` with proper dependencies
 - Don't try to compile standalone files with external crates
@@ -453,6 +476,7 @@ nix develop -c bash -c "cargo build"
 **Problem**: Forgetting to update task status
 
 **Solution**:
+
 - Set a reminder to update tasks before ending work session
 - Use this checklist:
   - [ ] Move started tasks to "In Progress"
