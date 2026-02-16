@@ -62,9 +62,12 @@ let
           await assertTextVisible(page, 'Healthy', 'Healthy stat card');
           await assertVisible(page, "[data-testid='fleet-health-breakdown']", 'Fleet health breakdown');
           await assertVisible(page, "[data-testid='cve-summary']", 'CVE summary panel');
+          await assertVisible(page, "[data-testid='deployment-status']", 'Deployment status panel');
+          await assertVisible(page, "[data-testid='build-summary-panel']", 'Build summary panel');
+          await assertVisible(page, "[data-testid='build-queue']", 'Build queue panel');
           await assertVisible(page, "[data-testid='recent-deployments']", 'Recent deployments list');
           // Should show actual mock data values
-          await assertTextVisible(page, '54', 'Total systems count (54)');
+          await assertTextVisible(page, '21', 'Total systems count (21)');
           await assertTextVisible(page, 'atlas-01', 'Recent deployment hostname');
           // Flake commit timeline
           await assertVisible(page, "[data-testid='flake-timeline-widget']", 'Flake timeline widget');
@@ -100,6 +103,20 @@ let
           // Should show system hostnames in cards
           await assertTextVisible(page, 'atlas-01', 'First system in cards');
           await assertTextVisible(page, 'luna-02', 'Second system in cards');
+        }
+      },
+      {
+        path: '/systems/00000000-0000-0000-0000-000000000001',
+        name: 'system-detail',
+        desc: 'System detail page',
+        assertions: async (page) => {
+          await assertVisible(page, "[data-testid='system-detail']", 'System detail container');
+          await assertTextVisible(page, 'atlas-01', 'System hostname');
+          await assertTextVisible(page, 'Hardware', 'Hardware card');
+          await assertTextVisible(page, 'Network', 'Network card');
+          await assertTextVisible(page, 'Security', 'Security card');
+          await assertTextVisible(page, 'Vulnerabilities', 'Vulnerabilities card');
+          await assertTextVisible(page, 'Agent', 'Agent card');
         }
       },
       {
