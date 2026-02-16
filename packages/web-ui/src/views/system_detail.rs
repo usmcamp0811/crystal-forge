@@ -429,6 +429,11 @@ fn HistoryTab(commits: Vec<SystemCommitHistory>) -> Element {
                     div { class: "w-4 h-4 rounded-full bg-blue-500 ring-2 ring-blue-400" }
                     span { "Current" }
                 }
+                div {
+                    class: "flex items-center gap-2",
+                    div { class: "w-4 h-4 rounded-full bg-orange-500" }
+                    span { "Ready" }
+                }
             }
 
             // Git graph container - relative positioning for the continuous vertical line
@@ -471,12 +476,14 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
         "#10b981"
     } else if commit.was_deployed {
         "#3b82f6"
+    } else if commit.is_ready_to_deploy {
+        "#f97316"
     } else {
         "#1f2937"
     };
 
     // Border style - solid for deployed/current, dashed for skipped
-    let node_border = if !commit.is_current && !commit.was_deployed {
+    let node_border = if !commit.is_current && !commit.was_deployed && !commit.is_ready_to_deploy {
         "border-2 border-dashed border-gray-500"
     } else {
         "border-2 border-gray-950"
@@ -499,6 +506,8 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
         "bg-emerald-500"
     } else if commit.was_deployed {
         "bg-blue-500"
+    } else if commit.is_ready_to_deploy {
+        "bg-orange-500"
     } else {
         "bg-gray-600"
     };
@@ -575,6 +584,11 @@ fn CommitTimelineNode(commit: SystemCommitHistory, #[allow(unused)] is_first: bo
                             span {
                                 class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400",
                                 "Deployed"
+                            }
+                        } else if commit.is_ready_to_deploy {
+                            span {
+                                class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-orange-500/20 text-orange-400",
+                                "Ready"
                             }
                         } else {
                             span {
@@ -1463,6 +1477,7 @@ fn mock_commit_history() -> Vec<SystemCommitHistory> {
             was_deployed: true,
             deployed_at: Some(now - Duration::hours(1)),
             is_current: true,
+            is_ready_to_deploy: false,
             diff_summary: Some(
                 "nginx.nix: +15 -3 lines\nChanged: server blocks, upstream config".to_string(),
             ),
@@ -1475,6 +1490,7 @@ fn mock_commit_history() -> Vec<SystemCommitHistory> {
             was_deployed: false,
             deployed_at: None,
             is_current: false,
+            is_ready_to_deploy: true,
             diff_summary: Some(
                 "redis.nix: +45 lines (new file)\nservices.nix: +5 -1 lines".to_string(),
             ),
@@ -1487,6 +1503,7 @@ fn mock_commit_history() -> Vec<SystemCommitHistory> {
             was_deployed: true,
             deployed_at: Some(now - Duration::hours(20)),
             is_current: false,
+            is_ready_to_deploy: false,
             diff_summary: Some(
                 "postgresql.nix: +8 -4 lines\nChanged: max_connections, shared_buffers".to_string(),
             ),
@@ -1499,6 +1516,7 @@ fn mock_commit_history() -> Vec<SystemCommitHistory> {
             was_deployed: true,
             deployed_at: Some(now - Duration::days(7) + Duration::hours(1)),
             is_current: false,
+            is_ready_to_deploy: false,
             diff_summary: None,
         },
     ]

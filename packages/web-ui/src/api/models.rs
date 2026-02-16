@@ -532,6 +532,9 @@ pub struct SystemCommitHistory {
     pub deployed_at: Option<DateTime<Utc>>,
     /// Whether this is the currently running config on the system.
     pub is_current: bool,
+    /// Whether this build is ready to deploy but not yet deployed.
+    #[serde(default)]
+    pub is_ready_to_deploy: bool,
     /// Config diff summary (e.g., "+5 -3 lines" or "nginx, redis changed").
     pub diff_summary: Option<String>,
 }
