@@ -108,7 +108,7 @@ impl FlakesViewMode {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct FlakeListItem {
     id: i32,
     name: String,
