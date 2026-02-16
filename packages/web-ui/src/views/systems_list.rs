@@ -2,7 +2,9 @@
 
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
-use web_sys::window;
+use wasm_bindgen::prelude::Closure;
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 use crate::api::models::{CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemSummary};
 use crate::components::layout::Card;
@@ -47,6 +49,8 @@ pub fn SystemsListView() -> Element {
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| SystemsViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
+    let mut open_dropdown = use_signal(|| None::<FilterDropdown>);
+    let container_id = use_memo(|| format!("systems-filters-{}", uuid::Uuid::new_v4()));
 
     use_effect(move || {
         if let Some(mode) = query_view {
@@ -54,11 +58,49 @@ pub fn SystemsListView() -> Element {
             let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
         }
     });
+
+    {
+        let mut open_dropdown = open_dropdown.clone();
+        let container_id = container_id.clone();
+        use_effect(move || {
+            let Some(window) = window() else {
+                return;
+            };
+            let Some(document) = window.document() else {
+                return;
+            };
+            let document_for_listener = document.clone();
+            let handler = Closure::<dyn FnMut(_)>::new(move |event: web_sys::Event| {
+                if open_dropdown.read().is_none() {
+                    return;
+                }
+                let target = match event.target() {
+                    Some(target) => target,
+                    None => return,
+                };
+                let node: Node = match target.dyn_into() {
+                    Ok(node) => node,
+                    Err(_) => return,
+                };
+                let container_id = container_id.read();
+                if let Some(container) = document_for_listener.get_element_by_id(container_id.as_str()) {
+                    if !container.contains(Some(&node)) {
+                        open_dropdown.set(None);
+                    }
+                }
+            });
+            let _ = document.add_event_listener_with_callback(
+                "mousedown",
+                handler.as_ref().unchecked_ref(),
+            );
+            handler.forget();
+        });
+    }
+
     let search = use_signal(String::new);
     let environment_filter = use_signal(Vec::<String>::new);
     let health_filter = use_signal(Vec::<HealthStatus>::new);
     let deployment_filter = use_signal(Vec::<DeploymentStatus>::new);
-    let open_dropdown = use_signal(|| None::<FilterDropdown>);
 
     let mock_systems = mock_systems();
 
@@ -74,7 +116,8 @@ pub fn SystemsListView() -> Element {
 
     rsx! {
         div {
-            class: "space-y-6 relative",
+            class: "space-y-6",
+            id: "{container_id}",
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {

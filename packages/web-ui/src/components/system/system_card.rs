@@ -16,33 +16,59 @@ pub fn SystemCard(system: SystemSummary) -> Element {
         .unwrap_or("Unknown");
     let primary_ip = system.primary_ip.clone().unwrap_or_else(|| "-".to_string());
 
+    let deployment_label = deployment_policy_label(&system.deployment_policy);
+    let env_style = environment_style(&environment);
+
     rsx! {
         Link {
             to: Route::SystemDetailView { id: system.id.to_string() },
-            class: "block rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-6 shadow-sm hover:border-gray-600 transition",
+            class: "block rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm hover:border-gray-600 transition",
+
+            // Header section with environment tab
             div {
-                class: "flex items-center justify-between mb-4",
-                div {
-                    class: "space-y-1",
-                    h3 { class: "text-lg font-semibold", "{system.hostname}" }
-                    p { class: "text-xs {theme::text::MUTED}", "{environment} • {pipeline_label} • {primary_ip}" }
-                }
-                div {
-                    class: "text-xs {theme::text::MUTED}",
-                    "{system.deployment_policy}"
+                class: "flex items-center justify-between px-6 py-4 border-b border-gray-800",
+                style: "{env_style.header_bg}",
+                h3 { class: "text-lg font-semibold text-white pl-0.5", "{system.hostname}" }
+                span {
+                    class: "inline-flex items-center px-3 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
+                    "{environment}"
                 }
             }
 
+            // Status section
             div {
-                class: "flex flex-wrap gap-2 mb-4",
-                StatusBadge { label: system.health_status.label(), color_class: system.health_status.color_class(), bg_class: system.health_status.bg_class() }
-                StatusBadge { label: system.deployment_status.label(), color_class: system.deployment_status.color_class(), bg_class: system.deployment_status.bg_class() }
+                class: "px-5 py-3 bg-gray-800/50",
+                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Status" }
+                div {
+                    class: "flex flex-wrap gap-2",
+                    StatusBadge { label: system.health_status.label(), color_class: system.health_status.color_class(), bg_class: system.health_status.bg_class() }
+                    StatusBadge { label: system.deployment_status.label(), color_class: system.deployment_status.color_class(), bg_class: system.deployment_status.bg_class() }
+                }
             }
 
-            CveSummaryRow { cve_counts: system.cve_counts }
+            // Details section
+            div {
+                class: "px-5 py-3 bg-gray-900",
+                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Details" }
+                div {
+                    class: "flex flex-wrap gap-2 text-xs {theme::text::MUTED}",
+                    span { "{pipeline_label}" }
+                    span { "•" }
+                    span { "{primary_ip}" }
+                    span { "•" }
+                    span { "{deployment_label}" }
+                    if let Some(nixos_version) = system.nixos_version {
+                        span { "•" }
+                        span { "NixOS {nixos_version}" }
+                    }
+                }
+            }
 
-            if let Some(nixos_version) = system.nixos_version {
-                p { class: "mt-4 text-xs {theme::text::MUTED}", "NixOS {nixos_version}" }
+            // Vulnerabilities section
+            div {
+                class: "px-5 py-3 bg-gray-800/50",
+                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Vulnerabilities" }
+                CveSummaryRow { cve_counts: system.cve_counts }
             }
         }
     }
@@ -56,6 +82,45 @@ fn StatusBadge(label: &'static str, color_class: &'static str, bg_class: &'stati
             class: "inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium {color_class} {bg_class}",
             "{label}"
         }
+    }
+}
+
+fn deployment_policy_label(policy: &str) -> String {
+    match policy {
+        "Immediate" => "Auto-deploy: Immediate".to_string(),
+        "Boot Only" => "Auto-deploy: On reboot".to_string(),
+        _ => policy.to_string(),
+    }
+}
+
+struct EnvStyle {
+    chip_bg: &'static str,
+    chip_text: &'static str,
+    header_bg: &'static str,
+}
+
+fn environment_style(environment: &str) -> EnvStyle {
+    match environment.to_lowercase().as_str() {
+        "production" => EnvStyle {
+            chip_bg: "bg-emerald-500/20",
+            chip_text: "text-emerald-300",
+            header_bg: "background: rgba(6, 78, 59, 0.5);", // emerald-900 with alpha
+        },
+        "staging" => EnvStyle {
+            chip_bg: "bg-amber-500/20",
+            chip_text: "text-amber-300",
+            header_bg: "background: rgba(120, 53, 15, 0.5);", // amber-900 with alpha
+        },
+        "development" => EnvStyle {
+            chip_bg: "bg-blue-500/20",
+            chip_text: "text-blue-300",
+            header_bg: "background: rgba(30, 58, 138, 0.5);", // blue-900 with alpha
+        },
+        _ => EnvStyle {
+            chip_bg: "bg-gray-500/20",
+            chip_text: "text-gray-300",
+            header_bg: "background: rgba(31, 41, 55, 1);", // gray-800
+        },
     }
 }
 
