@@ -8,6 +8,7 @@ use crate::components::layout::AppShell;
 use crate::views::builds::BuildsView;
 use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
+use crate::views::flakes::FlakesView;
 use crate::views::not_found::NotFoundView;
 use crate::views::style_guide::StyleGuideView;
 use crate::views::system_detail::SystemDetailView;
@@ -29,6 +30,9 @@ pub enum Route {
     #[route("/systems/:id")]
     SystemDetailView { id: String },
 
+    #[route("/flakes")]
+    FlakesView {},
+
     #[route("/builds")]
     BuildsView {},
 
@@ -49,6 +53,7 @@ impl Route {
             Route::DashboardView { .. } => "Dashboard".to_string(),
             Route::SystemsView { .. } => "Systems".to_string(),
             Route::SystemDetailView { id } => format!("System: {id}"),
+            Route::FlakesView { .. } => "Flakes".to_string(),
             Route::BuildsView { .. } => "Builds".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::StyleGuideView { .. } => "Style Guide".to_string(),

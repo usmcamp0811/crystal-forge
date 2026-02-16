@@ -3,6 +3,8 @@
 pub mod builds;
 pub mod cves;
 pub mod dashboard;
+pub mod flakes;
+pub mod flakes_list;
 pub mod systems;
 pub mod systems_list;
 pub mod system_detail;

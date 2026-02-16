@@ -28,10 +28,48 @@ use web_sys::Notification;
 // Tab Enum
 // ─────────────────────────────────────────────────────────────────────────────
 
+const POLICY_TOML_SAMPLE: &str = r#"[[policy]]
+type = "require_crystal_forge_agent"
+strict = true
+
+[[policy]]
+type = "require_packages"
+packages = ["git", "vim"]
+strict = false
+
+[[policy]]
+type = "custom_check"
+expression = "(cfg.config.services.openssh.enable or false)"
+description = "SSH must be enabled"
+field_name = "sshEnabled"
+strict = true
+"#;
+
+const POLICY_JSON_SAMPLE: &str = r#"[
+  {
+    "type": "require_crystal_forge_agent",
+    "strict": true
+  },
+  {
+    "type": "require_packages",
+    "packages": ["git", "vim"],
+    "strict": false
+  },
+  {
+    "type": "custom_check",
+    "expression": "(cfg.config.services.openssh.enable or false)",
+    "description": "SSH must be enabled",
+    "field_name": "sshEnabled",
+    "strict": true
+  }
+]
+"#;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
     Overview,
     History,
+    Policy,
     Cves,
     Logs,
 }
@@ -41,6 +79,7 @@ impl Tab {
         match self {
             Self::Overview => "Overview",
             Self::History => "History",
+            Self::Policy => "Policy",
             Self::Cves => "CVEs",
             Self::Logs => "Logs",
         }
@@ -130,7 +169,14 @@ pub fn SystemDetailView(id: String) -> Element {
                     class: "space-y-2",
                     div {
                         class: "flex items-center gap-3",
-                        h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
+                        div {
+                            class: "flex flex-col",
+                            h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
+                            span {
+                                class: "text-xs {theme::text::MUTED}",
+                                "{system.id}"
+                            }
+                        }
                         span {
                             class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
                             "{environment}"
@@ -179,7 +225,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 div {
                     class: "flex items-center gap-2",
                     button {
-                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-colors {theme::interactive::PRIMARY_BTN} text-white",
+                        class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-purple-400/40 bg-purple-600/60 hover:bg-purple-600/80 hover:border-purple-300/60 shadow-sm shadow-purple-900/30",
                         disabled: *sync_in_progress.read(),
                         onclick: move |_| show_sync_dialog.set(true),
 
@@ -228,7 +274,7 @@ pub fn SystemDetailView(id: String) -> Element {
                 class: "border-b {theme::surface::CARD_BORDER}",
                 nav {
                     class: "flex gap-1",
-                    for tab in [Tab::Overview, Tab::History, Tab::Cves, Tab::Logs] {
+                    for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
@@ -267,11 +313,15 @@ pub fn SystemDetailView(id: String) -> Element {
                     Tab::History => rsx! {
                         HistoryTab {
                             commits: commit_history.clone(),
+                            deployment_policy: system.deployment_policy.clone(),
                             on_rollback: move |commit| {
                                 rollback_target.set(Some(commit));
                                 show_rollback_dialog.set(true);
                             }
                         }
+                    },
+                    Tab::Policy => rsx! {
+                        PolicyTab { system: system.clone() }
                     },
                     Tab::Cves => rsx! {
                         CvesTab {
@@ -447,7 +497,11 @@ fn OverviewTab(system: SystemDetail) -> Element {
 }
 
 #[component]
-fn HistoryTab(commits: Vec<SystemCommitHistory>, on_rollback: EventHandler<SystemCommitHistory>) -> Element {
+fn HistoryTab(
+    commits: Vec<SystemCommitHistory>,
+    deployment_policy: String,
+    on_rollback: EventHandler<SystemCommitHistory>,
+) -> Element {
     rsx! {
         div {
             class: "pt-6 flex flex-col max-h-[70vh] overflow-hidden",
@@ -457,23 +511,28 @@ fn HistoryTab(commits: Vec<SystemCommitHistory>, on_rollback: EventHandler<Syste
                 class: "flex items-center gap-6 mb-6 text-sm {theme::text::SECONDARY}",
                 div {
                     class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-emerald-500" }
-                    span { "Deployed" }
-                }
-                div {
-                    class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full border-2 border-dashed border-gray-500 bg-gray-900" }
-                    span { "Skipped" }
-                }
-                div {
-                    class: "flex items-center gap-2",
                     div { class: "w-4 h-4 rounded-full bg-blue-500 ring-2 ring-blue-400" }
                     span { "Current" }
                 }
                 div {
                     class: "flex items-center gap-2",
+                    div { class: "w-4 h-4 rounded-full bg-emerald-500" }
+                    span { "Deployed" }
+                }
+                div {
+                    class: "flex items-center gap-2",
                     div { class: "w-4 h-4 rounded-full bg-orange-500" }
-                    span { "Ready" }
+                    span { "Pending" }
+                }
+                div {
+                    class: "flex items-center gap-2",
+                    div { class: "w-4 h-4 rounded-full bg-amber-500" }
+                    span { "Not Ready" }
+                }
+                div {
+                    class: "flex items-center gap-2",
+                    div { class: "w-4 h-4 rounded-full border-2 border-dashed border-gray-500 bg-gray-900" }
+                    span { "Skipped" }
                 }
             }
 
@@ -501,6 +560,7 @@ fn HistoryTab(commits: Vec<SystemCommitHistory>, on_rollback: EventHandler<Syste
                             commit: commit.clone(),
                             is_first: idx == 0,
                             is_last: idx == commits.len() - 1,
+                            deployment_policy: deployment_policy.clone(),
                             on_rollback: on_rollback.clone()
                         }
                     }
@@ -516,6 +576,7 @@ fn CommitTimelineNode(
     commit: SystemCommitHistory,
     #[allow(unused)] is_first: bool,
     #[allow(unused)] is_last: bool,
+    deployment_policy: String,
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
@@ -523,7 +584,7 @@ fn CommitTimelineNode(
 
     let short_hash = commit.hash.chars().take(7).collect::<String>();
 
-    // Determine node color based on status - current is filled blue with glow
+    // Determine node color based on status - current is filled green with glow
     let node_color = if commit.is_current {
         "#10b981"
     } else if commit.was_deployed {
@@ -556,6 +617,23 @@ fn CommitTimelineNode(
     let build_status = commit
         .build_status
         .filter(|status| matches!(status, BuildStatus::Queued | BuildStatus::Building));
+
+    // Policy hint: only Immediate/Auto policies should auto-deploy on build.
+    // This keeps the UI intent when we later wire real policy evaluation.
+    let is_auto_policy = deployment_policy.to_lowercase() == "immediate";
+
+    let status_badge = if commit.is_current {
+        ("Current", "bg-blue-500/20 text-blue-400")
+    } else if commit.was_deployed {
+        ("Deployed", "bg-emerald-500/20 text-emerald-400")
+    } else if commit.is_ready_to_deploy {
+        // Built but not deployed yet.
+        ("Skipped", "bg-gray-700/50 text-gray-500")
+    } else if matches!(build_status, Some(BuildStatus::Building)) && is_auto_policy {
+        ("Pending", "bg-orange-500/20 text-orange-400")
+    } else {
+        ("Not Ready", "bg-amber-500/20 text-amber-400")
+    };
 
     let commit_for_action = commit.clone();
 
@@ -637,26 +715,9 @@ fn CommitTimelineNode(
                             class: "flex items-center gap-2 shrink-0",
 
                             // Status badge
-                            if commit.is_current {
-                                span {
-                                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-blue-500/20 text-blue-400",
-                                    "Current"
-                                }
-                            } else if commit.was_deployed {
-                                span {
-                                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400",
-                                    "Deployed"
-                                }
-                            } else if commit.is_ready_to_deploy {
-                                span {
-                                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-orange-500/20 text-orange-400",
-                                    "Ready"
-                                }
-                            } else {
-                                span {
-                                    class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-gray-700/50 text-gray-500",
-                                    "Skipped"
-                                }
+                            span {
+                                class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded {status_badge.1}",
+                                "{status_badge.0}"
                             }
 
                             // Build status badge
@@ -674,8 +735,8 @@ fn CommitTimelineNode(
                             // Rollback action (icon-only, hover)
                             if !commit.is_current {
                                 button {
-                                    class: "shrink-0 p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 transition-colors opacity-0 group-hover:opacity-100",
-                                    title: "Deploy this commit",
+                                    class: "shrink-0 p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 transition-colors opacity-40 group-hover:opacity-100",
+                                    title: "Deploy this commit (rollback)",
                                     onclick: move |_| on_rollback.call(commit_for_action.clone()),
                                     svg {
                                         class: "w-4 h-4",
@@ -686,7 +747,7 @@ fn CommitTimelineNode(
                                             stroke_linecap: "round",
                                             stroke_linejoin: "round",
                                             stroke_width: "2",
-                                            d: "M12 8v4l-3 3m6-11a9 9 0 11-9 9"
+                                            d: "M9 14l-4-4 4-4M5 10h7a4 4 0 014 4v1"
                                         }
                                     }
                                 }
@@ -794,10 +855,7 @@ fn CommitTimelineNode(
                             if let Some(ref diff) = commit.diff_summary {
                                 div {
                                     class: "px-4 pb-4",
-                                    pre {
-                                        class: "text-xs font-mono text-gray-400 bg-gray-950 p-3 rounded-lg overflow-x-auto whitespace-pre-wrap",
-                                        "{diff}"
-                                    }
+                                    DiffViewer { diff: diff.clone() }
                                 }
                             }
                         }
@@ -1098,6 +1156,110 @@ fn LogsTab(logs: Vec<DeploymentLogEntry>) -> Element {
                     class: "font-mono text-sm divide-y divide-gray-800/50 max-h-[400px] overflow-y-auto",
                     for log in logs.iter() {
                         LogLine { log: log.clone() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PolicyFormat {
+    Toml,
+    Json,
+}
+
+#[component]
+fn PolicyTab(system: SystemDetail) -> Element {
+    let mut format = use_signal(|| PolicyFormat::Toml);
+    let mut policy_text = use_signal(|| POLICY_TOML_SAMPLE.to_string());
+
+    let on_format_change = move |next: PolicyFormat| {
+        format.set(next);
+        let content = match next {
+            PolicyFormat::Toml => POLICY_TOML_SAMPLE,
+            PolicyFormat::Json => POLICY_JSON_SAMPLE,
+        };
+        policy_text.set(content.to_string());
+    };
+
+    rsx! {
+        div {
+            class: "pt-6 space-y-6",
+
+            div {
+                class: "flex flex-col gap-2",
+                h3 { class: "{theme::typography::SECTION_TITLE} text-white", "Deployment Policy" }
+                p {
+                    class: "text-sm {theme::text::SECONDARY}",
+                    "Define policy rules for {system.hostname}. Policies are parsed using the server model in deployment_policies.rs."
+                }
+            }
+
+            div {
+                class: "flex items-center gap-2",
+                button {
+                    class: "px-3 py-1.5 rounded-md text-sm border transition-colors",
+                    class: if *format.read() == PolicyFormat::Toml {
+                        "bg-blue-500/20 border-blue-500 text-blue-300"
+                    } else {
+                        "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
+                    },
+                    onclick: move |_| on_format_change(PolicyFormat::Toml),
+                    "TOML"
+                }
+                button {
+                    class: "px-3 py-1.5 rounded-md text-sm border transition-colors",
+                    class: if *format.read() == PolicyFormat::Json {
+                        "bg-blue-500/20 border-blue-500 text-blue-300"
+                    } else {
+                        "{theme::interactive::INPUT} {theme::surface::CARD_BORDER} {theme::text::SECONDARY}"
+                    },
+                    onclick: move |_| on_format_change(PolicyFormat::Json),
+                    "JSON"
+                }
+            }
+
+            Card {
+                title: Some("Policy Definition".to_string()),
+                children: rsx! {
+                    textarea {
+                        class: "w-full min-h-[280px] bg-gray-950 text-gray-100 font-mono text-xs rounded-lg border border-gray-800 p-4 focus:outline-none focus:ring-2 focus:ring-blue-500/40",
+                        value: "{policy_text}",
+                        oninput: move |event| policy_text.set(event.value()),
+                    }
+                    p {
+                        class: "mt-3 text-xs {theme::text::MUTED}",
+                        "This is a stub UI; saving will wire to policy evaluation and policy override behavior."
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn DiffViewer(diff: String) -> Element {
+    rsx! {
+        div {
+            class: "text-xs font-mono text-gray-300 bg-gray-950 p-3 rounded-lg overflow-x-auto whitespace-pre",
+            for line in diff.lines() {
+                {
+                    let class = if line.starts_with("+++") || line.starts_with("---") {
+                        "text-gray-400"
+                    } else if line.starts_with("@@") {
+                        "text-purple-300"
+                    } else if line.starts_with("+") {
+                        "text-emerald-300"
+                    } else if line.starts_with("-") {
+                        "text-red-300"
+                    } else if line.starts_with("diff --git") || line.starts_with("index ") {
+                        "text-blue-300"
+                    } else {
+                        "text-gray-300"
+                    };
+                    rsx! {
+                        div { class: "{class}", "{line}" }
                     }
                 }
             }
@@ -1662,7 +1824,7 @@ fn mock_commit_history_for_system(system: &SystemDetail) -> Vec<SystemCommitHist
             is_current: false,
             is_ready_to_deploy: false,
             build_status: commit.build_status,
-            diff_summary: None,
+            diff_summary: Some(diff_for_commit(&commit.hash, &commit.message)),
         })
         .collect();
 

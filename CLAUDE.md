@@ -11,6 +11,15 @@ This project uses Backlog.md MCP for all task and project management activities.
 - If your client supports MCP resources, read `backlog://workflow/overview` to understand when and how to use Backlog for this project.
 - If your client only supports tools or the above request fails, call `backlog.get_workflow_overview()` tool to load the tool-oriented overview (it lists the matching guide tools).
 
+- If you still cant get to the backlog use the cli here is a quickstart:
+  backlog task create "Title" -d "Description" Create a new task
+  backlog task list --plain List tasks (plain text)
+  backlog board Open the TUI Kanban board
+  backlog browser Start the web UI
+  backlog overview Show project statistics
+
+  Docs: https://backlog.md
+
 - **First time working here?** Read the overview resource IMMEDIATELY to learn the workflow
 - **Already familiar?** You should have the overview cached ("## Backlog.md Overview (MCP)")
 - **When to read it**: BEFORE creating tasks, or when you're unsure whether to track work
