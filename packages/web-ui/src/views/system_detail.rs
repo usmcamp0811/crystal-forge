@@ -6,7 +6,7 @@
 //! - CVEs: Expandable vulnerability list
 //! - Logs: Recent deployment logs
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use dioxus::prelude::*;
 use serde_json::Value as JsonValue;
 #[cfg(target_arch = "wasm32")]
@@ -21,7 +21,7 @@ use crate::api::models::{
 };
 use crate::components::layout::Card;
 use crate::theme;
-use crate::views::systems_list::{mock_system_detail_by_id, mock_system_details};
+use crate::views::systems_list::mock_system_detail_by_id;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
@@ -1399,7 +1399,6 @@ fn highlight_policy_block(element_id: &str) {
     let Ok(highlight_fn) = highlight_fn.dyn_into::<js_sys::Function>() else {
         return;
     };
-    let element: DomElement = element;
     let _ = highlight_fn.call1(&hljs, &element);
 }
 
