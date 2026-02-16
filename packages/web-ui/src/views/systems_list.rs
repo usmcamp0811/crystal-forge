@@ -243,11 +243,12 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                         thead {
                             class: "{theme::surface::SUBTLE_BG}",
                             tr {
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER}", "Hostname" }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER}", "Environment" }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER}", "Health" }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER}", "Deployment" }
-                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER}", "CVEs" }
+                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "Hostname" } }
+                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "IP" } }
+                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "Environment" } }
+                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "Health" } }
+                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "Deployment" } }
+                                th { class: "{theme::spacing::TABLE_CELL} {theme::typography::TABLE_HEADER} text-left", div { class: "flex items-center", "CVEs" } }
                             }
                         }
                         tbody {
@@ -256,6 +257,10 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                                 tr {
                                     class: "hover:bg-gray-900/60 transition",
                                     td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{system.hostname}" }
+                                    td {
+                                        class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono",
+                                        "{ip_label(&system)}"
+                                    }
                                     td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environment_label(&system)}" }
                                     td { class: "{theme::spacing::TABLE_CELL}",
                                         span { class: "text-xs {system.health_status.color_class()}", "{system.health_status.label()}" }
@@ -302,6 +307,13 @@ fn environment_label(system: &SystemSummary) -> String {
         .environment
         .clone()
         .unwrap_or_else(|| "Unknown".to_string())
+}
+
+fn ip_label(system: &SystemSummary) -> String {
+    system
+        .primary_ip
+        .clone()
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn matches_environment(system: &SystemSummary, filter: &str) -> bool {
@@ -364,6 +376,7 @@ fn mock_systems() -> Vec<SystemSummary> {
             id: uuid::Uuid::new_v4(),
             hostname: "atlas-01".to_string(),
             environment: Some("production".to_string()),
+            primary_ip: Some("10.42.1.12".to_string()),
             health_status: HealthStatus::Healthy,
             deployment_status: DeploymentStatus::UpToDate,
             pipeline_stage: Some(PipelineStage::BuildComplete),
@@ -381,6 +394,7 @@ fn mock_systems() -> Vec<SystemSummary> {
             id: uuid::Uuid::new_v4(),
             hostname: "luna-02".to_string(),
             environment: Some("staging".to_string()),
+            primary_ip: Some("10.42.2.22".to_string()),
             health_status: HealthStatus::Warning,
             deployment_status: DeploymentStatus::Behind,
             pipeline_stage: Some(PipelineStage::ReadyForDeploy),
@@ -398,6 +412,7 @@ fn mock_systems() -> Vec<SystemSummary> {
             id: uuid::Uuid::new_v4(),
             hostname: "orion-03".to_string(),
             environment: Some("production".to_string()),
+            primary_ip: Some("10.42.1.44".to_string()),
             health_status: HealthStatus::Critical,
             deployment_status: DeploymentStatus::Behind,
             pipeline_stage: Some(PipelineStage::Building),
@@ -415,6 +430,7 @@ fn mock_systems() -> Vec<SystemSummary> {
             id: uuid::Uuid::new_v4(),
             hostname: "vega-04".to_string(),
             environment: Some("development".to_string()),
+            primary_ip: Some("10.42.3.18".to_string()),
             health_status: HealthStatus::Offline,
             deployment_status: DeploymentStatus::NeverDeployed,
             pipeline_stage: Some(PipelineStage::DryRun),
@@ -432,6 +448,7 @@ fn mock_systems() -> Vec<SystemSummary> {
             id: uuid::Uuid::new_v4(),
             hostname: "nova-05".to_string(),
             environment: Some("staging".to_string()),
+            primary_ip: Some("10.42.2.31".to_string()),
             health_status: HealthStatus::Healthy,
             deployment_status: DeploymentStatus::Ahead,
             pipeline_stage: Some(PipelineStage::ReadyForBuild),
@@ -444,7 +461,7 @@ fn mock_systems() -> Vec<SystemSummary> {
             nixos_version: Some("24.05".to_string()),
             last_seen: None,
             deployment_policy: "Immediate".to_string(),
-        },
+        }
     ]
 }
 

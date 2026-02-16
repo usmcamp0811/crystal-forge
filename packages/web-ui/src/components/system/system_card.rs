@@ -14,6 +14,7 @@ pub fn SystemCard(system: SystemSummary) -> Element {
         .pipeline_stage
         .map(|stage| stage.label())
         .unwrap_or("Unknown");
+    let primary_ip = system.primary_ip.clone().unwrap_or_else(|| "-".to_string());
 
     rsx! {
         Link {
@@ -24,7 +25,7 @@ pub fn SystemCard(system: SystemSummary) -> Element {
                 div {
                     class: "space-y-1",
                     h3 { class: "text-lg font-semibold", "{system.hostname}" }
-                    p { class: "text-xs {theme::text::MUTED}", "{environment} • {pipeline_label}" }
+                    p { class: "text-xs {theme::text::MUTED}", "{environment} • {pipeline_label} • {primary_ip}" }
                 }
                 div {
                     class: "text-xs {theme::text::MUTED}",
