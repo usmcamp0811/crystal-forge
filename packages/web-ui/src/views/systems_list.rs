@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
+use std::rc::Rc;
 use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 use web_sys::{window, Node};
@@ -81,6 +82,7 @@ pub fn SystemsListView() -> Element {
     let query_view = prefers_view_from_query();
     let mut open_dropdown = use_signal(|| None::<FilterDropdown>);
     let container_id = use_memo(|| format!("systems-filters-{}", uuid::Uuid::new_v4()));
+    let container_id_value = Rc::new(container_id.read().clone());
 
     use_effect(move || {
         if let Some(mode) = query_view {
@@ -91,7 +93,7 @@ pub fn SystemsListView() -> Element {
 
     {
         let mut open_dropdown = open_dropdown.clone();
-        let container_id = container_id.clone();
+        let container_id_value = container_id_value.clone();
         use_effect(move || {
             let Some(window) = window() else {
                 return;
@@ -100,6 +102,7 @@ pub fn SystemsListView() -> Element {
                 return;
             };
             let document_for_listener = document.clone();
+            let container_id_value = container_id_value.clone();
             let handler = Closure::<dyn FnMut(_)>::new(move |event: web_sys::Event| {
                 if open_dropdown.read().is_none() {
                     return;
@@ -112,9 +115,8 @@ pub fn SystemsListView() -> Element {
                     Ok(node) => node,
                     Err(_) => return,
                 };
-                let container_id = container_id.read();
                 if let Some(container) =
-                    document_for_listener.get_element_by_id(container_id.as_str())
+                    document_for_listener.get_element_by_id(container_id_value.as_str())
                 {
                     if !container.contains(Some(&node)) {
                         open_dropdown.set(None);
