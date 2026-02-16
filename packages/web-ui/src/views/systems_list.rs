@@ -363,7 +363,10 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                             class: "divide-y {theme::surface::DIVIDER}",
                             for system in sorted_systems {
                                 tr {
-                                    class: "hover:bg-gray-900/60 transition",
+                                    class: "hover:bg-gray-900/60 transition cursor-pointer",
+                                    onclick: move |_| {
+                                        navigator.push(Route::SystemDetailView { id: system.id.to_string() });
+                                    },
                                     td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{system.hostname}" }
                                     td {
                                         class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono",
