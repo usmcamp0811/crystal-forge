@@ -287,7 +287,7 @@ pub struct SystemSummary {
 }
 
 /// Full system representation for the detail view.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemDetail {
     pub id: Uuid,
     pub hostname: String,
@@ -312,7 +312,7 @@ pub struct SystemDetail {
 }
 
 /// Hardware information subset for system detail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemHardwareInfo {
     pub cpu_brand: Option<String>,
     pub cpu_cores: Option<i32>,
@@ -323,7 +323,7 @@ pub struct SystemHardwareInfo {
 }
 
 /// Network information subset for system detail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemNetworkInfo {
     pub primary_ip: Option<String>,
     pub primary_mac: Option<String>,
@@ -331,7 +331,7 @@ pub struct SystemNetworkInfo {
 }
 
 /// Security posture subset for system detail.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemSecurityInfo {
     pub tpm_present: Option<bool>,
     pub secure_boot_enabled: Option<bool>,
