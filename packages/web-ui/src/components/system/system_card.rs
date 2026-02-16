@@ -19,7 +19,7 @@ pub fn SystemCard(system: SystemSummary) -> Element {
     rsx! {
         Link {
             to: Route::SystemDetailView { id: system.id.to_string() },
-            class: "block rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-6 shadow-sm hover:border-gray-600 hover:-translate-y-0.5 transition",
+            class: "block rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-6 shadow-sm hover:border-gray-600 transition",
             div {
                 class: "flex items-center justify-between mb-4",
                 div {

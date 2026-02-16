@@ -33,49 +33,6 @@ impl SystemsViewMode {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StatusFilter {
-    All,
-    Healthy,
-    Warning,
-    Critical,
-    Offline,
-}
-
-impl StatusFilter {
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Healthy => "Healthy",
-            Self::Warning => "Warning",
-            Self::Critical => "Critical",
-            Self::Offline => "Offline",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DeploymentFilter {
-    All,
-    UpToDate,
-    Behind,
-    Ahead,
-    NeverDeployed,
-    Unknown,
-}
-
-impl DeploymentFilter {
-    fn label(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::UpToDate => "Up to Date",
-            Self::Behind => "Behind",
-            Self::Ahead => "Ahead",
-            Self::NeverDeployed => "Never Deployed",
-            Self::Unknown => "Unknown",
-        }
-    }
-}
 
 /// Systems list with toggles and filters.
 #[component]
@@ -91,25 +48,25 @@ pub fn SystemsListView() -> Element {
         }
     });
     let search = use_signal(String::new);
-    let environment_filter = use_signal(String::new);
-    let health_filter = use_signal(|| StatusFilter::All);
-    let deployment_filter = use_signal(|| DeploymentFilter::All);
+    let environment_filter = use_signal(Vec::<String>::new);
+    let health_filter = use_signal(Vec::<HealthStatus>::new);
+    let deployment_filter = use_signal(Vec::<DeploymentStatus>::new);
 
     let mock_systems = mock_systems();
+
+    let environments = unique_environments(&mock_systems);
 
     let filtered_systems: Vec<SystemSummary> = mock_systems
         .into_iter()
         .filter(|system| matches_environment(system, &environment_filter.read()))
-        .filter(|system| matches_health(system, *health_filter.read()))
-        .filter(|system| matches_deployment(system, *deployment_filter.read()))
+        .filter(|system| matches_health(system, &health_filter.read()))
+        .filter(|system| matches_deployment(system, &deployment_filter.read()))
         .filter(|system| matches_search(system, &search.read()))
         .collect();
 
-    let environments = unique_environments(&filtered_systems);
-
     rsx! {
         div {
-            class: "space-y-6",
+            class: "space-y-6 relative",
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {
@@ -181,13 +138,14 @@ fn ViewToggle(view_mode: SystemsViewMode, on_change: EventHandler<SystemsViewMod
 fn FiltersBar(
     environments: Vec<String>,
     search: Signal<String>,
-    environment_filter: Signal<String>,
-    health_filter: Signal<StatusFilter>,
-    deployment_filter: Signal<DeploymentFilter>,
+    environment_filter: Signal<Vec<String>>,
+    health_filter: Signal<Vec<HealthStatus>>,
+    deployment_filter: Signal<Vec<DeploymentStatus>>,
 ) -> Element {
     rsx! {
         div {
-            class: "grid grid-cols-1 lg:grid-cols-4 gap-4",
+            class: "relative z-[2000] grid grid-cols-1 lg:grid-cols-4 gap-4",
+            style: "position: sticky; top: 0;",
             input {
                 class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                 r#type: "search",
@@ -195,36 +153,9 @@ fn FiltersBar(
                 value: "{search.read()}",
                 oninput: move |evt| search.set(evt.value()),
             }
-            select {
-                class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                value: "{environment_filter}",
-                onchange: move |evt| environment_filter.set(evt.value()),
-                option { value: "", "All environments" }
-                for environment in environments {
-                    option { value: "{environment}", "{environment}" }
-                }
-            }
-            select {
-                class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                value: "{health_filter.read().label()}",
-                onchange: move |evt| health_filter.set(parse_health_filter(&evt.value())),
-                option { value: "All", "All health" }
-                option { value: "Healthy", "Healthy" }
-                option { value: "Warning", "Warning" }
-                option { value: "Critical", "Critical" }
-                option { value: "Offline", "Offline" }
-            }
-            select {
-                class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
-                value: "{deployment_filter.read().label()}",
-                onchange: move |evt| deployment_filter.set(parse_deployment_filter(&evt.value())),
-                option { value: "All", "All deployment" }
-                option { value: "Up to Date", "Up to Date" }
-                option { value: "Behind", "Behind" }
-                option { value: "Ahead", "Ahead" }
-                option { value: "Never Deployed", "Never Deployed" }
-                option { value: "Unknown", "Unknown" }
-            }
+            EnvironmentFilterDropdown { environments, selected: environment_filter }
+            HealthFilterDropdown { selected: health_filter }
+            DeploymentFilterDropdown { selected: deployment_filter }
         }
     }
 }
@@ -281,27 +212,6 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
     }
 }
 
-fn parse_health_filter(value: &str) -> StatusFilter {
-    match value {
-        "Healthy" => StatusFilter::Healthy,
-        "Warning" => StatusFilter::Warning,
-        "Critical" => StatusFilter::Critical,
-        "Offline" => StatusFilter::Offline,
-        _ => StatusFilter::All,
-    }
-}
-
-fn parse_deployment_filter(value: &str) -> DeploymentFilter {
-    match value {
-        "Up to Date" => DeploymentFilter::UpToDate,
-        "Behind" => DeploymentFilter::Behind,
-        "Ahead" => DeploymentFilter::Ahead,
-        "Never Deployed" => DeploymentFilter::NeverDeployed,
-        "Unknown" => DeploymentFilter::Unknown,
-        _ => DeploymentFilter::All,
-    }
-}
-
 fn environment_label(system: &SystemSummary) -> String {
     system
         .environment
@@ -316,37 +226,299 @@ fn ip_label(system: &SystemSummary) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn matches_environment(system: &SystemSummary, filter: &str) -> bool {
-    if filter.is_empty() {
+fn format_multi_label(values: &[String], placeholder: &str) -> String {
+    if values.is_empty() {
+        placeholder.to_string()
+    } else if values.len() == 1 {
+        values[0].clone()
+    } else {
+        format!("{} selected", values.len())
+    }
+}
+
+fn format_status_label(values: &[HealthStatus]) -> String {
+    if values.is_empty() {
+        "All health".to_string()
+    } else if values.len() == 1 {
+        values[0].label().to_string()
+    } else {
+        format!("{} selected", values.len())
+    }
+}
+
+fn format_deployment_label(values: &[DeploymentStatus]) -> String {
+    if values.is_empty() {
+        "All deployment".to_string()
+    } else if values.len() == 1 {
+        values[0].label().to_string()
+    } else {
+        format!("{} selected", values.len())
+    }
+}
+
+fn matches_environment(system: &SystemSummary, filters: &[String]) -> bool {
+    if filters.is_empty() {
         return true;
     }
 
     system
         .environment
         .as_deref()
-        .is_some_and(|env| env.eq_ignore_ascii_case(filter))
+        .is_some_and(|env| filters.iter().any(|filter| env.eq_ignore_ascii_case(filter)))
 }
 
-fn matches_health(system: &SystemSummary, filter: StatusFilter) -> bool {
-    match filter {
-        StatusFilter::All => true,
-        StatusFilter::Healthy => system.health_status == HealthStatus::Healthy,
-        StatusFilter::Warning => system.health_status == HealthStatus::Warning,
-        StatusFilter::Critical => system.health_status == HealthStatus::Critical,
-        StatusFilter::Offline => system.health_status == HealthStatus::Offline,
+fn matches_health(system: &SystemSummary, filters: &[HealthStatus]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+
+    filters.contains(&system.health_status)
+}
+
+fn matches_deployment(system: &SystemSummary, filters: &[DeploymentStatus]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+
+    filters.contains(&system.deployment_status)
+}
+
+#[component]
+fn EnvironmentFilterDropdown(environments: Vec<String>, selected: Signal<Vec<String>>) -> Element {
+    let mut open = use_signal(|| false);
+    let label = format_multi_label(&selected.read(), "All environments");
+
+    rsx! {
+        div {
+            class: "relative",
+            button {
+                class: "w-full flex items-center justify-between rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                onclick: move |_| {
+                    let next = !*open.read();
+                    open.set(next);
+                },
+
+
+                span { "{label}" }
+                svg {
+                    class: "w-4 h-4",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M19 9l-7 7-7-7" }
+                }
+            }
+
+            if open() {
+                div {
+                    class: "absolute left-0 right-0 mt-1 rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl z-[3000]",
+                    button {
+                        class: "w-full text-left px-3 py-2 text-sm hover:bg-gray-700",
+                        onclick: move |_| {
+                            selected.set(Vec::new());
+                            open.set(false);
+                        },
+                        "All environments"
+                    }
+                    for env in environments {
+                        {
+                            let is_selected = selected.read().contains(&env);
+                            let env_clone = env.clone();
+                            rsx! {
+                                button {
+                                    key: "{env_clone}",
+                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-700",
+                                    onclick: move |_| {
+                                        let mut next = selected.read().clone();
+                                        if next.contains(&env_clone) {
+                                            next.retain(|value| value != &env_clone);
+                                        } else {
+                                            next.push(env_clone.clone());
+                                        }
+                                        selected.set(next);
+                                    },
+                                    div {
+                                        class: "w-4 h-4 rounded border flex items-center justify-center",
+                                        class: if is_selected { "bg-blue-500 border-blue-500" } else { "border-gray-500" },
+                                        if is_selected {
+                                            svg {
+                                                class: "w-3 h-3 text-white",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                view_box: "0 0 24 24",
+                                                path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "3", d: "M5 13l4 4L19 7" }
+                                            }
+                                        }
+                                    }
+                                    span { "{env_clone}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
-fn matches_deployment(system: &SystemSummary, filter: DeploymentFilter) -> bool {
-    match filter {
-        DeploymentFilter::All => true,
-        DeploymentFilter::UpToDate => system.deployment_status == DeploymentStatus::UpToDate,
-        DeploymentFilter::Behind => system.deployment_status == DeploymentStatus::Behind,
-        DeploymentFilter::Ahead => system.deployment_status == DeploymentStatus::Ahead,
-        DeploymentFilter::NeverDeployed => system.deployment_status == DeploymentStatus::NeverDeployed,
-        DeploymentFilter::Unknown => true,
+#[component]
+fn HealthFilterDropdown(selected: Signal<Vec<HealthStatus>>) -> Element {
+    let mut open = use_signal(|| false);
+    let label = format_status_label(&selected.read());
+    let options = vec![HealthStatus::Healthy, HealthStatus::Warning, HealthStatus::Critical, HealthStatus::Offline];
+
+    rsx! {
+        div {
+            class: "relative",
+            button {
+                class: "w-full flex items-center justify-between rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                onclick: move |_| {
+                    let next = !*open.read();
+                    open.set(next);
+                },
+                span { "{label}" }
+                svg {
+                    class: "w-4 h-4",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M19 9l-7 7-7-7" }
+                }
+            }
+            if open() {
+                div {
+                    class: "absolute left-0 right-0 mt-1 rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl z-[3000]",
+                    button {
+                        class: "w-full text-left px-3 py-2 text-sm hover:bg-gray-700",
+                        onclick: move |_| {
+                            selected.set(Vec::new());
+                            open.set(false);
+                        },
+                        "All health"
+                    }
+                    for status in options {
+                        {
+                            let is_selected = selected.read().contains(&status);
+                            let label = status.label();
+                            rsx! {
+                                button {
+                                    key: "{label}",
+                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-700",
+                                    onclick: move |_| {
+                                        let mut next = selected.read().clone();
+                                        if next.contains(&status) {
+                                            next.retain(|value| value != &status);
+                                        } else {
+                                            next.push(status);
+                                        }
+                                        selected.set(next);
+                                    },
+                                    div {
+                                        class: "w-4 h-4 rounded border flex items-center justify-center",
+                                        class: if is_selected { "bg-blue-500 border-blue-500" } else { "border-gray-500" },
+                                        if is_selected {
+                                            svg {
+                                                class: "w-3 h-3 text-white",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                view_box: "0 0 24 24",
+                                                path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "3", d: "M5 13l4 4L19 7" }
+                                            }
+                                        }
+                                    }
+                                    span { "{label}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 }
+
+#[component]
+fn DeploymentFilterDropdown(selected: Signal<Vec<DeploymentStatus>>) -> Element {
+    let mut open = use_signal(|| false);
+    let label = format_deployment_label(&selected.read());
+    let options = vec![
+        DeploymentStatus::UpToDate,
+        DeploymentStatus::Behind,
+        DeploymentStatus::Ahead,
+        DeploymentStatus::NeverDeployed,
+        DeploymentStatus::Unknown,
+    ];
+
+    rsx! {
+        div {
+            class: "relative",
+            button {
+                class: "w-full flex items-center justify-between rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                onclick: move |_| {
+                    let next = !*open.read();
+                    open.set(next);
+                },
+                span { "{label}" }
+                svg {
+                    class: "w-4 h-4",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M19 9l-7 7-7-7" }
+                }
+            }
+            if open() {
+                div {
+                    class: "absolute left-0 right-0 mt-1 rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} shadow-xl z-[3000]",
+                    button {
+                        class: "w-full text-left px-3 py-2 text-sm hover:bg-gray-700",
+                        onclick: move |_| {
+                            selected.set(Vec::new());
+                            open.set(false);
+                        },
+                        "All deployment"
+                    }
+                    for status in options {
+                        {
+                            let is_selected = selected.read().contains(&status);
+                            let label = status.label();
+                            rsx! {
+                                button {
+                                    key: "{label}",
+                                    class: "w-full flex items-center gap-2 px-3 py-2 text-sm hover:bg-gray-700",
+                                    onclick: move |_| {
+                                        let mut next = selected.read().clone();
+                                        if next.contains(&status) {
+                                            next.retain(|value| value != &status);
+                                        } else {
+                                            next.push(status);
+                                        }
+                                        selected.set(next);
+                                    },
+                                    div {
+                                        class: "w-4 h-4 rounded border flex items-center justify-center",
+                                        class: if is_selected { "bg-blue-500 border-blue-500" } else { "border-gray-500" },
+                                        if is_selected {
+                                            svg {
+                                                class: "w-3 h-3 text-white",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                view_box: "0 0 24 24",
+                                                path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "3", d: "M5 13l4 4L19 7" }
+                                            }
+                                        }
+                                    }
+                                    span { "{label}" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 
 fn matches_search(system: &SystemSummary, query: &str) -> bool {
     if query.trim().is_empty() {
