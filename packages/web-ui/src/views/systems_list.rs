@@ -167,6 +167,7 @@ pub fn SystemsListView() -> Element {
 
     let current_systems = systems.read().clone();
     let environments = unique_environments(&current_systems);
+    let registered_flakes = unique_registered_flakes();
 
     let filtered_systems: Vec<SystemSummary> = current_systems
         .into_iter()
@@ -175,6 +176,7 @@ pub fn SystemsListView() -> Element {
         .filter(|system| matches_deployment(system, &deployment_filter.read()))
         .filter(|system| matches_search(system, &search.read()))
         .collect();
+    let registered_flakes_for_submit = registered_flakes.clone();
 
     rsx! {
         div {
@@ -228,7 +230,9 @@ pub fn SystemsListView() -> Element {
                     },
                     on_submit: move |_| {
                         let next = draft.read().clone();
-                        if let Err(message) = validate_new_system(&next, &systems.read()) {
+                        if let Err(message) =
+                            validate_new_system(&next, &systems.read(), &registered_flakes_for_submit)
+                        {
                             add_error.set(Some(message));
                             return;
                         }
@@ -271,6 +275,7 @@ pub fn SystemsListView() -> Element {
                         show_key_modal.set(true);
                     },
                     environments: environments.clone(),
+                    flake_names: registered_flakes.clone(),
                 }
             }
 
@@ -581,6 +586,7 @@ fn AddSystemForm(
     on_cancel: EventHandler<()>,
     on_generate_keys: EventHandler<()>,
     environments: Vec<String>,
+    flake_names: Vec<String>,
 ) -> Element {
     rsx! {
         Card {
@@ -650,14 +656,17 @@ fn AddSystemForm(
                         label {
                             class: "space-y-2",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
-                            input {
+                            select {
                                 class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                                 value: "{draft.read().flake_name}",
-                                placeholder: "campground",
-                                oninput: move |evt| {
+                                onchange: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.flake_name = evt.value();
                                     draft.set(next);
+                                },
+                                option { value: "", "Select flake" }
+                                for flake_name in flake_names {
+                                    option { value: "{flake_name}", "{flake_name}" }
                                 }
                             }
                         }
@@ -814,7 +823,11 @@ fn KeyPairModal(
     }
 }
 
-fn validate_new_system(draft: &NewSystemDraft, existing: &[SystemSummary]) -> Result<(), String> {
+fn validate_new_system(
+    draft: &NewSystemDraft,
+    existing: &[SystemSummary],
+    flake_names: &[String],
+) -> Result<(), String> {
     let hostname = draft.hostname.trim();
     if hostname.is_empty() {
         return Err("Hostname is required.".to_string());
@@ -832,6 +845,12 @@ fn validate_new_system(draft: &NewSystemDraft, existing: &[SystemSummary]) -> Re
 
     if draft.flake_name.trim().is_empty() {
         return Err("Flake name is required.".to_string());
+    }
+    if !flake_names
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(draft.flake_name.trim()))
+    {
+        return Err("Flake must be selected from registered flakes.".to_string());
     }
 
     let public_key = draft.public_key.trim();
@@ -1260,6 +1279,17 @@ fn unique_environments(systems: &[SystemSummary]) -> Vec<String> {
     let mut values: Vec<String> = systems
         .iter()
         .filter_map(|system| system.environment.clone())
+        .collect();
+
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn unique_registered_flakes() -> Vec<String> {
+    let mut values: Vec<String> = mock_system_details()
+        .into_iter()
+        .filter_map(|system| system.flake.map(|flake| flake.name))
         .collect();
 
     values.sort();
