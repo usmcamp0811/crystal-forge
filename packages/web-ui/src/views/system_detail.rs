@@ -8,12 +8,12 @@
 
 use chrono::Utc;
 use dioxus::prelude::*;
+#[cfg(target_arch = "wasm32")]
+use js_sys::Object;
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
-#[cfg(target_arch = "wasm32")]
-use js_sys::Object;
 
 use crate::api::models::{
     BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
@@ -1596,7 +1596,11 @@ fn PolicyEditorModal(
     on_close: EventHandler<()>,
 ) -> Element {
     let is_editing = editing_policy_id.read().is_some();
-    let action_label = if is_editing { "Save Policy" } else { "Add Policy" };
+    let action_label = if is_editing {
+        "Save Policy"
+    } else {
+        "Add Policy"
+    };
 
     rsx! {
         div {
@@ -1878,7 +1882,11 @@ fn highlight_policy_html(language: &str, text: &str) -> String {
         return escape_html(text);
     };
     let options = Object::new();
-    let _ = js_sys::Reflect::set(&options, &JsValue::from_str("language"), &JsValue::from_str(language));
+    let _ = js_sys::Reflect::set(
+        &options,
+        &JsValue::from_str("language"),
+        &JsValue::from_str(language),
+    );
     let Ok(result) = highlight_fn.call2(&hljs, &JsValue::from_str(text), &options.into()) else {
         return escape_html(text);
     };
@@ -1911,7 +1919,8 @@ fn highlight_policy_block(element_id: &str) {
     if hljs.is_undefined() || hljs.is_null() {
         return;
     }
-    let Ok(highlight_fn) = js_sys::Reflect::get(&hljs, &JsValue::from_str("highlightElement")) else {
+    let Ok(highlight_fn) = js_sys::Reflect::get(&hljs, &JsValue::from_str("highlightElement"))
+    else {
         return;
     };
     let Ok(highlight_fn) = highlight_fn.dyn_into::<js_sys::Function>() else {
@@ -1950,12 +1959,7 @@ fn DiffViewer(diff: String) -> Element {
 }
 
 fn diff_for_commit(hash: &str, message: &str) -> String {
-    let selector = hash
-        .bytes()
-        .last()
-        .unwrap_or(b'0')
-        .wrapping_sub(b'0')
-        % 3;
+    let selector = hash.bytes().last().unwrap_or(b'0').wrapping_sub(b'0') % 3;
 
     match selector {
         0 => format!(
@@ -2580,7 +2584,9 @@ fn mock_commit_history_for_system(system: &SystemDetail) -> Vec<SystemCommitHist
     use chrono::Duration;
     let flake_name = system.flake.as_ref().map(|flake| flake.name.as_str());
     let timelines = crate::views::dashboard::mock_flake_timelines();
-    let Some(timeline) = flake_name.and_then(|name| timelines.iter().find(|t| t.flake_name == name)) else {
+    let Some(timeline) =
+        flake_name.and_then(|name| timelines.iter().find(|t| t.flake_name == name))
+    else {
         return Vec::new();
     };
 

@@ -12,7 +12,9 @@ fn base_url() -> String {
     // During development with `dx serve`, we proxy or use the server URL directly.
     let window = web_sys::window().expect("no global window");
     let location = window.location();
-    let origin = location.origin().unwrap_or_else(|_| "http://localhost:3000".into());
+    let origin = location
+        .origin()
+        .unwrap_or_else(|_| "http://localhost:3000".into());
     format!("{origin}/api/v1")
 }
 
@@ -23,7 +25,9 @@ pub async fn fetch_dashboard() -> Result<DashboardSummary, ApiClientError> {
 }
 
 /// Fetch a paginated list of systems.
-pub async fn fetch_systems(params: &SystemsListParams) -> Result<PaginatedResponse<SystemSummary>, ApiClientError> {
+pub async fn fetch_systems(
+    params: &SystemsListParams,
+) -> Result<PaginatedResponse<SystemSummary>, ApiClientError> {
     let mut url = format!("{}/systems", base_url());
     let query = serde_urlencoded::to_string(params).unwrap_or_default();
     if !query.is_empty() {
@@ -84,9 +88,7 @@ async fn fetch_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, ApiC
     .await
     .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
 
-    let body = text
-        .as_string()
-        .unwrap_or_default();
+    let body = text.as_string().unwrap_or_default();
 
     if !(200..300).contains(&status) {
         return Err(ApiClientError::Status {

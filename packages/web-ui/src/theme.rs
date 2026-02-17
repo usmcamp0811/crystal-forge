@@ -141,9 +141,9 @@ pub mod text {
 /// Color tokens for buttons and interactive elements.
 pub mod interactive {
     /// Primary action button.
-    pub const PRIMARY_BTN: &str = "bg-blue-600 hover:bg-blue-700";
+    pub const PRIMARY_BTN: &str = "cf-primary-btn";
     /// Danger action button.
-    pub const DANGER_BTN: &str = "bg-red-600 hover:bg-red-700";
+    pub const DANGER_BTN: &str = "bg-rose-700 hover:bg-rose-600";
     /// Success action button.
     pub const SUCCESS_BTN: &str = "bg-emerald-600 hover:bg-emerald-700";
     /// Ghost / subtle button.
@@ -204,9 +204,11 @@ pub mod presets {
     /// Standard card container.
     pub const CARD: &str = "bg-gray-900 border border-gray-800 rounded-xl p-6";
     /// Badge (pill) base.
-    pub const BADGE: &str = "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium";
+    pub const BADGE: &str =
+        "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium";
     /// Status dot (small circle indicator).
     pub const DOT: &str = "w-2 h-2 rounded-full";
     /// Table container.
-    pub const TABLE_CONTAINER: &str = "bg-gray-900 border border-gray-800 rounded-xl overflow-hidden";
+    pub const TABLE_CONTAINER: &str =
+        "bg-gray-900 border border-gray-800 rounded-xl overflow-hidden";
 }

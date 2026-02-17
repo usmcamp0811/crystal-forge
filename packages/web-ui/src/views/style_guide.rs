@@ -189,7 +189,12 @@ fn ColorSwatch(label: &'static str, text_class: &'static str, bg_class: &'static
 
 /// A status swatch with dot, text, and badge preview.
 #[component]
-fn StatusSwatch(label: &'static str, text_class: &'static str, bg_class: &'static str, dot_class: &'static str) -> Element {
+fn StatusSwatch(
+    label: &'static str,
+    text_class: &'static str,
+    bg_class: &'static str,
+    dot_class: &'static str,
+) -> Element {
     rsx! {
         div {
             class: "{presets::CARD} min-w-[140px]",

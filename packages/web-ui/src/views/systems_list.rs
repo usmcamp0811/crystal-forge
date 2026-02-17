@@ -15,7 +15,10 @@ use crate::components::layout::Card;
 use crate::components::system::SystemCard;
 use crate::routes::Route;
 use crate::theme;
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine;
 use chrono::{Duration, TimeZone, Utc};
+use ed25519_dalek::SigningKey;
 use uuid::Uuid;
 
 const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
@@ -47,6 +50,21 @@ enum SortColumn {
 enum SortDirection {
     Asc,
     Desc,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct NewSystemDraft {
+    hostname: String,
+    public_key: String,
+    environment: String,
+    flake_name: String,
+    deployment_policy: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GeneratedKeyPair {
+    public_key: String,
+    private_key: String,
 }
 
 impl SortDirection {
@@ -133,12 +151,24 @@ pub fn SystemsListView() -> Element {
     let environment_filter = use_signal(Vec::<String>::new);
     let health_filter = use_signal(Vec::<HealthStatus>::new);
     let deployment_filter = use_signal(Vec::<DeploymentStatus>::new);
+    let mut systems = use_signal(mock_systems);
+    let mut show_add_form = use_signal(|| false);
+    let mut add_error = use_signal(|| None::<String>);
+    let mut draft = use_signal(|| NewSystemDraft {
+        hostname: String::new(),
+        public_key: String::new(),
+        environment: String::new(),
+        flake_name: String::new(),
+        deployment_policy: "manual".to_string(),
+    });
+    let mut pending_remove = use_signal(|| None::<SystemSummary>);
+    let mut show_key_modal = use_signal(|| false);
+    let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
 
-    let mock_systems = mock_systems();
+    let current_systems = systems.read().clone();
+    let environments = unique_environments(&current_systems);
 
-    let environments = unique_environments(&mock_systems);
-
-    let filtered_systems: Vec<SystemSummary> = mock_systems
+    let filtered_systems: Vec<SystemSummary> = current_systems
         .into_iter()
         .filter(|system| matches_environment(system, &environment_filter.read()))
         .filter(|system| matches_health(system, &health_filter.read()))
@@ -156,11 +186,105 @@ pub fn SystemsListView() -> Element {
                     h1 { class: "{theme::typography::PAGE_TITLE}", "Systems" }
                     p { class: "text-sm {theme::text::SECONDARY}", "Manage fleet systems and deployment status." }
                 }
-                ViewToggle {
-                    view_mode: *view_mode.read(),
-                    on_change: move |mode| {
-                        view_mode.set(mode);
-                        let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
+                div {
+                    class: "flex items-center gap-3",
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                        onclick: move |_| {
+                            let next = !*show_add_form.read();
+                            show_add_form.set(next);
+                            add_error.set(None);
+                        },
+                        if *show_add_form.read() {
+                            "Close"
+                        } else {
+                            "Add System"
+                        }
+                    }
+                    ViewToggle {
+                        view_mode: *view_mode.read(),
+                        on_change: move |mode| {
+                            view_mode.set(mode);
+                            let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
+                        }
+                    }
+                }
+            }
+
+            if *show_add_form.read() {
+                AddSystemForm {
+                    draft: draft,
+                    error: add_error,
+                    on_cancel: move |_| {
+                        draft.set(NewSystemDraft {
+                            hostname: String::new(),
+                            public_key: String::new(),
+                            environment: String::new(),
+                            flake_name: String::new(),
+                            deployment_policy: "manual".to_string(),
+                        });
+                        add_error.set(None);
+                        show_add_form.set(false);
+                    },
+                    on_submit: move |_| {
+                        let next = draft.read().clone();
+                        if let Err(message) = validate_new_system(&next, &systems.read()) {
+                            add_error.set(Some(message));
+                            return;
+                        }
+
+                        let new_item = SystemSummary {
+                            id: Uuid::new_v4(),
+                            hostname: next.hostname.trim().to_string(),
+                            environment: normalize_optional(&next.environment),
+                            primary_ip: None,
+                            health_status: HealthStatus::Healthy,
+                            deployment_status: DeploymentStatus::NeverDeployed,
+                            pipeline_stage: Some(PipelineStage::ReadyForBuild),
+                            cve_counts: CveSummary {
+                                critical: 0,
+                                high: 0,
+                                medium: 0,
+                                low: 0,
+                            },
+                            nixos_version: None,
+                            last_seen: Some(Utc::now()),
+                            deployment_policy: normalize_policy(&next.deployment_policy),
+                        };
+
+                        let mut values = systems.read().clone();
+                        values.push(new_item);
+                        values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+                        systems.set(values);
+                        draft.set(NewSystemDraft {
+                            hostname: String::new(),
+                            public_key: String::new(),
+                            environment: String::new(),
+                            flake_name: String::new(),
+                            deployment_policy: "manual".to_string(),
+                        });
+                        add_error.set(None);
+                        show_add_form.set(false);
+                    },
+                    on_generate_keys: move |_| {
+                        generated_keys.set(Some(generate_key_pair()));
+                        show_key_modal.set(true);
+                    },
+                    environments: environments.clone(),
+                }
+            }
+
+            if *show_key_modal.read() {
+                KeyPairModal {
+                    keys: generated_keys.read().clone(),
+                    on_close: move |_| show_key_modal.set(false),
+                    on_use_public_key: move |_| {
+                        if let Some(keys) = generated_keys.read().clone() {
+                            let mut next = draft.read().clone();
+                            next.public_key = keys.public_key;
+                            draft.set(next);
+                        }
+                        show_key_modal.set(false);
                     }
                 }
             }
@@ -186,11 +310,38 @@ pub fn SystemsListView() -> Element {
                     class: "grid grid-cols-1 xl:grid-cols-2 gap-6",
                     "data-testid": "systems-cards",
                     for system in filtered_systems.clone() {
-                        SystemCard { system }
+                        div {
+                            class: "space-y-2",
+                            SystemCard { system: system.clone() }
+                            div {
+                                class: "px-1 flex justify-end",
+                                button {
+                                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                                    onclick: move |_| remove_system_by_id(systems, pending_remove, system.id),
+                                    "Remove"
+                                }
+                            }
+                        }
                     }
                 }
             } else {
-                SystemsTable { systems: filtered_systems.clone() }
+                SystemsTable {
+                    systems: filtered_systems.clone(),
+                    on_remove: move |id| remove_system_by_id(systems, pending_remove, id),
+                }
+            }
+
+            if let Some(system) = pending_remove.read().clone() {
+                RemoveSystemDialog {
+                    hostname: system.hostname.clone(),
+                    on_cancel: move |_| pending_remove.set(None),
+                    on_confirm: move |_| {
+                        let mut values = systems.read().clone();
+                        values.retain(|item| item.id != system.id);
+                        systems.set(values);
+                        pending_remove.set(None);
+                    }
+                }
             }
         }
     }
@@ -256,7 +407,7 @@ fn FiltersBar(
 }
 
 #[component]
-fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
+fn SystemsTable(systems: Vec<SystemSummary>, on_remove: EventHandler<Uuid>) -> Element {
     let navigator = use_navigator();
     let mut sort_column = use_signal(|| None::<SortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -368,6 +519,7 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                                     sort_column: sort_column,
                                     sort_direction: sort_direction,
                                 }
+                                th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
                             }
                         }
                         tbody {
@@ -400,6 +552,17 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                                         span { class: "{theme::cve::LOW_TEXT} font-semibold", "{system.cve_counts.low}" }
                                         span { class: "text-gray-500", " L" }
                                     }
+                                    td {
+                                        class: "{theme::spacing::TABLE_CELL} text-right",
+                                        button {
+                                            class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_remove.call(system.id);
+                                            },
+                                            "Remove"
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -407,6 +570,351 @@ fn SystemsTable(systems: Vec<SystemSummary>) -> Element {
                 }
             }
         }
+    }
+}
+
+#[component]
+fn AddSystemForm(
+    draft: Signal<NewSystemDraft>,
+    error: Signal<Option<String>>,
+    on_submit: EventHandler<()>,
+    on_cancel: EventHandler<()>,
+    on_generate_keys: EventHandler<()>,
+    environments: Vec<String>,
+) -> Element {
+    rsx! {
+        Card {
+            title: Some("Register System".to_string()),
+            children: rsx! {
+                div {
+                    class: "space-y-4",
+                    p {
+                        class: "text-sm {theme::text::SECONDARY}",
+                        "System IP is discovered from agent heartbeats and is not required at registration."
+                    }
+                    div {
+                        class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                        label {
+                            class: "space-y-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Hostname" }
+                            input {
+                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().hostname}",
+                                placeholder: "atlas-09",
+                                oninput: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.hostname = evt.value();
+                                    draft.set(next);
+                                }
+                            }
+                        }
+                        label {
+                            class: "space-y-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Public Key" }
+                            div {
+                                class: "flex gap-2",
+                                input {
+                                    class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                    value: "{draft.read().public_key}",
+                                    placeholder: "base64 public key",
+                                    oninput: move |evt| {
+                                        let mut next = draft.read().clone();
+                                        next.public_key = evt.value();
+                                        draft.set(next);
+                                    }
+                                }
+                                button {
+                                    class: "px-3 py-2 rounded-lg text-xs font-medium border border-gray-600 text-gray-200 hover:bg-gray-700 transition",
+                                    onclick: move |_| on_generate_keys.call(()),
+                                    "Generate"
+                                }
+                            }
+                        }
+                        label {
+                            class: "space-y-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Environment" }
+                            select {
+                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().environment}",
+                                onchange: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.environment = evt.value();
+                                    draft.set(next);
+                                },
+                                option { value: "", "Select environment" }
+                                for env in environments {
+                                    option { value: "{env}", "{env}" }
+                                }
+                            }
+                        }
+                        label {
+                            class: "space-y-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
+                            input {
+                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().flake_name}",
+                                placeholder: "campground",
+                                oninput: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.flake_name = evt.value();
+                                    draft.set(next);
+                                }
+                            }
+                        }
+                        label {
+                            class: "space-y-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Deployment Policy" }
+                            select {
+                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().deployment_policy}",
+                                onchange: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.deployment_policy = evt.value();
+                                    draft.set(next);
+                                },
+                                option { value: "manual", "manual" }
+                                option { value: "auto_latest", "auto_latest" }
+                                option { value: "pinned", "pinned" }
+                            }
+                        }
+                    }
+
+                    if let Some(message) = error.read().clone() {
+                        p { class: "text-sm text-red-300", "{message}" }
+                    }
+
+                    div {
+                        class: "flex flex-col-reverse sm:flex-row sm:justify-end gap-2",
+                        button {
+                            class: "px-3 py-2 rounded-lg text-sm bg-gray-700 hover:bg-gray-600 text-white",
+                            onclick: move |_| on_cancel.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            onclick: move |_| on_submit.call(()),
+                            "Save System"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RemoveSystemDialog(
+    hostname: String,
+    on_confirm: EventHandler<()>,
+    on_cancel: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
+            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            onclick: move |_| on_cancel.call(()),
+
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
+                style: "width: 100%; max-width: 28rem;",
+                onclick: |evt| evt.stop_propagation(),
+
+                h3 {
+                    class: "text-lg font-semibold text-white text-center mb-2",
+                    "Remove {hostname}?"
+                }
+                p {
+                    class: "text-sm {theme::text::SECONDARY} text-center mb-6",
+                    "This removes the system from the current registry view."
+                }
+                div {
+                    class: "flex gap-3",
+                    button {
+                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    button {
+                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white",
+                        onclick: move |_| on_confirm.call(()),
+                        "Remove"
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn KeyPairModal(
+    keys: Option<GeneratedKeyPair>,
+    on_close: EventHandler<()>,
+    on_use_public_key: EventHandler<()>,
+) -> Element {
+    let key_pair = keys.unwrap_or_else(generate_key_pair);
+
+    rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
+            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            onclick: move |_| on_close.call(()),
+
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 space-y-4",
+                style: "width: 100%; max-width: 44rem;",
+                onclick: |evt| evt.stop_propagation(),
+
+                h3 { class: "text-lg font-semibold text-white", "Generated System Key Pair" }
+                p {
+                    class: "text-sm {theme::text::SECONDARY}",
+                    "Store the private key securely. It is shown only now. Install the private key on the system and register the public key in Crystal Forge."
+                }
+
+                div {
+                    class: "space-y-2",
+                    p { class: "text-xs uppercase tracking-wide text-gray-500", "Public Key" }
+                    pre {
+                        class: "rounded-lg border border-gray-700 bg-gray-950 p-3 text-xs text-gray-200 font-mono overflow-x-auto",
+                        "{key_pair.public_key}"
+                    }
+                }
+
+                div {
+                    class: "space-y-2",
+                    p { class: "text-xs uppercase tracking-wide text-gray-500", "Private Key" }
+                    pre {
+                        class: "rounded-lg border border-gray-700 bg-gray-950 p-3 text-xs text-gray-200 font-mono overflow-x-auto",
+                        "{key_pair.private_key}"
+                    }
+                }
+
+                ul {
+                    class: "list-disc pl-5 text-sm {theme::text::SECONDARY} space-y-1",
+                    li { "Copy and store the private key in your secret manager." }
+                    li { "Install the private key on the target host before starting the agent." }
+                    li { "Keep the public key in Crystal Forge for system registration." }
+                    li { "Rotate keys immediately if private key exposure is suspected." }
+                }
+
+                div {
+                    class: "flex flex-col-reverse sm:flex-row sm:justify-end gap-2",
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm bg-gray-700 hover:bg-gray-600 text-white",
+                        onclick: move |_| on_close.call(()),
+                        "Close"
+                    }
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                        onclick: move |_| on_use_public_key.call(()),
+                        "Use Public Key"
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn validate_new_system(draft: &NewSystemDraft, existing: &[SystemSummary]) -> Result<(), String> {
+    let hostname = draft.hostname.trim();
+    if hostname.is_empty() {
+        return Err("Hostname is required.".to_string());
+    }
+    if existing
+        .iter()
+        .any(|item| item.hostname.eq_ignore_ascii_case(hostname))
+    {
+        return Err("Hostname already exists in this view.".to_string());
+    }
+
+    if draft.environment.trim().is_empty() {
+        return Err("Environment is required.".to_string());
+    }
+
+    if draft.flake_name.trim().is_empty() {
+        return Err("Flake name is required.".to_string());
+    }
+
+    let public_key = draft.public_key.trim();
+    if public_key.is_empty() {
+        return Err("Public key is required.".to_string());
+    }
+    if !looks_like_base64_key(public_key) {
+        return Err("Public key must be a valid base64 string.".to_string());
+    }
+
+    let policy = draft.deployment_policy.trim();
+    if !policy.is_empty() && !matches!(policy, "manual" | "auto_latest" | "pinned") {
+        return Err("Deployment policy must be manual, auto_latest, or pinned.".to_string());
+    }
+
+    Ok(())
+}
+
+fn remove_system_by_id(
+    systems: Signal<Vec<SystemSummary>>,
+    mut pending_remove: Signal<Option<SystemSummary>>,
+    system_id: Uuid,
+) {
+    let target = systems
+        .read()
+        .iter()
+        .find(|item| item.id == system_id)
+        .cloned();
+    if let Some(system) = target {
+        pending_remove.set(Some(system));
+    }
+}
+
+fn normalize_optional(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn normalize_policy(value: &str) -> String {
+    let normalized = value.trim().to_lowercase();
+    if normalized.is_empty() {
+        "manual".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn looks_like_base64_key(value: &str) -> bool {
+    if value.len() < 40 {
+        return false;
+    }
+
+    value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '+' || ch == '/' || ch == '=')
+}
+
+fn generate_key_pair() -> GeneratedKeyPair {
+    let mut secret = [0_u8; 32];
+    let mut filled = false;
+    if let Some(win) = window() {
+        if let Ok(crypto) = win.crypto() {
+            if crypto.get_random_values_with_u8_array(&mut secret).is_ok() {
+                filled = true;
+            }
+        }
+    }
+    if !filled {
+        for byte in &mut secret {
+            *byte = (js_sys::Math::random() * 256.0) as u8;
+        }
+    }
+
+    let signing_key = SigningKey::from_bytes(&secret);
+    let verifying_key = signing_key.verifying_key();
+
+    GeneratedKeyPair {
+        public_key: STANDARD.encode(verifying_key.to_bytes()),
+        private_key: STANDARD.encode(signing_key.to_bytes()),
     }
 }
 
