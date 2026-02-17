@@ -28,7 +28,7 @@ fn app() -> Element {
         // Load vendored Tailwind CSS (works offline).
         document::Stylesheet { href: asset!("assets/tailwind.min.css") }
         document::Style {
-            ":root {{ --cf-brand-purple: #82699B; --cf-brand-purple-hover: #B18FCC; --cf-danger-berry: #8A5E77; --cf-danger-berry-hover: #A3748E; }}\n.cf-primary-btn {{ background-color: var(--cf-brand-purple); }}\n.cf-primary-btn:hover {{ background-color: var(--cf-brand-purple-hover); }}\n.cf-danger-btn {{ background-color: var(--cf-danger-berry); }}\n.cf-danger-btn:hover {{ background-color: var(--cf-danger-berry-hover); }}"
+            ":root {{ --cf-brand-purple: #82699B; --cf-brand-purple-hover: #B18FCC; --cf-danger-berry: #8A5E77; --cf-danger-berry-hover: #A3748E; }}\n.cf-primary-btn {{ background-color: var(--cf-brand-purple); }}\n.cf-primary-btn:hover {{ background-color: var(--cf-brand-purple-hover); }}\n.cf-danger-btn {{ background-color: var(--cf-danger-berry); }}\n.cf-danger-btn:hover {{ background-color: var(--cf-danger-berry-hover); }}\n.cf-builds-split {{ display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 1.5rem; }}\n@media (max-width: 1024px) {{ .cf-builds-split {{ grid-template-columns: 1fr; }} }}"
         }
         document::Link {
             rel: "icon",

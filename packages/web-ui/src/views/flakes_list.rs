@@ -5,9 +5,9 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 use crate::components::layout::Card;
 use crate::theme;
