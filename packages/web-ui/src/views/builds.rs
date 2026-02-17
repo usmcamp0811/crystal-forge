@@ -377,15 +377,22 @@ fn BuildQueuePane(
                         for build in filtered {
                             button {
                                 key: "{build.id}",
-                                class: "w-full rounded-lg border px-3 py-3 text-left transition",
+                                class: "w-full rounded-xl border px-4 py-3 text-left transition",
                                 style: "{queue_row_style(*selected_id.read() == Some(build.id), build.status)}",
                                 onclick: move |_| selected_id.set(Some(build.id)),
                                 div {
                                     class: "flex items-start justify-between gap-3",
                                     div {
-                                        p { class: "text-sm text-white font-semibold", "{build.hostname}" }
-                                        p { class: "text-xs text-gray-400", "{build.flake} · {short_commit(build.commit)} · {build.branch}" }
-                                        p { class: "text-xs text-gray-500 mt-1", "{build.summary}" }
+                                        div {
+                                            class: "flex items-center gap-2",
+                                            p { class: "text-sm text-white font-semibold", "{build.hostname}" }
+                                            span {
+                                                class: "inline-flex px-2 py-0.5 text-[10px] rounded border text-blue-100",
+                                                style: "background-color: #253449; border-color: #3E5B82;",
+                                                "{build.flake}"
+                                            }
+                                        }
+                                        p { class: "text-xs text-gray-300 mt-1", "{build.branch} · {short_commit(build.commit)}" }
                                     }
                                     div {
                                         class: "text-right",
@@ -394,12 +401,32 @@ fn BuildQueuePane(
                                             style: "{build_status_badge_style(build.status)}",
                                             "{build.status_label()}"
                                         }
-                                        p { class: "text-[10px] text-gray-500 mt-1", "{build.queued_for}" }
+                                        p { class: "text-[10px] text-gray-400 mt-1", "{build.queued_for}" }
                                     }
                                 }
+
                                 div {
-                                    class: "mt-3 flex items-center justify-between",
-                                    p { class: "text-[10px] text-gray-500", "Worker: {build.worker_id}" }
+                                    class: "mt-2 rounded-md border border-gray-700/60 bg-gray-950/70 px-2 py-1",
+                                    p { class: "text-[11px] text-gray-300 font-mono leading-5", "{build.summary}" }
+                                }
+
+                                div {
+                                    class: "mt-3 flex flex-wrap items-center justify-between gap-2",
+                                    div {
+                                        class: "inline-flex items-center gap-2 text-[10px]",
+                                        span {
+                                            class: "inline-flex px-2 py-1 rounded border text-gray-100",
+                                            style: "background-color: #2B303B; border-color: #495264;",
+                                            "worker {build.worker_id}"
+                                        }
+                                        if let Some(runtime) = build.runtime {
+                                            span {
+                                                class: "inline-flex px-2 py-1 rounded border text-gray-100",
+                                                style: "background-color: #23363A; border-color: #3D6870;",
+                                                "runtime {runtime}"
+                                            }
+                                        }
+                                    }
                                     div {
                                         class: "inline-flex items-center gap-2",
                                         if matches!(build.status, BuildStatus::Building | BuildStatus::Restarting) {
@@ -824,14 +851,14 @@ fn short_commit(commit: &str) -> String {
 }
 
 fn queue_row_style(selected: bool, status: BuildStatus) -> String {
-    let border = if selected { "#4D6888" } else { "#374151" };
+    let border = if selected { "#6D8FBA" } else { "#374151" };
     let bg = match status {
-        BuildStatus::Building | BuildStatus::Restarting => "#1F2E42",
-        BuildStatus::Queued => "#262D3A",
-        BuildStatus::Stopping => "#3B2D1F",
-        BuildStatus::Failed => "#3A2229",
-        BuildStatus::Complete => "#1F342D",
-        BuildStatus::Canceled => "#2B2F37",
+        BuildStatus::Building | BuildStatus::Restarting => "#1C2B3E",
+        BuildStatus::Queued => "#242C3A",
+        BuildStatus::Stopping => "#3C2F20",
+        BuildStatus::Failed => "#3B232A",
+        BuildStatus::Complete => "#1E362E",
+        BuildStatus::Canceled => "#2C313A",
     };
 
     format!("background-color: {bg}; border-color: {border};")
