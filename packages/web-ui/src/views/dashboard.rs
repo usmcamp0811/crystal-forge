@@ -935,21 +935,21 @@ fn DonutChartWithLegend(props: DonutChartWithLegendProps) -> Element {
                     }
 
                     // Donut segments with hover
-                    for (idx, arc) in arcs.iter().enumerate() {
+                    for arc in arcs.clone() {
                         circle {
                             cx: "50",
                             cy: "50",
                             r: "40",
                             fill: "none",
                             stroke: "{arc.color}",
-                            stroke_width: if hovered_idx.read().map_or(false, |h| h == idx) { "18" } else { "14" },
+                            stroke_width: if hovered_idx.read().map_or(false, |h| h == arc.segment_idx) { "18" } else { "14" },
                             stroke_dasharray: "{arc.dash_length} {arc.gap_length}",
                             stroke_dashoffset: "{arc.offset}",
                             stroke_linecap: "butt",
                             transform: "rotate(-90 50 50)",
                             style: "cursor: pointer; transition: stroke-width 0.15s ease;",
                             onmouseenter: move |_| {
-                                hovered_idx.set(Some(idx));
+                                hovered_idx.set(Some(arc.segment_idx));
                             },
                             onmouseleave: move |_| {
                                 hovered_idx.set(None);
@@ -1056,6 +1056,7 @@ fn DonutChartWithLegend(props: DonutChartWithLegendProps) -> Element {
 /// Arc data for donut chart rendering using stroke-dasharray technique
 #[derive(Clone, Debug, PartialEq)]
 struct DonutArc {
+    segment_idx: usize,
     color: &'static str,
     dash_length: f64,
     gap_length: f64,
@@ -1067,7 +1068,7 @@ fn donut_arcs(segments: &[DonutSegment]) -> Vec<DonutArc> {
     let circumference = 2.0 * std::f64::consts::PI * 40.0; // r=40
     let mut offset = 0.0;
 
-    for segment in segments {
+    for (segment_idx, segment) in segments.iter().enumerate() {
         if segment.percent <= 0.0 {
             continue;
         }
@@ -1076,6 +1077,7 @@ fn donut_arcs(segments: &[DonutSegment]) -> Vec<DonutArc> {
         let gap_length = circumference - dash_length;
 
         arcs.push(DonutArc {
+            segment_idx,
             color: segment.color,
             dash_length,
             gap_length,
@@ -1227,7 +1229,7 @@ fn BuildQueueRow(
     rsx! {
         Link {
             class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition hover:bg-gray-800/80 hover:border hover:border-gray-600",
-            to: crate::routes::Route::SystemsView {},
+            to: crate::routes::Route::BuildsView {},
             div {
                 class: "flex items-center gap-3 min-w-0 flex-1",
                 svg {
