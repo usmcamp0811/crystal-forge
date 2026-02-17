@@ -10,6 +10,7 @@ use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
 use crate::views::flakes::FlakesView;
 use crate::views::not_found::NotFoundView;
+use crate::views::policies::PoliciesView;
 use crate::views::style_guide::StyleGuideView;
 use crate::views::system_detail::SystemDetailView;
 use crate::views::systems::SystemsView;
@@ -39,6 +40,9 @@ pub enum Route {
     #[route("/cves")]
     CvesView {},
 
+    #[route("/deployment-policies")]
+    PoliciesView {},
+
     #[route("/style-guide")]
     StyleGuideView {},
 
@@ -56,6 +60,7 @@ impl Route {
             Route::FlakesView { .. } => "Flakes".to_string(),
             Route::BuildsView { .. } => "Builds".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
+            Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::StyleGuideView { .. } => "Style Guide".to_string(),
             Route::NotFoundView { .. } => "Not Found".to_string(),
         }
