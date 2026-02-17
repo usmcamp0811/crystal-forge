@@ -1,6 +1,8 @@
 //! Environments list view with add/remove and required policy assignment.
 
 use dioxus::prelude::*;
+use gloo_storage::{LocalStorage, Storage};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::components::layout::Card;
@@ -18,6 +20,7 @@ struct EnvironmentItem {
     id: Uuid,
     name: String,
     description: Option<String>,
+    color_hex: String,
     system_count: usize,
     required_policy_ids: Vec<Uuid>,
 }
@@ -26,6 +29,7 @@ struct EnvironmentItem {
 struct NewEnvironmentDraft {
     name: String,
     description: String,
+    color_hex: String,
     required_policy_ids: Vec<Uuid>,
 }
 
@@ -34,19 +38,23 @@ struct EditEnvironmentDraft {
     id: Uuid,
     name: String,
     description: String,
+    color_hex: String,
 }
+
+const ENV_COLOR_STORAGE_KEY: &str = "crystal_forge.environments.colors";
 
 #[component]
 pub fn EnvironmentsListView() -> Element {
     let policy_library = policy_library();
     let default_required_policy = required_agent_policy_id(&policy_library);
 
-    let mut environments = use_signal(|| seed_environments(default_required_policy));
+    let mut environments = use_signal(|| initial_environments(default_required_policy));
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(|| NewEnvironmentDraft {
         name: String::new(),
         description: String::new(),
+        color_hex: "#4F46E5".to_string(),
         required_policy_ids: vec![default_required_policy],
     });
     let mut pending_remove = use_signal(|| None::<EnvironmentItem>);
@@ -88,7 +96,7 @@ pub fn EnvironmentsListView() -> Element {
                         div {
                             class: "space-y-4",
                             div {
-                                class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                                class: "grid grid-cols-1 md:grid-cols-3 gap-4",
                                 label {
                                     class: "space-y-2",
                                     span { class: "text-xs uppercase tracking-wide text-gray-500", "Name" }
@@ -113,6 +121,20 @@ pub fn EnvironmentsListView() -> Element {
                                         oninput: move |evt| {
                                             let mut next = draft.read().clone();
                                             next.description = evt.value();
+                                            draft.set(next);
+                                        }
+                                    }
+                                }
+                                label {
+                                    class: "space-y-2",
+                                    span { class: "text-xs uppercase tracking-wide text-gray-500", "Color" }
+                                    input {
+                                        r#type: "color",
+                                        class: "w-full h-10 rounded-lg border {theme::surface::CARD_BORDER} bg-gray-900 cursor-pointer",
+                                        value: "{draft.read().color_hex}",
+                                        oninput: move |evt| {
+                                            let mut next = draft.read().clone();
+                                            next.color_hex = evt.value();
                                             draft.set(next);
                                         }
                                     }
@@ -157,6 +179,7 @@ pub fn EnvironmentsListView() -> Element {
                                         draft.set(NewEnvironmentDraft {
                                             name: String::new(),
                                             description: String::new(),
+                                            color_hex: "#4F46E5".to_string(),
                                             required_policy_ids: vec![default_required_policy],
                                         });
                                         add_error.set(None);
@@ -178,14 +201,17 @@ pub fn EnvironmentsListView() -> Element {
                                             id: Uuid::new_v4(),
                                             name: next.name.trim().to_string(),
                                             description: normalize_optional(&next.description),
+                                            color_hex: normalize_color_hex(&next.color_hex),
                                             system_count: 0,
                                             required_policy_ids: next.required_policy_ids,
                                         });
                                         values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                        persist_environment_colors(&values);
                                         environments.set(values);
                                         draft.set(NewEnvironmentDraft {
                                             name: String::new(),
                                             description: String::new(),
+                                            color_hex: "#4F46E5".to_string(),
                                             required_policy_ids: vec![default_required_policy],
                                         });
                                         add_error.set(None);
@@ -230,9 +256,10 @@ pub fn EnvironmentsListView() -> Element {
                                 rsx! {
                                     div {
                                         key: "{env.id}",
-                                        class: "rounded-lg border {theme::surface::CARD_BORDER} bg-gray-900/60 p-4 space-y-3",
+                                        class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm",
                                         div {
-                                            class: "flex flex-col lg:flex-row lg:items-start lg:justify-between gap-3",
+                                            class: "flex items-center justify-between px-6 py-4 border-b border-gray-800",
+                                            style: "background: linear-gradient(135deg, {with_alpha(&env.color_hex, 0.42)} 0%, rgba(17, 24, 39, 0.92) 100%);",
                                             div {
                                                 p { class: "text-sm font-semibold text-white", "{env.name}" }
                                                 p {
@@ -244,6 +271,10 @@ pub fn EnvironmentsListView() -> Element {
                                                     }
                                                 }
                                             }
+                                        }
+
+                                        div {
+                                            class: "px-6 py-3 bg-gray-800/50",
                                             div {
                                                 class: "flex flex-wrap items-center gap-2 text-xs",
                                                 span {
@@ -256,17 +287,12 @@ pub fn EnvironmentsListView() -> Element {
                                                     style: "background-color: #23363A; border-color: #3D6870;",
                                                     "{required_count} required"
                                                 }
-                                                span {
-                                                    class: "inline-flex px-2 py-1 rounded border text-amber-100",
-                                                    style: "background-color: #4A3B22; border-color: #8C6A2F;",
-                                                    "Enforcement Pending"
-                                                }
                                             }
                                         }
 
                                         div {
-                                            class: "space-y-2",
-                                            p { class: "text-xs uppercase tracking-wide text-gray-500", "Required Policies" }
+                                            class: "px-6 py-3 bg-gray-900 space-y-2",
+                                            p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500", "Required Policies" }
                                             div {
                                                 class: "flex flex-wrap gap-2",
                                                 for policy_name in visible_chips {
@@ -283,20 +309,23 @@ pub fn EnvironmentsListView() -> Element {
                                         }
 
                                         div {
-                                            class: "flex items-center justify-between pt-1",
+                                            class: "px-6 py-3 bg-gray-800/50 flex items-center justify-between",
                                             div {
                                                 class: "flex items-center gap-2",
                                                 button {
-                                                    class: "text-xs text-blue-300 hover:text-blue-200 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                                                    class: "text-xs px-2 py-1 rounded transition-colors",
+                                                    style: "color: #D6C3E8;",
                                                     onclick: {
                                                         let name = env.name.clone();
                                                         let description = env.description.clone().unwrap_or_default();
+                                                        let color_hex = env.color_hex.clone();
                                                         let id = env.id;
                                                         move |_| {
                                                             editing_environment_meta.set(Some(EditEnvironmentDraft {
                                                                 id,
                                                                 name: name.clone(),
                                                                 description: description.clone(),
+                                                                color_hex: color_hex.clone(),
                                                             }));
                                                             edit_meta_error.set(None);
                                                         }
@@ -304,7 +333,8 @@ pub fn EnvironmentsListView() -> Element {
                                                     "Edit Environment"
                                                 }
                                                 button {
-                                                    class: "text-xs text-blue-300 hover:text-blue-200 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                                                    class: "text-xs px-2 py-1 rounded transition-colors",
+                                                    style: "color: #D6C3E8;",
                                                     onclick: {
                                                         let id = env.id;
                                                         let ids = env.required_policy_ids.clone();
@@ -412,6 +442,23 @@ pub fn EnvironmentsListView() -> Element {
                             }
                         }
 
+                        label {
+                            class: "space-y-2 block",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Color" }
+                            input {
+                                r#type: "color",
+                                class: "w-full h-10 rounded-lg border {theme::surface::CARD_BORDER} bg-gray-900 cursor-pointer",
+                                value: "{editing.color_hex}",
+                                oninput: move |evt| {
+                                    let current = editing_environment_meta.read().clone();
+                                    if let Some(mut next) = current {
+                                        next.color_hex = evt.value();
+                                        editing_environment_meta.set(Some(next));
+                                    }
+                                }
+                            }
+                        }
+
                         if let Some(message) = edit_meta_error.read().clone() {
                             p { class: "text-sm text-red-300", "{message}" }
                         }
@@ -441,8 +488,10 @@ pub fn EnvironmentsListView() -> Element {
                                     if let Some(target) = values.iter_mut().find(|env| env.id == next.id) {
                                         target.name = next.name.trim().to_string();
                                         target.description = normalize_optional(&next.description);
+                                        target.color_hex = normalize_color_hex(&next.color_hex);
                                     }
                                     values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    persist_environment_colors(&values);
                                     environments.set(values);
                                     editing_environment_meta.set(None);
                                     edit_meta_error.set(None);
@@ -480,6 +529,7 @@ pub fn EnvironmentsListView() -> Element {
                                 onclick: move |_| {
                                     let mut values = environments.read().clone();
                                     values.retain(|item| item.id != env.id);
+                                    persist_environment_colors(&values);
                                     environments.set(values);
                                     pending_remove.set(None);
                                 },
@@ -674,6 +724,9 @@ fn validate_environment(
     {
         return Err("Required policies must come from the policy library.".to_string());
     }
+    if !looks_like_hex_color(&draft.color_hex) {
+        return Err("Environment color must be a valid hex value.".to_string());
+    }
     Ok(())
 }
 
@@ -690,6 +743,9 @@ fn validate_environment_edit(
         .any(|item| item.id != draft.id && item.name.eq_ignore_ascii_case(name))
     {
         return Err("Environment name already exists.".to_string());
+    }
+    if !looks_like_hex_color(&draft.color_hex) {
+        return Err("Environment color must be a valid hex value.".to_string());
     }
     Ok(())
 }
@@ -730,6 +786,58 @@ fn normalize_optional(value: &str) -> Option<String> {
     }
 }
 
+fn normalize_color_hex(value: &str) -> String {
+    let trimmed = value.trim();
+    if looks_like_hex_color(trimmed) {
+        trimmed.to_uppercase()
+    } else {
+        "#4F46E5".to_string()
+    }
+}
+
+fn looks_like_hex_color(value: &str) -> bool {
+    if value.len() != 7 || !value.starts_with('#') {
+        return false;
+    }
+    value[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+}
+
+fn with_alpha(hex: &str, alpha: f32) -> String {
+    let color = normalize_color_hex(hex);
+    let r = u8::from_str_radix(&color[1..3], 16).unwrap_or(79);
+    let g = u8::from_str_radix(&color[3..5], 16).unwrap_or(70);
+    let b = u8::from_str_radix(&color[5..7], 16).unwrap_or(229);
+    format!("rgba({r}, {g}, {b}, {alpha})")
+}
+
+fn environment_color_map(items: &[EnvironmentItem]) -> HashMap<String, String> {
+    items
+        .iter()
+        .map(|env| (env.name.to_lowercase(), normalize_color_hex(&env.color_hex)))
+        .collect()
+}
+
+fn persist_environment_colors(items: &[EnvironmentItem]) {
+    let map = environment_color_map(items);
+    let _ = LocalStorage::set(ENV_COLOR_STORAGE_KEY, map);
+}
+
+fn load_environment_colors() -> HashMap<String, String> {
+    LocalStorage::get::<HashMap<String, String>>(ENV_COLOR_STORAGE_KEY).unwrap_or_default()
+}
+
+fn initial_environments(default_required_policy: Uuid) -> Vec<EnvironmentItem> {
+    let mut items = seed_environments(default_required_policy);
+    let stored = load_environment_colors();
+    for env in &mut items {
+        if let Some(color) = stored.get(&env.name.to_lowercase()) {
+            env.color_hex = normalize_color_hex(color);
+        }
+    }
+    persist_environment_colors(&items);
+    items
+}
+
 fn policy_library() -> Vec<PolicyOption> {
     vec![
         PolicyOption {
@@ -756,6 +864,7 @@ fn seed_environments(default_required_policy: Uuid) -> Vec<EnvironmentItem> {
             id: Uuid::from_u128(101),
             name: "production".to_string(),
             description: Some("Live fleet systems".to_string()),
+            color_hex: "#0F766E".to_string(),
             system_count: 12,
             required_policy_ids: vec![default_required_policy, Uuid::from_u128(3)],
         },
@@ -763,6 +872,7 @@ fn seed_environments(default_required_policy: Uuid) -> Vec<EnvironmentItem> {
             id: Uuid::from_u128(102),
             name: "staging".to_string(),
             description: Some("Pre-production validation".to_string()),
+            color_hex: "#B45309".to_string(),
             system_count: 2,
             required_policy_ids: vec![default_required_policy],
         },
@@ -770,6 +880,7 @@ fn seed_environments(default_required_policy: Uuid) -> Vec<EnvironmentItem> {
             id: Uuid::from_u128(103),
             name: "development".to_string(),
             description: Some("Workstations and local testing".to_string()),
+            color_hex: "#2563EB".to_string(),
             system_count: 8,
             required_policy_ids: vec![default_required_policy],
         },
@@ -777,6 +888,7 @@ fn seed_environments(default_required_policy: Uuid) -> Vec<EnvironmentItem> {
             id: Uuid::from_u128(104),
             name: "remote".to_string(),
             description: Some("Remote unmanaged network".to_string()),
+            color_hex: "#6B7280".to_string(),
             system_count: 0,
             required_policy_ids: vec![default_required_policy],
         },

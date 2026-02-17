@@ -1,6 +1,8 @@
 //! System card component for summary views.
 
 use dioxus::prelude::*;
+use gloo_storage::{LocalStorage, Storage};
+use std::collections::HashMap;
 
 use crate::api::models::{CveSummary, SystemSummary};
 use crate::routes::Route;
@@ -30,10 +32,11 @@ pub fn SystemCard(system: SystemSummary) -> Element {
             // Header section with environment tab
             div {
                 class: "flex items-center justify-between px-6 py-4 border-b border-gray-800",
-                style: "{env_style.header_bg}",
+                style: "{env_style.header_style}",
                 h3 { class: "text-lg font-semibold text-white pl-0.5", "{system.hostname}" }
                 span {
-                    class: "inline-flex items-center px-3 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
+                    class: "inline-flex items-center px-3 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide",
+                    style: "{env_style.chip_style}",
                     "{environment}"
                 }
             }
@@ -104,35 +107,61 @@ fn deployment_policy_label(policy: &str) -> String {
     }
 }
 
+const ENV_COLOR_STORAGE_KEY: &str = "crystal_forge.environments.colors";
+
 struct EnvStyle {
-    chip_bg: &'static str,
-    chip_text: &'static str,
-    header_bg: &'static str,
+    chip_style: String,
+    header_style: String,
 }
 
 fn environment_style(environment: &str) -> EnvStyle {
-    match environment.to_lowercase().as_str() {
-        "production" => EnvStyle {
-            chip_bg: "bg-emerald-500/20",
-            chip_text: "text-emerald-300",
-            header_bg: "background: rgba(6, 78, 59, 0.5);", // emerald-900 with alpha
-        },
-        "staging" => EnvStyle {
-            chip_bg: "bg-amber-500/20",
-            chip_text: "text-amber-300",
-            header_bg: "background: rgba(120, 53, 15, 0.5);", // amber-900 with alpha
-        },
-        "development" => EnvStyle {
-            chip_bg: "bg-blue-500/20",
-            chip_text: "text-blue-300",
-            header_bg: "background: rgba(30, 58, 138, 0.5);", // blue-900 with alpha
-        },
-        _ => EnvStyle {
-            chip_bg: "bg-gray-500/20",
-            chip_text: "text-gray-300",
-            header_bg: "background: rgba(31, 41, 55, 1);", // gray-800
-        },
+    let color = environment_color_for(environment);
+    EnvStyle {
+        chip_style: format!(
+            "background: {}; border: 1px solid {}; color: #F8FAFC;",
+            rgba(&color, 0.24),
+            rgba(&color, 0.75)
+        ),
+        header_style: format!(
+            "background: linear-gradient(135deg, {} 0%, rgba(17, 24, 39, 0.92) 100%);",
+            rgba(&color, 0.42)
+        ),
     }
+}
+
+fn environment_color_for(environment: &str) -> String {
+    if let Ok(map) = LocalStorage::get::<HashMap<String, String>>(ENV_COLOR_STORAGE_KEY) {
+        if let Some(value) = map.get(&environment.to_lowercase()) {
+            return normalize_color_hex(value);
+        }
+    }
+
+    match environment.to_lowercase().as_str() {
+        "production" => "#0F766E".to_string(),
+        "staging" => "#B45309".to_string(),
+        "development" => "#2563EB".to_string(),
+        _ => "#6B7280".to_string(),
+    }
+}
+
+fn normalize_color_hex(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() == 7
+        && trimmed.starts_with('#')
+        && trimmed[1..].chars().all(|ch| ch.is_ascii_hexdigit())
+    {
+        trimmed.to_uppercase()
+    } else {
+        "#6B7280".to_string()
+    }
+}
+
+fn rgba(hex: &str, alpha: f32) -> String {
+    let color = normalize_color_hex(hex);
+    let r = u8::from_str_radix(&color[1..3], 16).unwrap_or(107);
+    let g = u8::from_str_radix(&color[3..5], 16).unwrap_or(114);
+    let b = u8::from_str_radix(&color[5..7], 16).unwrap_or(128);
+    format!("rgba({r}, {g}, {b}, {alpha})")
 }
 
 /// CVE summary row with severity counts.
