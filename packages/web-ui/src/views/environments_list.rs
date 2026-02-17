@@ -75,7 +75,7 @@ pub fn EnvironmentsListView() -> Element {
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Environments" }
+                    h1 { class: "{theme::typography::PAGE_TITLE}", "Environment Registry" }
                     p { class: "text-sm {theme::text::SECONDARY}", "Group systems by deployment domain and define required deployment policy baselines." }
                 }
                 button {
@@ -240,12 +240,9 @@ pub fn EnvironmentsListView() -> Element {
                 }
             }
 
-            Card {
-                title: Some("Environment Registry".to_string()),
-                children: rsx! {
-                    div {
-                        class: "space-y-3",
-                        for env in items {
+            div {
+                class: "space-y-3",
+                for env in items {
                             {
                                 let env_for_remove = env.clone();
                                 let required_names = required_policy_names(&env.required_policy_ids, &policy_library);
@@ -362,8 +359,6 @@ pub fn EnvironmentsListView() -> Element {
                                 }
                             }
                         }
-                    }
-                }
             }
 
             if let Some(env_id) = editing_environment.read().clone() {
