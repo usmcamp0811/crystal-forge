@@ -548,17 +548,18 @@ fn HistoryTab(
                 // Inner content wrapper - line sized to full content height
                 div {
                     class: "relative",
-                    style: "padding-left: 3rem;",
+                    style: "padding-left: 48px;",
 
                     // Continuous vertical line running the full content height
                     div {
                         class: "absolute bg-gray-600",
-                        style: "left: 0.875rem; top: 0; bottom: 0; width: 4px; border-radius: 2px; z-index: 1;",
+                        style: "left: 14px; top: 0; bottom: 0; width: 4px; border-radius: 2px; z-index: 0;",
                     }
 
                     // Commit entries
                     div {
-                        class: "space-y-4",
+                        class: "space-y-4 relative",
+                        style: "z-index: 1;",
                     for (idx, commit) in commits.iter().enumerate() {
                         CommitTimelineNode {
                             key: "{commit.hash}",
@@ -642,15 +643,15 @@ fn CommitTimelineNode(
 
     let commit_for_action = commit.clone();
 
-    // Connector color matches node
+    // Connector color matches node (using hex for inline styles)
     let connector_color = if commit.is_current {
-        "bg-emerald-500"
+        "#10b981" // emerald-500
     } else if commit.was_deployed {
-        "bg-blue-500"
+        "#3b82f6" // blue-500
     } else if commit.is_ready_to_deploy {
-        "bg-orange-500"
+        "#f97316" // orange-500
     } else {
-        "bg-gray-500"
+        "#6b7280" // gray-500
     };
 
     // Node dimensions and positioning math:
@@ -659,14 +660,15 @@ fn CommitTimelineNode(
     // Diamond: 8px tall, center at 24px -> top = 24 - 4 = 20px
 
     rsx! {
+        // Outer wrapper using grid layout to ensure proper alignment
         div {
-            class: "relative overflow-visible",
-            style: "min-height: 3rem;",
+            class: "grid",
+            style: "grid-template-columns: 32px 16px 1fr; margin-left: -48px; align-items: start;",
 
-            // Node (circle) - positioned on the vertical line, filled solid
+            // Node (circle) - first column
             div {
-                class: "absolute rounded-full {node_border} flex items-center justify-center",
-                style: "left: -3rem; top: 8px; width: 32px; height: 32px; z-index: 10; background-color: {node_color}; {node_glow}",
+                class: "rounded-full {node_border} flex items-center justify-center relative",
+                style: "width: 32px; height: 32px; margin-top: 8px; background-color: {node_color}; {node_glow} z-index: 2;",
 
                 // Checkmark icon for deployed commits
                 if commit.is_current || commit.was_deployed {
@@ -685,21 +687,25 @@ fn CommitTimelineNode(
                 }
             }
 
-            // Horizontal connector from node to card - centered vertically with node
+            // Connector stem - second column
             div {
-                class: "{connector_color}",
-                style: "position: absolute; left: -1rem; top: 22px; width: 1rem; height: 4px; border-radius: 2px; z-index: 5;",
+                class: "relative",
+                style: "height: 32px; margin-top: 8px;",
+
+                // Horizontal line
+                div {
+                    style: "position: absolute; top: 14px; left: 0; right: 0; height: 4px; border-radius: 2px; background-color: {connector_color};",
+                }
+
+                // Arrow/pointer (diamond) on the right edge
+                div {
+                    style: "position: absolute; top: 12px; right: -4px; width: 8px; height: 8px; transform: rotate(45deg); background-color: {connector_color};",
+                }
             }
 
-            // Arrow/pointer (diamond) on the card - centered with connector
+            // Content card - third column
             div {
-                class: "{connector_color}",
-                style: "position: absolute; left: -4px; top: 20px; width: 8px; height: 8px; transform: rotate(45deg); z-index: 6;",
-            }
-
-            // Content card
-            div {
-                class: "group relative rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} overflow-visible",
+                class: "group rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER}",
 
                 // Main content area
                 div {
