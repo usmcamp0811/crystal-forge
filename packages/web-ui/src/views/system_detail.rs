@@ -517,12 +517,12 @@ fn HistoryTab(
                 class: "flex items-center gap-6 mb-6 text-sm {theme::text::SECONDARY}",
                 div {
                     class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-blue-500 ring-2 ring-blue-400" }
+                    div { class: "w-4 h-4 rounded-full bg-emerald-500 ring-2 ring-emerald-400" }
                     span { "Current" }
                 }
                 div {
                     class: "flex items-center gap-2",
-                    div { class: "w-4 h-4 rounded-full bg-emerald-500" }
+                    div { class: "w-4 h-4 rounded-full bg-blue-500" }
                     span { "Deployed" }
                 }
                 div {
@@ -603,15 +603,17 @@ fn CommitTimelineNode(
     };
 
     // Border style - solid for deployed/current, dashed for skipped
-    let node_border = if !commit.is_current && !commit.was_deployed && !commit.is_ready_to_deploy {
+    let node_border = if commit.is_current {
+        "border-2 border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.5)]"
+    } else if !commit.was_deployed && !commit.is_ready_to_deploy {
         "border-2 border-dashed border-gray-500"
     } else {
         "border-2 border-gray-950"
     };
 
-    // Glow effect for current commit
+    // Glow effect for current commit - enhanced for "infill" feel
     let node_glow = if commit.is_current {
-        "box-shadow: 0 0 16px 4px rgba(16, 185, 129, 0.7);"
+        "box-shadow: 0 0 20px 6px rgba(16, 185, 129, 0.4);"
     } else {
         ""
     };
@@ -671,8 +673,11 @@ fn CommitTimelineNode(
                 class: "rounded-full {node_border} flex items-center justify-center relative",
                 style: "width: 32px; height: 32px; margin-top: 8px; background-color: {node_color}; {node_glow} z-index: 2;",
 
-                // Checkmark icon for deployed commits
-                if commit.is_current || commit.was_deployed {
+                // Checkmark icon or infilled dot
+                if commit.is_current {
+                    // Solid white dot for current commit infill
+                    div { class: "w-3 h-3 rounded-full bg-white shadow-[0_0_8px_white]" }
+                } else if commit.was_deployed {
                     svg {
                         class: "w-4 h-4 text-white",
                         fill: "none",
@@ -706,7 +711,7 @@ fn CommitTimelineNode(
 
             // Content card - third column
             div {
-                class: "group rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER}",
+                class: "group rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} max-w-md",
 
                 // Main content area
                 div {
