@@ -4,7 +4,7 @@ title: Environments view and systems add-form enhancements
 status: Done
 assignee: []
 created_date: '2026-02-17 03:00'
-updated_date: '2026-02-17 03:02'
+updated_date: '2026-02-17 03:29'
 labels:
   - ui
   - web-ui
@@ -26,4 +26,6 @@ Add Environments page with add/remove actions; update systems add form to use en
 Added Environments route/view with local registry add/remove UX and safe remove guard; updated Systems add form to required fields (hostname/public key/environment/flake/policy), environment dropdown from existing environments, and keypair generation modal that inserts generated public key.
 
 Implemented client-side Ed25519 keypair generation modal (Web Crypto randomness + ed25519-dalek), with private/public output and one-click public-key injection into add-system form.
+
+Refined environments UX: required-policy chips/counts, enforcement-pending badge, add-environment default required agent policy, and edit-requirements modal with policy-library link.
 <!-- SECTION:NOTES:END -->
