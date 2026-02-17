@@ -21,6 +21,7 @@ Implement advanced deployment features like automatic rollback, health checks, a
 
 - TASK-7: Feature: Automatic Deployment Rollback (like deploy-rs)
   - All subtasks (TASK-7.1 through TASK-7.X)
+- TASK-45: Feature: Agent Debug/Maintenance Mode for Rapid Iteration
 
 ## Dependencies
 
