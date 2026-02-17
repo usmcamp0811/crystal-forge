@@ -3,9 +3,9 @@
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 use crate::api::models::{
     CveSummary, DeploymentStatus, FlakeSummary, HealthStatus, PipelineStage, SystemDetail,
@@ -15,8 +15,8 @@ use crate::components::layout::Card;
 use crate::components::system::SystemCard;
 use crate::routes::Route;
 use crate::theme;
-use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use chrono::{Duration, TimeZone, Utc};
 use ed25519_dalek::SigningKey;
 use uuid::Uuid;
