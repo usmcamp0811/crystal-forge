@@ -17,7 +17,12 @@ pub struct WidgetLayout {
 
 impl WidgetLayout {
     pub fn new(col: usize, row: usize, width: usize, height: usize) -> Self {
-        Self { col, row, width, height }
+        Self {
+            col,
+            row,
+            width,
+            height,
+        }
     }
 }
 
@@ -83,17 +88,17 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
     let grid_row = format!("{} / span {}", row + 1, height);
 
     // Visual states
-    let drag_class = if is_dragging { 
-        "opacity-50 scale-105 shadow-2xl z-50" 
-    } else { 
-        "" 
+    let drag_class = if is_dragging {
+        "opacity-50 scale-105 shadow-2xl z-50"
+    } else {
+        ""
     };
-    let drop_class = if is_drop_target { 
-        "ring-2 ring-blue-400 ring-offset-2 ring-offset-gray-900 scale-[1.02] bg-blue-900/20" 
+    let drop_class = if is_drop_target {
+        "ring-2 ring-blue-400 ring-offset-2 ring-offset-gray-900 scale-[1.02] bg-blue-900/20"
     } else if is_invalid_drop_target {
         "ring-2 ring-red-400 ring-offset-2 ring-offset-gray-900 bg-red-900/20"
-    } else { 
-        "" 
+    } else {
+        ""
     };
 
     rsx! {
@@ -143,7 +148,7 @@ pub fn GridWidget(props: GridWidgetProps) -> Element {
             // Header with drag handle
             div {
                 class: "flex items-center gap-2 px-3 py-1.5 bg-gray-800/50 border-b border-gray-700 cursor-grab active:cursor-grabbing",
-                
+
                 // Drag handle icon (6-dot grip)
                 svg {
                     width: "8",

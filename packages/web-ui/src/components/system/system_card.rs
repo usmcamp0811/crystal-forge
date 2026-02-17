@@ -9,7 +9,10 @@ use crate::theme;
 /// Card displaying a system summary.
 #[component]
 pub fn SystemCard(system: SystemSummary) -> Element {
-    let environment = system.environment.clone().unwrap_or_else(|| "Unknown".to_string());
+    let environment = system
+        .environment
+        .clone()
+        .unwrap_or_else(|| "Unknown".to_string());
     let pipeline_label = system
         .pipeline_stage
         .map(|stage| stage.label())
@@ -92,6 +95,9 @@ fn StatusBadge(label: &'static str, color_class: &'static str, bg_class: &'stati
 
 fn deployment_policy_label(policy: &str) -> String {
     match policy {
+        "manual" => "Deploy policy: Manual".to_string(),
+        "auto_latest" => "Deploy policy: Auto latest".to_string(),
+        "pinned" => "Deploy policy: Pinned".to_string(),
         "Immediate" => "Auto-deploy: Immediate".to_string(),
         "Boot Only" => "Auto-deploy: On reboot".to_string(),
         _ => policy.to_string(),

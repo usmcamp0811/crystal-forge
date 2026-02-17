@@ -1,0 +1,29 @@
+---
+id: TASK-34
+title: Environments view and systems add-form enhancements
+status: Done
+assignee: []
+created_date: '2026-02-17 03:00'
+updated_date: '2026-02-17 03:02'
+labels:
+  - ui
+  - web-ui
+  - systems
+  - environments
+dependencies: []
+priority: high
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Add Environments page with add/remove actions; update systems add form to use environment dropdown and keypair generation modal that auto-fills public key.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Added Environments route/view with local registry add/remove UX and safe remove guard; updated Systems add form to required fields (hostname/public key/environment/flake/policy), environment dropdown from existing environments, and keypair generation modal that inserts generated public key.
+
+Implemented client-side Ed25519 keypair generation modal (Web Crypto randomness + ed25519-dalek), with private/public output and one-click public-key injection into add-system form.
+<!-- SECTION:NOTES:END -->

@@ -5,15 +5,16 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 use crate::components::layout::Card;
 use crate::theme;
 use crate::views::systems_list::mock_system_details;
 
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
+const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FlakesViewMode {
@@ -118,6 +119,12 @@ struct FlakeListItem {
     environments: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct NewFlakeDraft {
+    name: String,
+    repo_url: String,
+}
+
 /// Flakes list with toggles and filters.
 #[component]
 pub fn FlakesListView() -> Element {
@@ -176,11 +183,19 @@ pub fn FlakesListView() -> Element {
     let environment_filter = use_signal(Vec::<String>::new);
     let commit_filter = use_signal(Vec::<CommitFilter>::new);
     let size_filter = use_signal(Vec::<SizeBucket>::new);
+    let mut flakes = use_signal(mock_flakes);
+    let mut show_add_form = use_signal(|| false);
+    let mut add_error = use_signal(|| None::<String>);
+    let mut draft = use_signal(|| NewFlakeDraft {
+        name: String::new(),
+        repo_url: String::new(),
+    });
+    let mut pending_remove = use_signal(|| None::<FlakeListItem>);
 
-    let flakes = mock_flakes();
-    let environments = unique_environments(&flakes);
+    let current_flakes = flakes.read().clone();
+    let environments = unique_environments(&current_flakes);
 
-    let filtered_flakes: Vec<FlakeListItem> = flakes
+    let filtered_flakes: Vec<FlakeListItem> = current_flakes
         .into_iter()
         .filter(|flake| matches_environment(flake, &environment_filter.read()))
         .filter(|flake| matches_commit_state(flake, &commit_filter.read()))
@@ -198,12 +213,69 @@ pub fn FlakesListView() -> Element {
                     h1 { class: "{theme::typography::PAGE_TITLE}", "Flakes" }
                     p { class: "text-sm {theme::text::SECONDARY}", "Track flake repositories and deployment coverage." }
                 }
-                ViewToggle {
-                    view_mode: *view_mode.read(),
-                    on_change: move |mode| {
-                        view_mode.set(mode);
-                        let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
+                div {
+                    class: "flex items-center gap-3",
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                        onclick: move |_| {
+                            let next = !*show_add_form.read();
+                            show_add_form.set(next);
+                            add_error.set(None);
+                        },
+                        if *show_add_form.read() {
+                            "Close"
+                        } else {
+                            "Add Flake"
+                        }
                     }
+                    ViewToggle {
+                        view_mode: *view_mode.read(),
+                        on_change: move |mode| {
+                            view_mode.set(mode);
+                            let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
+                        }
+                    }
+                }
+            }
+
+            if *show_add_form.read() {
+                AddFlakeForm {
+                    draft: draft,
+                    error: add_error,
+                    on_cancel: move |_| {
+                        draft.set(NewFlakeDraft {
+                            name: String::new(),
+                            repo_url: String::new(),
+                        });
+                        add_error.set(None);
+                        show_add_form.set(false);
+                    },
+                    on_submit: move |_| {
+                        let next = draft.read().clone();
+                        if let Err(err) = validate_new_flake(&next, &flakes.read()) {
+                            add_error.set(Some(err));
+                            return;
+                        }
+
+                        let mut values = flakes.read().clone();
+                        let next_id = values.iter().map(|flake| flake.id).max().unwrap_or(0) + 1;
+                        values.push(FlakeListItem {
+                            id: next_id,
+                            name: next.name.trim().to_string(),
+                            repo_url: next.repo_url.trim().to_string(),
+                            latest_commit: None,
+                            system_count: 0,
+                            environments: Vec::new(),
+                        });
+                        values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                        flakes.set(values);
+                        draft.set(NewFlakeDraft {
+                            name: String::new(),
+                            repo_url: String::new(),
+                        });
+                        add_error.set(None);
+                        show_add_form.set(false);
+                    },
                 }
             }
 
@@ -228,11 +300,31 @@ pub fn FlakesListView() -> Element {
                     class: "grid grid-cols-1 xl:grid-cols-2 gap-6",
                     "data-testid": "flakes-cards",
                     for flake in filtered_flakes.clone() {
-                        FlakeCard { flake }
+                        FlakeCard {
+                            flake,
+                            on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
+                        }
                     }
                 }
             } else {
-                FlakesTable { flakes: filtered_flakes.clone() }
+                FlakesTable {
+                    flakes: filtered_flakes.clone(),
+                    on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
+                }
+            }
+
+            if let Some(flake) = pending_remove.read().clone() {
+                RemoveFlakeDialog {
+                    flake_name: flake.name.clone(),
+                    system_count: flake.system_count,
+                    on_cancel: move |_| pending_remove.set(None),
+                    on_confirm: move |_| {
+                        let mut values = flakes.read().clone();
+                        values.retain(|item| item.id != flake.id);
+                        flakes.set(values);
+                        pending_remove.set(None);
+                    }
+                }
             }
         }
     }
@@ -298,7 +390,7 @@ fn FiltersBar(
 }
 
 #[component]
-fn FlakesTable(flakes: Vec<FlakeListItem>) -> Element {
+fn FlakesTable(flakes: Vec<FlakeListItem>, on_remove: EventHandler<i32>) -> Element {
     let mut sort_column = use_signal(|| None::<SortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
 
@@ -384,6 +476,7 @@ fn FlakesTable(flakes: Vec<FlakeListItem>) -> Element {
                                     sort_column: sort_column,
                                     sort_direction: sort_direction,
                                 }
+                                th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
                             }
                         }
                         tbody {
@@ -396,6 +489,23 @@ fn FlakesTable(flakes: Vec<FlakeListItem>) -> Element {
                                     td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
                                     td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
                                     td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{latest_commit_label(&flake)}" }
+                                    td {
+                                        class: "{theme::spacing::TABLE_CELL} text-right",
+                                        if flake.system_count > 0 {
+                                            button {
+                                                class: "inline-flex px-2 py-1 text-xs rounded border border-gray-700 text-gray-500 cursor-not-allowed",
+                                                disabled: true,
+                                                title: "Cannot remove flakes linked to systems",
+                                                "In Use"
+                                            }
+                                        } else {
+                                            button {
+                                                class: "inline-flex px-2 py-1 text-xs rounded border border-red-500/40 text-red-300 hover:bg-red-500/15 transition",
+                                                onclick: move |_| on_remove.call(flake.id),
+                                                "Remove"
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -407,7 +517,7 @@ fn FlakesTable(flakes: Vec<FlakeListItem>) -> Element {
 }
 
 #[component]
-fn FlakeCard(flake: FlakeListItem) -> Element {
+fn FlakeCard(flake: FlakeListItem, on_remove: EventHandler<i32>) -> Element {
     let environments = environments_label(&flake);
     let latest_commit = latest_commit_label(&flake);
 
@@ -432,12 +542,192 @@ fn FlakeCard(flake: FlakeListItem) -> Element {
                 p { class: "text-sm text-gray-200", "{environments}" }
             }
             div {
-                class: "px-6 py-4",
+                class: "px-6 py-4 space-y-3",
                 p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Latest Commit" }
                 p { class: "text-sm text-gray-200 font-mono", "{latest_commit}" }
+                if flake.system_count > 0 {
+                    p {
+                        class: "text-xs text-gray-500",
+                        "Cannot remove while linked to active systems."
+                    }
+                } else {
+                    button {
+                        class: "w-full px-3 py-2 rounded-lg text-sm font-medium border border-red-500/40 text-red-300 hover:bg-red-500/15 transition",
+                        onclick: move |_| on_remove.call(flake.id),
+                        "Remove Flake"
+                    }
+                }
             }
         }
     }
+}
+
+#[component]
+fn AddFlakeForm(
+    draft: Signal<NewFlakeDraft>,
+    error: Signal<Option<String>>,
+    on_submit: EventHandler<()>,
+    on_cancel: EventHandler<()>,
+) -> Element {
+    rsx! {
+        Card {
+            title: Some("Register Flake".to_string()),
+            children: rsx! {
+                div {
+                    class: "space-y-4",
+                    p {
+                        class: "text-sm {theme::text::SECONDARY}",
+                        "Schema context: {FLAKE_TABLE_SCHEMA_NOTE}."
+                    }
+                    div {
+                        class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                        label {
+                            class: "space-y-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
+                            input {
+                                class: "w-full rounded-lg px-3 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().name}",
+                                placeholder: "prod-core",
+                                oninput: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.name = evt.value();
+                                    draft.set(next);
+                                },
+                            }
+                        }
+                        label {
+                            class: "space-y-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Repository URL" }
+                            input {
+                                class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().repo_url}",
+                                placeholder: "https://github.com/org/repo",
+                                oninput: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.repo_url = evt.value();
+                                    draft.set(next);
+                                },
+                            }
+                        }
+                    }
+                    if let Some(message) = error.read().clone() {
+                        p { class: "text-sm text-red-300", "{message}" }
+                    }
+                    div {
+                        class: "flex flex-col-reverse sm:flex-row sm:justify-end gap-2",
+                        button {
+                            class: "px-3 py-2 rounded-lg text-sm bg-gray-700 hover:bg-gray-600 text-white",
+                            onclick: move |_| on_cancel.call(()),
+                            "Cancel"
+                        }
+                        button {
+                            class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            onclick: move |_| on_submit.call(()),
+                            "Save Flake"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn RemoveFlakeDialog(
+    flake_name: String,
+    system_count: usize,
+    on_confirm: EventHandler<()>,
+    on_cancel: EventHandler<()>,
+) -> Element {
+    let warning = if system_count == 0 {
+        "This removes the flake from the registry. Related commits are deleted by cascade."
+            .to_string()
+    } else {
+        format!("This flake is linked to {system_count} systems and cannot be removed.")
+    };
+
+    rsx! {
+        div {
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
+            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            onclick: move |_| on_cancel.call(()),
+            div {
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
+                style: "width: 100%; max-width: 30rem;",
+                onclick: |evt| evt.stop_propagation(),
+                h3 {
+                    class: "text-lg font-semibold text-white mb-2",
+                    "Remove flake {flake_name}?"
+                }
+                p {
+                    class: "text-sm {theme::text::SECONDARY} mb-6",
+                    "{warning}"
+                }
+                div {
+                    class: "flex gap-3",
+                    button {
+                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                    if system_count == 0 {
+                        button {
+                            class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-red-500 hover:bg-red-400 text-white",
+                            onclick: move |_| on_confirm.call(()),
+                            "Remove"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn remove_flake_by_id(
+    flakes: Signal<Vec<FlakeListItem>>,
+    mut pending_remove: Signal<Option<FlakeListItem>>,
+    flake_id: i32,
+) {
+    let target = flakes
+        .read()
+        .iter()
+        .find(|flake| flake.id == flake_id)
+        .cloned();
+    if let Some(flake) = target {
+        pending_remove.set(Some(flake));
+    }
+}
+
+fn validate_new_flake(draft: &NewFlakeDraft, existing: &[FlakeListItem]) -> Result<(), String> {
+    let name = draft.name.trim();
+    let repo_url = draft.repo_url.trim();
+
+    if name.is_empty() {
+        return Err("Flake name is required.".to_string());
+    }
+    if repo_url.is_empty() {
+        return Err("Repository URL is required.".to_string());
+    }
+    if !looks_like_repo_url(repo_url) {
+        return Err("Repository URL must look like a git remote.".to_string());
+    }
+    if existing
+        .iter()
+        .any(|flake| flake.repo_url.eq_ignore_ascii_case(repo_url))
+    {
+        return Err("Repository URL already exists in the registry.".to_string());
+    }
+
+    Ok(())
+}
+
+fn looks_like_repo_url(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower.starts_with("https://")
+        || lower.starts_with("http://")
+        || lower.starts_with("git@")
+        || lower.starts_with("ssh://")
+        || lower.starts_with("github:")
 }
 
 #[component]

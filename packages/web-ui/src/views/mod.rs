@@ -3,6 +3,8 @@
 pub mod builds;
 pub mod cves;
 pub mod dashboard;
+pub mod environments;
+pub mod environments_list;
 pub mod flakes;
 pub mod flakes_list;
 pub mod not_found;
