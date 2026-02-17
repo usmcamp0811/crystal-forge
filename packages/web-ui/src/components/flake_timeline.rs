@@ -633,7 +633,7 @@ fn TimelineGraph(
     let node_center = node_top + (node_size / 2); // Center at y=14
     let line_thickness = 5;
     let line_top = node_center - 2; // Line at y=12, 5px thick, centers at y=14
-    // Height for node + text labels only
+                                    // Height for node + text labels only
     let container_height = 65;
 
     rsx! {
@@ -770,11 +770,13 @@ fn CommitNode(
 
             // Main node - colored circle with system count, centered ON the line
             div {
-                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2 border-gray-900",
+                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2",
+                class: if commit.commits_behind == 0 { "border-white shadow-[0_0_10px_rgba(255,255,255,0.4)]" } else { "border-gray-900" },
                 style: "width: {node_size}px; height: {node_size}px; top: {badge_top}px; box-shadow: {build_ring};",
                 title: "{build_status.label()}",
                 span {
-                    class: "text-[9px] font-bold text-gray-900",
+                    class: "text-[9px] font-bold",
+                    class: if commit.commits_behind == 0 { "text-white" } else { "text-gray-900" },
                     "{commit.system_count}"
                 }
 

@@ -2,10 +2,15 @@
 
 use std::collections::HashMap;
 
+use chrono::{DateTime, Duration, Utc};
 use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
+#[cfg(target_arch = "wasm32")]
+use js_sys::Object;
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
 
@@ -117,6 +122,37 @@ struct FlakeListItem {
     latest_commit: Option<String>,
     system_count: usize,
     environments: Vec<String>,
+    last_synced_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct FlakeHistoryCommit {
+    hash: String,
+    message: String,
+    author: String,
+    committed_at: DateTime<Utc>,
+    files_changed: usize,
+    insertions: usize,
+    deletions: usize,
+    diff: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct ParsedDiffFile {
+    old_path: String,
+    new_path: String,
+    language: &'static str,
+    lines: Vec<RenderedDiffLine>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RenderedDiffLine {
+    old_number: Option<usize>,
+    new_number: Option<usize>,
+    prefix: char,
+    content: String,
+    class_name: &'static str,
+    is_hunk_header: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -200,6 +236,10 @@ pub fn FlakesListView() -> Element {
     let mut pending_remove = use_signal(|| None::<FlakeListItem>);
     let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
     let mut edit_error = use_signal(|| None::<String>);
+    let mut selected_history_flake = use_signal(|| None::<i32>);
+    let mut selected_history_commit = use_signal(|| None::<String>);
+    let mut sync_note = use_signal(|| None::<String>);
+    let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
 
     let current_flakes = flakes.read().clone();
     let environments = unique_environments(&current_flakes);
@@ -211,6 +251,24 @@ pub fn FlakesListView() -> Element {
         .filter(|flake| matches_size(flake, &size_filter.read()))
         .filter(|flake| matches_search(flake, &search.read()))
         .collect();
+    let sync_timestamp =
+        (*last_manual_sync.read()).map(|ts| ts.format("%Y-%m-%d %H:%M:%S UTC").to_string());
+
+    {
+        let filtered_ids: Vec<i32> = filtered_flakes.iter().map(|flake| flake.id).collect();
+        let mut selected_history_flake = selected_history_flake.clone();
+        let mut selected_history_commit = selected_history_commit.clone();
+        use_effect(move || {
+            let current = *selected_history_flake.read();
+            let has_selected = current
+                .map(|id| filtered_ids.iter().any(|value| *value == id))
+                .unwrap_or(false);
+            if !has_selected {
+                selected_history_flake.set(filtered_ids.first().copied());
+                selected_history_commit.set(None);
+            }
+        });
+    }
 
     rsx! {
         div {
@@ -224,6 +282,22 @@ pub fn FlakesListView() -> Element {
                 }
                 div {
                     class: "flex items-center gap-3",
+                    button {
+                        class: "px-3 py-2 rounded-lg text-sm font-medium border border-blue-500/50 text-blue-200 hover:text-white hover:bg-blue-500/20 transition-colors",
+                        onclick: move |_| {
+                            let mut next = flakes.read().clone();
+                            let changed = sync_flake_registry(&mut next);
+                            flakes.set(next);
+                            let now = Utc::now();
+                            last_manual_sync.set(Some(now));
+                            sync_note.set(Some(format!(
+                                "Polled {} flakes from source ({} updated).",
+                                flakes.read().len(),
+                                changed
+                            )));
+                        },
+                        "Sync from Source"
+                    }
                     button {
                         class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
                         onclick: move |_| {
@@ -244,6 +318,19 @@ pub fn FlakesListView() -> Element {
                             let _ = LocalStorage::set(VIEW_PREF_KEY, mode.as_storage());
                         }
                     }
+                }
+            }
+
+            if let Some(note) = sync_note.read().clone() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
+                    style: "background-color: #23354B; border-color: #406084;",
+                    "{note}"
+                }
+            } else if let Some(sync_ts) = sync_timestamp {
+                p {
+                    class: "text-xs {theme::text::MUTED}",
+                    "Last manual sync {sync_ts}"
                 }
             }
 
@@ -275,6 +362,7 @@ pub fn FlakesListView() -> Element {
                             latest_commit: None,
                             system_count: 0,
                             environments: Vec::new(),
+                            last_synced_at: Utc::now(),
                         });
                         values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
                         flakes.set(values);
@@ -322,6 +410,12 @@ pub fn FlakesListView() -> Element {
                     on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                     on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
                 }
+            }
+
+            FlakeHistoryExplorer {
+                flakes: filtered_flakes.clone(),
+                selected_flake_id: selected_history_flake,
+                selected_commit_hash: selected_history_commit,
             }
 
             if let Some(editing) = editing_flake.read().clone() {
@@ -654,6 +748,280 @@ fn FlakeCard(
                             class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
                             onclick: move |_| on_remove.call(flake.id),
                             "Remove"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FlakeHistoryExplorer(
+    flakes: Vec<FlakeListItem>,
+    selected_flake_id: Signal<Option<i32>>,
+    selected_commit_hash: Signal<Option<String>>,
+) -> Element {
+    let history = mock_flake_history();
+
+    if flakes.is_empty() {
+        return rsx! {
+            Card {
+                title: Some("Git Commit History".to_string()),
+                children: rsx! {
+                    p { class: "text-sm {theme::text::SECONDARY}", "No flakes in scope for commit history." }
+                }
+            }
+        };
+    }
+
+    let active_flake_id = selected_flake_id
+        .read()
+        .to_owned()
+        .unwrap_or_else(|| flakes[0].id);
+    let active_flake = flakes
+        .iter()
+        .find(|flake| flake.id == active_flake_id)
+        .cloned()
+        .unwrap_or_else(|| flakes[0].clone());
+    let commits = history.get(&active_flake.id).cloned().unwrap_or_default();
+
+    let active_commit = selected_commit_hash
+        .read()
+        .as_ref()
+        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .map(|commit| commit.clone())
+        .or_else(|| commits.first().cloned());
+    let active_repo = active_flake.repo_url.clone();
+    let flake_sync_label = active_flake
+        .last_synced_at
+        .format("%Y-%m-%d %H:%M UTC")
+        .to_string();
+
+    rsx! {
+        Card {
+            title: Some("Git Commit History".to_string()),
+            header_actions: Some(rsx! {
+                div {
+                    class: "flex items-center gap-2",
+                    label {
+                        class: "text-xs {theme::text::MUTED}",
+                        "Flake"
+                    }
+                    select {
+                        class: "rounded-md px-2 py-1 text-xs {theme::interactive::INPUT}",
+                        value: "{active_flake.id}",
+                        onchange: move |evt| {
+                            if let Ok(id) = evt.value().parse::<i32>() {
+                                selected_flake_id.set(Some(id));
+                                selected_commit_hash.set(None);
+                            }
+                        },
+                        for flake in flakes.iter() {
+                            option {
+                                key: "{flake.id}",
+                                value: "{flake.id}",
+                                "{flake.name}"
+                            }
+                        }
+                    }
+                }
+            }),
+            children: rsx! {
+                div {
+                    class: "space-y-3",
+                    div {
+                        class: "text-xs {theme::text::MUTED}",
+                        "{active_repo} · last sync {flake_sync_label}"
+                    }
+                    div {
+                        class: "cf-builds-split",
+                        div {
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} bg-gray-900/50 overflow-hidden",
+                            div {
+                                class: "px-3 py-2 border-b {theme::surface::CARD_BORDER} text-xs uppercase tracking-wide text-gray-400",
+                                "Timeline"
+                            }
+                            div {
+                                class: "max-h-[68vh] overflow-y-auto",
+                                if commits.is_empty() {
+                                    p { class: "p-4 text-sm {theme::text::SECONDARY}", "No commits available." }
+                                } else {
+                                    div {
+                                        class: "relative px-3 py-2",
+                                        div {
+                                            class: "absolute bg-gray-700",
+                                            style: "left: 18px; top: 0; bottom: 0; width: 2px;",
+                                        }
+                                        div {
+                                            class: "space-y-4 relative",
+                                            for commit in commits.iter() {
+                                                {
+                                                    let is_active = active_commit
+                                                        .as_ref()
+                                                        .map(|value| value.hash == commit.hash)
+                                                        .unwrap_or(false);
+                                                    let short_hash = commit.hash.chars().take(8).collect::<String>();
+                                                    let commit_time = commit.committed_at.format("%b %d %H:%M").to_string();
+                                                    let commit_for_select = commit.hash.clone();
+                                                    rsx! {
+                                                        div {
+                                                            key: "{commit.hash}",
+                                                            class: "grid",
+                                                            style: "grid-template-columns: 26px 14px 1fr; margin-left: -3px; align-items: start;",
+
+                                                            div {
+                                                                class: "rounded-full border-2 flex items-center justify-center",
+                                                                class: if is_active {
+                                                                    "border-blue-300 bg-blue-500"
+                                                                } else {
+                                                                    "border-gray-700 bg-gray-900"
+                                                                },
+                                                                style: if is_active {
+                                                                    "width: 24px; height: 24px; margin-top: 8px; box-shadow: 0 0 12px 2px rgba(59, 130, 246, 0.55);"
+                                                                } else {
+                                                                    "width: 24px; height: 24px; margin-top: 8px;"
+                                                                },
+                                                                if is_active {
+                                                                    svg {
+                                                                        class: "w-3 h-3 text-white",
+                                                                        fill: "none",
+                                                                        stroke: "currentColor",
+                                                                        stroke_width: "2.5",
+                                                                        view_box: "0 0 24 24",
+                                                                        path {
+                                                                            stroke_linecap: "round",
+                                                                            stroke_linejoin: "round",
+                                                                            d: "M5 13l4 4L19 7"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            div {
+                                                                class: "relative",
+                                                                style: "height: 24px; margin-top: 8px;",
+                                                                div {
+                                                                    style: if is_active {
+                                                                        "position: absolute; top: 10px; left: 0; right: 0; height: 3px; border-radius: 2px; background-color: #60a5fa;"
+                                                                    } else {
+                                                                        "position: absolute; top: 10px; left: 0; right: 0; height: 3px; border-radius: 2px; background-color: #6b7280;"
+                                                                    },
+                                                                }
+                                                                div {
+                                                                    style: if is_active {
+                                                                        "position: absolute; top: 8px; right: -3px; width: 6px; height: 6px; transform: rotate(45deg); background-color: #60a5fa;"
+                                                                    } else {
+                                                                        "position: absolute; top: 8px; right: -3px; width: 6px; height: 6px; transform: rotate(45deg); background-color: #6b7280;"
+                                                                    },
+                                                                }
+                                                            }
+
+                                                            button {
+                                                                class: "w-full text-left px-3 py-2 rounded-lg border transition",
+                                                                class: if is_active {
+                                                                    "border-blue-500/70 bg-blue-500/10"
+                                                                } else {
+                                                                    "border-gray-800 bg-gray-900/60 hover:border-gray-600"
+                                                                },
+                                                                onclick: move |_| selected_commit_hash.set(Some(commit_for_select.clone())),
+                                                                p { class: "text-sm text-white truncate", "{commit.message}" }
+                                                                p { class: "text-[11px] text-gray-400 font-mono", "{short_hash} · {commit.author}" }
+                                                                p { class: "text-[10px] {theme::text::MUTED}", "{commit_time}" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        div {
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} bg-gray-900/50 overflow-hidden",
+                            if let Some(commit) = active_commit {
+                                div {
+                                    class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} space-y-2",
+                                    p { class: "text-base text-white font-semibold", "{commit.message}" }
+                                    div {
+                                        class: "flex flex-wrap items-center gap-2 text-xs",
+                                        span { class: "font-mono px-2 py-1 rounded bg-gray-800 text-gray-300", "{commit.hash}" }
+                                        span { class: "px-2 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
+                                        span {
+                                            class: "px-2 py-1 rounded bg-gray-800 text-gray-300",
+                                            {commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()}
+                                        }
+                                        span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{commit.files_changed} files" }
+                                        span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{commit.insertions}" }
+                                        span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{commit.deletions}" }
+                                    }
+                                }
+                                div {
+                                    class: "p-4 max-h-[68vh] overflow-auto",
+                                    FriendlyDiffViewer {
+                                        diff: commit.diff.clone(),
+                                    }
+                                }
+                            } else {
+                                p { class: "p-4 text-sm {theme::text::SECONDARY}", "Select a commit node to inspect the full diff." }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+fn FriendlyDiffViewer(diff: String) -> Element {
+    let parsed_files = parse_unified_diff(&diff);
+    if parsed_files.is_empty() {
+        return rsx! {
+            pre {
+                class: "text-xs font-mono rounded-lg border border-gray-700 bg-gray-950 p-3 text-gray-200 overflow-x-auto",
+                "{diff}"
+            }
+        };
+    }
+
+    rsx! {
+        div {
+            class: "space-y-4",
+            for file in parsed_files {
+                div {
+                    key: "{file.new_path}",
+                    class: "rounded-lg border border-gray-700 overflow-hidden",
+                    div {
+                        class: "px-3 py-2 border-b border-gray-700 bg-gray-900 flex items-center justify-between gap-2",
+                        p { class: "text-xs font-mono text-gray-300 truncate", "{file.old_path} -> {file.new_path}" }
+                        span { class: "text-[10px] uppercase tracking-wide text-gray-500", "{file.language}" }
+                    }
+                    div {
+                        class: "bg-gray-950",
+                        for line in file.lines {
+                            div {
+                                class: "grid",
+                                style: "grid-template-columns: 3.2rem 3.2rem 1.5rem minmax(0, 1fr);",
+                                class: "{line.class_name}",
+                                div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.old_number.map(|value| value.to_string()).unwrap_or_default()}" }
+                                div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.new_number.map(|value| value.to_string()).unwrap_or_default()}" }
+                                div { class: "px-1 py-0.5 text-[11px] text-gray-400 border-r border-gray-800", "{line.prefix}" }
+                                div {
+                                    class: if line.is_hunk_header {
+                                        "px-2 py-0.5 text-[11px] font-mono text-sky-300"
+                                    } else {
+                                        "px-2 py-0.5 text-[11px] font-mono text-gray-200 hljs language-{file.language}"
+                                    },
+                                    if line.is_hunk_header {
+                                        "{line.content}"
+                                    } else {
+                                        span { dangerous_inner_html: "{highlight_diff_fragment(file.language, &line.content)}" }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1353,6 +1721,7 @@ fn mock_flakes() -> Vec<FlakeListItem> {
             latest_commit: flake.latest_commit.clone(),
             system_count: 0,
             environments: Vec::new(),
+            last_synced_at: Utc::now() - Duration::minutes(37),
         });
 
         entry.system_count += 1;
@@ -1372,6 +1741,15 @@ fn mock_flakes() -> Vec<FlakeListItem> {
         flake.environments.sort();
         flake.environments.dedup();
     }
+
+    // Keep one flake intentionally stale so manual sync shows visible updates in mock mode.
+    if let Some(stale) = values
+        .iter_mut()
+        .find(|flake| flake.name == "infrastructure")
+    {
+        stale.latest_commit = Some("c3d4e5f".to_string());
+    }
+
     values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     values
 }
@@ -1397,4 +1775,429 @@ fn table_class(active: bool) -> &'static str {
     } else {
         "text-gray-400 hover:text-white"
     }
+}
+
+fn sync_flake_registry(flakes: &mut [FlakeListItem]) -> usize {
+    let now = Utc::now();
+    let latest_by_id: HashMap<i32, String> = crate::views::dashboard::mock_flake_timelines()
+        .into_iter()
+        .filter_map(|timeline| {
+            timeline
+                .commits
+                .first()
+                .map(|commit| (timeline.flake_id, commit.hash.chars().take(7).collect()))
+        })
+        .collect();
+
+    let mut changed = 0;
+    for flake in flakes.iter_mut() {
+        if let Some(latest) = latest_by_id.get(&flake.id) {
+            if flake.latest_commit.as_deref() != Some(latest.as_str()) {
+                flake.latest_commit = Some(latest.clone());
+                changed += 1;
+            }
+        }
+        flake.last_synced_at = now;
+    }
+
+    changed
+}
+
+fn mock_flake_history() -> HashMap<i32, Vec<FlakeHistoryCommit>> {
+    let mut history = HashMap::new();
+
+    for timeline in crate::views::dashboard::mock_flake_timelines() {
+        let commits: Vec<FlakeHistoryCommit> = timeline
+            .commits
+            .into_iter()
+            .map(|commit| {
+                let diff = full_diff_for_commit(&timeline.flake_name, &commit);
+                let (files_changed, insertions, deletions) = diff_stats(&diff);
+                FlakeHistoryCommit {
+                    hash: commit.hash,
+                    message: commit.message,
+                    author: commit.author,
+                    committed_at: commit.committed_at,
+                    files_changed,
+                    insertions,
+                    deletions,
+                    diff,
+                }
+            })
+            .collect();
+
+        history.insert(timeline.flake_id, commits);
+    }
+
+    history
+}
+
+fn full_diff_for_commit(flake_name: &str, commit: &crate::api::models::FlakeCommit) -> String {
+    let selector = commit.hash.bytes().last().unwrap_or(b'0') % 4;
+    match selector {
+        0 => format!(
+            "diff --git a/hosts/{flake_name}/default.nix b/hosts/{flake_name}/default.nix\n\
+index 2b0fa11..71c3d97 100644\n\
+--- a/hosts/{flake_name}/default.nix\n\
++++ b/hosts/{flake_name}/default.nix\n\
+@@ -18,8 +18,12 @@ in {{\n\
+   services.openssh.enable = true;\n\
+-  services.openssh.settings.PasswordAuthentication = true;\n\
++  services.openssh.settings.PasswordAuthentication = false;\n\
++  services.openssh.settings.KbdInteractiveAuthentication = false;\n\
++  services.openssh.ports = [ 22 2222 ];\n\
+\n\
+   environment.systemPackages = with pkgs; [\n\
+     git\n\
++    htop\n\
+   ];\n\
+@@ -42,6 +46,10 @@ in {{\n\
+   systemd.services.crystal-forge-agent = {{\n\
+     wantedBy = [ \"multi-user.target\" ];\n\
++    serviceConfig = {{\n\
++      Restart = \"always\";\n\
++      RestartSec = \"8s\";\n\
++    }};\n\
+   }};\n\
+ }}\n\
+\n\
+// {message}\n",
+            flake_name = flake_name,
+            message = commit.message
+        ),
+        1 => format!(
+            "diff --git a/modules/networking.nix b/modules/networking.nix\n\
+index 618a22d..7d8a1a4 100644\n\
+--- a/modules/networking.nix\n\
++++ b/modules/networking.nix\n\
+@@ -10,9 +10,11 @@\n\
+ {{ config, lib, ... }}: {{\n\
+   networking.firewall = {{\n\
+-    enable = false;\n\
++    enable = true;\n\
+     allowedTCPPorts = [ 22 443 9100 ];\n\
++    allowedUDPPorts = [ 51820 ];\n\
+   }};\n\
+\n\
+-  networking.useNetworkd = false;\n\
++  networking.useNetworkd = true;\n\
+ }}\n\
+\n\
+diff --git a/overlays/default.nix b/overlays/default.nix\n\
+index 77ea010..7ccca12 100644\n\
+--- a/overlays/default.nix\n\
++++ b/overlays/default.nix\n\
+@@ -1,5 +1,9 @@\n\
+ final: prev: {{\n\
++  crystal-forge-agent = prev.crystal-forge-agent.overrideAttrs (_: {{\n\
++    RUST_LOG = \"info\";\n\
++  }});\n\
++\n\
+   jq = prev.jq;\n\
+ }}\n\
+\n\
+// {message}\n",
+            message = commit.message
+        ),
+        2 => format!(
+            "diff --git a/flake.nix b/flake.nix\n\
+index 1aaa010..3bbb120 100644\n\
+--- a/flake.nix\n\
++++ b/flake.nix\n\
+@@ -8,10 +8,12 @@\n\
+   inputs = {{\n\
+-    nixpkgs.url = \"github:NixOS/nixpkgs/nixos-25.05\";\n\
++    nixpkgs.url = \"github:NixOS/nixpkgs/nixos-25.11\";\n\
+     snowfall-lib.url = \"github:snowfallorg/lib\";\n\
+   }};\n\
+\n\
+   outputs = inputs @ {{ self, nixpkgs, ... }}: let\n\
++    systems = [ \"x86_64-linux\" \"aarch64-linux\" ];\n\
+   in {{\n\
+-    packages.x86_64-linux.default = ...;\n\
++    packages = builtins.listToAttrs (map (system: {{\n\
++      name = system;\n\
++      value.default = ...;\n\
++    }}) systems);\n\
+   }};\n\
+\n\
+// {message}\n",
+            message = commit.message
+        ),
+        _ => format!(
+            "diff --git a/services/web.nix b/services/web.nix\n\
+index 04fed11..6acdd22 100644\n\
+--- a/services/web.nix\n\
++++ b/services/web.nix\n\
+@@ -4,12 +4,15 @@\n\
+ {{ config, pkgs, ... }}: {{\n\
+   services.nginx = {{\n\
+     enable = true;\n\
+-    recommendedTlsSettings = false;\n\
++    recommendedTlsSettings = true;\n\
+     recommendedOptimisation = true;\n\
++    clientMaxBodySize = \"64m\";\n\
+   }};\n\
+\n\
+   systemd.services.nginx-reload = {{\n\
+     serviceConfig.Type = \"oneshot\";\n\
+     script = ''\n\
+       set -euo pipefail\n\
++      ${{pkgs.nginx}}/bin/nginx -t\n\
+       systemctl reload nginx\n\
+     '';\n\
+   }};\n\
+ }}\n\
+\n\
+// {message}\n",
+            message = commit.message
+        ),
+    }
+}
+
+fn diff_stats(diff: &str) -> (usize, usize, usize) {
+    let mut files_changed = 0;
+    let mut insertions = 0;
+    let mut deletions = 0;
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git") {
+            files_changed += 1;
+        } else if line.starts_with('+') && !line.starts_with("+++") {
+            insertions += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            deletions += 1;
+        }
+    }
+
+    (files_changed, insertions, deletions)
+}
+
+fn parse_unified_diff(diff: &str) -> Vec<ParsedDiffFile> {
+    let mut files = Vec::new();
+    let mut current_block: Vec<String> = Vec::new();
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git ") && !current_block.is_empty() {
+            files.push(parse_diff_file_block(&current_block));
+            current_block.clear();
+        }
+        current_block.push(line.to_string());
+    }
+
+    if !current_block.is_empty() {
+        files.push(parse_diff_file_block(&current_block));
+    }
+
+    files
+}
+
+fn parse_diff_file_block(lines: &[String]) -> ParsedDiffFile {
+    let mut old_path = String::new();
+    let mut new_path = String::new();
+    let mut payload = Vec::new();
+
+    for line in lines {
+        if let Some(path) = line.strip_prefix("--- ") {
+            old_path = path.trim().trim_start_matches("a/").to_string();
+        } else if let Some(path) = line.strip_prefix("+++ ") {
+            new_path = path.trim().trim_start_matches("b/").to_string();
+        } else {
+            payload.push(line.clone());
+        }
+    }
+
+    if old_path.is_empty() && new_path.is_empty() {
+        old_path = "(unknown)".to_string();
+        new_path = "(unknown)".to_string();
+    }
+
+    let language = if new_path != "(unknown)" {
+        detect_language(&new_path)
+    } else {
+        detect_language(&old_path)
+    };
+
+    ParsedDiffFile {
+        old_path,
+        new_path,
+        language,
+        lines: render_diff_lines(&payload),
+    }
+}
+
+fn render_diff_lines(lines: &[String]) -> Vec<RenderedDiffLine> {
+    let mut rendered = Vec::new();
+    let mut old_line = None::<usize>;
+    let mut new_line = None::<usize>;
+
+    for line in lines {
+        if let Some((old_start, new_start)) = parse_hunk_header(line) {
+            old_line = Some(old_start);
+            new_line = Some(new_start);
+            rendered.push(RenderedDiffLine {
+                old_number: None,
+                new_number: None,
+                prefix: '@',
+                content: line.clone(),
+                class_name: "bg-sky-500/10 border-y border-sky-500/20",
+                is_hunk_header: true,
+            });
+            continue;
+        }
+
+        if line.starts_with('+') && !line.starts_with("+++") {
+            let content = line.trim_start_matches('+').to_string();
+            let next_new = new_line;
+            if let Some(value) = new_line.as_mut() {
+                *value += 1;
+            }
+            rendered.push(RenderedDiffLine {
+                old_number: None,
+                new_number: next_new,
+                prefix: '+',
+                content,
+                class_name: "bg-emerald-500/10",
+                is_hunk_header: false,
+            });
+            continue;
+        }
+
+        if line.starts_with('-') && !line.starts_with("---") {
+            let content = line.trim_start_matches('-').to_string();
+            let next_old = old_line;
+            if let Some(value) = old_line.as_mut() {
+                *value += 1;
+            }
+            rendered.push(RenderedDiffLine {
+                old_number: next_old,
+                new_number: None,
+                prefix: '-',
+                content,
+                class_name: "bg-red-500/10",
+                is_hunk_header: false,
+            });
+            continue;
+        }
+
+        if let Some(content) = line.strip_prefix(' ') {
+            let next_old = old_line;
+            let next_new = new_line;
+            if let Some(value) = old_line.as_mut() {
+                *value += 1;
+            }
+            if let Some(value) = new_line.as_mut() {
+                *value += 1;
+            }
+            rendered.push(RenderedDiffLine {
+                old_number: next_old,
+                new_number: next_new,
+                prefix: ' ',
+                content: content.to_string(),
+                class_name: "bg-transparent",
+                is_hunk_header: false,
+            });
+            continue;
+        }
+
+        rendered.push(RenderedDiffLine {
+            old_number: None,
+            new_number: None,
+            prefix: ' ',
+            content: line.clone(),
+            class_name: "bg-gray-900/50",
+            is_hunk_header: false,
+        });
+    }
+
+    rendered
+}
+
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    if !line.starts_with("@@") {
+        return None;
+    }
+
+    let mut parts = line.split_whitespace();
+    let _ = parts.next();
+    let old_part = parts.next()?;
+    let new_part = parts.next()?;
+
+    let old_start = old_part
+        .trim_start_matches('-')
+        .split(',')
+        .next()?
+        .parse::<usize>()
+        .ok()?;
+    let new_start = new_part
+        .trim_start_matches('+')
+        .split(',')
+        .next()?
+        .parse::<usize>()
+        .ok()?;
+
+    Some((old_start, new_start))
+}
+
+fn detect_language(path: &str) -> &'static str {
+    if path.ends_with(".nix") {
+        "nix"
+    } else if path.ends_with(".rs") {
+        "rust"
+    } else if path.ends_with(".toml") {
+        "toml"
+    } else if path.ends_with(".json") {
+        "json"
+    } else if path.ends_with(".yaml") || path.ends_with(".yml") {
+        "yaml"
+    } else if path.ends_with(".sh") {
+        "bash"
+    } else {
+        "plaintext"
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn highlight_diff_fragment(language: &str, text: &str) -> String {
+    let Some(window) = web_sys::window() else {
+        return escape_html(text);
+    };
+    let Ok(hljs) = js_sys::Reflect::get(&window, &JsValue::from_str("hljs")) else {
+        return escape_html(text);
+    };
+    if hljs.is_undefined() || hljs.is_null() {
+        return escape_html(text);
+    }
+    let Ok(highlight_fn) = js_sys::Reflect::get(&hljs, &JsValue::from_str("highlight")) else {
+        return escape_html(text);
+    };
+    let Ok(highlight_fn) = highlight_fn.dyn_into::<js_sys::Function>() else {
+        return escape_html(text);
+    };
+
+    let options = Object::new();
+    let _ = js_sys::Reflect::set(
+        &options,
+        &JsValue::from_str("language"),
+        &JsValue::from_str(language),
+    );
+    let Ok(result) = highlight_fn.call2(&hljs, &JsValue::from_str(text), &options.into()) else {
+        return escape_html(text);
+    };
+    let Ok(value) = js_sys::Reflect::get(&result, &JsValue::from_str("value")) else {
+        return escape_html(text);
+    };
+    value.as_string().unwrap_or_else(|| escape_html(text))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn highlight_diff_fragment(_language: &str, text: &str) -> String {
+    escape_html(text)
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
