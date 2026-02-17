@@ -1257,21 +1257,7 @@ fn PolicyTab(system: SystemDetail) -> Element {
                     class: "space-y-4 border-l-4 border-l-blue-500/40 pl-4",
                     Card {
                         title: Some("Policy Library".to_string()),
-                        header_actions: Some(rsx!(
-                            button {
-                                class: "px-3 py-1.5 rounded-md text-xs font-semibold bg-gray-800 text-gray-200 border border-gray-700 hover:bg-gray-700",
-                                onclick: move |_| {
-                                    editing_policy_id.set(None);
-                                    edit_name.set(String::new());
-                                    edit_description.set(String::new());
-                                    edit_body.set(POLICY_TOML_SAMPLE.to_string());
-                                    edit_format.set(PolicyFormat::Toml);
-                                    add_to_system.set(true);
-                                    show_editor.set(true);
-                                },
-                                "New Policy"
-                            }
-                        )),
+                        header_actions: None,
                         children: rsx! {
                             div { class: "flex items-center gap-3",
                                 input {
@@ -1299,21 +1285,7 @@ fn PolicyTab(system: SystemDetail) -> Element {
                     class: "space-y-4",
                     Card {
                         title: Some("Active Policies".to_string()),
-                        header_actions: Some(rsx!(
-                            button {
-                                class: "px-3 py-1.5 rounded-md text-xs font-semibold bg-blue-500/20 text-blue-200 border border-blue-500/40 hover:bg-blue-500/30",
-                                onclick: move |_| {
-                                    editing_policy_id.set(None);
-                                    edit_name.set(String::new());
-                                    edit_description.set(String::new());
-                                    edit_body.set(POLICY_TOML_SAMPLE.to_string());
-                                    edit_format.set(PolicyFormat::Toml);
-                                    add_to_system.set(true);
-                                    show_editor.set(true);
-                                },
-                                "Add Policy"
-                            }
-                        )),
+                        header_actions: None,
                         children: rsx! {
                             div {
                                 class: "space-y-3 rounded-xl border border-gray-800 bg-gray-950/40 p-3",
