@@ -1494,11 +1494,15 @@ fn PolicyLibraryRow(
     on_edit: EventHandler<PolicyDefinition>,
 ) -> Element {
     let row_class = if is_active {
-        "rounded-xl border border-blue-500/40 bg-blue-500/10 p-4"
+        "group rounded-xl border border-violet-500/40 bg-violet-500/10 p-4"
     } else {
-        "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 hover:border-blue-500/40 transition"
+        "group rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 hover:border-violet-500/40 transition-all"
     };
     let policy_id = policy.id;
+    let format_badge = match policy.format {
+        PolicyFormat::Toml => "bg-orange-500/20",
+        PolicyFormat::Json => "bg-blue-500/20",
+    };
 
     rsx! {
         div {
@@ -1517,9 +1521,9 @@ fn PolicyLibraryRow(
                     p { class: "text-xs text-gray-500", "{policy.description}" }
                 }
                 div { class: "flex items-center gap-2",
-                    span { class: "text-xs text-gray-500", if is_active { "Active" } else { "Library" } }
+                    span { class: "w-2.5 h-2.5 rounded-full {format_badge}" }
                     button {
-                        class: "text-xs text-blue-300 hover:text-blue-200",
+                        class: "text-xs text-violet-400 hover:text-violet-300",
                         onclick: move |_| on_edit.call(policy.clone()),
                         "Edit"
                     }
@@ -1537,22 +1541,28 @@ fn ActivePolicyRow(
 ) -> Element {
     let policy_id = policy.id;
 
+    let format_badge = match policy.format {
+        PolicyFormat::Toml => "bg-orange-500/20",
+        PolicyFormat::Json => "bg-blue-500/20",
+    };
+
     rsx! {
         div {
-            class: "rounded-xl border border-gray-800 bg-gray-900/40 p-4",
+            class: "group rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 hover:border-violet-500/40 transition-all",
             div { class: "flex items-start justify-between gap-4",
                 div {
                     span { class: "text-sm font-semibold text-white", "{policy.name}" }
                     p { class: "text-xs text-gray-500", "{policy.description}" }
                 }
                 div { class: "flex items-center gap-2",
+                    span { class: "w-2.5 h-2.5 rounded-full {format_badge}" }
                     button {
-                        class: "text-xs text-blue-300 hover:text-blue-200",
+                        class: "text-xs text-violet-400 hover:text-violet-300",
                         onclick: move |_| on_edit.call(policy.clone()),
                         "Edit"
                     }
                     button {
-                        class: "text-xs text-red-300 hover:text-red-200",
+                        class: "text-xs text-orange-400 hover:text-orange-300",
                         onclick: move |_| on_remove.call(policy_id),
                         "Remove"
                     }
