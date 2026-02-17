@@ -4,7 +4,7 @@
 # then takes screenshots of every route using headless Chromium in a NixOS VM.
 #
 # Output ($out):
-#   screenshots/   — PNG screenshots of each route (dashboard, systems table, systems cards, builds, cves, style-guide, 404)
+#   screenshots/   — PNG screenshots of core routes and modal states
 #   result.txt     — Build verification summary
 #
 # Run: nix build .#checks.x86_64-linux.web-ui
@@ -106,6 +106,47 @@ let
         }
       },
       {
+        path: '/systems',
+        name: 'systems-add-modal',
+        desc: 'Systems add modal',
+        setup: async (page) => {
+          await page.getByRole('button', { name: 'Add System' }).click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Register System', 'Add system modal title');
+          await assertTextVisible(page, 'Save System', 'Save system button');
+        }
+      },
+      {
+        path: '/systems',
+        name: 'systems-keypair-modal',
+        desc: 'Systems keypair generation modal',
+        setup: async (page) => {
+          await page.getByRole('button', { name: 'Add System' }).click();
+          await page.waitForTimeout(250);
+          await page.getByRole('button', { name: 'Generate' }).click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Generated System Key Pair', 'Keypair modal title');
+          await assertTextVisible(page, 'Use Public Key', 'Use public key action');
+        }
+      },
+      {
+        path: '/systems',
+        name: 'systems-remove-modal',
+        desc: 'Systems remove confirmation modal',
+        setup: async (page) => {
+          await page.locator("button:has-text('Remove')").first().click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Remove', 'Remove modal visible');
+          await assertTextVisible(page, 'Cancel', 'Cancel button visible');
+        }
+      },
+      {
         path: '/systems/00000000-0000-0000-0000-000000000001',
         name: 'system-detail',
         desc: 'System detail page',
@@ -117,6 +158,153 @@ let
           await assertTextVisible(page, 'Security', 'Security card');
           await assertTextVisible(page, 'Vulnerabilities', 'Vulnerabilities card');
           await assertTextVisible(page, 'Agent', 'Agent card');
+        }
+      },
+      {
+        path: '/flakes',
+        name: 'flakes-table',
+        desc: 'Flakes registry table view',
+        setup: async (page) => {
+          const tableToggle = page.getByRole('button', { name: 'Table' });
+          if (await tableToggle.isVisible().catch(() => false)) {
+            await tableToggle.click();
+            await page.waitForTimeout(200);
+          }
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Flake Registry', 'Flakes page title');
+          await assertVisible(page, "[data-testid='flakes-table']", 'Flakes table');
+        }
+      },
+      {
+        path: '/flakes',
+        name: 'flakes-cards',
+        desc: 'Flakes registry card view',
+        clickCards: true,
+        assertions: async (page) => {
+          await assertVisible(page, "[data-testid='flakes-cards']", 'Flakes cards container');
+          await assertTextVisible(page, 'Latest Commit', 'Card section label');
+        }
+      },
+      {
+        path: '/flakes',
+        name: 'flakes-add-modal',
+        desc: 'Flakes add modal',
+        setup: async (page) => {
+          await page.getByRole('button', { name: 'Add Flake' }).click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Register Flake', 'Add flake modal title');
+          await assertTextVisible(page, 'Save Flake', 'Save flake button');
+        }
+      },
+      {
+        path: '/flakes',
+        name: 'flakes-edit-modal',
+        desc: 'Flakes edit modal',
+        setup: async (page) => {
+          await page.locator("button:has-text('Edit')").first().click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Edit Flake', 'Edit flake modal title');
+          await assertTextVisible(page, 'Save Changes', 'Save edits button');
+        }
+      },
+      {
+        path: '/flakes',
+        name: 'flakes-remove-modal',
+        desc: 'Flakes remove confirmation modal',
+        setup: async (page) => {
+          await page.getByRole('button', { name: 'Add Flake' }).click();
+          await page.getByPlaceholder('prod-core').fill('qa-temp');
+          await page.getByPlaceholder('https://github.com/org/repo').fill('https://github.com/example/qa-temp');
+          await page.getByRole('button', { name: 'Save Flake' }).click();
+          await page.waitForTimeout(300);
+          await page.locator("tr:has-text('qa-temp') button:has-text('Remove')").first().click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Remove flake', 'Remove flake modal title');
+          await assertTextVisible(page, 'Related commits are deleted by cascade', 'Cascade warning');
+        }
+      },
+      {
+        path: '/environments',
+        name: 'environments-registry',
+        desc: 'Environment registry view',
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Environment Registry', 'Environment registry title');
+          await assertTextVisible(page, 'Edit Environment', 'Environment edit action');
+          await assertTextVisible(page, 'Edit Requirements', 'Requirements edit action');
+        }
+      },
+      {
+        path: '/environments',
+        name: 'environments-add-modal',
+        desc: 'Environment add modal',
+        setup: async (page) => {
+          await page.getByRole('button', { name: 'Add Environment' }).click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Create Environment', 'Create environment title');
+          await assertTextVisible(page, 'Choose Policies', 'Choose policies action');
+        }
+      },
+      {
+        path: '/environments',
+        name: 'environments-policy-picker-modal',
+        desc: 'Environment policy picker modal',
+        setup: async (page) => {
+          await page.getByRole('button', { name: 'Add Environment' }).click();
+          await page.waitForTimeout(200);
+          await page.getByRole('button', { name: 'Choose Policies' }).click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Choose Required Policies', 'Policy picker title');
+          await assertTextVisible(page, 'Apply Policies', 'Apply policies button');
+        }
+      },
+      {
+        path: '/environments',
+        name: 'environments-edit-modal',
+        desc: 'Environment edit metadata modal',
+        setup: async (page) => {
+          await page.locator("button:has-text('Edit Environment')").first().click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Edit Environment', 'Edit environment modal title');
+          await assertTextVisible(page, 'Save Changes', 'Save changes button');
+        }
+      },
+      {
+        path: '/environments',
+        name: 'environments-edit-requirements-modal',
+        desc: 'Environment edit requirements modal',
+        setup: async (page) => {
+          await page.locator("button:has-text('Edit Requirements')").first().click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Save Requirements', 'Save requirements button');
+          await assertTextVisible(page, 'Required policies are hard requirements', 'Requirements help text');
+        }
+      },
+      {
+        path: '/environments',
+        name: 'environments-remove-modal',
+        desc: 'Environment remove confirmation modal',
+        setup: async (page) => {
+          await page.locator("button:has-text('Remove')").first().click();
+          await page.waitForTimeout(300);
+        },
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Remove environment', 'Remove environment modal title');
+          await assertTextVisible(page, 'This deletes the environment', 'Removal warning text');
         }
       },
       {
@@ -181,6 +369,11 @@ let
           if (route.clickCards) {
             await page.getByRole('button', { name: 'Cards' }).click();
             await page.waitForTimeout(500); // Wait for animation
+          }
+
+          // Optional custom setup per route (open modals, fill forms, etc.)
+          if (route.setup) {
+            await route.setup(page);
           }
 
           // Run assertions to verify the page rendered correctly
