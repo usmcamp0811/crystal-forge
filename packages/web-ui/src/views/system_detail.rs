@@ -447,6 +447,22 @@ pub fn SystemDetailView(id: String) -> Element {
 #[component]
 fn OverviewTab(system: SystemDetail) -> Element {
     rsx! {
+        // Store path (full width)
+        if let Some(ref store_path) = system.current_store_path {
+            div {
+                class: "mb-6",
+                Card {
+                    title: Some("Current Store Path".to_string()),
+                    children: rsx! {
+                        code {
+                            class: "block text-sm font-mono text-gray-300 bg-gray-800/50 px-4 py-3 rounded-lg overflow-x-auto",
+                            "{store_path}"
+                        }
+                    }
+                }
+            }
+        }
+
         div {
             class: "grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6 pt-6",
 
@@ -483,21 +499,6 @@ fn OverviewTab(system: SystemDetail) -> Element {
             }
         }
 
-        // Store path (full width)
-        if let Some(ref store_path) = system.current_store_path {
-            div {
-                class: "mt-6",
-                Card {
-                    title: Some("Current Store Path".to_string()),
-                    children: rsx! {
-                        code {
-                            class: "block text-sm font-mono text-gray-300 bg-gray-800/50 px-4 py-3 rounded-lg overflow-x-auto",
-                            "{store_path}"
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
