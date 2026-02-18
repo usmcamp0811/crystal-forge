@@ -7,6 +7,8 @@
 //!
 //! - `charts` - Data visualization (donut charts, etc.)
 //! - `dashboard` - Dashboard panels (fleet health, build queue, etc.)
+//! - `diff` - Diff viewer components
+//! - `environments` - Environment management components
 //! - `filters` - Filter dropdowns, view toggles, filter bars
 //! - `forms` - Form components for data entry
 //! - `layout` - Application shell, cards, sidebar, topbar
@@ -16,13 +18,13 @@
 //! - `flake` - Flake-specific components
 //! - `builds` - Build control center components
 //! - `policy` - Policy management components
-//! - `diff` - Diff viewer components
 
 // Domain-specific component modules
 pub mod builds;
 pub mod charts;
 pub mod dashboard;
 pub mod diff;
+pub mod environments;
 pub mod filters;
 pub mod flake;
 pub mod forms;
@@ -40,6 +42,10 @@ pub mod widget_grid;
 
 // Re-exports for convenience
 pub use charts::{DonutArc, DonutChartWithLegend, DonutSegment};
+pub use environments::{
+    AddEnvironmentForm, EditEnvironmentModal, EditRequirementsModal, EnvironmentCard,
+    PolicyPickerModal, RemoveEnvironmentDialog,
+};
 pub use filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, MultiSelectDropdown,
     ViewToggle,
@@ -49,5 +55,6 @@ pub use loading::{ErrorMessage, LoadingSpinner};
 pub use modals::ConfirmDialog;
 pub use stat_card::StatCard;
 pub use status_badge::{DeploymentBadge, HealthBadge};
+pub use system::SystemCard;
 pub use tables::{SortDirection, SortableHeader};
 pub use widget_grid::{GridWidget, WidgetGrid};
