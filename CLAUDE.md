@@ -748,3 +748,100 @@ STATE: COMPLETE
 You MUST NOT skip states.
 
 </CRITICAL_INSTRUCTION>
+
+---
+
+<CRITICAL_INSTRUCTION>
+
+# NIX GIT TRACKING REQUIREMENT (MANDATORY)
+
+This repository uses Nix for deterministic builds.
+
+Nix only includes files that are tracked by Git.
+
+If you create a new file and it is NOT added to Git:
+
+- Nix builds WILL fail.
+- The file WILL NOT exist in the Nix store.
+- The derivation WILL be incomplete.
+
+## REQUIRED BEHAVIOR
+
+If you create, rename, or move any file, you MUST:
+
+1. Run `git status` to identify untracked files.
+2. Run `git add <file>` for every new file created.
+3. Confirm the file appears in `git status` as staged.
+4. Ensure no required file remains untracked.
+
+You MUST perform this before running any Nix build or verification command.
+
+## VERIFICATION STEP (MANDATORY)
+
+Before marking a task complete, you MUST confirm:
+
+- `git status` shows no unintended untracked files.
+- All new source files are staged.
+- Nix build succeeds after staging.
+
+If Nix build fails due to missing files:
+You MUST check Git tracking immediately.
+
+## PROHIBITED
+
+You MUST NOT:
+
+- Leave newly created source files untracked.
+- Assume the build system includes untracked files.
+- Mark a task Done without staging new files.
+
+Failure to stage new files is considered incorrect task completion.
+
+</CRITICAL_INSTRUCTION>
+
+---
+
+---
+
+<CRITICAL_INSTRUCTION>
+
+# MERGE REQUEST REQUIREMENT (MANDATORY)
+
+When a task is complete and all verification passes, you MUST open a Merge Request (MR) in GitLab.
+
+## REQUIRED TOOLING
+
+You MUST use GitLab CLI via Nix:
+
+- `nix run nixpkgs#glab -- <glab command ...>`
+
+You MUST NOT rely on a locally installed `glab` outside the repository-defined environment.
+
+## MR TEMPLATE REQUIREMENT
+
+This project defines an MR template in GitLab.
+
+When creating the MR, you MUST:
+
+- Use the project’s configured MR template content
+- Fill out every required section in the template
+- Ensure the MR description matches the task’s acceptance criteria and verification results
+
+You MUST NOT submit an MR with an empty or partial description.
+
+## MINIMUM MR CONTENT
+
+Your MR description MUST include:
+
+- Task ID and title
+- Summary of changes (scoped to the task)
+- Verification commands executed and results
+- Notes on tradeoffs or risks
+- Any follow-up tasks created for out-of-scope discoveries
+
+## FAILURE CONDITIONS
+
+If you cannot access GitLab, cannot use `glab`, or cannot locate the MR template:
+YOU MUST STOP AND REPORT.
+
+</CRITICAL_INSTRUCTION>
