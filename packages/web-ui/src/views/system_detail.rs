@@ -22,7 +22,7 @@ use crate::api::models::{
 };
 use crate::components::layout::Card;
 use crate::theme;
-use crate::views::systems_list::mock_system_detail_by_id;
+use crate::views::systems_mock::mock_system_detail_by_id;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
@@ -2768,7 +2768,7 @@ fn mock_deployment_logs() -> Vec<DeploymentLogEntry> {
 }
 
 fn fallback_system_detail() -> SystemDetail {
-    crate::views::systems_list::mock_system_details()
+    crate::views::systems_mock::mock_system_details()
         .into_iter()
         .next()
         .unwrap_or_else(|| SystemDetail {

@@ -3,6 +3,6 @@
 //! Provides reusable form elements like text inputs, selects,
 //! and form containers.
 
-// TODO: Extract form components from views
-// - AddSystemForm
-// - AddFlakeForm
+mod add_system_form;
+
+pub use add_system_form::{validate_new_system, AddSystemForm, NewSystemDraft};

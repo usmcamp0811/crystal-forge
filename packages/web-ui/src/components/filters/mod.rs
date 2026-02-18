@@ -9,4 +9,4 @@ mod view_toggle;
 pub use dropdown::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, MultiSelectDropdown,
 };
-pub use view_toggle::ViewToggle;
+pub use view_toggle::{ViewMode, ViewToggle};
