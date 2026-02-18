@@ -1,9 +1,10 @@
 ---
 id: TASK-46
 title: 'Refactor: Clean up dashboard.rs duplicate components'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-18 02:44'
+updated_date: '2026-02-18 02:55'
 labels:
   - refactoring
   - web-ui
@@ -35,9 +36,11 @@ The views/dashboard.rs file is 1900+ lines and contains duplicate definitions of
 | format_elapsed | views/dashboard.rs | Already in components/dashboard/mod.rs |
 
 ## Acceptance Criteria
-- [ ] views/dashboard.rs reduced to ~300-400 lines
-- [ ] All components imported from components/dashboard/ and components/charts/
-- [ ] No duplicate component definitions
-- [ ] Mock data functions (mock_dashboard_summary, mock_flake_timelines, mock_build_queue_summary) can remain or move to api/mock_data.rs
-- [ ] Build passes: nix build .#checks.x86_64-linux.web-ui
+<!-- AC:BEGIN -->
+- [ ] #1 views/dashboard.rs reduced to ~300-400 lines
+- [ ] #2 All components imported from components/dashboard/ and components/charts/
+- [ ] #3 No duplicate component definitions
+- [ ] #4 Mock data functions (mock_dashboard_summary, mock_flake_timelines, mock_build_queue_summary) can remain or move to api/mock_data.rs
+- [ ] #5 Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->

@@ -32,7 +32,6 @@ pub mod system;
 pub mod tables;
 
 // Top-level component modules
-pub mod flake_timeline;
 pub mod layout;
 pub mod loading;
 pub mod stat_card;

@@ -8,7 +8,7 @@ use crate::api::models::{
     BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary, DeploymentStatus,
     DeploymentStatusSummary, FlakeCommit, FlakeTimeline, FleetHealthSummary, RecentDeployment,
 };
-use crate::components::flake_timeline::FlakeTimelineWidget;
+use crate::components::flake::FlakeTimelineWidget;
 use crate::components::layout::Card;
 use crate::components::stat_card::StatCard;
 use crate::components::widget_grid::{GridWidget, WidgetGrid};
