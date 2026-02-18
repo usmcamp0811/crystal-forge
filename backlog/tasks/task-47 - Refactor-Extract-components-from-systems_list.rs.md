@@ -1,9 +1,10 @@
 ---
 id: TASK-47
 title: 'Refactor: Extract components from systems_list.rs'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-18 02:45'
+updated_date: '2026-02-18 03:51'
 labels:
   - refactoring
   - web-ui
@@ -51,12 +52,14 @@ The views/systems_list.rs file is 1400+ lines and contains multiple components t
 | remove_system_by_id | Keep in view (view-specific logic) |
 
 ## Acceptance Criteria
-- [ ] views/systems_list.rs reduced to ~400-500 lines
-- [ ] AddSystemForm moved to components/forms/add_system.rs
-- [ ] KeyPairModal moved to components/modals/key_pair.rs
-- [ ] RemoveSystemDialog moved to components/modals/remove_system_dialog.rs
-- [ ] SystemsTable moved to components/tables/systems_table.rs
-- [ ] Filter dropdowns consolidated in components/filters/
-- [ ] All components properly re-exported through mod.rs files
-- [ ] Build passes: nix build .#checks.x86_64-linux.web-ui
+<!-- AC:BEGIN -->
+- [ ] #1 views/systems_list.rs reduced to ~400-500 lines
+- [ ] #2 AddSystemForm moved to components/forms/add_system.rs
+- [ ] #3 KeyPairModal moved to components/modals/key_pair.rs
+- [ ] #4 RemoveSystemDialog moved to components/modals/remove_system_dialog.rs
+- [ ] #5 SystemsTable moved to components/tables/systems_table.rs
+- [ ] #6 Filter dropdowns consolidated in components/filters/
+- [ ] #7 All components properly re-exported through mod.rs files
+- [ ] #8 Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->
