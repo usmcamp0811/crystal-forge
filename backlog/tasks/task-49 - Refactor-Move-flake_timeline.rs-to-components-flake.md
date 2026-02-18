@@ -1,9 +1,10 @@
 ---
 id: TASK-49
 title: 'Refactor: Move flake_timeline.rs to components/flake/'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-02-18 02:45'
+updated_date: '2026-02-18 03:00'
 labels:
   - refactoring
   - web-ui
@@ -35,9 +36,18 @@ components/
 ```
 
 ## Acceptance Criteria
-- [ ] Move components/flake_timeline.rs to components/flake/flake_timeline.rs
-- [ ] Update components/flake/mod.rs to export FlakeTimelineWidget
-- [ ] Remove components/flake_timeline.rs
-- [ ] Update imports in views/dashboard.rs and any other files using it
-- [ ] Build passes: nix build .#checks.x86_64-linux.web-ui
+<!-- AC:BEGIN -->
+- [ ] #1 Move components/flake_timeline.rs to components/flake/flake_timeline.rs
+- [ ] #2 Update components/flake/mod.rs to export FlakeTimelineWidget
+- [ ] #3 Remove components/flake_timeline.rs
+- [ ] #4 Update imports in views/dashboard.rs and any other files using it
+- [ ] #5 Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved components/flake_timeline.rs to components/flake/flake_timeline.rs and updated imports.
+<!-- SECTION:NOTES:END -->
