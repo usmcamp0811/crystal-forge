@@ -57,6 +57,79 @@ You MUST read the overview resource to understand the complete workflow. The inf
 
 <CRITICAL_INSTRUCTION>
 
+# 8A. WORKTREE-BASED ISOLATION (MANDATORY)
+
+This repository uses git worktrees to allow multiple agents to work concurrently without conflicts.
+
+You MUST follow these rules:
+
+## 1. Never work directly in the shared integration worktrees
+
+The directories `~/code/crystal-forge/main` and `~/code/crystal-forge/refactor` are integration worktrees.
+They MUST remain clean and MUST NOT be used for task implementation.
+
+You MAY inspect, build, and run tests in integration worktrees, but you MUST NOT:
+
+- edit files
+- commit
+- create branches
+- rebase
+- merge
+
+## 2. One worktree per task (required)
+
+For each backlog task, you MUST create a dedicated branch and dedicated worktree.
+
+Branch naming MUST include the task identifier:
+
+TASK-ID-short-slug
+
+Example:
+TASK-12.3-add-system-card
+
+Worktree directory naming MUST match the branch name:
+
+~/code/crystal-forge/TASK-ID-short-slug
+
+## 3. Branch base and creation rule
+
+You MUST branch from the designated integration branch (default: refactor unless the task says otherwise).
+
+From within an existing worktree, create the new task worktree using:
+
+git worktree add -b TASK-ID-short-slug ../TASK-ID-short-slug refactor
+
+If the branch already exists, use:
+
+git worktree add ../TASK-ID-short-slug TASK-ID-short-slug
+
+## 4. Enforcement requirement
+
+Before modifying any files, you MUST state:
+
+- the absolute path of the current worktree
+- the active branch name
+- the base branch used (main or refactor)
+
+If you are not in a dedicated task worktree directory:
+YOU MUST STOP AND REPORT.
+
+## 5. Cleanup rule
+
+After the task is complete and merged (or abandoned), you MUST remove the task worktree:
+
+git worktree remove ../TASK-ID-short-slug
+
+If the directory was deleted manually, you MUST prune:
+
+git worktree prune
+
+</CRITICAL_INSTRUCTION>
+
+---
+
+<CRITICAL_INSTRUCTION>
+
 # 1. BACKLOG-FIRST EXECUTION (MANDATORY)
 
 You MUST NOT modify code without an active backlog task.
