@@ -748,3 +748,53 @@ STATE: COMPLETE
 You MUST NOT skip states.
 
 </CRITICAL_INSTRUCTION>
+
+---
+
+<CRITICAL_INSTRUCTION>
+
+# NIX GIT TRACKING REQUIREMENT (MANDATORY)
+
+This repository uses Nix for deterministic builds.
+
+Nix only includes files that are tracked by Git.
+
+If you create a new file and it is NOT added to Git:
+
+- Nix builds WILL fail.
+- The file WILL NOT exist in the Nix store.
+- The derivation WILL be incomplete.
+
+## REQUIRED BEHAVIOR
+
+If you create, rename, or move any file, you MUST:
+
+1. Run `git status` to identify untracked files.
+2. Run `git add <file>` for every new file created.
+3. Confirm the file appears in `git status` as staged.
+4. Ensure no required file remains untracked.
+
+You MUST perform this before running any Nix build or verification command.
+
+## VERIFICATION STEP (MANDATORY)
+
+Before marking a task complete, you MUST confirm:
+
+- `git status` shows no unintended untracked files.
+- All new source files are staged.
+- Nix build succeeds after staging.
+
+If Nix build fails due to missing files:
+You MUST check Git tracking immediately.
+
+## PROHIBITED
+
+You MUST NOT:
+
+- Leave newly created source files untracked.
+- Assume the build system includes untracked files.
+- Mark a task Done without staging new files.
+
+Failure to stage new files is considered incorrect task completion.
+
+</CRITICAL_INSTRUCTION>
