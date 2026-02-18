@@ -130,6 +130,95 @@ git worktree prune
 
 <CRITICAL_INSTRUCTION>
 
+# 8B. WORKTREE PRE-FLIGHT PROOF (AGENT-PROOF ENFORCEMENT)
+
+To prevent multiple agents from stepping on each other, the following enforcement is mandatory.
+
+## 1. Required shell proof (MUST RUN AND PASTE OUTPUT)
+
+Before ANY file modification, the agent MUST run the following commands and paste the full output in the pre-flight declaration.
+
+REQUIRED PROOF COMMANDS (run from the current working directory):
+
+pwd
+git rev-parse --abbrev-ref HEAD
+git rev-parse --show-toplevel
+git status --porcelain
+git worktree list
+
+If ANY command fails:
+YOU MUST STOP AND REPORT.
+
+## 2. Directory policy (hard constraint)
+
+The agent MUST only implement changes inside a dedicated task worktree directory:
+
+~/code/crystal-forge/TASK-ID-short-slug
+
+If `pwd` or `git rev-parse --show-toplevel` is:
+
+- ~/code/crystal-forge/main
+- ~/code/crystal-forge/refactor
+  OR any other non-task directory,
+
+YOU MUST STOP AND REPORT.
+
+## 3. Clean integration requirement (hard constraint)
+
+The integration worktrees MUST remain clean at all times.
+
+If `git status --porcelain` shows changes in:
+~/code/crystal-forge/main
+or
+~/code/crystal-forge/refactor
+
+YOU MUST STOP AND REPORT and instruct the user how to discard or move changes into a task worktree.
+
+## 4. Task lock protocol (prevents two agents picking the same task)
+
+When moving a task to "In Progress", the agent MUST add a lock note in the task notes:
+
+LOCK: <agent-name-or-id> on <hostname> in <worktree-path>
+
+Example:
+LOCK: agent-1 on gray in ~/code/crystal-forge/TASK-12.3-add-system-card
+
+If a different active LOCK already exists:
+YOU MUST STOP AND REPORT (do not proceed on that task).
+
+## 5. Worktree creation enforcement
+
+A dedicated worktree MUST be created for the task before coding.
+
+Command template (required, unless branch already exists):
+
+git worktree add -b TASK-ID-short-slug ../TASK-ID-short-slug refactor
+
+If branch exists:
+
+git worktree add ../TASK-ID-short-slug TASK-ID-short-slug
+
+## 6. Pre-flight declaration must include worktree proof
+
+The structured pre-flight declaration MUST include an additional section:
+
+Worktree Proof:
+
+- pwd: ...
+- branch: ...
+- toplevel: ...
+- status: ...
+- worktrees: ...
+
+If this section is missing:
+YOU MUST STOP.
+
+</CRITICAL_INSTRUCTION>
+
+---
+
+<CRITICAL_INSTRUCTION>
+
 # 1. BACKLOG-FIRST EXECUTION (MANDATORY)
 
 You MUST NOT modify code without an active backlog task.
