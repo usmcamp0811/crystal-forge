@@ -1,7 +1,7 @@
 ---
 id: TASK-54
 title: 'Refactor: Extract components from views/system_detail.rs'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-18 02:47'
 labels:
@@ -34,3 +34,9 @@ Needs analysis, but likely includes:
 - [ ] Target reduction: < 800 lines
 - [ ] Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+
+## Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-code on gray in ~/code/crystal-forge/TASK-54-extract-system-detail-components
+<!-- SECTION:NOTES:END -->

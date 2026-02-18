@@ -6,7 +6,7 @@
 //! - CVEs: Expandable vulnerability list
 //! - Logs: Recent deployment logs
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
@@ -20,7 +20,15 @@ use crate::api::models::{
     PipelineStage, SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo,
     SystemSecurityInfo, SystemVulnerability,
 };
+use crate::components::cve::CvesTab;
+use crate::components::diff::DiffViewer;
 use crate::components::layout::Card;
+use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
+use crate::components::notifications::Toast;
+use crate::components::system::{
+    environment_style, AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine,
+    LogsTab, NetworkCard, SecurityCard, StatusBadge, SystemInfoCard,
+};
 use crate::theme;
 use crate::views::systems_mock::mock_system_detail_by_id;
 #[cfg(target_arch = "wasm32")]
@@ -883,303 +891,6 @@ fn CommitTimelineNode(
     }
 }
 
-#[component]
-fn CvesTab(cve_counts: CveSummary, vulnerabilities: Vec<SystemVulnerability>) -> Element {
-    let mut expanded_severity: Signal<Option<CveSeverity>> = use_signal(|| None);
-
-    let total = cve_counts.total();
-
-    rsx! {
-        div {
-            class: "pt-6 space-y-6",
-
-            // Summary header
-            div {
-                class: "flex items-baseline gap-3",
-                span {
-                    class: "text-3xl font-bold text-white",
-                    "{total}"
-                }
-                span {
-                    class: "{theme::text::SECONDARY}",
-                    "known vulnerabilities"
-                }
-            }
-
-            // Severity breakdown - clickable to expand
-            div {
-                class: "space-y-3",
-                CveSeverityRow {
-                    severity: CveSeverity::Critical,
-                    count: cve_counts.critical,
-                    vulnerabilities: vulnerabilities.clone(),
-                    expanded: *expanded_severity.read() == Some(CveSeverity::Critical),
-                    on_toggle: move |_| {
-                        let current = *expanded_severity.read();
-                        if current == Some(CveSeverity::Critical) {
-                            expanded_severity.set(None);
-                        } else {
-                            expanded_severity.set(Some(CveSeverity::Critical));
-                        }
-                    }
-                }
-                CveSeverityRow {
-                    severity: CveSeverity::High,
-                    count: cve_counts.high,
-                    vulnerabilities: vulnerabilities.clone(),
-                    expanded: *expanded_severity.read() == Some(CveSeverity::High),
-                    on_toggle: move |_| {
-                        let current = *expanded_severity.read();
-                        if current == Some(CveSeverity::High) {
-                            expanded_severity.set(None);
-                        } else {
-                            expanded_severity.set(Some(CveSeverity::High));
-                        }
-                    }
-                }
-                CveSeverityRow {
-                    severity: CveSeverity::Medium,
-                    count: cve_counts.medium,
-                    vulnerabilities: vulnerabilities.clone(),
-                    expanded: *expanded_severity.read() == Some(CveSeverity::Medium),
-                    on_toggle: move |_| {
-                        let current = *expanded_severity.read();
-                        if current == Some(CveSeverity::Medium) {
-                            expanded_severity.set(None);
-                        } else {
-                            expanded_severity.set(Some(CveSeverity::Medium));
-                        }
-                    }
-                }
-                CveSeverityRow {
-                    severity: CveSeverity::Low,
-                    count: cve_counts.low,
-                    vulnerabilities: vulnerabilities.clone(),
-                    expanded: *expanded_severity.read() == Some(CveSeverity::Low),
-                    on_toggle: move |_| {
-                        let current = *expanded_severity.read();
-                        if current == Some(CveSeverity::Low) {
-                            expanded_severity.set(None);
-                        } else {
-                            expanded_severity.set(Some(CveSeverity::Low));
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn CveSeverityRow(
-    severity: CveSeverity,
-    count: i64,
-    vulnerabilities: Vec<SystemVulnerability>,
-    expanded: bool,
-    on_toggle: EventHandler<()>,
-) -> Element {
-    let filtered_vulns: Vec<_> = vulnerabilities
-        .iter()
-        .filter(|v| v.severity == severity)
-        .collect();
-
-    let has_vulns = !filtered_vulns.is_empty();
-
-    let severity_dot_color = match severity {
-        CveSeverity::Critical => "bg-red-500",
-        CveSeverity::High => "bg-orange-500",
-        CveSeverity::Medium => "bg-yellow-500",
-        CveSeverity::Low => "bg-blue-500",
-    };
-    let severity_text_color = severity.color_class();
-    let chevron_class = if expanded { "rotate-180" } else { "" };
-    let button_bg = if expanded { "bg-gray-800/30" } else { "" };
-
-    rsx! {
-        div {
-            class: "rounded-lg border {theme::surface::CARD_BORDER} overflow-hidden",
-
-            // Header row (clickable)
-            button {
-                class: "w-full flex items-center justify-between p-4 text-left transition-colors hover:bg-gray-800/50 {button_bg}",
-                disabled: !has_vulns,
-                onclick: move |_| on_toggle.call(()),
-
-                div {
-                    class: "flex items-center gap-3",
-                    // Severity indicator
-                    span {
-                        class: "w-3 h-3 rounded-full {severity_dot_color}",
-                    }
-                    span {
-                        class: "font-medium {severity_text_color}",
-                        "{severity.label()}"
-                    }
-                }
-
-                div {
-                    class: "flex items-center gap-3",
-                    span {
-                        class: "text-xl font-bold {severity_text_color}",
-                        "{count}"
-                    }
-                    if has_vulns {
-                        svg {
-                            class: "w-4 h-4 text-gray-500 transition-transform {chevron_class}",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M19 9l-7 7-7-7"
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Expanded content
-            if expanded && has_vulns {
-                div {
-                    class: "border-t {theme::surface::CARD_BORDER} divide-y divide-gray-800",
-                    for vuln in filtered_vulns.iter() {
-                        VulnerabilityRow { vuln: (*vuln).clone() }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn VulnerabilityRow(vuln: SystemVulnerability) -> Element {
-    let severity_color = vuln.severity.color_class();
-
-    rsx! {
-        div {
-            class: "p-4 hover:bg-gray-800/30 transition-colors",
-
-            div {
-                class: "flex items-start justify-between gap-4",
-                div {
-                    class: "flex-1 min-w-0",
-
-                    // CVE ID and package
-                    div {
-                        class: "flex items-center gap-2 flex-wrap",
-                        span {
-                            class: "font-mono text-sm font-medium text-white",
-                            "{vuln.cve_id}"
-                        }
-                        span {
-                            class: "text-xs px-2 py-0.5 rounded bg-gray-700 text-gray-300",
-                            "{vuln.package_name}"
-                        }
-                    }
-
-                    // Description
-                    p {
-                        class: "text-sm {theme::text::SECONDARY} mt-1 line-clamp-2",
-                        "{vuln.description}"
-                    }
-
-                    // Version info
-                    div {
-                        class: "flex items-center gap-4 mt-2 text-xs {theme::text::MUTED}",
-                        span { "Installed: {vuln.installed_version}" }
-                        if let Some(ref fixed) = vuln.fixed_version {
-                            span {
-                                class: "text-emerald-400",
-                                "Fixed in: {fixed}"
-                            }
-                        }
-                    }
-                }
-
-                // CVSS score
-                if let Some(score) = vuln.cvss_score {
-                    div {
-                        class: "shrink-0 text-right",
-                        div {
-                            class: "text-lg font-bold {severity_color}",
-                            "{score:.1}"
-                        }
-                        div {
-                            class: "text-xs {theme::text::MUTED}",
-                            "CVSS"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn LogsTab(logs: Vec<DeploymentLogEntry>) -> Element {
-    if logs.is_empty() {
-        return rsx! {
-            div {
-                class: "pt-6 text-center py-12",
-                p {
-                    class: "{theme::text::SECONDARY}",
-                    "No deployment logs available."
-                }
-            }
-        };
-    }
-
-    // Get the deployment phase for grouping
-    let first_phase = logs
-        .first()
-        .and_then(|l| l.phase.clone())
-        .unwrap_or_else(|| "Deployment".to_string());
-
-    rsx! {
-        div {
-            class: "pt-6",
-
-            // Header
-            div {
-                class: "flex items-center justify-between mb-4",
-                h3 {
-                    class: "{theme::typography::SECTION_TITLE} text-white",
-                    "Recent Deployment"
-                }
-                // TODO: Add link to full logs view
-                button {
-                    class: "text-sm text-blue-400 hover:text-blue-300 transition-colors",
-                    "View full logs →"
-                }
-            }
-
-            // Log container
-            div {
-                class: "rounded-lg border {theme::surface::CARD_BG} {theme::surface::CARD_BORDER} overflow-hidden",
-
-                // Phase header
-                div {
-                    class: "px-4 py-2 bg-gray-800/50 border-b border-gray-700",
-                    span {
-                        class: "text-xs font-medium text-gray-400 uppercase tracking-wider",
-                        "{first_phase}"
-                    }
-                }
-
-                // Log entries
-                div {
-                    class: "font-mono text-sm divide-y divide-gray-800/50 max-h-[400px] overflow-y-auto",
-                    for log in logs.iter() {
-                        LogLine { log: log.clone() }
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PolicyFormat {
     Toml,
@@ -1934,35 +1645,6 @@ fn highlight_policy_block(element_id: &str) {
     let _ = highlight_fn.call1(&hljs, &element);
 }
 
-#[component]
-fn DiffViewer(diff: String) -> Element {
-    rsx! {
-        div {
-            class: "text-xs font-mono text-gray-300 bg-gray-950 p-3 rounded-lg overflow-x-auto whitespace-pre",
-            for line in diff.lines() {
-                {
-                    let class = if line.starts_with("+++") || line.starts_with("---") {
-                        "text-gray-400"
-                    } else if line.starts_with("@@") {
-                        "text-purple-300"
-                    } else if line.starts_with("+") {
-                        "text-emerald-300"
-                    } else if line.starts_with("-") {
-                        "text-red-300"
-                    } else if line.starts_with("diff --git") || line.starts_with("index ") {
-                        "text-blue-300"
-                    } else {
-                        "text-gray-300"
-                    };
-                    rsx! {
-                        div { class: "{class}", "{line}" }
-                    }
-                }
-            }
-        }
-    }
-}
-
 fn diff_for_commit(hash: &str, message: &str) -> String {
     let selector = hash.bytes().last().unwrap_or(b'0').wrapping_sub(b'0') % 3;
 
@@ -2049,41 +1731,6 @@ index 77d3a10..e4b2c15 100644\n\
     }
 }
 
-#[component]
-fn LogLine(log: DeploymentLogEntry) -> Element {
-    let time = log.timestamp.format("%H:%M:%S").to_string();
-    let level_bg = match log.level {
-        LogLevel::Error => "bg-red-500",
-        LogLevel::Warn => "bg-yellow-500",
-        LogLevel::Info => "bg-gray-500",
-        LogLevel::Debug => "bg-gray-700",
-    };
-    let level_text = log.level.color_class();
-
-    rsx! {
-        div {
-            class: "flex gap-3 px-4 py-2 hover:bg-gray-800/30",
-
-            // Timestamp
-            span {
-                class: "shrink-0 text-xs {theme::text::MUTED}",
-                "{time}"
-            }
-
-            // Level indicator
-            span {
-                class: "shrink-0 w-1 rounded-full {level_bg}",
-            }
-
-            // Message
-            span {
-                class: "flex-1 {level_text}",
-                "{log.message}"
-            }
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Toast Notification
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2119,474 +1766,11 @@ fn show_notification(message: &str, is_success: bool) -> Result<Notification, Js
     Notification::new(&title)
 }
 
-#[component]
-fn Toast(message: String, is_success: bool, on_dismiss: EventHandler<()>) -> Element {
-    let (bg_class, icon_class, icon_path) = if is_success {
-        (
-            "bg-emerald-900/90 border-emerald-700",
-            "text-emerald-400",
-            "M5 13l4 4L19 7", // checkmark
-        )
-    } else {
-        (
-            "bg-red-900/90 border-red-700",
-            "text-red-400",
-            "M6 18L18 6M6 6l12 12", // X
-        )
-    };
-
-    rsx! {
-        div {
-            class: "animate-slide-in",
-            style: "position: fixed; top: 1rem; right: 1rem; z-index: 120;",
-            div {
-                class: "flex items-center gap-3 px-4 py-3 rounded-lg border shadow-lg backdrop-blur-sm {bg_class}",
-
-                // Icon
-                div {
-                    class: "shrink-0",
-                    svg {
-                        class: "w-5 h-5 {icon_class}",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path {
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            stroke_width: "2",
-                            d: "{icon_path}"
-                        }
-                    }
-                }
-
-                // Message
-                span {
-                    class: "text-sm text-white font-medium",
-                    "{message}"
-                }
-
-                // Dismiss button
-                button {
-                    class: "shrink-0 ml-2 p-1 rounded hover:bg-white/10 transition-colors",
-                    onclick: move |_| on_dismiss.call(()),
-                    svg {
-                        class: "w-4 h-4 text-gray-400",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path {
-                            stroke_linecap: "round",
-                            stroke_linejoin: "round",
-                            stroke_width: "2",
-                            d: "M6 18L18 6M6 6l12 12"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Sync Confirmation Dialog
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[component]
-fn SyncConfirmDialog(
-    hostname: String,
-    on_confirm: EventHandler<()>,
-    on_cancel: EventHandler<()>,
-) -> Element {
-    rsx! {
-        // Backdrop
-        div {
-            class: "bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 60; backdrop-filter: blur(6px);",
-            onclick: move |_| on_cancel.call(()),
-
-            // Dialog
-            div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 30rem;",
-                onclick: |evt| evt.stop_propagation(),
-
-                // Icon
-                div {
-                    class: "flex justify-center mb-4",
-                    div {
-                        class: "w-12 h-12 rounded-full bg-blue-500/20 flex items-center justify-center",
-                        svg {
-                            class: "w-6 h-6 text-blue-400",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"
-                            }
-                        }
-                    }
-                }
-
-                // Title
-                h3 {
-                    class: "text-lg font-semibold text-white text-center mb-2",
-                    "Sync {hostname}?"
-                }
-
-                // Description
-                p {
-                    class: "text-sm {theme::text::SECONDARY} text-center mb-6",
-                    "This will build the latest configuration and deploy it to this system immediately. Any in-progress builds will be interrupted."
-                }
-
-                // Buttons
-                div {
-                    class: "flex gap-3",
-                    button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
-                        onclick: move |_| on_cancel.call(()),
-                        "Cancel"
-                    }
-                    button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors {theme::interactive::PRIMARY_BTN} text-white",
-                        onclick: move |_| on_confirm.call(()),
-                        "Sync Now"
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn RollbackConfirmDialog(
-    hostname: String,
-    commit: SystemCommitHistory,
-    on_confirm: EventHandler<()>,
-    on_cancel: EventHandler<()>,
-) -> Element {
-    let short_hash = commit.hash.chars().take(7).collect::<String>();
-
-    rsx! {
-        // Backdrop
-        div {
-            class: "bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 60; backdrop-filter: blur(6px);",
-            onclick: move |_| on_cancel.call(()),
-
-            // Dialog
-            div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 32rem;",
-                onclick: |evt| evt.stop_propagation(),
-
-                // Icon
-                div {
-                    class: "flex justify-center mb-4",
-                    div {
-                        class: "w-12 h-12 rounded-full bg-amber-500/20 flex items-center justify-center",
-                        svg {
-                            class: "w-6 h-6 text-amber-400",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M3 12a9 9 0 1018 0 9 9 0 00-18 0zm9-4v4l-3 3"
-                            }
-                        }
-                    }
-                }
-
-                // Title
-                h3 {
-                    class: "text-lg font-semibold text-white text-center mb-2",
-                    "Deploy historical commit?"
-                }
-
-                // Description
-                p {
-                    class: "text-sm {theme::text::SECONDARY} text-center mb-4",
-                    "This will roll back {hostname} to commit {short_hash}. This may pause automatic deployment policies."
-                }
-
-                // Commit summary
-                div {
-                    class: "rounded-lg border border-gray-700 bg-gray-900/60 p-3 mb-5",
-                    div { class: "text-xs text-gray-400", "Commit" }
-                    div { class: "text-sm text-white font-medium", "{commit.message}" }
-                }
-
-                // Buttons
-                div {
-                    class: "flex gap-3",
-                    button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
-                        onclick: move |_| on_cancel.call(()),
-                        "Cancel"
-                    }
-                    button {
-                        class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-amber-500 hover:bg-amber-400 text-gray-900",
-                        onclick: move |_| on_confirm.call(()),
-                        "Deploy commit"
-                    }
-                }
-            }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Card Components (from original)
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[component]
-fn SystemInfoCard(system: SystemDetail) -> Element {
-    rsx! {
-        Card {
-            title: Some("System".to_string()),
-            children: rsx! {
-                dl {
-                    class: "space-y-3",
-                    InfoRow { label: "Hostname", value: system.hostname.clone() }
-                    if let Some(ref nixos_version) = system.nixos_version {
-                        InfoRow { label: "NixOS Version", value: nixos_version.clone() }
-                    }
-                    if let Some(ref kernel) = system.kernel {
-                        InfoRow { label: "Kernel", value: kernel.clone() }
-                    }
-                    InfoRow { label: "Deployment Policy", value: deployment_policy_label(&system.deployment_policy) }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn HardwareCard(hardware: SystemHardwareInfo) -> Element {
-    rsx! {
-        Card {
-            title: Some("Hardware".to_string()),
-            children: rsx! {
-                dl {
-                    class: "space-y-3",
-                    if let Some(ref cpu) = hardware.cpu_brand {
-                        InfoRow { label: "CPU", value: cpu.clone() }
-                    }
-                    if let Some(cores) = hardware.cpu_cores {
-                        InfoRow { label: "CPU Cores", value: cores.to_string() }
-                    }
-                    if let Some(mem) = hardware.memory_gb {
-                        InfoRow { label: "Memory", value: format_memory(mem) }
-                    }
-                    if let Some(uptime) = hardware.uptime_secs {
-                        InfoRow { label: "Uptime", value: format_uptime(uptime) }
-                    }
-                    if let Some(ref bios) = hardware.bios_version {
-                        InfoRow { label: "BIOS Version", value: bios.clone() }
-                    }
-                    if let Some(ref serial) = hardware.board_serial {
-                        InfoRow { label: "Board Serial", value: serial.clone() }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn NetworkCard(network: SystemNetworkInfo) -> Element {
-    rsx! {
-        Card {
-            title: Some("Network".to_string()),
-            children: rsx! {
-                dl {
-                    class: "space-y-3",
-                    if let Some(ref ip) = network.primary_ip {
-                        InfoRowMono { label: "Primary IP", value: ip.clone() }
-                    }
-                    if let Some(ref mac) = network.primary_mac {
-                        InfoRowMono { label: "MAC Address", value: mac.clone() }
-                    }
-                    if let Some(ref gateway) = network.gateway_ip {
-                        InfoRowMono { label: "Gateway", value: gateway.clone() }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn SecurityCard(security: SystemSecurityInfo) -> Element {
-    rsx! {
-        Card {
-            title: Some("Security".to_string()),
-            children: rsx! {
-                dl {
-                    class: "space-y-3",
-                    if let Some(tpm) = security.tpm_present {
-                        BooleanRow { label: "TPM Present", value: tpm }
-                    }
-                    if let Some(sb) = security.secure_boot_enabled {
-                        BooleanRow { label: "Secure Boot", value: sb }
-                    }
-                    if let Some(fips) = security.fips_mode {
-                        BooleanRow { label: "FIPS Mode", value: fips }
-                    }
-                    if let Some(ref selinux) = security.selinux_status {
-                        InfoRow { label: "SELinux", value: selinux.clone() }
-                    }
-                }
-            }
-        }
-    }
-}
-
-#[component]
-fn AgentCard(system: SystemDetail) -> Element {
-    rsx! {
-        Card {
-            title: Some("Agent".to_string()),
-            children: rsx! {
-                dl {
-                    class: "space-y-3",
-                    if let Some(ref version) = system.agent_version {
-                        InfoRow { label: "Version", value: version.clone() }
-                    }
-                    if let Some(ref last_seen) = system.last_seen {
-                        InfoRow { label: "Last Seen", value: last_seen.format("%Y-%m-%d %H:%M:%S UTC").to_string() }
-                    }
-                    BooleanRow { label: "Active", value: system.is_active }
-                }
-            }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper Components
-// ─────────────────────────────────────────────────────────────────────────────
-
-#[component]
-fn StatusBadge(label: &'static str, color_class: &'static str, bg_class: &'static str) -> Element {
-    rsx! {
-        span {
-            class: "inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium {color_class} {bg_class}",
-            "{label}"
-        }
-    }
-}
-
-#[component]
-fn InfoRow(label: &'static str, value: String) -> Element {
-    rsx! {
-        div {
-            class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1",
-            dt { class: "text-xs uppercase tracking-wider text-gray-500", "{label}" }
-            dd { class: "text-sm text-gray-200", "{value}" }
-        }
-    }
-}
-
-#[component]
-fn InfoRowMono(label: &'static str, value: String) -> Element {
-    rsx! {
-        div {
-            class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1",
-            dt { class: "text-xs uppercase tracking-wider text-gray-500", "{label}" }
-            dd { class: "text-sm text-gray-200 font-mono", "{value}" }
-        }
-    }
-}
-
-#[component]
-fn BooleanRow(label: &'static str, value: bool) -> Element {
-    let (icon, color, text) = if value {
-        ("✓", "text-emerald-400", "Enabled")
-    } else {
-        ("✗", "text-gray-500", "Disabled")
-    };
-    rsx! {
-        div {
-            class: "flex flex-col sm:flex-row sm:items-center sm:justify-between gap-1",
-            dt { class: "text-xs uppercase tracking-wider text-gray-500", "{label}" }
-            dd { class: "text-sm font-medium {color}", "{icon} {text}" }
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper Functions
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn format_memory(gb: f64) -> String {
-    if gb >= 1000.0 {
-        format!("{:.0} GB", gb / 1000.0)
-    } else {
-        format!("{:.1} GB", gb)
-    }
-}
-
-fn format_uptime(seconds: i64) -> String {
-    let days = seconds / 86400;
-    let hours = (seconds % 86400) / 3600;
-    let minutes = (seconds % 3600) / 60;
-
-    if days > 0 {
-        format!("{}d {}h {}m", days, hours, minutes)
-    } else if hours > 0 {
-        format!("{}h {}m", hours, minutes)
-    } else {
-        format!("{}m", minutes)
-    }
-}
-
-fn deployment_policy_label(policy: &str) -> String {
-    match policy {
-        "Immediate" => "Auto-deploy: Immediate".to_string(),
-        "Boot Only" => "Auto-deploy: On reboot".to_string(),
-        _ => policy.to_string(),
-    }
-}
-
-struct EnvStyle {
-    chip_bg: &'static str,
-    chip_text: &'static str,
-}
-
-fn environment_style(environment: &str) -> EnvStyle {
-    match environment.to_lowercase().as_str() {
-        "production" => EnvStyle {
-            chip_bg: "bg-emerald-500/20",
-            chip_text: "text-emerald-300",
-        },
-        "staging" => EnvStyle {
-            chip_bg: "bg-amber-500/20",
-            chip_text: "text-amber-300",
-        },
-        "development" => EnvStyle {
-            chip_bg: "bg-blue-500/20",
-            chip_text: "text-blue-300",
-        },
-        _ => EnvStyle {
-            chip_bg: "bg-gray-500/20",
-            chip_text: "text-gray-300",
-        },
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Mock Data
+// Mock Data Functions
 // ─────────────────────────────────────────────────────────────────────────────
 
 fn mock_commit_history_for_system(system: &SystemDetail) -> Vec<SystemCommitHistory> {
-    use chrono::Duration;
     let flake_name = system.flake.as_ref().map(|flake| flake.name.as_str());
     let timelines = crate::views::dashboard::mock_flake_timelines();
     let Some(timeline) =
@@ -2666,7 +1850,7 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "openssl".to_string(),
             installed_version: "3.0.12".to_string(),
             fixed_version: Some("3.0.13".to_string()),
-            published_at: Some(Utc::now() - chrono::Duration::days(30)),
+            published_at: Some(Utc::now() - Duration::days(30)),
         },
         SystemVulnerability {
             cve_id: "CVE-2024-5678".to_string(),
@@ -2676,7 +1860,7 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "curl".to_string(),
             installed_version: "8.4.0".to_string(),
             fixed_version: Some("8.5.0".to_string()),
-            published_at: Some(Utc::now() - chrono::Duration::days(14)),
+            published_at: Some(Utc::now() - Duration::days(14)),
         },
         SystemVulnerability {
             cve_id: "CVE-2024-9012".to_string(),
@@ -2686,7 +1870,7 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "sudo".to_string(),
             installed_version: "1.9.14".to_string(),
             fixed_version: None,
-            published_at: Some(Utc::now() - chrono::Duration::days(7)),
+            published_at: Some(Utc::now() - Duration::days(7)),
         },
         SystemVulnerability {
             cve_id: "CVE-2024-3456".to_string(),
@@ -2696,7 +1880,7 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "nginx".to_string(),
             installed_version: "1.24.0".to_string(),
             fixed_version: Some("1.25.0".to_string()),
-            published_at: Some(Utc::now() - chrono::Duration::days(45)),
+            published_at: Some(Utc::now() - Duration::days(45)),
         },
         SystemVulnerability {
             cve_id: "CVE-2024-7890".to_string(),
@@ -2706,13 +1890,12 @@ fn mock_vulnerabilities() -> Vec<SystemVulnerability> {
             package_name: "bash".to_string(),
             installed_version: "5.2".to_string(),
             fixed_version: None,
-            published_at: Some(Utc::now() - chrono::Duration::days(60)),
+            published_at: Some(Utc::now() - Duration::days(60)),
         },
     ]
 }
 
 fn mock_deployment_logs() -> Vec<DeploymentLogEntry> {
-    use chrono::Duration;
     let base_time = Utc::now() - Duration::hours(1);
 
     vec![
@@ -2811,7 +1994,7 @@ fn fallback_system_detail() -> SystemDetail {
             },
             flake: None,
             last_seen: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         })
 }
