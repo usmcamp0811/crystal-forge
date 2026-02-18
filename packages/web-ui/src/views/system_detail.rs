@@ -1188,7 +1188,7 @@ enum PolicyFormat {
 
 #[component]
 fn PolicyTab(system: SystemDetail) -> Element {
-    let mut policy_library = use_signal(initial_policy_definitions);
+    let policy_library = use_signal(initial_policy_definitions);
     let mut active_policy_ids = use_signal(initial_active_policy_ids);
     let mut drag_policy_id: Signal<Option<Uuid>> = use_signal(|| None);
 

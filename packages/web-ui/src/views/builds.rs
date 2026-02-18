@@ -111,10 +111,10 @@ pub fn BuildsView() -> Element {
     let mut selected_build = use_signal(|| Some(1_i32));
     let mut active_tab = use_signal(|| DetailTab::Logs);
 
-    let mut follow_logs = use_signal(|| true);
-    let mut pause_logs = use_signal(|| false);
-    let mut wrap_logs = use_signal(|| false);
-    let mut log_query = use_signal(String::new);
+    let follow_logs = use_signal(|| true);
+    let pause_logs = use_signal(|| false);
+    let wrap_logs = use_signal(|| false);
+    let log_query = use_signal(String::new);
 
     let mut pending_action = use_signal(|| None::<PendingAction>);
     let mut last_action_note = use_signal(|| None::<String>);

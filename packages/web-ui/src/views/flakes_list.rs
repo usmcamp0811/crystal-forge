@@ -8,11 +8,11 @@ use gloo_storage::{LocalStorage, Storage};
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use uuid::Uuid;
+use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
-use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use web_sys::{window, Node};
 
 use crate::components::layout::Card;
 use crate::theme;
@@ -174,7 +174,7 @@ pub fn FlakesListView() -> Element {
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| FlakesViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
-    let mut open_dropdown = use_signal(|| None::<FilterDropdown>);
+    let open_dropdown = use_signal(|| None::<FilterDropdown>);
     let container_id = use_memo(|| format!("flakes-filters-{}", Uuid::new_v4()));
 
     use_effect(move || {
@@ -236,8 +236,8 @@ pub fn FlakesListView() -> Element {
     let mut pending_remove = use_signal(|| None::<FlakeListItem>);
     let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
     let mut edit_error = use_signal(|| None::<String>);
-    let mut selected_history_flake = use_signal(|| None::<i32>);
-    let mut selected_history_commit = use_signal(|| None::<String>);
+    let selected_history_flake = use_signal(|| None::<i32>);
+    let selected_history_commit = use_signal(|| None::<String>);
     let mut sync_note = use_signal(|| None::<String>);
     let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
 
@@ -531,8 +531,8 @@ fn FlakesTable(
     on_remove: EventHandler<i32>,
     on_edit: EventHandler<i32>,
 ) -> Element {
-    let mut sort_column = use_signal(|| None::<SortColumn>);
-    let mut sort_direction = use_signal(|| SortDirection::Asc);
+    let sort_column = use_signal(|| None::<SortColumn>);
+    let sort_direction = use_signal(|| SortDirection::Asc);
 
     let sorted_flakes = {
         let mut sorted = flakes.clone();
