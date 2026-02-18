@@ -10,6 +10,7 @@ let
       clippy
       coreutils
       findutils
+      gcc
       gnugrep
       jq
       tokei
@@ -93,10 +94,17 @@ let
           while IFS= read -r file; do
             if [[ -f "$file" ]]; then
               rel_path="''${file#"$PROJECT_ROOT/"}"
-              total_lines=$(wc -l < "$file")
-              fn_count=$(grep -c "^\\s*\\(pub\\s\\+\\)\\?\\(async\\s\\+\\)\\?fn\\s" "$file" 2>/dev/null || echo "0")
-              struct_count=$(grep -c "^\\s*\\(pub\\s\\+\\)\\?struct\\s" "$file" 2>/dev/null || echo "0")
-              impl_count=$(grep -c "^\\s*impl\\s" "$file" 2>/dev/null || echo "0")
+              # Ensure we get numeric values, defaulting to 0
+              total_lines=$(wc -l < "$file" | tr -d '[:space:]') || total_lines=0
+              fn_count=$(grep -c "^\\s*\\(pub\\s\\+\\)\\?\\(async\\s\\+\\)\\?fn\\s" "$file" 2>/dev/null | tr -d '[:space:]') || fn_count=0
+              struct_count=$(grep -c "^\\s*\\(pub\\s\\+\\)\\?struct\\s" "$file" 2>/dev/null | tr -d '[:space:]') || struct_count=0
+              impl_count=$(grep -c "^\\s*impl\\s" "$file" 2>/dev/null | tr -d '[:space:]') || impl_count=0
+              
+              # Default empty values to 0
+              total_lines=''${total_lines:-0}
+              fn_count=''${fn_count:-0}
+              struct_count=''${struct_count:-0}
+              impl_count=''${impl_count:-0}
               
               if [[ "$FIRST" == "true" ]]; then
                 FIRST=false
