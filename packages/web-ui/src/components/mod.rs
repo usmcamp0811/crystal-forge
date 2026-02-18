@@ -8,6 +8,8 @@
 //! - `charts` - Data visualization (donut charts, etc.)
 //! - `cve` - CVE vulnerability display components
 //! - `dashboard` - Dashboard panels (fleet health, build queue, etc.)
+//! - `diff` - Diff viewer components
+//! - `environments` - Environment management components
 //! - `filters` - Filter dropdowns, view toggles, filter bars
 //! - `forms` - Form components for data entry
 //! - `layout` - Application shell, cards, sidebar, topbar
@@ -18,7 +20,6 @@
 //! - `flake` - Flake-specific components
 //! - `builds` - Build control center components
 //! - `policy` - Policy management components
-//! - `diff` - Diff viewer components
 
 // Domain-specific component modules
 pub mod builds;
@@ -26,6 +27,7 @@ pub mod charts;
 pub mod cve;
 pub mod dashboard;
 pub mod diff;
+pub mod environments;
 pub mod filters;
 pub mod flake;
 pub mod forms;
