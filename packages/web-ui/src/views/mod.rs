@@ -13,3 +13,4 @@ pub mod style_guide;
 pub mod system_detail;
 pub mod systems;
 pub mod systems_list;
+pub mod systems_mock;

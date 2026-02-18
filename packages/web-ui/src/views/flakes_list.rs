@@ -16,7 +16,7 @@ use web_sys::{Node, window};
 
 use crate::components::layout::Card;
 use crate::theme;
-use crate::views::systems_list::mock_system_details;
+use crate::views::systems_mock::mock_system_details;
 
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
 const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE)";
