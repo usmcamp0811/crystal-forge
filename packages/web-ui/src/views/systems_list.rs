@@ -33,7 +33,7 @@ pub fn SystemsListView() -> Element {
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
-    let mut open_dropdown = use_signal(|| None::<String>);
+    let open_dropdown = use_signal(|| None::<String>);
     let container_id = use_memo(|| format!("systems-filters-{}", uuid::Uuid::new_v4()));
     let container_id_value = Rc::new(container_id.read().clone());
 
