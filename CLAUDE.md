@@ -798,3 +798,50 @@ You MUST NOT:
 Failure to stage new files is considered incorrect task completion.
 
 </CRITICAL_INSTRUCTION>
+
+---
+
+---
+
+<CRITICAL_INSTRUCTION>
+
+# MERGE REQUEST REQUIREMENT (MANDATORY)
+
+When a task is complete and all verification passes, you MUST open a Merge Request (MR) in GitLab.
+
+## REQUIRED TOOLING
+
+You MUST use GitLab CLI via Nix:
+
+- `nix run nixpkgs#glab -- <glab command ...>`
+
+You MUST NOT rely on a locally installed `glab` outside the repository-defined environment.
+
+## MR TEMPLATE REQUIREMENT
+
+This project defines an MR template in GitLab.
+
+When creating the MR, you MUST:
+
+- Use the project’s configured MR template content
+- Fill out every required section in the template
+- Ensure the MR description matches the task’s acceptance criteria and verification results
+
+You MUST NOT submit an MR with an empty or partial description.
+
+## MINIMUM MR CONTENT
+
+Your MR description MUST include:
+
+- Task ID and title
+- Summary of changes (scoped to the task)
+- Verification commands executed and results
+- Notes on tradeoffs or risks
+- Any follow-up tasks created for out-of-scope discoveries
+
+## FAILURE CONDITIONS
+
+If you cannot access GitLab, cannot use `glab`, or cannot locate the MR template:
+YOU MUST STOP AND REPORT.
+
+</CRITICAL_INSTRUCTION>
