@@ -1,16 +1,17 @@
 ---
 id: TASK-2.5
 title: Add unit tests for builder/mod.rs - error recovery
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:39'
+updated_date: '2026-02-19 03:39'
 labels:
   - testing
   - builder
   - rust
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-2
-milestone: m-1
 ---
 
 ## Description
