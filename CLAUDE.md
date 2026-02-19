@@ -516,7 +516,54 @@ When creating new tasks (e.g., for scope violations or discovered issues):
 This preserves sprint integrity and prevents scope creep.
 
 </CRITICAL_INSTRUCTION>
+---
 
+<CRITICAL_INSTRUCTION>
+
+# TASK QUALITY TIERS (MANDATORY)
+
+This repository uses two task quality tiers:
+
+Tier 1: Backlog Capture
+Tier 2: Sprint-Ready
+
+## 1. Backlog Capture (Backlog Status Only)
+
+Tasks in Backlog may be lightweight and incomplete.
+
+They MUST include:
+- Problem
+- Desired Outcome
+
+They MAY omit:
+- Acceptance Criteria
+- Verification Plan
+- Architectural Constraints
+
+Backlog tasks are NOT eligible for execution.
+
+## 2. Sprint-Ready (Required Before Moving to To Do)
+
+Before moving a task from Backlog → To Do, it MUST be upgraded to Sprint-Ready quality.
+
+Sprint-Ready tasks MUST include:
+
+- Clear Problem Statement
+- Goal
+- Explicit Non-Goals
+- Objective Acceptance Criteria
+- Architectural Constraints
+- Verification Plan
+- Impact Areas
+- Risk Level
+- Dependencies (if any)
+
+If any of these are missing:
+YOU MUST STOP AND REPORT.
+
+Agents MUST NOT execute tasks that are not Sprint-Ready.
+
+</CRITICAL_INSTRUCTION>
 ---
 <CRITICAL_INSTRUCTION>
 
@@ -844,6 +891,29 @@ You MUST NOT skip states.
 
 </CRITICAL_INSTRUCTION>
 
+---
+
+<CRITICAL_INSTRUCTION>
+
+# DEFINITION OF READY (MANDATORY BEFORE EXECUTION)
+
+A task may only move from Backlog → To Do if it satisfies Sprint-Ready requirements.
+
+Before selecting a task for execution, the agent MUST verify:
+
+- Acceptance Criteria are objective and testable
+- Non-Goals are defined
+- Verification Plan exists
+- Dependencies are resolved
+- Scope is unambiguous
+
+If ambiguity exists:
+YOU MUST STOP AND REQUEST CLARIFICATION.
+
+Agents MUST NOT refine tasks silently.
+Task refinement is a grooming activity, not an execution activity.
+
+</CRITICAL_INSTRUCTION>
 ---
 
 <CRITICAL_INSTRUCTION>
