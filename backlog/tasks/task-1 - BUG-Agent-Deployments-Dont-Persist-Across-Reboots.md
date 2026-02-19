@@ -1,17 +1,18 @@
 ---
 id: TASK-1
 title: 'BUG: Agent Deployments Don''t Persist Across Reboots'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:15'
+updated_date: '2026-02-19 03:38'
 labels:
   - bug
   - deployment
   - agent
   - nixos
+milestone: m-0
 dependencies: []
 priority: high
-milestone: m-0
 ---
 
 ## Description
