@@ -1,17 +1,18 @@
 ---
 id: TASK-18
 title: 'Roadmap: STIG NixOS Modules'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 15:36'
+updated_date: '2026-02-19 03:39'
 labels:
   - roadmap
   - compliance
   - security
   - nix
+milestone: m-4
 dependencies: []
 priority: medium
-milestone: m-4
 ---
 
 ## Description
