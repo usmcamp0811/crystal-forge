@@ -4,7 +4,7 @@ title: Embed Built UI Assets in Axum Server
 status: In Progress
 assignee: []
 created_date: '2026-02-11 10:00'
-updated_date: '2026-02-19 02:09'
+updated_date: '2026-02-19 02:19'
 labels:
   - ui
   - backend
@@ -67,4 +67,8 @@ Implemented embedded UI serving behind feature flag: added handlers/ui.rs for SP
 Verification: nix develop -c env SQLX_OFFLINE=true cargo check --features embedded-ui (pass), nix develop -c env SQLX_OFFLINE=true cargo test --lib --features embedded-ui (pass, 87 tests), nix build .#packages.x86_64-linux.server (pass).
 
 Verification caveats: nix develop -c cargo fmt -- --check fails due pre-existing repository formatting drift in unrelated files; nix develop -c env SQLX_OFFLINE=true cargo clippy --features embedded-ui -- -D warnings fails due existing repo-wide warnings and toolchain artifact mismatch (E0514).
+
+Commit: 1fe0f62 (feat: embed web UI assets in server build)
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/110
 <!-- SECTION:NOTES:END -->
