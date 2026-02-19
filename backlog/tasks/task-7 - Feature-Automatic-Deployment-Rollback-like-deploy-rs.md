@@ -1,18 +1,19 @@
 ---
 id: TASK-7
 title: 'Feature: Automatic Deployment Rollback (like deploy-rs)'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:16'
+updated_date: '2026-02-19 03:39'
 labels:
   - feature
   - deployment
   - rollback
   - safety
+milestone: m-4
 dependencies:
   - TASK-1
 priority: medium
-milestone: m-4
 ---
 
 ## Description
