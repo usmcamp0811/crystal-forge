@@ -1,18 +1,19 @@
 ---
 id: TASK-8.6
 title: Build API Client - HTTP Client Implementation
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 14:15'
+updated_date: '2026-02-19 03:38'
 labels:
   - ui
   - api
   - backend
+milestone: m-3
 dependencies:
   - TASK-8.5
 parent_task_id: TASK-8
 priority: high
-milestone: m-3
 ---
 
 ## Description
