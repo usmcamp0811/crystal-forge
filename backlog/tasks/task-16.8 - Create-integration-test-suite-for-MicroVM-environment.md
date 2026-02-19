@@ -1,16 +1,17 @@
 ---
 id: TASK-16.8
 title: Create integration test suite for MicroVM environment
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 15:17'
+updated_date: '2026-02-19 03:39'
 labels:
   - testing
   - integration
   - microvm
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-16
-milestone: m-1
 ---
 
 ## Description
