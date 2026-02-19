@@ -1,17 +1,18 @@
 ---
 id: TASK-5
 title: 'Phase 4: Improve Error Handling'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:16'
+updated_date: '2026-02-19 03:39'
 labels:
   - refactoring
   - error-handling
   - phase-4
+milestone: m-2
 dependencies:
   - TASK-4
 priority: medium
-milestone: m-2
 ---
 
 ## Description
