@@ -530,6 +530,7 @@ In Progress:
 
 - Task is actively being implemented in a dedicated worktree.
 - MUST include a LOCK note.
+- Before work begins the task MUST be moved to In Progress
 
 Review:
 
