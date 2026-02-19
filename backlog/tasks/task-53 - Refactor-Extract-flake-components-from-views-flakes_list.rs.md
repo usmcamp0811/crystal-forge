@@ -1,9 +1,10 @@
 ---
 id: TASK-53
 title: 'Refactor: Extract flake components from views/flakes_list.rs'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-18 02:46'
+updated_date: '2026-02-19 03:39'
 labels:
   - refactoring
   - web-ui
@@ -28,10 +29,12 @@ Based on TODO in components/flake/mod.rs:
 FlakeTimelineWidget already identified for move in TASK-49
 
 ## Acceptance Criteria
-- [ ] Review views/flakes_list.rs for extractable components
-- [ ] Create component files in components/flake/
-- [ ] Update components/flake/mod.rs with proper exports
-- [ ] Update views/flakes_list.rs to import from components
-- [ ] Remove TODO comments from mod.rs
-- [ ] Build passes: nix build .#checks.x86_64-linux.web-ui
+<!-- AC:BEGIN -->
+- [ ] #1 Review views/flakes_list.rs for extractable components
+- [ ] #2 Create component files in components/flake/
+- [ ] #3 Update components/flake/mod.rs with proper exports
+- [ ] #4 Update views/flakes_list.rs to import from components
+- [ ] #5 Remove TODO comments from mod.rs
+- [ ] #6 Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->
