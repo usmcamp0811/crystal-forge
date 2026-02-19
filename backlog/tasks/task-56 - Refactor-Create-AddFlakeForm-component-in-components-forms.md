@@ -1,9 +1,10 @@
 ---
 id: TASK-56
 title: 'Refactor: Create AddFlakeForm component in components/forms/'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-18 02:47'
+updated_date: '2026-02-19 03:39'
 labels:
   - refactoring
   - web-ui
@@ -23,10 +24,12 @@ Based on TODO in components/forms/mod.rs:
 - AddFlakeForm (extract from flakes_list.rs)
 
 ## Acceptance Criteria
-- [ ] Identify AddFlakeForm or similar form in views/flakes_list.rs
-- [ ] Create components/forms/add_flake_form.rs
-- [ ] Update components/forms/mod.rs with export
-- [ ] Update views to import from components
-- [ ] Remove TODO comments from mod.rs
-- [ ] Build passes: nix build .#checks.x86_64-linux.web-ui
+<!-- AC:BEGIN -->
+- [ ] #1 Identify AddFlakeForm or similar form in views/flakes_list.rs
+- [ ] #2 Create components/forms/add_flake_form.rs
+- [ ] #3 Update components/forms/mod.rs with export
+- [ ] #4 Update views to import from components
+- [ ] #5 Remove TODO comments from mod.rs
+- [ ] #6 Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->
