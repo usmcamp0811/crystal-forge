@@ -127,7 +127,33 @@ git worktree prune
 </CRITICAL_INSTRUCTION>
 
 ---
+<CRITICAL_INSTRUCTION>
 
+# WORKTREE EXCEPTION FOR BACKLOG MAINTENANCE (LIMITED)
+
+The integration worktrees (main/dev) MUST NOT be used for application code implementation.
+
+Exception:
+Backlog-only maintenance edits are permitted in integration worktrees ONLY under BACKLOG MAINTENANCE MODE.
+
+If any non-backlog file is modified:
+YOU MUST STOP AND REPORT.
+
+</CRITICAL_INSTRUCTION>
+---
+<CRITICAL_INSTRUCTION>
+
+# PRE-FLIGHT AND WORKTREE PROOF EXEMPTION (BACKLOG-ONLY)
+
+STRUCTURED PRE-FLIGHT DECLARATION and WORKTREE PRE-FLIGHT PROOF apply only to application code changes.
+
+They do NOT apply to backlog-only maintenance edits performed under BACKLOG MAINTENANCE MODE.
+
+Backlog-only maintenance edits MUST instead follow the BACKLOG MAINTENANCE MODE proof requirement:
+- git status --porcelain must show only allowed backlog-related files.
+
+</CRITICAL_INSTRUCTION>
+---
 <CRITICAL_INSTRUCTION>
 
 # 8B. WORKTREE PRE-FLIGHT PROOF (AGENT-PROOF ENFORCEMENT)
@@ -221,20 +247,20 @@ YOU MUST STOP.
 
 # 1. BACKLOG-FIRST EXECUTION (MANDATORY)
 
-You MUST NOT modify code without an active backlog task.
+You MUST NOT modify application code without an active backlog task.
 
-Before writing or modifying any files, you MUST:
+Backlog-only maintenance edits are permitted ONLY under BACKLOG MAINTENANCE MODE.
+
+Before writing or modifying any application code files, you MUST:
 
 1. Locate the backlog (backlog/ directory or backlog.md).
 2. Select the highest-priority task in "To Do" that:
    - Has no unmet dependencies
    - Has no active LOCK
-
+   - Is not already actively being worked
 3. Move the task status to "In Progress".
-4. Read and understand:
-   - Acceptance criteria
-   - Dependencies
-   - Related milestone
+4. Add the LOCK note.
+5. Read and understand acceptance criteria, dependencies, and related milestone (if any).
 
 If the backlog cannot be located, accessed, or understood:
 YOU MUST STOP AND REPORT.
@@ -798,7 +824,75 @@ You MUST re-enter BACKLOG-FIRST EXECUTION mode.
 </CRITICAL_INSTRUCTION>
 
 ---
+<CRITICAL_INSTRUCTION>
 
+# BACKLOG MAINTENANCE MODE (PLAN MODE ALLOWED)
+
+Agents MAY create, edit, and reorganize backlog tasks and backlog-related markdown during planning.
+
+This is called BACKLOG MAINTENANCE MODE.
+
+## ALLOWED ACTIONS
+
+In BACKLOG MAINTENANCE MODE, agents MAY:
+
+- Create new tasks (status MUST be Backlog)
+- Edit task titles, descriptions, acceptance criteria, non-goals, and verification plans
+- Perform backlog grooming edits (clarify, deduplicate, split, merge tasks)
+- Move tasks between Backlog and To Do ONLY when explicitly instructed by a human
+- Apply consistent formatting to backlog markdown
+- Add links, notes, and metadata to tasks
+- Update backlog templates and documentation about task quality
+
+## ALLOWED FILES ONLY
+
+In BACKLOG MAINTENANCE MODE, agents MUST ONLY modify files that are backlog-related.
+
+Examples of allowed paths (adjust to match your repo):
+
+- backlog/
+- backlog.md
+- .backlog-templates/
+- docs/ (ONLY if the change is backlog/workflow documentation)
+
+If any non-backlog file is modified:
+YOU MUST STOP AND REPORT.
+You MUST revert those changes or move to normal execution workflow.
+
+## NO CODE CHANGES (HARD CONSTRAINT)
+
+In BACKLOG MAINTENANCE MODE, agents MUST NOT:
+
+- modify Rust, UI, infra, Nix, or application code
+- create branches for implementation
+- create worktrees for implementation
+- run implementation verification
+- open merge requests for code changes
+
+This mode is planning-only.
+
+## BRANCH AND WORKTREE REQUIREMENTS (RELAXED FOR BACKLOG-ONLY)
+
+Backlog-only changes do NOT require one-branch-per-task and do NOT require dedicated worktrees.
+
+Agents MAY perform backlog-only changes on the dev branch in the current worktree.
+
+However, the agent MUST ensure that ONLY backlog-related files are changed.
+
+## REQUIRED PROOF (MUST RUN AND PASTE OUTPUT)
+
+Before committing backlog-only changes, the agent MUST run and paste:
+
+git status --porcelain
+
+The output MUST show changes ONLY in allowed backlog-related paths.
+
+If the output includes any non-backlog paths:
+YOU MUST STOP AND REPORT.
+
+</CRITICAL_INSTRUCTION>
+
+---
 <CRITICAL_INSTRUCTION>
 
 # BACKLOG AUTO-CREATION PROTOCOL
@@ -806,11 +900,11 @@ You MUST re-enter BACKLOG-FIRST EXECUTION mode.
 If no suitable backlog task exists for the requested work:
 
 1. You MUST create a new backlog task.
-2. You MUST define clear acceptance criteria if the task is intended for immediate sprint execution.
+2. You MUST write it using the Backlog Capture template (minimum) or Sprint-Ready template (if explicitly requested).
 3. You MUST set the task status to "Backlog".
 4. You MUST confirm no duplicate task exists.
 5. You MUST NOT move the task to "To Do" unless a human explicitly selects it during grooming.
-6. You MUST NOT implement work without a task that is in "To Do" and moved to "In Progress".
+6. You MUST NOT implement application code unless the task is in "To Do" and moved to "In Progress".
 
 If task creation fails:
 YOU MUST STOP AND REPORT.
