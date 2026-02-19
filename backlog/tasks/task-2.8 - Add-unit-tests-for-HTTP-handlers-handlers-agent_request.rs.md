@@ -1,7 +1,7 @@
 ---
 id: TASK-2.8
 title: Add unit tests for HTTP handlers - handlers/agent_request.rs
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-04 20:39'
 updated_date: '2026-02-19 03:53'
@@ -16,9 +16,7 @@ parent_task_id: TASK-2
 
 ## Notes
 
-LOCK: claude on gray in ~/code/crystal-forge/TASK-2.8-agent-request-tests
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/112
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/112 (merged)
 
 ## Implementation Summary
 
