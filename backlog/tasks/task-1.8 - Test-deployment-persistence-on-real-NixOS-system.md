@@ -1,17 +1,18 @@
 ---
 id: TASK-1.8
 title: Test deployment persistence on real NixOS system
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:19'
+updated_date: '2026-02-19 03:39'
 labels:
   - testing
   - manual
   - deployment
+milestone: m-0
 dependencies:
   - TASK-1.7
 parent_task_id: TASK-1
-milestone: m-0
 ---
 
 ## Description
