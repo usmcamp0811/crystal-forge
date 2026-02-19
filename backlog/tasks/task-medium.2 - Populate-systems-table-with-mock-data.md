@@ -1,9 +1,10 @@
 ---
 id: TASK-MEDIUM.2
 title: Populate systems table with mock data
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-14 04:02'
+updated_date: '2026-02-19 03:39'
 labels:
   - ui
   - frontend
