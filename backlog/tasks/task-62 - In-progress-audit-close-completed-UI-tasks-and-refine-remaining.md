@@ -1,9 +1,10 @@
 ---
 id: TASK-62
 title: 'In-progress audit: close completed UI tasks and refine remaining'
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-19 04:06'
+updated_date: '2026-02-19 04:06'
 labels: []
 dependencies: []
 priority: high
@@ -37,3 +38,9 @@ Verification Plan
 - [ ] #6 TASK-24 remains In Progress with refinement notes
 - [ ] #7 TASK-32 remains In Progress with refinement notes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-62-inprogress-audit
+<!-- SECTION:NOTES:END -->
