@@ -1,9 +1,10 @@
 ---
 id: TASK-42
 title: Create cache view
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-17 04:43'
+updated_date: '2026-02-19 03:39'
 labels:
   - ui
   - web-ui
