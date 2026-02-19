@@ -1,17 +1,18 @@
 ---
 id: TASK-3.4
 title: Extract CachePushWorker to src/builder/cache_worker.rs
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 21:12'
+updated_date: '2026-02-19 03:39'
 labels:
   - refactoring
   - builder
   - cache
   - rust
+milestone: m-2
 dependencies: []
 parent_task_id: TASK-3
-milestone: m-2
 ---
 
 ## Description
