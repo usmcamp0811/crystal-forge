@@ -65,7 +65,7 @@ You MUST follow these rules:
 
 ## 1. Never work directly in the shared integration worktrees
 
-The directories `~/code/crystal-forge/main` and `~/code/crystal-forge/refactor` are integration worktrees.
+The directories `~/code/crystal-forge/main` and `~/code/crystal-forge/dev` are integration worktrees.
 They MUST remain clean and MUST NOT be used for task implementation.
 
 You MAY inspect, build, and run tests in integration worktrees, but you MUST NOT:
@@ -93,11 +93,11 @@ Worktree directory naming MUST match the branch name:
 
 ## 3. Branch base and creation rule
 
-You MUST branch from the designated integration branch (default: refactor unless the task says otherwise).
+You MUST branch from the designated integration branch (default: dev unless the task says otherwise).
 
 From within an existing worktree, create the new task worktree using:
 
-git worktree add -b TASK-ID-short-slug ../TASK-ID-short-slug refactor
+git worktree add -b TASK-ID-short-slug ../TASK-ID-short-slug dev
 
 If the branch already exists, use:
 
@@ -109,7 +109,7 @@ Before modifying any files, you MUST state:
 
 - the absolute path of the current worktree
 - the active branch name
-- the base branch used (main or refactor)
+- the base branch used (main or dev)
 
 If you are not in a dedicated task worktree directory:
 YOU MUST STOP AND REPORT.
@@ -158,7 +158,7 @@ The agent MUST only implement changes inside a dedicated task worktree directory
 If `pwd` or `git rev-parse --show-toplevel` is:
 
 - ~/code/crystal-forge/main
-- ~/code/crystal-forge/refactor
+- ~/code/crystal-forge/dev
   OR any other non-task directory,
 
 YOU MUST STOP AND REPORT.
@@ -170,7 +170,7 @@ The integration worktrees MUST remain clean at all times.
 If `git status --porcelain` shows changes in:
 ~/code/crystal-forge/main
 or
-~/code/crystal-forge/refactor
+~/code/crystal-forge/dev
 
 YOU MUST STOP AND REPORT and instruct the user how to discard or move changes into a task worktree.
 
@@ -192,7 +192,7 @@ A dedicated worktree MUST be created for the task before coding.
 
 Command template (required, unless branch already exists):
 
-git worktree add -b TASK-ID-short-slug ../TASK-ID-short-slug refactor
+git worktree add -b TASK-ID-short-slug ../TASK-ID-short-slug dev
 
 If branch exists:
 
@@ -388,7 +388,7 @@ You MUST use the appropriate offline mode or start required services.
 
 One branch per task.
 
-You MUST branch from the designated integration branch (e.g., refactor).
+You MUST branch from the designated integration branch (e.g., dev).
 
 You MUST use Conventional Commits:
 
@@ -800,6 +800,7 @@ Failure to stage new files is considered incorrect task completion.
 </CRITICAL_INSTRUCTION>
 
 ---
+
 
 ---
 
