@@ -1,10 +1,10 @@
 ---
 id: TASK-50
 title: 'Refactor: Extract build components from views/builds.rs'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-02-18 02:45'
-updated_date: '2026-02-19 04:33'
+updated_date: '2026-02-19 13:16'
 labels:
   - refactoring
   - web-ui
@@ -47,4 +47,6 @@ LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-50-extract-build-c
 Extracted 5 components from views/builds.rs into components/builds/: MetricsRow, MetricBadge, WorkerStrip, BuildQueuePane, BuildDetailPane. Created helpers.rs for shared types and styling functions. Updated mod.rs with proper exports. View now imports from components.
 
 Verification: nix build .#checks.x86_64-linux.web-ui passed.
+
+Closed from MR audit: merged in MR !113 (TASK-50-extract-build-components -> dev).
 <!-- SECTION:NOTES:END -->
