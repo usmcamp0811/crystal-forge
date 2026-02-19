@@ -1,10 +1,10 @@
 ---
 id: TASK-50
 title: 'Refactor: Extract build components from views/builds.rs'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-18 02:45'
-updated_date: '2026-02-19 03:39'
+updated_date: '2026-02-19 03:53'
 labels:
   - refactoring
   - web-ui
