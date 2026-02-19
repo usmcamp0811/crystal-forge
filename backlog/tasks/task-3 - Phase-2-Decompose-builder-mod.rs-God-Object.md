@@ -1,17 +1,18 @@
 ---
 id: TASK-3
 title: 'Phase 2: Decompose builder/mod.rs God Object'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:15'
+updated_date: '2026-02-19 03:38'
 labels:
   - refactoring
   - architecture
   - phase-2
+milestone: m-2
 dependencies:
   - TASK-2
 priority: high
-milestone: m-2
 ---
 
 ## Description
