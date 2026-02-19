@@ -1,8 +1,10 @@
 ---
 id: TASK-58
 title: Add code coverage CI job with MR artifacts
+status: Done
 assignee: []
 created_date: '2026-02-18'
+updated_date: '2026-02-19 13:16'
 labels:
   - ci
   - rust
@@ -27,17 +29,20 @@ Create a GitLab CI job that computes code coverage for Rust tests and generates 
 - Identify uncovered code paths
 
 ## Acceptance Criteria
-- [ ] Create `packages/coverage/default.nix` with the coverage analysis script
-- [ ] Use `cargo-tarpaulin` or `grcov` for coverage collection
-- [ ] Generate HTML coverage report artifact
-- [ ] Generate coverage summary in Markdown format
-- [ ] Add CI job to `.gitlab-ci.yml` that runs on merge requests
-- [ ] Configure job to expose artifacts for MR review
-- [ ] Show line-by-line coverage in HTML report
-- [ ] Include coverage percentage in summary
-- [ ] Show coverage delta (change from target branch)
-- [ ] Build passes: `nix build .#checks.x86_64-linux.coverage` (or similar)
+<!-- AC:BEGIN -->
+- [ ] #1 Create `packages/coverage/default.nix` with the coverage analysis script
+- [ ] #2 Use `cargo-tarpaulin` or `grcov` for coverage collection
+- [ ] #3 Generate HTML coverage report artifact
+- [ ] #4 Generate coverage summary in Markdown format
+- [ ] #5 Add CI job to `.gitlab-ci.yml` that runs on merge requests
+- [ ] #6 Configure job to expose artifacts for MR review
+- [ ] #7 Show line-by-line coverage in HTML report
+- [ ] #8 Include coverage percentage in summary
+- [ ] #9 Show coverage delta (change from target branch)
+- [ ] #10 Build passes: `nix build .#checks.x86_64-linux.coverage` (or similar)
 <!-- SECTION:DESCRIPTION:END -->
+
+<!-- AC:END -->
 
 ## Implementation Notes
 
@@ -79,4 +84,6 @@ coverage-report/
 - Coverage tests may need PostgreSQL running
 - Use the existing test infrastructure from the project
 - Consider using `nix build` with coverage instead of `cargo test`
+
+Closed from MR audit: merged in MR !109 (TASK-58-coverage-main -> main).
 <!-- SECTION:NOTES:END -->
