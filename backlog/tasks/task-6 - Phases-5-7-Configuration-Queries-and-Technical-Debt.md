@@ -1,19 +1,20 @@
 ---
 id: TASK-6
 title: 'Phases 5-7: Configuration, Queries, and Technical Debt'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:16'
+updated_date: '2026-02-19 03:39'
 labels:
   - refactoring
   - cleanup
   - phase-5
   - phase-6
   - phase-7
+milestone: m-2
 dependencies:
   - TASK-5
 priority: low
-milestone: m-2
 ---
 
 ## Description
