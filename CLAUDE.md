@@ -226,10 +226,9 @@ You MUST NOT modify code without an active backlog task.
 Before writing or modifying any files, you MUST:
 
 1. Locate the backlog (backlog/ directory or backlog.md).
-2. Select the highest-priority task that:
-   - Is not completed
+2. Select the highest-priority task in "To Do" that:
    - Has no unmet dependencies
-   - Is not already actively being worked
+   - Has no active LOCK
 
 3. Move the task status to "In Progress".
 4. Read and understand:
@@ -548,6 +547,55 @@ You MUST NOT move tasks directly from Backlog to In Progress.
 You MUST NOT skip To Do.
 
 </CRITICAL_INSTRUCTION>
+--- 
+<CRITICAL_INSTRUCTION>
+
+# TASK STATUS TRANSITION CONTRACT (HARD CONSTRAINT)
+
+Task status MUST reflect the real execution state.
+
+Agents MUST follow these exact transitions:
+
+Backlog → To Do → In Progress → Review → Done
+
+Agents MUST NOT invent alternative paths.
+
+## 1. Starting work (MANDATORY)
+
+Before ANY code changes, commits, or file modifications:
+
+- The selected task MUST be in "To Do".
+- The agent MUST move the task to "In Progress".
+- The agent MUST add the LOCK note described in WORKTREE PRE-FLIGHT PROOF.
+
+If the task is not moved to "In Progress" first:
+YOU MUST STOP AND REPORT.
+You MUST NOT modify files.
+
+## 2. Opening a Merge Request (MANDATORY)
+
+When implementation is complete and verification has been executed:
+
+- The agent MUST open a Merge Request.
+- At the same time, the agent MUST move the task status to "Review".
+- The agent MUST add the MR link (or MR identifier) to the task notes.
+
+If the MR cannot be opened:
+YOU MUST STOP AND REPORT.
+You MUST NOT move the task to "Review" without an MR.
+
+## 3. Completing the task (MANDATORY)
+
+A task MUST NOT be moved to "Done" until:
+
+- The Merge Request is merged into the integration branch (dev unless specified).
+- Any required follow-up tasks have been created in Backlog.
+- The task worktree has been cleaned up (worktree remove + prune if needed).
+
+Agents MUST NOT move tasks backwards (e.g., Review → To Do).
+Agents MUST NOT set tasks to "To Do" after work is complete.
+
+</CRITICAL_INSTRUCTION>
 
 ---
 <CRITICAL_INSTRUCTION>
@@ -758,13 +806,11 @@ You MUST re-enter BACKLOG-FIRST EXECUTION mode.
 If no suitable backlog task exists for the requested work:
 
 1. You MUST create a new backlog task.
-2. You MUST define clear acceptance criteria.
-3. You MUST set the task status to "To Do".
+2. You MUST define clear acceptance criteria if the task is intended for immediate sprint execution.
+3. You MUST set the task status to "Backlog".
 4. You MUST confirm no duplicate task exists.
-5. You MUST move the task to "In Progress".
-6. You MUST execute the PRE-FLIGHT GATE before coding.
-
-You MUST NOT implement work without a tracked task.
+5. You MUST NOT move the task to "To Do" unless a human explicitly selects it during grooming.
+6. You MUST NOT implement work without a task that is in "To Do" and moved to "In Progress".
 
 If task creation fails:
 YOU MUST STOP AND REPORT.
@@ -959,11 +1005,12 @@ STATE: INIT
 → If not found: STOP
 
 STATE: SELECT_TASK
-→ Choose highest-priority eligible task
-→ If none exists: execute BACKLOG AUTO-CREATION PROTOCOL
+→ Choose highest-priority eligible task in "To Do"
+→ If no tasks are in To Do: STOP
 
 STATE: IN_PROGRESS
-→ Move task to "In Progress" before begining to work
+→ Move task to "In Progress" before beginning to work
+→ Add LOCK note
 → Execute STRUCTURED PRE-FLIGHT DECLARATION
 → If incomplete: STOP
 
@@ -974,11 +1021,14 @@ STATE: VERIFY
 → Execute required verification commands
 → If verification fails: FIX or STOP
 
-STATE: COMPLETE
-→ Confirm acceptance criteria
-→ Update backlog notes
-→ Commit using Conventional Commits
+STATE: REVIEW
+→ Open Merge Request
+→ Move task to "Review" and add MR link to task notes
+
+STATE: MERGED
+→ After MR is merged into dev:
 → Move task to "Done"
+→ Remove task worktree and prune if needed
 
 You MUST NOT skip states.
 

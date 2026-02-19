@@ -18,6 +18,8 @@ parent_task_id: TASK-2
 
 LOCK: claude on gray in ~/code/crystal-forge/TASK-2.8-agent-request-tests
 
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/112
+
 ## Implementation Summary
 
 Added comprehensive unit tests for `handlers/agent_request.rs`:
