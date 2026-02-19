@@ -1,17 +1,18 @@
 ---
 id: TASK-20
 title: 'Roadmap: Tvix/Rvix Integration'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 15:36'
+updated_date: '2026-02-19 03:39'
 labels:
   - roadmap
   - tvix
   - performance
   - rust
+milestone: m-4
 dependencies: []
 priority: low
-milestone: m-4
 ---
 
 ## Description
