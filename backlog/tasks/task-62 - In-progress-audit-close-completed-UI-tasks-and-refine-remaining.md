@@ -2,7 +2,7 @@
 id: TASK-62
 title: 'In-progress audit: close completed UI tasks and refine remaining'
 status: Done
-assignee:
+assignee: ["GLM5.1"]
   - GLM5.1
 created_date: '2026-02-19 04:06'
 updated_date: '2026-02-19 16:33'

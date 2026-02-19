@@ -2,7 +2,7 @@
 id: TASK-22
 title: Move inline SQL from models/evaluate_with_policies.rs to queries/ module
 status: Done
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-14 00:24'
 updated_date: '2026-02-19 04:38'
 labels:

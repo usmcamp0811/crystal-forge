@@ -2,7 +2,7 @@
 id: TASK-24
 title: Dashboard Draggable Resizable Widgets
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-14'
 updated_date: '2026-02-19 04:12'
 labels:
