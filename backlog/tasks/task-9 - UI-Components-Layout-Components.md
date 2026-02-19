@@ -1,10 +1,10 @@
 ---
 id: TASK-9
 title: UI Components - Layout Components
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-02-05 14:25'
-updated_date: '2026-02-14 03:26'
+updated_date: '2026-02-19 04:06'
 labels:
   - ui
   - components
@@ -47,3 +47,9 @@ Expected: Responsive dark-themed shell with working navigation between placehold
 - [ ] #5 Responsive layout (sidebar collapses on mobile)
 - [ ] #6 Dark theme applied via Tailwind
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Closed after in-progress review: core layout components (app shell, sidebar, topbar, card) exist and are integrated in web-ui layout module.
+<!-- SECTION:NOTES:END -->
