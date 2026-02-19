@@ -1,14 +1,15 @@
 ---
 id: TASK-62
 title: 'In-progress audit: close completed UI tasks and refine remaining'
-status: Review
-assignee: ["GLM5.1"]
+status: Done
+assignee:
+  - GLM5.1
 created_date: '2026-02-19 04:06'
-updated_date: '2026-02-19 04:07'
+updated_date: '2026-02-19 16:33'
 labels: []
+milestone: m-3
 dependencies: []
 priority: high
-milestone: m-3
 ---
 
 ## Description
