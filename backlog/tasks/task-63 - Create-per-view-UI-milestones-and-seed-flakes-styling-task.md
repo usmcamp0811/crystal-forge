@@ -1,11 +1,12 @@
 ---
 id: TASK-63
 title: Create per-view UI milestones and seed flakes styling task
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-02-19 04:59'
-updated_date: '2026-02-19 04:59'
+updated_date: '2026-02-19 13:29'
 labels: []
+milestone: m-3
 dependencies: []
 priority: medium
 ---
@@ -30,14 +31,16 @@ Verification Plan
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Create milestones for each top-level UI view with consistent naming
-- [ ] #2 Add initial flakes git history card styling task
-- [ ] #3 Link initial flakes task to flakes view milestone
-- [ ] #4 No product source code files changed
+- [x] #1 Create milestones for each top-level UI view with consistent naming
+- [x] #2 Add initial flakes git history card styling task
+- [x] #3 Link initial flakes task to flakes view milestone
+- [x] #4 No product source code files changed
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-63-ui-view-milestones
+
+Completed: created UI view milestones m-6..m-13, assigned milestone field across active tasks, and added TASK-64 for flakes git history card density/styling under m-10.
 <!-- SECTION:NOTES:END -->
