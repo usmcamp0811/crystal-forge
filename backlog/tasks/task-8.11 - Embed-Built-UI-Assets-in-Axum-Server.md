@@ -4,7 +4,7 @@ title: Embed Built UI Assets in Axum Server
 status: In Progress
 assignee: []
 created_date: '2026-02-11 10:00'
-updated_date: '2026-02-19 02:19'
+updated_date: '2026-02-19 03:12'
 labels:
   - ui
   - backend
@@ -71,4 +71,10 @@ Verification caveats: nix develop -c cargo fmt -- --check fails due pre-existing
 Commit: 1fe0f62 (feat: embed web UI assets in server build)
 
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/110
+
+Blocker fix for MR validation: default systems[].deployment_policy to manual when missing in legacy config to prevent startup parse failure during server-stack boot.
+
+Added tests in config/system.rs for missing-field defaulting and explicit deployment policy preservation.
+
+Verification (blocker fix): nix develop -c env SQLX_OFFLINE=true cargo test --lib config::system -- --nocapture (pass), nix develop -c env SQLX_OFFLINE=true cargo check --features embedded-ui (pass), nix build .#packages.x86_64-linux.server (pass).
 <!-- SECTION:NOTES:END -->
