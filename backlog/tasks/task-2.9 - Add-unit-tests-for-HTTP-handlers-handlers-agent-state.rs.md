@@ -1,10 +1,10 @@
 ---
 id: TASK-2.9
 title: Add unit tests for HTTP handlers - handlers/agent/state.rs
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-04 20:39'
-updated_date: '2026-02-19 03:39'
+updated_date: '2026-02-19 03:53'
 labels:
   - testing
   - handlers
