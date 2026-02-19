@@ -1,10 +1,10 @@
 ---
 id: TASK-29
 title: Refine deploy-commit action UI
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-02-16 17:09'
-updated_date: '2026-02-16 18:21'
+updated_date: '2026-02-19 04:06'
 labels: []
 dependencies: []
 ---
@@ -23,4 +23,6 @@ Goal: improve deploy historical commit action UI (icon/button placement, hover b
 Rollback icon swapped to curved arrow; still needs polish per feedback.
 
 Deploy commit action moved into badge row as hover icon; icon updated to rollback arrow + subtle opacity.
+
+Closed after in-progress review: deploy historical commit action UI was refined in system detail history timeline per notes and current view code.
 <!-- SECTION:NOTES:END -->
