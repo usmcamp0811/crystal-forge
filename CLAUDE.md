@@ -962,7 +962,7 @@ STATE: SELECT_TASK
 → If none exists: execute BACKLOG AUTO-CREATION PROTOCOL
 
 STATE: IN_PROGRESS
-→ Move task to "In Progress"
+→ Move task to "In Progress" before begining to work
 → Execute STRUCTURED PRE-FLIGHT DECLARATION
 → If incomplete: STOP
 
