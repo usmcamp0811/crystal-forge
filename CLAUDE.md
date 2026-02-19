@@ -411,18 +411,113 @@ You MUST NOT merge without approval.
 
 # 9. VALID TASK STATUSES
 
-Only the following statuses are valid:
+The following statuses are valid:
 
+- Backlog
 - To Do
 - In Progress
+- Review
 - Done
 
 You MUST NOT invent additional statuses.
 
+## STATUS SEMANTICS (MANDATORY)
+
+Backlog:
+
+- Newly created tasks MUST default to Backlog.
+- Backlog represents unprioritized, unscheduled work.
+- You MUST NOT begin implementation from Backlog.
+
+To Do:
+
+- Represents sprint-selected work.
+- Only tasks in To Do are eligible for execution.
+
+In Progress:
+
+- Task is actively being implemented in a dedicated worktree.
+- MUST include a LOCK note.
+
+Review:
+
+- Implementation complete.
+- Verification passed.
+- Awaiting merge or approval.
+
+Done:
+
+- Merged into the integration branch.
+- Worktree cleaned up.
+
+You MUST respect these semantics.
+You MUST NOT move tasks directly from Backlog to In Progress.
+You MUST NOT skip To Do.
+
 </CRITICAL_INSTRUCTION>
 
 ---
+<CRITICAL_INSTRUCTION>
 
+# BACKLOG GROOMING & SPRINT SELECTION POLICY
+
+This repository uses a gated workflow:
+
+Backlog → To Do → In Progress → Review → Done
+
+## 1. Backlog (Default Entry State)
+
+All newly created tasks MUST be placed in Backlog.
+
+Backlog represents:
+
+- Unprioritized ideas
+- Discovered improvements
+- Technical debt
+- Future enhancements
+- Out-of-scope findings
+
+You MUST NOT begin work from Backlog.
+
+## 2. Sprint Formation (Human-Controlled)
+
+Movement from Backlog → To Do represents sprint selection.
+
+Only a human (repository owner or maintainer) performs backlog grooming and selects tasks into To Do.
+
+Agents MUST NOT:
+
+- Promote tasks from Backlog to To Do
+- Self-prioritize backlog items
+- Override sprint decisions
+
+## 3. Execution Eligibility Rule
+
+You MAY only select tasks in To Do for execution.
+
+When selecting work:
+
+1. Choose the highest-priority task in To Do.
+2. Confirm no active LOCK exists.
+3. Move the task to In Progress.
+4. Apply the task lock protocol.
+
+If no tasks are in To Do:
+YOU MUST STOP AND REPORT.
+
+## 4. Automatic Task Creation Behavior
+
+When creating new tasks (e.g., for scope violations or discovered issues):
+
+- Status MUST be Backlog.
+- DO NOT move it to To Do.
+- DO NOT begin implementation unless explicitly moved to To Do.
+
+This preserves sprint integrity and prevents scope creep.
+
+</CRITICAL_INSTRUCTION>
+
+---
 <CRITICAL_INSTRUCTION>
 
 # 10. DEVELOPMENT ENVIRONMENT
