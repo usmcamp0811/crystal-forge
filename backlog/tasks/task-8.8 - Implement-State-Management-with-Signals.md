@@ -1,17 +1,18 @@
 ---
 id: TASK-8.8
 title: Implement State Management with Signals
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 14:25'
+updated_date: '2026-02-19 03:39'
 labels:
   - ui
   - state
+milestone: m-3
 dependencies:
   - TASK-8.3
 parent_task_id: TASK-8
 priority: medium
-milestone: m-3
 ---
 
 ## Description
