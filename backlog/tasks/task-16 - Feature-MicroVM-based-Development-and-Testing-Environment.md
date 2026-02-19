@@ -1,18 +1,18 @@
 ---
 id: TASK-16
 title: 'Feature: MicroVM-based Development and Testing Environment'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 15:16'
-updated_date: '2026-02-05 15:19'
+updated_date: '2026-02-19 03:39'
 labels:
   - feature
   - microvm
   - development
   - testing
+milestone: m-1
 dependencies: []
 priority: high
-milestone: m-1
 ---
 
 ## Description
