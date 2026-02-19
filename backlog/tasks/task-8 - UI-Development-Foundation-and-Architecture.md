@@ -1,16 +1,17 @@
 ---
 id: TASK-8
 title: UI Development - Foundation and Architecture
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 14:14'
+updated_date: '2026-02-19 03:38'
 labels:
   - ui
   - foundation
   - dioxus
+milestone: m-3
 dependencies: []
 priority: high
-milestone: m-3
 ---
 
 ## Description
