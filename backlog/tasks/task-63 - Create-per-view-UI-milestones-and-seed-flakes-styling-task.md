@@ -1,9 +1,10 @@
 ---
 id: TASK-63
 title: Create per-view UI milestones and seed flakes styling task
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-19 04:59'
+updated_date: '2026-02-19 04:59'
 labels: []
 dependencies: []
 priority: medium
@@ -34,3 +35,9 @@ Verification Plan
 - [ ] #3 Link initial flakes task to flakes view milestone
 - [ ] #4 No product source code files changed
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-63-ui-view-milestones
+<!-- SECTION:NOTES:END -->
