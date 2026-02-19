@@ -1,10 +1,10 @@
 ---
 id: TASK-62
 title: 'In-progress audit: close completed UI tasks and refine remaining'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-19 04:06'
-updated_date: '2026-02-19 04:06'
+updated_date: '2026-02-19 04:07'
 labels: []
 dependencies: []
 priority: high
@@ -30,17 +30,19 @@ Verification Plan
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 TASK-25 moved to Done with closure note
-- [ ] #2 TASK-9 moved to Done with closure note
-- [ ] #3 TASK-28 moved to Done with closure note
-- [ ] #4 TASK-29 moved to Done with closure note
-- [ ] #5 TASK-37 moved to Done with closure note
-- [ ] #6 TASK-24 remains In Progress with refinement notes
-- [ ] #7 TASK-32 remains In Progress with refinement notes
+- [x] #1 TASK-25 moved to Done with closure note
+- [x] #2 TASK-9 moved to Done with closure note
+- [x] #3 TASK-28 moved to Done with closure note
+- [x] #4 TASK-29 moved to Done with closure note
+- [x] #5 TASK-37 moved to Done with closure note
+- [x] #6 TASK-24 remains In Progress with refinement notes
+- [x] #7 TASK-32 remains In Progress with refinement notes
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-62-inprogress-audit
+
+In-progress audit completed: closed TASK-25/TASK-9/TASK-28/TASK-29/TASK-37 as done and refined TASK-24/TASK-32 with remaining scope + verification guidance.
 <!-- SECTION:NOTES:END -->
