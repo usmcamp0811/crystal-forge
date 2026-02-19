@@ -1,9 +1,10 @@
 ---
 id: TASK-50
 title: 'Refactor: Extract build components from views/builds.rs'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-18 02:45'
+updated_date: '2026-02-19 03:39'
 labels:
   - refactoring
   - web-ui
@@ -27,10 +28,12 @@ Based on TODO in components/builds/mod.rs:
 - BuildDetailPane
 
 ## Acceptance Criteria
-- [ ] Review views/builds.rs for extractable components
-- [ ] Create component files in components/builds/
-- [ ] Update components/builds/mod.rs with proper exports
-- [ ] Update views/builds.rs to import from components
-- [ ] Remove TODO comments from mod.rs
-- [ ] Build passes: nix build .#checks.x86_64-linux.web-ui
+<!-- AC:BEGIN -->
+- [ ] #1 Review views/builds.rs for extractable components
+- [ ] #2 Create component files in components/builds/
+- [ ] #3 Update components/builds/mod.rs with proper exports
+- [ ] #4 Update views/builds.rs to import from components
+- [ ] #5 Remove TODO comments from mod.rs
+- [ ] #6 Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->
