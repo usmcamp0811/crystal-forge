@@ -2,7 +2,7 @@
 id: TASK-2.7
 title: Add unit tests for query modules - queries/systems.rs
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:39'
 updated_date: '2026-02-19 03:39'
 labels:

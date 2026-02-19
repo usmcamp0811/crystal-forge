@@ -2,7 +2,7 @@
 id: TASK-1
 title: 'BUG: Agent Deployments Don''t Persist Across Reboots'
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:15'
 updated_date: '2026-02-19 03:38'
 labels:

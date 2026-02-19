@@ -2,7 +2,7 @@
 id: TASK-38
 title: Align flakes view styling with environment registry
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 04:08'
 updated_date: '2026-02-17 04:09'
 labels:

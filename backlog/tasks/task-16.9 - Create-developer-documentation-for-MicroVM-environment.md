@@ -2,7 +2,7 @@
 id: TASK-16.9
 title: Create developer documentation for MicroVM environment
 status: Backlog
-assignee: []
+assignee: ["GLM5.1"]
 created_date: '2026-02-05 15:17'
 updated_date: '2026-02-19 03:39'
 labels:

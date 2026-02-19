@@ -2,7 +2,7 @@
 id: TASK-MEDIUM.1
 title: Refine sidebar navigation aesthetics
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-14 03:46'
 updated_date: '2026-02-19 03:39'
 labels:

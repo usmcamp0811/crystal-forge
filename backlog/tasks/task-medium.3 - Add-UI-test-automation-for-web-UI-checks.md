@@ -2,7 +2,7 @@
 id: TASK-MEDIUM.3
 title: Add UI test automation for web UI checks
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-14 04:41'
 updated_date: '2026-02-14 05:16'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-41
 title: Builds control center UI
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 04:42'
 updated_date: '2026-02-17 04:48'
 labels:

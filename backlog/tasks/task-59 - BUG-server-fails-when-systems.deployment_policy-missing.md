@@ -2,7 +2,7 @@
 id: TASK-59
 title: 'BUG: server fails when systems[].deployment_policy missing'
 status: To Do
-assignee: []
+assignee: ["Claude Opus 4.5"]
 created_date: '2026-02-19 03:04'
 labels: []
 dependencies: []

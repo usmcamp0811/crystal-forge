@@ -2,7 +2,7 @@
 id: TASK-11
 title: Dashboard View - Fleet Summary
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:25'
 updated_date: '2026-02-14 05:34'
 labels:

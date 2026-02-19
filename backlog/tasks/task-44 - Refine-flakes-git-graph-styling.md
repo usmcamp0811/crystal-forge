@@ -2,7 +2,7 @@
 id: TASK-44
 title: Refine flakes git graph styling
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 14:42'
 updated_date: '2026-02-17 14:43'
 labels:

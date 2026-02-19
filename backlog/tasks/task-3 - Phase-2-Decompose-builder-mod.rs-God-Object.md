@@ -2,7 +2,7 @@
 id: TASK-3
 title: 'Phase 2: Decompose builder/mod.rs God Object'
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-04 20:15'
 updated_date: '2026-02-19 03:38'
 labels:

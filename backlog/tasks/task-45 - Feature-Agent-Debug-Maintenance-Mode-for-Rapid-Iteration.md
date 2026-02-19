@@ -2,7 +2,7 @@
 id: TASK-45
 title: 'Feature: Agent Debug/Maintenance Mode for Rapid Iteration'
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 16:58'
 updated_date: '2026-02-19 03:39'
 labels:

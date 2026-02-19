@@ -2,7 +2,7 @@
 id: TASK-54
 title: 'Refactor: Extract components from views/system_detail.rs'
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-18 02:47'
 labels:
   - refactoring

@@ -2,7 +2,7 @@
 id: TASK-47
 title: 'Refactor: Extract components from systems_list.rs'
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-18 02:45'
 updated_date: '2026-02-18 04:25'
 labels:

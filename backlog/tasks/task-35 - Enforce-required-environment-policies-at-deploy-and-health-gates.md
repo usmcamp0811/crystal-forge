@@ -2,7 +2,7 @@
 id: TASK-35
 title: Enforce required environment policies at deploy and health gates
 status: Backlog
-assignee: []
+assignee: ["Claude Opus 4.5"]
 created_date: '2026-02-17 03:29'
 updated_date: '2026-02-19 03:39'
 labels:

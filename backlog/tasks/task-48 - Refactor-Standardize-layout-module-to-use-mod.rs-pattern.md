@@ -2,7 +2,7 @@
 id: TASK-48
 title: 'Refactor: Standardize layout module to use mod.rs pattern'
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-18 02:45'
 updated_date: '2026-02-18 04:26'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-28
 title: Add deploy policy tab to system view
 status: Done
-assignee: []
+assignee: ["Claude Opus 4.5"]
 created_date: '2026-02-16 17:09'
 updated_date: '2026-02-19 04:06'
 labels: []

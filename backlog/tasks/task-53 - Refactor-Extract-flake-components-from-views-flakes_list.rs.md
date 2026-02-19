@@ -2,7 +2,7 @@
 id: TASK-53
 title: 'Refactor: Extract flake components from views/flakes_list.rs'
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-18 02:46'
 updated_date: '2026-02-19 03:39'
 labels:

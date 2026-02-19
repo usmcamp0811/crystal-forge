@@ -2,7 +2,7 @@
 id: TASK-8.10
 title: Add Tailwind CSS Build Pipeline
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-11 10:00'
 updated_date: '2026-02-19 01:51'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-1.4
 title: Refactor activate_configuration to use strategy pattern
 status: Done
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:19'
 updated_date: '2026-02-05 14:53'
 labels:

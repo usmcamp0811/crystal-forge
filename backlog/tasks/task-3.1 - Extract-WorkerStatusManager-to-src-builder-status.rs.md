@@ -2,7 +2,7 @@
 id: TASK-3.1
 title: Extract WorkerStatusManager to src/builder/status.rs
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-04 21:12'
 updated_date: '2026-02-19 03:39'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-30
 title: Add flakes view and navigation
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-16 17:30'
 updated_date: '2026-02-16 17:35'
 labels:

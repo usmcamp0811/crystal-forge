@@ -2,7 +2,7 @@
 id: TASK-16.7
 title: Create MicroVM orchestration scripts (start/stop/status)
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-05 15:16'
 updated_date: '2026-02-19 03:39'
 labels:

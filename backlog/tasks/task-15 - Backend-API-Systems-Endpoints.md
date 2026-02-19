@@ -2,7 +2,7 @@
 id: TASK-15
 title: Backend API - Systems Endpoints
 status: Backlog
-assignee: []
+assignee: ["MiniMax M2.5"]
 created_date: '2026-02-05 14:25'
 updated_date: '2026-02-19 03:39'
 labels:

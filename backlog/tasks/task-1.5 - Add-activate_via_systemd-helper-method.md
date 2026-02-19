@@ -2,7 +2,7 @@
 id: TASK-1.5
 title: Add activate_via_systemd helper method
 status: Done
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:19'
 updated_date: '2026-02-05 14:53'
 labels:

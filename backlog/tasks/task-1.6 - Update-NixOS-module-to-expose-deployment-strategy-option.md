@@ -2,7 +2,7 @@
 id: TASK-1.6
 title: Update NixOS module to expose deployment strategy option
 status: Done
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:19'
 updated_date: '2026-02-05 15:03'
 labels:

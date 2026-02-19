@@ -2,7 +2,7 @@
 id: TASK-31
 title: Fix web-ui build errors
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-16 17:35'
 updated_date: '2026-02-18'
 labels:

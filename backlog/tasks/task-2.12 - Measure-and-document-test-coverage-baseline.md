@@ -2,7 +2,7 @@
 id: TASK-2.12
 title: Measure and document test coverage baseline
 status: Backlog
-assignee: []
+assignee: ["GLM5.1"]
 created_date: '2026-02-04 20:40'
 updated_date: '2026-02-19 03:39'
 labels:

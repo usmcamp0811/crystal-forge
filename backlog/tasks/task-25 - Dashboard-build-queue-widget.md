@@ -2,7 +2,7 @@
 id: TASK-25
 title: Dashboard build queue widget
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-15 19:17'
 updated_date: '2026-02-19 04:06'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-32
 title: Flakes view add/remove management
 status: In Progress
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 02:20'
 updated_date: '2026-02-19 04:06'
 labels:

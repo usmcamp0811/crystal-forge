@@ -2,7 +2,7 @@
 id: TASK-8.9
 title: Add Dioxus/Trunk Tooling to Nix Dev Shell
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-11 10:00'
 labels:
   - ui

@@ -2,7 +2,7 @@
 id: TASK-36
 title: Allow editing existing environments
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 03:51'
 updated_date: '2026-02-17 03:54'
 labels:

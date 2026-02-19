@@ -2,7 +2,7 @@
 id: TASK-2.1
 title: Create test utilities module (src/test_utils/mod.rs)
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:38'
 updated_date: '2026-02-19 03:39'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-12
 title: Systems List View - Table and Cards Toggle
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:25'
 updated_date: '2026-02-14 05:27'
 labels:

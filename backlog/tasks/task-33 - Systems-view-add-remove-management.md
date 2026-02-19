@@ -2,7 +2,7 @@
 id: TASK-33
 title: Systems view add/remove management
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 02:37'
 updated_date: '2026-02-17 02:38'
 labels:

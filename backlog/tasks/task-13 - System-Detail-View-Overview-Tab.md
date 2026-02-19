@@ -2,7 +2,7 @@
 id: TASK-13
 title: System Detail View - Overview Tab
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:25'
 updated_date: '2026-02-19 03:39'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-64
 title: Refine flakes git history card density and visual styling
 status: To Do
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-19 13:26'
 labels:
   - ui

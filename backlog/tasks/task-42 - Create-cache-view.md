@@ -2,7 +2,7 @@
 id: TASK-42
 title: Create cache view
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 04:43'
 updated_date: '2026-02-19 03:39'
 labels:

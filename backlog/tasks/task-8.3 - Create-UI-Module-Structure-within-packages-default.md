@@ -2,7 +2,7 @@
 id: TASK-8.3
 title: Create UI Module Structure within packages/default
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:15'
 updated_date: '2026-02-19 03:38'
 labels:

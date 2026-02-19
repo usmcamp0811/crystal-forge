@@ -2,7 +2,7 @@
 id: TASK-8
 title: UI Development - Foundation and Architecture
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:14'
 updated_date: '2026-02-19 03:38'
 labels:

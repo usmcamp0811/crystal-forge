@@ -2,7 +2,7 @@
 id: TASK-49
 title: 'Refactor: Move flake_timeline.rs to components/flake/'
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-18 02:45'
 updated_date: '2026-02-18 04:27'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-3.7
 title: Refactor src/builder/mod.rs to orchestration only
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-04 21:12'
 updated_date: '2026-02-19 03:39'
 labels:

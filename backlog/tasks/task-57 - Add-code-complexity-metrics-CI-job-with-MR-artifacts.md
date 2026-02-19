@@ -2,7 +2,7 @@
 id: TASK-57
 title: Add code complexity metrics CI job with MR artifacts
 status: Done
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-18'
 updated_date: '2026-02-18'
 labels:

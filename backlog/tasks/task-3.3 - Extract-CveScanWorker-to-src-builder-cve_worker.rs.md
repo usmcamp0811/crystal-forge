@@ -2,7 +2,7 @@
 id: TASK-3.3
 title: Extract CveScanWorker to src/builder/cve_worker.rs
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-04 21:12'
 updated_date: '2026-02-19 03:39'
 labels:

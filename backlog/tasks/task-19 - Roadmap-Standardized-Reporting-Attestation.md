@@ -2,7 +2,7 @@
 id: TASK-19
 title: 'Roadmap: Standardized Reporting & Attestation'
 status: Backlog
-assignee: []
+assignee: ["GLM5.1"]
 created_date: '2026-02-05 15:36'
 updated_date: '2026-02-19 03:39'
 labels:

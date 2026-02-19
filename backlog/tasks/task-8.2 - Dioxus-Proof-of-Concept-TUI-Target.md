@@ -2,7 +2,7 @@
 id: TASK-8.2
 title: Dioxus Proof of Concept - TUI Target
 status: Cancelled
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:15'
 labels:
   - ui

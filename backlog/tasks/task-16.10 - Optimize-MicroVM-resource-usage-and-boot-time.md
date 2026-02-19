@@ -2,7 +2,7 @@
 id: TASK-16.10
 title: Optimize MicroVM resource usage and boot time
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-05 15:17'
 updated_date: '2026-02-19 03:39'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-8.12
 title: Web UI Build Verification Check
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-12 10:00'
 updated_date: '2026-02-19 01:51'
 labels:

@@ -2,7 +2,7 @@
 id: TASK-2.2
 title: Add unit tests for builder/mod.rs - build_task_description
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-04 20:38'
 updated_date: '2026-02-14 00:05'
 labels:

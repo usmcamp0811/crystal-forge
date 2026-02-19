@@ -2,7 +2,7 @@
 id: TASK-16.1
 title: Research MicroVM solutions for NixOS (microvm.nix vs nixos-shell)
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-05 15:16'
 updated_date: '2026-02-19 03:39'
 labels:

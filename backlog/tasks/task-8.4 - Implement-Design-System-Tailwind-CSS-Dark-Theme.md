@@ -2,7 +2,7 @@
 id: TASK-8.4
 title: Implement Design System - Tailwind CSS Dark Theme
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:15'
 updated_date: '2026-02-19 03:39'
 labels:

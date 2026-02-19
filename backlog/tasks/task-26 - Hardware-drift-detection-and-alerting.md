@@ -2,7 +2,7 @@
 id: TASK-26
 title: Hardware drift detection and alerting
 status: Backlog
-assignee: []
+assignee: ["Claude Opus 4.5"]
 created_date: '2026-02-16 05:03'
 updated_date: '2026-02-19 03:39'
 labels:

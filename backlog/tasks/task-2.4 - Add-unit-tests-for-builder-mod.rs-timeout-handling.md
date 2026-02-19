@@ -2,7 +2,7 @@
 id: TASK-2.4
 title: Add unit tests for builder/mod.rs - timeout handling
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-04 20:39'
 updated_date: '2026-02-19 03:39'
 labels:

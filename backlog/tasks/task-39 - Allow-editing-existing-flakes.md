@@ -2,7 +2,7 @@
 id: TASK-39
 title: Allow editing existing flakes
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 04:10'
 updated_date: '2026-02-17 04:12'
 labels:

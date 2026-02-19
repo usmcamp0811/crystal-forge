@@ -2,7 +2,7 @@
 id: TASK-2.8
 title: Add unit tests for HTTP handlers - handlers/agent_request.rs
 status: Done
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:39'
 updated_date: '2026-02-19 03:53'
 labels:

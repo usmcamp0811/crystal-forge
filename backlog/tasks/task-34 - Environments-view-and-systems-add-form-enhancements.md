@@ -2,7 +2,7 @@
 id: TASK-34
 title: Environments view and systems add-form enhancements
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-17 03:00'
 updated_date: '2026-02-17 03:29'
 labels:

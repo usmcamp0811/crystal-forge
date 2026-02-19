@@ -2,7 +2,7 @@
 id: TASK-MEDIUM.2
 title: Populate systems table with mock data
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-14 04:02'
 updated_date: '2026-02-19 03:39'
 labels:

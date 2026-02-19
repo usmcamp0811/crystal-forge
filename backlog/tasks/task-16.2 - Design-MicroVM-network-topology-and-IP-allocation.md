@@ -2,7 +2,7 @@
 id: TASK-16.2
 title: Design MicroVM network topology and IP allocation
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-05 15:16'
 updated_date: '2026-02-19 03:39'
 labels:

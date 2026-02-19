@@ -2,7 +2,7 @@
 id: TASK-21
 title: Remove duplicate System struct from models/public_key.rs
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-13 04:25'
 updated_date: '2026-02-19 03:39'
 labels:

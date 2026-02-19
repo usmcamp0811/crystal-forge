@@ -2,7 +2,7 @@
 id: TASK-5
 title: 'Phase 4: Improve Error Handling'
 status: Backlog
-assignee: []
+assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:16'
 updated_date: '2026-02-19 03:39'
 labels:

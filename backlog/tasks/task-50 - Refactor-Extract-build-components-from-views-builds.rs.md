@@ -2,7 +2,7 @@
 id: TASK-50
 title: 'Refactor: Extract build components from views/builds.rs'
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-18 02:45'
 updated_date: '2026-02-19 13:16'
 labels:

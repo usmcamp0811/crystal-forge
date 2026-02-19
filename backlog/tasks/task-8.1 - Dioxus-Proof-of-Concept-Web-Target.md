@@ -2,7 +2,7 @@
 id: TASK-8.1
 title: Dioxus Proof of Concept - Web Target
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:14'
 labels:
   - ui

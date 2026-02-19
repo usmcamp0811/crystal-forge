@@ -2,7 +2,7 @@
 id: TASK-16.8
 title: Create integration test suite for MicroVM environment
 status: Backlog
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 15:17'
 updated_date: '2026-02-19 03:39'
 labels:

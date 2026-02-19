@@ -2,7 +2,7 @@
 id: TASK-8.5
 title: Build API Client - Define Data Models
 status: Done
-assignee: []
+assignee: ["KimiK2.5"]
 created_date: '2026-02-05 14:15'
 labels:
   - ui
