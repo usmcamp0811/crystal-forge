@@ -1,16 +1,17 @@
 ---
 id: TASK-2.12
 title: Measure and document test coverage baseline
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:40'
+updated_date: '2026-02-19 03:39'
 labels:
   - testing
   - metrics
   - documentation
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-2
-milestone: m-1
 ---
 
 ## Description
