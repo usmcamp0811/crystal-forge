@@ -1,18 +1,19 @@
 ---
 id: TASK-8.7
 title: Build API Client - Mock Client for Testing
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 14:15'
+updated_date: '2026-02-19 03:39'
 labels:
   - ui
   - api
   - testing
+milestone: m-3
 dependencies:
   - TASK-8.5
 parent_task_id: TASK-8
 priority: high
-milestone: m-3
 ---
 
 ## Description
