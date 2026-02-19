@@ -1,16 +1,17 @@
 ---
 id: TASK-16.4
 title: Implement PostgreSQL MicroVM configuration
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 15:16'
+updated_date: '2026-02-19 03:39'
 labels:
   - implementation
   - postgresql
   - microvm
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-16
-milestone: m-1
 ---
 
 ## Description
