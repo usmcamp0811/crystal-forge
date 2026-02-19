@@ -1,10 +1,10 @@
 ---
 id: TASK-8.11
 title: Embed Built UI Assets in Axum Server
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-02-11 10:00'
-updated_date: '2026-02-19 03:12'
+updated_date: '2026-02-19 03:53'
 labels:
   - ui
   - backend
@@ -77,4 +77,6 @@ Blocker fix for MR validation: default systems[].deployment_policy to manual whe
 Added tests in config/system.rs for missing-field defaulting and explicit deployment policy preservation.
 
 Verification (blocker fix): nix develop -c env SQLX_OFFLINE=true cargo test --lib config::system -- --nocapture (pass), nix develop -c env SQLX_OFFLINE=true cargo check --features embedded-ui (pass), nix build .#packages.x86_64-linux.server (pass).
+
+Merged to dev; closed during sprint grooming.
 <!-- SECTION:NOTES:END -->
