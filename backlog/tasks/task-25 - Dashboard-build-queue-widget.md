@@ -1,10 +1,10 @@
 ---
 id: TASK-25
 title: Dashboard build queue widget
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-02-15 19:17'
-updated_date: '2026-02-15 20:23'
+updated_date: '2026-02-19 04:06'
 labels:
   - ui
   - dashboard
@@ -26,4 +26,6 @@ Added build queue widget + timeline build markers with mock data. Updated dashbo
 Reworked timeline build indicator to colored ring around commit node. Build queue now sorts in execution order (active first, then queued) and labels rows as Active/Next/Queued #n for clarity.
 
 Added build ring legend entries for Building/Queued. Adjusted drag drop reflow to pack rows without collisions so widgets rearrange when moved.
+
+Closed after in-progress review: build queue widget and timeline markers are implemented and reflected in UI/component code and prior task notes.
 <!-- SECTION:NOTES:END -->
