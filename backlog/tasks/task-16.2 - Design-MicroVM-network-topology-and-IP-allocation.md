@@ -1,17 +1,17 @@
 ---
 id: TASK-16.2
 title: Design MicroVM network topology and IP allocation
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 15:16'
-updated_date: '2026-02-05 15:19'
+updated_date: '2026-02-19 03:39'
 labels:
   - design
   - networking
   - microvm
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-16
-milestone: m-1
 ---
 
 ## Description
