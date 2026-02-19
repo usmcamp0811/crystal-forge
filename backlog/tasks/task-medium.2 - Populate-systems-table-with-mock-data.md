@@ -10,6 +10,7 @@ labels:
   - frontend
 dependencies: []
 parent_task_id: TASK-MEDIUM
+milestone: m-7
 ---
 
 ## Description

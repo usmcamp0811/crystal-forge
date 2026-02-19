@@ -10,6 +10,7 @@ labels:
   - tech-debt
 dependencies: []
 priority: medium
+milestone: m-2
 ---
 
 ## Description

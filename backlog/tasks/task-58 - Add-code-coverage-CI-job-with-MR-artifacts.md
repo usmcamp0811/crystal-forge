@@ -14,6 +14,7 @@ labels:
 dependencies:
   - TASK-57
 priority: high
+milestone: m-1
 ---
 
 ## Description

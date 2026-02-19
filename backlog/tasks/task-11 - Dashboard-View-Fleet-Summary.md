@@ -9,7 +9,7 @@ labels:
   - ui
   - views
   - dashboard
-milestone: m-3
+milestone: m-6
 dependencies:
   - TASK-8.7
   - TASK-8.8

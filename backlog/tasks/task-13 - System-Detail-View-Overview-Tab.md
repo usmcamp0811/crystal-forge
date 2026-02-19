@@ -9,7 +9,7 @@ labels:
   - ui
   - views
   - systems
-milestone: m-3
+milestone: m-8
 dependencies:
   - TASK-8.7
   - TASK-8.8

@@ -8,7 +8,7 @@ updated_date: '2026-02-14 04:05'
 labels:
   - ui
   - components
-milestone: m-3
+milestone: m-7
 dependencies:
   - TASK-8.4
   - TASK-8.5

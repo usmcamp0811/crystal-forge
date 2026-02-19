@@ -10,6 +10,7 @@ labels:
   - system-detail
 dependencies: []
 priority: medium
+milestone: m-8
 ---
 
 ## Description
