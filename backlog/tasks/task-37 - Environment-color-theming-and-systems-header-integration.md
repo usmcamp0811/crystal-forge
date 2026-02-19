@@ -1,10 +1,10 @@
 ---
 id: TASK-37
 title: Environment color theming and systems header integration
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-02-17 03:55'
-updated_date: '2026-02-17 03:56'
+updated_date: '2026-02-19 04:06'
 labels:
   - ui
   - web-ui
@@ -19,3 +19,9 @@ priority: high
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Update Environments registry to use system-card style layout and allow selecting environment color; persist environment color mapping and use it to drive Systems card header/chip color styling.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Closed after in-progress review: environment color persistence and systems header/chip color integration are present in environments + system card flows.
+<!-- SECTION:NOTES:END -->
