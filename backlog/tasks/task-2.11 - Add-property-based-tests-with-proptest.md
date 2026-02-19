@@ -1,16 +1,17 @@
 ---
 id: TASK-2.11
 title: Add property-based tests with proptest
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:39'
+updated_date: '2026-02-19 03:39'
 labels:
   - testing
   - property-testing
   - rust
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-2
-milestone: m-1
 ---
 
 ## Description
