@@ -1,10 +1,10 @@
 ---
 id: TASK-22
 title: Move inline SQL from models/evaluate_with_policies.rs to queries/ module
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-02-14 00:24'
-updated_date: '2026-02-19 03:53'
+updated_date: '2026-02-19 04:38'
 labels:
   - refactoring
   - sql
