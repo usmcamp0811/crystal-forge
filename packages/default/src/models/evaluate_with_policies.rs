@@ -12,7 +12,7 @@ use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
-use crate::queries::derivations::{EvaluationStatus, insert_derivation_with_target};
+use crate::queries::derivations::{EvaluationStatus, insert_derivation_with_target, mark_derivation_dry_run_complete};
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,22 +290,7 @@ pub async fn evaluate_with_nix_eval_jobs(
         );
 
         for (deriv_id, drv_path) in &evaluated_derivations {
-            match sqlx::query!(
-                r#"
-                UPDATE derivations
-                SET 
-                    status_id = $1,           -- DryRunComplete (5)
-                    derivation_path = $2,     -- Store the .drv path!
-                    completed_at = NOW()
-                WHERE id = $3
-                "#,
-                EvaluationStatus::DryRunComplete.as_id(), // Status 5
-                drv_path,                                 // The .drv path from nix-eval-jobs
-                deriv_id
-            )
-            .execute(pool)
-            .await
-            {
+            match mark_derivation_dry_run_complete(pool, *deriv_id, drv_path).await {
                 Ok(_) => {
                     debug!(
                         "✅ Marked derivation {} as DryRunComplete with path {}",
