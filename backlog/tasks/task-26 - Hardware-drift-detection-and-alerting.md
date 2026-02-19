@@ -1,9 +1,10 @@
 ---
 id: TASK-26
 title: Hardware drift detection and alerting
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-16 05:03'
+updated_date: '2026-02-19 03:39'
 labels:
   - feature
   - security
