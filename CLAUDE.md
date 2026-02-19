@@ -243,27 +243,57 @@ YOU MUST STOP AND REPORT.
 </CRITICAL_INSTRUCTION>
 
 ---
-
 <CRITICAL_INSTRUCTION>
 
-# 2. PRE-FLIGHT GATE (MANDATORY BEFORE CODING)
+# VERIFICATION STRATEGY (TIERED, MANDATORY)
 
-Before modifying any files, you MUST explicitly state:
+Verification MUST be proportional to the task.
 
-- Task identifier (e.g., TASK-X.Y)
-- Acceptance criteria
-- Implementation plan (3–8 steps)
-- Files expected to change
-- Verification commands that will be executed
+You MUST choose verification commands that are sufficient to prove the acceptance criteria, while minimizing unnecessary work.
 
-If any of these items are missing:
-YOU MUST STOP.
+## TIER 0: FAST LOCAL CONFIDENCE (DEFAULT DURING IMPLEMENTATION)
 
-You MAY NOT begin code changes until this gate is satisfied.
+Use when the change is small or scoped and does not require full integration testing.
+
+Examples:
+- cargo fmt -- --check
+- cargo clippy -- -D warnings
+- cargo test (targeted: package/module/test selection)
+- cargo test <specific_test_name>
+- cargo nextest run (if configured)
+- nix build (doChecks is enabled)
+
+You MUST prefer targeted tests over running the full suite when possible.
+
+## TIER 1: FEATURE-LEVEL INTEGRATION
+
+Use when acceptance criteria depends on runtime behavior across components (server+db, UI+API, etc.).
+
+Examples:
+- server-stack up (or full-stack up) and validate behavior (from the repo devshell -- nix develop)
+
+If a real database is required, you MUST use the repo devshell and process-compose scripts.
+
+## TIER 2: NIX INTEGRATION CHECK (HEAVYWEIGHT)
+
+nix flake check is considered integration-level validation and may include VM tests or other expensive checks.
+
+You MUST NOT run nix flake check by default.
+
+You MUST run nix flake check when ANY of the following are true:
+
+- The task explicitly requires it
+- You changed Nix flakes, NixOS modules, devshells, or packaging
+- You changed interfaces likely to affect multiple packages/crates
+- You touched build, CI, or release related code
+- You cannot reasonably prove correctness with Tier 0/1
+- You are preparing the MR for review (recommended)
+
+If you do NOT run nix flake check, you MUST state why in the pre-flight declaration.
 
 </CRITICAL_INSTRUCTION>
-
 ---
+
 
 <CRITICAL_INSTRUCTION>
 
@@ -291,15 +321,26 @@ You MUST NOT “fix nearby things” unless explicitly included in the task.
 
 Before marking a task "Done", you MUST:
 
-- Run required verification commands
-- Confirm build succeeds
-- Confirm tests pass
-- Confirm formatting passes
-- Confirm linting passes
-- Confirm new files are tracked
+- Execute the verification plan declared in the pre-flight gate (tier + commands)
 - Confirm acceptance criteria are satisfied
+- Confirm formatting and linting requirements for the task are satisfied
+- Confirm new files are tracked by Git
 - Update task notes
 - Create tasks for any out-of-scope discoveries
+- Wait for the MR to be merged back into dev
+
+## NIX INTEGRATION CHECK
+
+If the selected verification tier was Tier 2:
+- nix flake check MUST be executed and must pass.
+
+If Tier 2 was not selected:
+- You MUST NOT claim nix flake check passed unless it was executed.
+
+## SQLX SYNC REQUIREMENT
+
+If sqlx sync applies:
+- sqlx metadata MUST be updated (cargo sqlx prepare) and consistent.
 
 If verification fails:
 YOU MUST NOT mark the task complete.
@@ -377,6 +418,57 @@ You MUST NOT mark a task complete with failing tests.
 
 If database-backed compile checks are required:
 You MUST use the appropriate offline mode or start required services.
+
+</CRITICAL_INSTRUCTION>
+
+---
+<CRITICAL_INSTRUCTION>
+
+# SQLX SYNC REQUIREMENT (HARD CONSTRAINT)
+
+SQLx offline metadata MUST remain in sync with database schema and application queries.
+
+It is a critical failure for the schema and sqlx metadata to be out of sync with the application.
+
+## WHEN THIS APPLIES
+
+This requirement applies if the change includes any of:
+
+- database schema or migrations
+- SQL query changes used by sqlx compile-time checking
+- changes to query shapes, selected columns, or bind parameters
+- any modification that would affect `cargo sqlx prepare`
+
+If unsure:
+ASSUME IT APPLIES.
+
+## REQUIRED WORKFLOW
+
+When sqlx sync is required, you MUST:
+
+1. Enter the repository dev environment:
+   - nix develop
+
+2. Start the dev database using process-compose:
+   - db-only up
+
+3. Run the sqlx prepare step:
+   - cargo sqlx prepare
+
+If schema changes require a reset and that is acceptable:
+- sqlx database reset -y
+- cargo sqlx prepare
+
+The devshell helpers MAY be used:
+- sqlx-refresh
+- sqlx-prepare
+
+## STOP CONDITIONS
+
+If the database cannot be started, cannot be reached, or sqlx prepare fails:
+YOU MUST STOP AND REPORT.
+
+You MUST NOT proceed to Review or Done if sqlx sync is required and not completed.
 
 </CRITICAL_INSTRUCTION>
 
