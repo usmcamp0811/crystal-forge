@@ -1,20 +1,21 @@
 ---
 id: TASK-13
 title: System Detail View - Overview Tab
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 14:25'
+updated_date: '2026-02-19 03:39'
 labels:
   - ui
   - views
   - systems
+milestone: m-3
 dependencies:
   - TASK-8.7
   - TASK-8.8
   - TASK-9
   - TASK-15
 priority: high
-milestone: m-3
 ---
 
 ## Description
