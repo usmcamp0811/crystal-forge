@@ -1,10 +1,10 @@
 ---
 id: TASK-52
 title: 'Refactor: Extract policy components from views/policies.rs'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-18 02:46'
-updated_date: '2026-02-19 03:39'
+updated_date: '2026-02-19 03:53'
 labels:
   - refactoring
   - web-ui
