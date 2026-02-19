@@ -1,16 +1,17 @@
 ---
 id: TASK-4.1
 title: Create src/services/mod.rs module structure
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 21:36'
+updated_date: '2026-02-19 03:39'
 labels:
   - refactoring
   - services
   - rust
+milestone: m-2
 dependencies: []
 parent_task_id: TASK-4
-milestone: m-2
 ---
 
 ## Description
