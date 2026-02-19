@@ -1,16 +1,17 @@
 ---
 id: TASK-2.1
 title: Create test utilities module (src/test_utils/mod.rs)
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-04 20:38'
+updated_date: '2026-02-19 03:39'
 labels:
   - testing
   - infrastructure
   - rust
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-2
-milestone: m-1
 ---
 
 ## Description
