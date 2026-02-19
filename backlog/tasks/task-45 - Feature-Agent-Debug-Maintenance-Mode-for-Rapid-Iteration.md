@@ -1,9 +1,10 @@
 ---
 id: TASK-45
 title: 'Feature: Agent Debug/Maintenance Mode for Rapid Iteration'
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-17 16:58'
+updated_date: '2026-02-19 03:39'
 labels:
   - feature
   - agent
@@ -59,16 +60,16 @@ Crystal Forge uses a pull-based architecture where agents poll the server for up
 - Log when entering/exiting debug mode
 
 ## Acceptance Criteria
-
-- [ ] UI has toggle to enable/disable debug mode per system
-- [ ] Visual indicator shows when system is in debug mode
-- [ ] Agent polls every 30s-60s when in debug mode
-- [ ] Agent polls every ~15min when NOT in debug mode
-- [ ] Automatic deployments are blocked during debug mode
-- [ ] Manual deployments work during debug mode
-- [ ] API endpoints exist for debug mode management
-- [ ] Database schema supports debug mode state
-- [ ] Debug mode state persists until explicitly disabled
+<!-- AC:BEGIN -->
+- [ ] #1 UI has toggle to enable/disable debug mode per system
+- [ ] #2 Visual indicator shows when system is in debug mode
+- [ ] #3 Agent polls every 30s-60s when in debug mode
+- [ ] #4 Agent polls every ~15min when NOT in debug mode
+- [ ] #5 Automatic deployments are blocked during debug mode
+- [ ] #6 Manual deployments work during debug mode
+- [ ] #7 API endpoints exist for debug mode management
+- [ ] #8 Database schema supports debug mode state
+- [ ] #9 Debug mode state persists until explicitly disabled
 
 ## Dependencies
 
@@ -82,3 +83,4 @@ Crystal Forge uses a pull-based architecture where agents poll the server for up
 - Consider audit logging when debug mode is enabled/disabled
 - Consider adding debug mode to system list view for quick toggle
 <!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->
