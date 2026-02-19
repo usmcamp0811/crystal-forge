@@ -1,17 +1,17 @@
 ---
 id: TASK-16.1
 title: Research MicroVM solutions for NixOS (microvm.nix vs nixos-shell)
-status: To Do
+status: Backlog
 assignee: []
 created_date: '2026-02-05 15:16'
-updated_date: '2026-02-05 15:19'
+updated_date: '2026-02-19 03:39'
 labels:
   - research
   - microvm
   - nix
+milestone: m-1
 dependencies: []
 parent_task_id: TASK-16
-milestone: m-1
 ---
 
 ## Description
