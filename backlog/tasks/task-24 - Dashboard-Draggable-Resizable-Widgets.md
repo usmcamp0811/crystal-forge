@@ -4,7 +4,7 @@ title: Dashboard Draggable Resizable Widgets
 status: In Progress
 assignee: []
 created_date: '2026-02-14'
-updated_date: '2026-02-14'
+updated_date: '2026-02-19 04:06'
 labels:
   - ui
   - dashboard
@@ -54,4 +54,8 @@ Technical considerations:
 
 <!-- SECTION:NOTES:BEGIN -->
 This is a future enhancement identified during dashboard layout work. Current implementation uses CSS columns masonry which provides reasonable auto-layout without user customization.
+
+Refinement (2026-02-19 sprint review): keep In Progress. Remaining scope: implement actual drag/drop interaction model, resize handles with per-widget constraints, and persistence wiring (localStorage) plus reset action. Current state is conceptual/future-enhancement notes only; no completion evidence in this review.
+
+Suggested verification before closing: UI interaction test for drag reorder + resize + persistence reload, and web-ui build check (nix build .#checks.x86_64-linux.web-ui).
 <!-- SECTION:NOTES:END -->
