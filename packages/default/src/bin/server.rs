@@ -25,6 +25,9 @@ use tokio::net::TcpListener;
 use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 
+#[cfg(feature = "embedded-ui")]
+use crystal_forge::handlers::ui;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -57,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Port: {}", server_cfg.port);
 
     let state = CFState::new(pool);
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/status", get(status::status))
         .route("/system_state", post(state::update))
         .route("/agent/heartbeat", post(heartbeat::log))
@@ -67,8 +70,14 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
-        )
-        .with_state(state);
+        );
+
+    #[cfg(feature = "embedded-ui")]
+    {
+        app = app.fallback(get(ui::serve_ui));
+    }
+
+    let app = app.with_state(state);
 
     let listener = TcpListener::bind(("0.0.0.0", server_cfg.port)).await?;
     axum::serve(listener, app).await?;

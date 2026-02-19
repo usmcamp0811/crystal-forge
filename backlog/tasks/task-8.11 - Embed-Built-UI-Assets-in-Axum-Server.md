@@ -1,19 +1,20 @@
 ---
 id: TASK-8.11
 title: Embed Built UI Assets in Axum Server
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-11 10:00'
+updated_date: '2026-02-19 03:12'
 labels:
   - ui
   - backend
   - deployment
+milestone: m-3
 dependencies:
   - TASK-8.1
   - TASK-8.10
 parent_task_id: TASK-8
 priority: high
-milestone: m-3
 ---
 
 ## Description
@@ -55,3 +56,25 @@ Expected: Single `server` binary serves both API and web UI on the same port
 - [ ] #6 Nix package build includes trunk build step
 - [ ] #7 Cache headers set for static assets
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-8.11-embed-built-ui-assets
+
+Implemented embedded UI serving behind feature flag: added handlers/ui.rs for SPA+asset responses with content-type and cache headers; wired fallback route in server binary under embedded-ui feature; added include_dir/mime_guess optional deps; enabled Nix build with embedded-ui feature and wired CRYSTAL_FORGE_UI_DIST to web-ui package public assets; kept build.rs migration rerun plus env fallback for local builds.
+
+Verification: nix develop -c env SQLX_OFFLINE=true cargo check --features embedded-ui (pass), nix develop -c env SQLX_OFFLINE=true cargo test --lib --features embedded-ui (pass, 87 tests), nix build .#packages.x86_64-linux.server (pass).
+
+Verification caveats: nix develop -c cargo fmt -- --check fails due pre-existing repository formatting drift in unrelated files; nix develop -c env SQLX_OFFLINE=true cargo clippy --features embedded-ui -- -D warnings fails due existing repo-wide warnings and toolchain artifact mismatch (E0514).
+
+Commit: 1fe0f62 (feat: embed web UI assets in server build)
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/110
+
+Blocker fix for MR validation: default systems[].deployment_policy to manual when missing in legacy config to prevent startup parse failure during server-stack boot.
+
+Added tests in config/system.rs for missing-field defaulting and explicit deployment policy preservation.
+
+Verification (blocker fix): nix develop -c env SQLX_OFFLINE=true cargo test --lib config::system -- --nocapture (pass), nix develop -c env SQLX_OFFLINE=true cargo check --features embedded-ui (pass), nix build .#packages.x86_64-linux.server (pass).
+<!-- SECTION:NOTES:END -->
