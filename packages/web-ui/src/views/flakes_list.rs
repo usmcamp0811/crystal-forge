@@ -835,9 +835,10 @@ fn FlakeHistoryExplorer(
                         "{active_repo} · last sync {flake_sync_label}"
                     }
                     div {
-                        class: "cf-builds-split",
+                        class: "cf-flakes-history-split",
                         div {
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} bg-gray-900/50 overflow-hidden",
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
+                            style: "background: linear-gradient(180deg, #131B29 0%, #0F141D 100%);",
                             div {
                                 class: "px-3 py-2 border-b {theme::surface::CARD_BORDER} text-xs uppercase tracking-wide text-gray-400",
                                 "Timeline"
@@ -848,43 +849,44 @@ fn FlakeHistoryExplorer(
                                     p { class: "p-4 text-sm {theme::text::SECONDARY}", "No commits available." }
                                 } else {
                                     div {
-                                        class: "relative px-3 py-2",
+                                        class: "relative px-2 py-2",
                                         div {
-                                            class: "absolute bg-gray-700",
-                                            style: "left: 18px; top: 0; bottom: 0; width: 2px;",
+                                            class: "absolute bg-slate-700/80",
+                                            style: "left: 14px; top: 0; bottom: 0; width: 2px;",
                                         }
                                         div {
-                                            class: "space-y-4 relative",
+                                            class: "space-y-3 relative",
                                             for commit in commits.iter() {
                                                 {
                                                     let is_active = active_commit
                                                         .as_ref()
                                                         .map(|value| value.hash == commit.hash)
                                                         .unwrap_or(false);
-                                                    let short_hash = commit.hash.chars().take(8).collect::<String>();
+                                                    let short_hash = commit.hash.chars().take(7).collect::<String>();
                                                     let commit_time = commit.committed_at.format("%b %d %H:%M").to_string();
                                                     let commit_for_select = commit.hash.clone();
+                                                    let commit_card_style = if is_active {
+                                                        "background-color: #1B2940; border-color: #7C67A4;"
+                                                    } else {
+                                                        "background-color: #1A212E; border-color: #303A4A;"
+                                                    };
+                                                    let commit_node_style = if is_active {
+                                                        "width: 20px; height: 20px; margin-top: 7px; border-color: #d9c9ea; background-color: #82699B; box-shadow: 0 0 10px 2px rgba(130, 105, 155, 0.45), inset 0 0 0 1px rgba(255,255,255,0.20);"
+                                                    } else {
+                                                        "width: 20px; height: 20px; margin-top: 7px; border-color: #475569; background-color: #0f172a;"
+                                                    };
                                                     rsx! {
                                                         div {
                                                             key: "{commit.hash}",
                                                             class: "grid",
-                                                            style: "grid-template-columns: 26px 14px 1fr; margin-left: -3px; align-items: start;",
+                                                            style: "grid-template-columns: 22px 10px minmax(0, 1fr); margin-left: -1px; align-items: start;",
 
                                                             div {
                                                                 class: "rounded-full border-2 flex items-center justify-center",
-                                                                class: if is_active {
-                                                                    "border-blue-300 bg-blue-500"
-                                                                } else {
-                                                                    "border-gray-700 bg-gray-900"
-                                                                },
-                                                                style: if is_active {
-                                                                    "width: 24px; height: 24px; margin-top: 8px; box-shadow: 0 0 12px 2px rgba(59, 130, 246, 0.55);"
-                                                                } else {
-                                                                    "width: 24px; height: 24px; margin-top: 8px;"
-                                                                },
+                                                                style: "{commit_node_style}",
                                                                 if is_active {
                                                                     svg {
-                                                                        class: "w-3 h-3 text-white",
+                                                                        class: "w-2.5 h-2.5 text-white",
                                                                         fill: "none",
                                                                         stroke: "currentColor",
                                                                         stroke_width: "2.5",
@@ -900,34 +902,45 @@ fn FlakeHistoryExplorer(
 
                                                             div {
                                                                 class: "relative",
-                                                                style: "height: 24px; margin-top: 8px;",
+                                                                style: "height: 20px; margin-top: 7px;",
                                                                 div {
                                                                     style: if is_active {
-                                                                        "position: absolute; top: 10px; left: 0; right: 0; height: 3px; border-radius: 2px; background-color: #60a5fa;"
+                                                                        "position: absolute; top: 8px; left: 0; right: 0; height: 2px; border-radius: 2px; background-color: #82699B;"
                                                                     } else {
-                                                                        "position: absolute; top: 10px; left: 0; right: 0; height: 3px; border-radius: 2px; background-color: #6b7280;"
+                                                                        "position: absolute; top: 8px; left: 0; right: 0; height: 2px; border-radius: 2px; background-color: #64748b;"
                                                                     },
                                                                 }
                                                                 div {
                                                                     style: if is_active {
-                                                                        "position: absolute; top: 8px; right: -3px; width: 6px; height: 6px; transform: rotate(45deg); background-color: #60a5fa;"
+                                                                        "position: absolute; top: 6px; right: -2px; width: 5px; height: 5px; transform: rotate(45deg); background-color: #82699B;"
                                                                     } else {
-                                                                        "position: absolute; top: 8px; right: -3px; width: 6px; height: 6px; transform: rotate(45deg); background-color: #6b7280;"
+                                                                        "position: absolute; top: 6px; right: -2px; width: 5px; height: 5px; transform: rotate(45deg); background-color: #64748b;"
                                                                     },
                                                                 }
                                                             }
 
                                                             button {
-                                                                class: "w-full text-left px-3 py-2 rounded-lg border transition",
-                                                                class: if is_active {
-                                                                    "border-blue-500/70 bg-blue-500/10"
-                                                                } else {
-                                                                    "border-gray-800 bg-gray-900/60 hover:border-gray-600"
-                                                                },
+                                                                class: "w-full justify-self-start rounded-xl border px-4 py-3 text-left transition",
+                                                                style: "{commit_card_style}",
                                                                 onclick: move |_| selected_commit_hash.set(Some(commit_for_select.clone())),
-                                                                p { class: "text-sm text-white truncate", "{commit.message}" }
-                                                                p { class: "text-[11px] text-gray-400 font-mono", "{short_hash} · {commit.author}" }
-                                                                p { class: "text-[10px] {theme::text::MUTED}", "{commit_time}" }
+                                                                p { class: "text-sm text-white font-semibold text-left truncate", style: "text-align: left;", "{commit.message}" }
+                                                                div {
+                                                                    class: "mt-2 flex flex-wrap items-center gap-2 text-[10px]",
+                                                                    span {
+                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border font-mono leading-none",
+                                                                        style: "background-color: rgba(130, 105, 155, 0.22); border-color: #82699B; color: #E5D8F3;",
+                                                                        "{short_hash}"
+                                                                    }
+                                                                    span {
+                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border text-gray-100 leading-none",
+                                                                        style: "background-color: #2B303B; border-color: #495264;",
+                                                                        "{commit.author}"
+                                                                    }
+                                                                    span {
+                                                                        class: "text-[10px] text-gray-400",
+                                                                        "{commit_time}"
+                                                                    }
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -944,11 +957,15 @@ fn FlakeHistoryExplorer(
                             if let Some(commit) = active_commit {
                                 div {
                                     class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} space-y-2",
-                                    p { class: "text-base text-white font-semibold", "{commit.message}" }
+                                    p { class: "text-base text-white font-semibold text-left", "{commit.message}" }
                                     div {
                                         class: "flex flex-wrap items-center gap-2 text-xs",
-                                        span { class: "font-mono px-2 py-1 rounded bg-gray-800 text-gray-300", "{commit.hash}" }
-                                        span { class: "px-2 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
+                                        span {
+                                            class: "font-mono px-2.5 py-1 rounded border",
+                                            style: "background-color: rgba(130, 105, 155, 0.22); border-color: #82699B; color: #E5D8F3;",
+                                            "{commit.hash}"
+                                        }
+                                        span { class: "px-2.5 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
                                         span {
                                             class: "px-2 py-1 rounded bg-gray-800 text-gray-300",
                                             {commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()}
