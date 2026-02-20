@@ -69,7 +69,7 @@ coverage-check:
     expire_in: 30 days
     paths:
       - coverage-report/
-    expose_as: 'Code Coverage Report'
+    expose_as: "Code Coverage Report"
     reports:
       junit: coverage-report/junit-report.xml
   only:
@@ -88,10 +88,10 @@ coverage-check:
     - |
       # Read the summary markdown
       SUMMARY=$(cat complexity-report/summary.md)
-      
+
       # Escape for JSON
       SUMMARY_ESCAPED=$(echo "$SUMMARY" | jq -Rs '.')
-      
+
       # Post or update MR comment
       if [ -n "${CI_MERGE_REQUEST_IID}" ]; then
         # Check for existing comment
@@ -137,7 +137,7 @@ complexity-check:
     expire_in: 30 days
     paths:
       - complexity-report/
-    expose_as: 'Code Complexity Report'
+    expose_as: "Code Complexity Report"
     reports:
       junit: complexity-report/junit-report.xml
   only:
@@ -170,3 +170,19 @@ manual-version-bump:
   when: manual
   variables:
     NEW_VERSION: ""
+
+flake-check:
+  stage: check
+  tags:
+    - nix
+  before_script:
+    # Create .netrc using CI job token (more secure)
+    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+    - echo "login gitlab-ci-token" >> ~/.netrc
+    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+    - chmod 600 ~/.netrc
+  script:
+    - nix flake check -L --show-trace
+  only:
+    - merge_requests
+    - main
