@@ -6,7 +6,7 @@
 //! All SQL lives in [`crate::queries::dashboard`]; this module is
 //! responsible only for HTTP concerns (extraction, response formatting).
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use chrono::Utc;
 use sqlx::PgPool;
 use tracing::error;
@@ -43,7 +43,14 @@ pub async fn dashboard_summary(State(pool): State<PgPool>) -> impl IntoResponse 
 /// Build the full dashboard summary by running parallel queries.
 async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSummary> {
     // Run all queries concurrently.
-    let (fleet_health, deployment_status, cve_summary, total_systems, active_builds, recent_deployments) = tokio::try_join!(
+    let (
+        fleet_health,
+        deployment_status,
+        cve_summary,
+        total_systems,
+        active_builds,
+        recent_deployments,
+    ) = tokio::try_join!(
         fetch_fleet_health(pool),
         fetch_deployment_status(pool),
         fetch_cve_summary(pool),

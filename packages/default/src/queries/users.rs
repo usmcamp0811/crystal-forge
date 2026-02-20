@@ -50,3 +50,41 @@ pub async fn get_by_email(pool: &PgPool, email: &str) -> Result<Option<User>> {
         .await?;
     Ok(user)
 }
+
+/// Get user by email, returning an error if not found.
+pub async fn get_user_by_email(pool: &PgPool, email: &str) -> Result<User> {
+    get_by_email(pool, email)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("User not found with email: {}", email))
+}
+
+/// Insert a new user with minimal fields (email and optional display name).
+pub async fn insert_user(pool: &PgPool, email: &str, display_name: Option<&str>) -> Result<User> {
+    let id = Uuid::new_v4();
+    let username = email.split('@').next().unwrap_or(email);
+    let (first_name, last_name) = match display_name {
+        Some(name) => {
+            let parts: Vec<&str> = name.splitn(2, ' ').collect();
+            (
+                Some(parts[0].to_string()),
+                parts.get(1).map(|s| s.to_string()),
+            )
+        }
+        None => (None, None),
+    };
+
+    let user = User {
+        id,
+        username: username.to_string(),
+        first_name,
+        last_name,
+        email: email.to_string(),
+        user_type: UserType::Human,
+        is_active: true,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+
+    create_user(pool, user.clone()).await?;
+    Ok(user)
+}

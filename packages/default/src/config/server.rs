@@ -24,6 +24,11 @@ pub struct ServerConfig {
     /// Default: true
     #[serde(default = "default_eval_check_cache")]
     pub eval_check_cache: bool,
+
+    /// Authentication mode: "dev" or "oidc"
+    /// Default: "oidc" (read from AUTH_MODE env var)
+    #[serde(default = "default_auth_mode")]
+    pub auth_mode: String,
 }
 
 // Default value functions for serde
@@ -39,6 +44,10 @@ fn default_eval_check_cache() -> bool {
     true // Usually helpful for build planning
 }
 
+fn default_auth_mode() -> String {
+    std::env::var("AUTH_MODE").unwrap_or_else(|_| "oidc".to_string())
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -47,6 +56,7 @@ impl Default for ServerConfig {
             eval_workers: default_eval_workers(),
             eval_max_memory_mb: default_eval_max_memory_mb(),
             eval_check_cache: default_eval_check_cache(),
+            auth_mode: default_auth_mode(),
         }
     }
 }
