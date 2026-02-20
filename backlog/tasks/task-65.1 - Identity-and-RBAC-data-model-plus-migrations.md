@@ -5,7 +5,7 @@ status: To Do
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 04:22'
+updated_date: '2026-02-20 04:27'
 labels:
   - security
   - auth
@@ -63,4 +63,6 @@ Risk Level
 Follow-up possibility: dedicated multi-tenant identity partitioning task.
 
 Selected for auth micro-sprint planning (2026-02-20).
+
+Backlog structure fix: removed parent dependency so this foundational child can execute first.
 <!-- SECTION:NOTES:END -->
