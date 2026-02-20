@@ -37,7 +37,7 @@ let
             
             # Run tarpaulin with JSON and HTML output
             echo "   Running cargo tarpaulin..."
-            if ${pkgs.cargo-tarpaulin}/bin/cargo tarpaulin \
+            if SQLX_OFFLINE=true ${pkgs.cargo-tarpaulin}/bin/cargo-tarpaulin \
               --out Html \
               --out Json \
               --output-dir "$PKG_OUTPUT" \
@@ -50,8 +50,8 @@ let
               
               # Parse JSON coverage report
               if [[ -f "$PKG_OUTPUT/tarpaulin-report.json" ]]; then
-                # Extract coverage data
-                LINE_COUNT=$(${pkgs.jq}/bin/jq -r '.files | map(.line_count) | add // 0' "$PKG_OUTPUT/tarpaulin-report.json")
+                # Extract coverage data (tarpaulin uses .coverable for total lines, not .line_count)
+                LINE_COUNT=$(${pkgs.jq}/bin/jq -r '.files | map(.coverable) | add // 0' "$PKG_OUTPUT/tarpaulin-report.json")
                 COVERED_COUNT=$(${pkgs.jq}/bin/jq -r '.files | map(.covered) | add // 0' "$PKG_OUTPUT/tarpaulin-report.json")
                 
                 if [[ $LINE_COUNT -gt 0 ]]; then
