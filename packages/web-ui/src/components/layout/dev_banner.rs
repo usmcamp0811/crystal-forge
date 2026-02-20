@@ -1,27 +1,51 @@
 //! Development mode warning banner.
 
 use dioxus::prelude::*;
+use wasm_bindgen::JsCast;
 
 /// Banner warning that dev authentication mode is active.
 ///
-/// This banner should be displayed at the top of all authenticated pages
-/// when AUTH_MODE=dev is enabled on the server.
-///
-/// # Current Limitation
-///
-/// This banner is currently rendered unconditionally in the AppShell.
-/// This means it will appear even when AUTH_MODE=oidc/production, which is incorrect.
-///
-/// TODO: Gate rendering behind a reliable dev-mode signal:
-/// - Option 1: Add auth_mode field to /api/v1/status endpoint
-/// - Option 2: Check if /api/auth/dev/login returns 200 vs 404
-/// - Option 3: Add compile-time flag (requires build-time coordination)
-///
-/// For now, this limitation is documented in TASK-65.0 notes.
+/// This banner detects dev mode at runtime by checking if the dev login endpoint exists.
+/// It only renders when AUTH_MODE=dev is enabled on the server.
 #[component]
 pub fn DevModeBanner() -> Element {
-    // TODO: Add runtime check for AUTH_MODE=dev before rendering
-    // For now, banner displays unconditionally (see limitation note above)
+    let mut is_dev_mode = use_signal(|| false);
+    let mut checked = use_signal(|| false);
+
+    // Check if dev mode is active on component mount
+    use_effect(move || {
+        if !checked() {
+            spawn(async move {
+                // Probe the dev login endpoint to detect dev mode
+                let window = web_sys::window().expect("no global window");
+                let location = window.location();
+                let origin = location.origin().unwrap_or_else(|_| "http://localhost:3000".into());
+                let url = format!("{}/api/auth/dev/login", origin);
+
+                // Try an OPTIONS request to see if the endpoint exists
+                let mut opts = web_sys::RequestInit::new();
+                opts.method("OPTIONS");
+
+                if let Ok(request) = web_sys::Request::new_with_str_and_init(&url, &opts) {
+                    let response_promise = window.fetch_with_request(&request);
+                    let future = wasm_bindgen_futures::JsFuture::from(response_promise);
+                    if let Ok(response) = future.await {
+                        if let Ok(response) = response.dyn_into::<web_sys::Response>() {
+                            // If we get any response (not 404), dev mode is active
+                            is_dev_mode.set(response.status() != 404);
+                        }
+                    }
+                }
+                checked.set(true);
+            });
+        }
+    });
+
+    // Only render if dev mode is detected
+    if !is_dev_mode() {
+        return rsx! { };
+    }
+
     rsx! {
         div {
             class: "bg-yellow-500 border-b-2 border-yellow-600 px-4 py-2",
