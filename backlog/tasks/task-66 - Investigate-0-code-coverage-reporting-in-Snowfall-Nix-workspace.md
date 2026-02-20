@@ -4,7 +4,7 @@ title: Investigate 0% code coverage reporting in Snowfall/Nix workspace
 status: In Progress
 assignee: []
 created_date: '2026-02-20 01:56'
-updated_date: '2026-02-20 04:36'
+updated_date: '2026-02-20 04:44'
 labels:
   - coverage
   - ci
@@ -50,4 +50,16 @@ Make coverage collection target the actual Rust crates under `packages/default`,
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-66-coverage-investigation
+
+Root Cause Analysis (2026-02-20):
+
+1. **Broken binary path**: Script used `${pkgs.cargo-tarpaulin}/bin/cargo tarpaulin` instead of `${pkgs.cargo-tarpaulin}/bin/cargo-tarpaulin`
+2. **Missing SQLX_OFFLINE**: SQLx compile-time checks failed without database connection
+3. **Incorrect JSON parsing**: Script used `.files | map(.line_count)` instead of `.files | map(.coverable)`
+
+All three issues combined to report 0% coverage.
+
+Actual coverage: 11.15% (497/4456 lines)
+
+Fix applied in packages/coverage/default.nix.
 <!-- SECTION:NOTES:END -->
