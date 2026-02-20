@@ -1,11 +1,11 @@
 ---
 id: TASK-65.0
 title: Developer auth mode with local selector screen
-status: In Progress
+status: Review
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 13:51'
+updated_date: '2026-02-20 14:13'
 labels:
   - security
   - auth
