@@ -1248,3 +1248,63 @@ If you cannot access GitLab, cannot use `glab`, or cannot locate the MR template
 YOU MUST STOP AND REPORT.
 
 </CRITICAL_INSTRUCTION>
+---
+<CRITICAL_INSTRUCTION>
+
+# MERGE REQUEST SCREENSHOT ATTACHMENTS (MANDATORY FOR UI CHANGES)
+
+If a change affects the UI, the agent MUST include screenshots or screen recordings in the Merge Request description.
+
+Screenshots MUST be attached to the MR using GitLab uploads.
+Screenshots MUST NOT be committed to the repository unless explicitly required by the task.
+
+If screenshots were accidentally committed:
+- You MUST remove them in a follow-up commit.
+- The MR MUST keep only the uploaded attachments.
+
+## APPROVED UPLOAD PROCEDURE (GITLAB.COM)
+
+To attach an image without committing it, upload it to the GitLab project uploads API.
+This returns Markdown you can paste into the MR description.
+
+IMPORTANT: In this environment the upload MUST use:
+Authorization: Bearer <token>
+NOT PRIVATE-TOKEN.
+
+### 1. Obtain token from glab (DO NOT PRINT TOKEN)
+
+You MUST NOT print the token.
+You MUST NOT log the token.
+You MUST NOT paste the token into MR text.
+
+Command pattern:
+
+STATUS=$(nix run nixpkgs#glab -- auth status --hostname gitlab.com -t 2>&1 >/dev/null)
+TOKEN=${STATUS##*Token found: }
+TOKEN=${TOKEN%%$'\n'*}
+
+### 2. Upload screenshot (returns markdown)
+
+curl --header "Authorization: Bearer $TOKEN" \
+  --form "file=@<path-to-image>" \
+  "https://gitlab.com/api/v4/projects/crystal-forge%2Fcrystal-forge/uploads"
+
+### 3. Paste returned Markdown into MR description
+
+The API response includes a Markdown field like:
+
+![name](/uploads/<id>/<file>.png)
+
+Paste that Markdown into the MR under the UI Changes section.
+
+## SAFETY RULES (HARD CONSTRAINT)
+
+- You MUST NOT echo, print, or otherwise expose $TOKEN.
+- You MUST NOT run commands that output the token to logs.
+- You MUST NOT store tokens in files committed to the repo.
+- You MUST treat tokens as secrets.
+
+If the upload fails:
+YOU MUST STOP AND REPORT.
+
+</CRITICAL_INSTRUCTION>
