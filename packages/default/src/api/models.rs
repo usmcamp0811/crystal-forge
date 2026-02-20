@@ -311,6 +311,22 @@ pub struct FlakeSummary {
     pub latest_commit: Option<String>,
 }
 
+/// Flake registry item for flakes management view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FlakeRegistryItem {
+    pub id: i32,
+    pub name: String,
+    pub repo_url: String,
+    pub system_count: i64,
+}
+
+/// Request payload for creating a flake registry entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateFlakeRequest {
+    pub name: String,
+    pub repo_url: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pagination
 // ─────────────────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 use anyhow::Context;
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
@@ -10,7 +10,7 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
-        api::dashboard,
+        api::{dashboard, flakes},
         status,
         webhook::webhook_handler,
     },
@@ -70,7 +70,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
-        );
+        )
+        .route("/api/v1/flakes", get(flakes::list_flakes))
+        .route("/api/v1/flakes", post(flakes::create_flake))
+        .route("/api/v1/flakes/:id", delete(flakes::delete_flake));
 
     #[cfg(feature = "embedded-ui")]
     {

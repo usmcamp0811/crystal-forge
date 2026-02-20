@@ -8,12 +8,14 @@ use gloo_storage::{LocalStorage, Storage};
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
+use crate::api::client::{create_flake, delete_flake, fetch_flakes};
+use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem};
 use crate::components::layout::Card;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
@@ -125,6 +127,20 @@ struct FlakeListItem {
     last_synced_at: DateTime<Utc>,
 }
 
+impl FlakeListItem {
+    fn from_registry(item: FlakeRegistryItem) -> Self {
+        Self {
+            id: item.id,
+            name: item.name,
+            repo_url: item.repo_url,
+            latest_commit: None,
+            system_count: item.system_count.max(0) as usize,
+            environments: Vec::new(),
+            last_synced_at: Utc::now(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct FlakeHistoryCommit {
     hash: String,
@@ -227,6 +243,8 @@ pub fn FlakesListView() -> Element {
     let commit_filter = use_signal(Vec::<CommitFilter>::new);
     let size_filter = use_signal(Vec::<SizeBucket>::new);
     let mut flakes = use_signal(mock_flakes);
+    let loading_flakes = use_signal(|| true);
+    let server_notice = use_signal(|| None::<String>);
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(|| NewFlakeDraft {
@@ -267,6 +285,33 @@ pub fn FlakesListView() -> Element {
                 selected_history_flake.set(filtered_ids.first().copied());
                 selected_history_commit.set(None);
             }
+        });
+    }
+
+    {
+        let mut flakes = flakes.clone();
+        let mut loading_flakes = loading_flakes.clone();
+        let mut server_notice = server_notice.clone();
+        use_effect(move || {
+            spawn(async move {
+                match fetch_flakes().await {
+                    Ok(items) => {
+                        flakes.set(
+                            items
+                                .into_iter()
+                                .map(FlakeListItem::from_registry)
+                                .collect(),
+                        );
+                        server_notice.set(None);
+                    }
+                    Err(error) => {
+                        server_notice.set(Some(format!(
+                            "Flake API unavailable, using local sample data: {error}"
+                        )));
+                    }
+                }
+                loading_flakes.set(false);
+            });
         });
     }
 
@@ -334,6 +379,14 @@ pub fn FlakesListView() -> Element {
                 }
             }
 
+            if let Some(message) = server_notice.read().clone() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
+                    style: "background-color: #493E26; border-color: #8C7041;",
+                    "{message}"
+                }
+            }
+
             if *show_add_form.read() {
                 AddFlakeForm {
                     draft: draft,
@@ -353,25 +406,37 @@ pub fn FlakesListView() -> Element {
                             return;
                         }
 
-                        let mut values = flakes.read().clone();
-                        let next_id = values.iter().map(|flake| flake.id).max().unwrap_or(0) + 1;
-                        values.push(FlakeListItem {
-                            id: next_id,
-                            name: next.name.trim().to_string(),
-                            repo_url: next.repo_url.trim().to_string(),
-                            latest_commit: None,
-                            system_count: 0,
-                            environments: Vec::new(),
-                            last_synced_at: Utc::now(),
+                        let mut flakes = flakes.clone();
+                        let mut draft = draft.clone();
+                        let mut add_error = add_error.clone();
+                        let mut show_add_form = show_add_form.clone();
+                        let mut server_notice = server_notice.clone();
+                        spawn(async move {
+                            let request = CreateFlakeRequest {
+                                name: next.name.trim().to_string(),
+                                repo_url: next.repo_url.trim().to_string(),
+                            };
+
+                            match create_flake(&request).await {
+                                Ok(created) => {
+                                    let mut values = flakes.read().clone();
+                                    values.push(FlakeListItem::from_registry(created));
+                                    values
+                                        .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    flakes.set(values);
+                                    draft.set(NewFlakeDraft {
+                                        name: String::new(),
+                                        repo_url: String::new(),
+                                    });
+                                    add_error.set(None);
+                                    server_notice.set(None);
+                                    show_add_form.set(false);
+                                }
+                                Err(error) => {
+                                    add_error.set(Some(error.to_string()));
+                                }
+                            }
                         });
-                        values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        flakes.set(values);
-                        draft.set(NewFlakeDraft {
-                            name: String::new(),
-                            repo_url: String::new(),
-                        });
-                        add_error.set(None);
-                        show_add_form.set(false);
                     },
                 }
             }
@@ -385,7 +450,14 @@ pub fn FlakesListView() -> Element {
                 open_dropdown: open_dropdown,
             }
 
-            if filtered_flakes.is_empty() {
+            if *loading_flakes.read() {
+                Card {
+                    title: Some("Loading flakes".to_string()),
+                    children: rsx! {
+                        p { class: "{theme::text::SECONDARY}", "Fetching registry entries from API..." }
+                    }
+                }
+            } else if filtered_flakes.is_empty() {
                 Card {
                     title: Some("No flakes".to_string()),
                     children: rsx! {
@@ -455,10 +527,24 @@ pub fn FlakesListView() -> Element {
                     system_count: flake.system_count,
                     on_cancel: move |_| pending_remove.set(None),
                     on_confirm: move |_| {
-                        let mut values = flakes.read().clone();
-                        values.retain(|item| item.id != flake.id);
-                        flakes.set(values);
-                        pending_remove.set(None);
+                        let mut flakes = flakes.clone();
+                        let mut pending_remove = pending_remove.clone();
+                        let mut server_notice = server_notice.clone();
+                        let remove_id = flake.id;
+                        spawn(async move {
+                            match delete_flake(remove_id).await {
+                                Ok(()) => {
+                                    let mut values = flakes.read().clone();
+                                    values.retain(|item| item.id != remove_id);
+                                    flakes.set(values);
+                                    server_notice.set(None);
+                                    pending_remove.set(None);
+                                }
+                                Err(error) => {
+                                    server_notice.set(Some(error.to_string()));
+                                }
+                            }
+                        });
                     }
                 }
             }
