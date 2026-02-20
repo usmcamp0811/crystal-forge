@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 05:19'
+updated_date: '2026-02-20 13:45'
 labels:
   - security
   - auth
@@ -70,4 +70,6 @@ Selected for auth micro-sprint planning (2026-02-20).
 Backlog structure fix: sequence dev auth mode after identity/RBAC data model foundation.
 
 LOCK: gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-65.0-developer-auth-mode
+
+WIP commit ebc3105: Added AUTH_MODE config support, dev fixture user provider, auth/user query helpers, and dev login API endpoint. Remaining: wire dev routes with guards in server.rs, add dev user initialization on startup, create UI login selector component, add dev-mode banner, export AUTH_MODE=dev in devshell, add production profile guard, and tests.
 <!-- SECTION:NOTES:END -->
