@@ -1,3 +1,4 @@
+use crate::api::models::FlakeRegistryItem;
 use crate::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
 use anyhow::Context;
@@ -95,4 +96,56 @@ pub async fn find_flake_by_repo_urls(
     .fetch_optional(pool)
     .await
     .context("Failed to find flake by repo URLs")
+}
+
+pub async fn list_flake_registry(pool: &PgPool) -> Result<Vec<FlakeRegistryItem>> {
+    let rows = sqlx::query_as::<_, (i32, String, String, i64)>(
+        r#"
+        SELECT
+            f.id,
+            f.name,
+            f.repo_url,
+            COUNT(s.id)::bigint AS system_count
+        FROM flakes f
+        LEFT JOIN systems s ON s.flake_id = f.id
+        GROUP BY f.id, f.name, f.repo_url
+        ORDER BY lower(f.name) ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|(id, name, repo_url, system_count)| FlakeRegistryItem {
+            id,
+            name,
+            repo_url,
+            system_count,
+        })
+        .collect())
+}
+
+pub async fn count_systems_for_flake(pool: &PgPool, flake_id: i32) -> Result<i64> {
+    let system_count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM systems
+        WHERE flake_id = $1
+        "#,
+    )
+    .bind(flake_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(system_count)
+}
+
+pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM flakes WHERE id = $1")
+        .bind(flake_id)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected())
 }
