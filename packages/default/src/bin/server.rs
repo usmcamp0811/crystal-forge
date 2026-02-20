@@ -5,12 +5,13 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
+    auth::dev_mode::ensure_dev_users,
     config::CrystalForgeConfig,
     flake::commits::initialize_flake_commits,
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
-        api::{dashboard, flakes},
+        api::{auth_dev, dashboard, flakes},
         status,
         webhook::webhook_handler,
     },
@@ -22,7 +23,7 @@ use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 #[cfg(feature = "embedded-ui")]
@@ -40,11 +41,37 @@ async fn main() -> anyhow::Result<()> {
     let cfg = CrystalForgeConfig::load()?;
     CrystalForgeConfig::validate_db_connection().await?;
 
+    // Validate auth mode and apply production guard
+    let auth_mode = &cfg.server.auth_mode;
+    if auth_mode == "dev" {
+        #[cfg(not(debug_assertions))]
+        {
+            anyhow::bail!(
+                "AUTH_MODE=dev is not allowed in release builds. \
+                 Use AUTH_MODE=oidc for production deployments."
+            );
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            warn!("⚠️  Running in development auth mode (AUTH_MODE=dev)");
+            warn!("⚠️  This mode is insecure and should NEVER be used in production");
+        }
+    }
+
     debug!("======== INITIALIZING DATABASE ========");
     let pool = CrystalForgeConfig::db_pool().await?;
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
     cfg.sync_systems_to_db(&pool).await?;
+
+    // Initialize dev mode fixtures if AUTH_MODE=dev
+    if auth_mode == "dev" {
+        info!("Initializing development auth fixtures...");
+        ensure_dev_users(&pool)
+            .await
+            .context("Failed to initialize dev auth fixtures")?;
+    }
     let background_pool = pool.clone();
     let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
@@ -74,6 +101,12 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake));
+
+    // Dev-mode auth routes (only available when AUTH_MODE=dev)
+    if auth_mode == "dev" {
+        info!("Registering development auth endpoints at /api/auth/dev/*");
+        app = app.route("/api/auth/dev/login", post(auth_dev::dev_login));
+    }
 
     #[cfg(feature = "embedded-ui")]
     {
