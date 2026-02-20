@@ -12,13 +12,13 @@ pub fn DevModeBanner() -> Element {
     // For now, we'll display the banner and let CSS handle visibility
     rsx! {
         div {
-            class: "bg-amber-500/10 border-b-2 border-amber-500/50 px-4 py-2",
+            class: "bg-yellow-500 border-b-2 border-yellow-600 px-4 py-2",
             "data-dev-mode-banner": "true",
             div {
                 class: "flex items-center justify-center gap-3 max-w-7xl mx-auto",
                 // Warning icon
                 svg {
-                    class: "w-4 h-4 text-amber-400 flex-shrink-0",
+                    class: "w-4 h-4 text-yellow-900 flex-shrink-0",
                     fill: "none",
                     stroke: "currentColor",
                     view_box: "0 0 24 24",
@@ -33,11 +33,11 @@ pub fn DevModeBanner() -> Element {
                 div {
                     class: "flex items-center gap-2 text-sm",
                     span {
-                        class: "font-semibold text-amber-300",
+                        class: "font-bold text-yellow-900",
                         "Development Mode:"
                     }
                     span {
-                        class: "text-amber-200/90",
+                        class: "text-yellow-950",
                         "Authentication bypass is active. Never use AUTH_MODE=dev in production."
                     }
                 }
