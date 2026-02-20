@@ -1,11 +1,11 @@
 ---
 id: TASK-52
 title: 'Refactor: Extract policy components from views/policies.rs'
-status: To Do
+status: In Progress
 assignee:
   - Claude Opus 4.5
 created_date: '2026-02-18 02:46'
-updated_date: '2026-02-20 02:12'
+updated_date: '2026-02-20 02:20'
 labels:
   - refactoring
   - web-ui
@@ -63,3 +63,9 @@ None. Task may start immediately when selected for execution.
 - [ ] #5 `nix build .#checks.x86_64-linux.web-ui` completes successfully.
 - [ ] #6 Manual policies-page smoke test passes with no regressions observed.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-52-extract-policy-components
+<!-- SECTION:NOTES:END -->
