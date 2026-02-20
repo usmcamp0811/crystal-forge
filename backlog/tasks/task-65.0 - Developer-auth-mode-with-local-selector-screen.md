@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 13:48'
+updated_date: '2026-02-20 13:51'
 labels:
   - security
   - auth
@@ -74,4 +74,6 @@ LOCK: gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-65.0-develope
 WIP commit ebc3105: Added AUTH_MODE config support, dev fixture user provider, auth/user query helpers, and dev login API endpoint. Remaining: wire dev routes with guards in server.rs, add dev user initialization on startup, create UI login selector component, add dev-mode banner, export AUTH_MODE=dev in devshell, add production profile guard, and tests.
 
 Commit 854c3cd: Wired dev auth into server with conditional routing, production guard (rejects AUTH_MODE=dev in release builds), dev user initialization on startup, and AUTH_MODE=dev export in devshell. Remaining: UI login selector component, dev-mode banner, and tests.
+
+Commit dac1eb3: Added DevLoginView with role selector UI (Admin/Operator/Viewer), registered /dev/login route, and dev-mode warning banner. Remaining: wire login API call, add dev-mode indicator banner to main UI, and tests.
 <!-- SECTION:NOTES:END -->
