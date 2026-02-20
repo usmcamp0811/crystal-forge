@@ -60,7 +60,7 @@ pub fn DevLoginView() -> Element {
                     div {
                         class: "flex items-start gap-3",
                         svg {
-                            class: "w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5",
+                            class: "w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5",
                             fill: "none",
                             stroke: "currentColor",
                             view_box: "0 0 24 24",

@@ -18,7 +18,7 @@ pub fn DevModeBanner() -> Element {
                 class: "flex items-center justify-center gap-3 max-w-7xl mx-auto",
                 // Warning icon
                 svg {
-                    class: "w-5 h-5 text-amber-400 flex-shrink-0",
+                    class: "w-4 h-4 text-amber-400 flex-shrink-0",
                     fill: "none",
                     stroke: "currentColor",
                     view_box: "0 0 24 24",
