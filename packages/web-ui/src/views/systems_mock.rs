@@ -857,4 +857,3 @@ fn build_system_detail(
         updated_at: base_time - Duration::hours(1),
     }
 }
-

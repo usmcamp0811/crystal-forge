@@ -2,9 +2,9 @@
 
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 /// Worker status enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

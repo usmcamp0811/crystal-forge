@@ -3,6 +3,7 @@
 pub mod builds;
 pub mod cves;
 pub mod dashboard;
+pub mod dev_login;
 pub mod environments;
 pub mod environments_list;
 pub mod flakes;

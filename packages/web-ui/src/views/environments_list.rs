@@ -6,10 +6,10 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::components::environments::{
-    environment_name_for_id, normalize_color_hex, normalize_optional, required_agent_policy_id,
-    required_policy_names, AddEnvironmentForm, EditEnvironmentDraft, EditEnvironmentModal,
-    EditRequirementsModal, EnvironmentCard, EnvironmentItem, NewEnvironmentDraft, PolicyOption,
-    PolicyPickerModal, RemoveEnvironmentDialog,
+    AddEnvironmentForm, EditEnvironmentDraft, EditEnvironmentModal, EditRequirementsModal,
+    EnvironmentCard, EnvironmentItem, NewEnvironmentDraft, PolicyOption, PolicyPickerModal,
+    RemoveEnvironmentDialog, environment_name_for_id, normalize_color_hex, normalize_optional,
+    required_agent_policy_id, required_policy_names,
 };
 use crate::components::layout::Card;
 use crate::theme;

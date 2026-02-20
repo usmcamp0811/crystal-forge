@@ -1,5 +1,5 @@
-use crate::handlers::agent::heartbeat::LogResponse;
 use crate::config::{CacheType, deployment::DeploymentConfig};
+use crate::handlers::agent::heartbeat::LogResponse;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -469,16 +469,20 @@ impl AgentDeploymentManager {
             }
         };
 
-        self.activate_via_systemd(store_path, unit_name, action).await?;
+        self.activate_via_systemd(store_path, unit_name, action)
+            .await?;
         Ok(())
     }
 
     /// Create a new NixOS generation
     async fn create_generation(&self, store_path: &str) -> Result<()> {
         let profile_path = "/nix/var/nix/profiles/system";
-        
-        debug!("Creating generation: nix-env --profile {} --set {}", profile_path, store_path);
-        
+
+        debug!(
+            "Creating generation: nix-env --profile {} --set {}",
+            profile_path, store_path
+        );
+
         let output = Command::new("nix-env")
             .args(&["--profile", profile_path, "--set", store_path])
             .output()
@@ -496,37 +500,44 @@ impl AgentDeploymentManager {
     /// Verify that generation was created correctly
     async fn verify_generation_created(&self, store_path: &str) -> Result<()> {
         let profile_path = "/nix/var/nix/profiles/system";
-        
+
         let output = Command::new("readlink")
             .arg(profile_path)
             .output()
             .context("Failed to read system profile")?;
-        
+
         let current_link = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        
+
         if current_link != store_path {
             anyhow::bail!(
                 "Generation verification failed: profile points to {} but expected {}",
-                current_link, store_path
+                current_link,
+                store_path
             );
         }
-        
+
         debug!("✅ Generation verified: {}", current_link);
         Ok(())
     }
 
     /// Activate configuration via systemd-run
-    async fn activate_via_systemd(&self, store_path: &str, unit_name: &str, action: &str) -> Result<()> {
+    async fn activate_via_systemd(
+        &self,
+        store_path: &str,
+        unit_name: &str,
+        action: &str,
+    ) -> Result<()> {
         let switch_script = format!("{}/bin/switch-to-configuration", store_path);
-        
+
         let run_args = [
-            "--unit", unit_name,
+            "--unit",
+            unit_name,
             "--no-block",
             "--same-dir",
             "--collect",
             "--",
             &switch_script,
-            action,  // "switch" or "boot"
+            action, // "switch" or "boot"
         ];
 
         debug!("Executing: systemd-run {}", shell_join(&run_args));
@@ -541,7 +552,8 @@ impl AgentDeploymentManager {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!(
                 "systemd-run failed: stdout={}, stderr={}",
-                stdout.trim(), stderr.trim()
+                stdout.trim(),
+                stderr.trim()
             );
         }
 

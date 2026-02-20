@@ -167,3 +167,50 @@ impl<'a> AuthIdentityRepository<'a> {
         Ok(created_session)
     }
 }
+
+// Convenience wrapper functions for common operations
+
+/// Find user roles by user ID.
+pub async fn find_user_roles(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<UserRoleAssignment>, AuthRepositoryError> {
+    let repo = AuthIdentityRepository::new(pool);
+    repo.list_roles(user_id).await
+}
+
+/// Assign a role to a user.
+pub async fn assign_role_to_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    role: AuthRole,
+    granted_by_user_id: Option<Uuid>,
+) -> Result<UserRoleAssignment, AuthRepositoryError> {
+    let repo = AuthIdentityRepository::new(pool);
+    let assignment = NewRoleAssignment {
+        user_id,
+        role,
+        granted_by_user_id,
+    };
+    repo.assign_role(&assignment).await
+}
+
+/// Create a new user session.
+pub async fn create_user_session(
+    pool: &PgPool,
+    user_id: Uuid,
+    session_token_hash: String,
+    expires_at: DateTime<Utc>,
+    user_agent: Option<String>,
+    ip_address: Option<String>,
+) -> Result<UserSession, AuthRepositoryError> {
+    let repo = AuthIdentityRepository::new(pool);
+    let session = NewUserSession {
+        user_id,
+        session_token_hash,
+        expires_at,
+        user_agent,
+        ip_address,
+    };
+    repo.create_session(&session).await
+}

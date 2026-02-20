@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 use crate::api::models::{
     CveSummary, DeploymentStatus, FlakeSummary, HealthStatus, PipelineStage, SystemSummary,
@@ -14,10 +14,10 @@ use crate::api::models::{
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
-use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
+use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog,
+    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, generate_key_pair,
 };
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;

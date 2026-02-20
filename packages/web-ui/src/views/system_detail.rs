@@ -26,8 +26,8 @@ use crate::components::layout::Card;
 use crate::components::modals::{RollbackConfirmDialog, SyncConfirmDialog};
 use crate::components::notifications::Toast;
 use crate::components::system::{
-    environment_style, AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine,
-    LogsTab, NetworkCard, SecurityCard, StatusBadge, SystemInfoCard,
+    AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
+    SecurityCard, StatusBadge, SystemInfoCard, environment_style,
 };
 use crate::theme;
 use crate::views::systems_mock::mock_system_detail_by_id;

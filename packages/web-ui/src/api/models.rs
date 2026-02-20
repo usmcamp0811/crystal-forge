@@ -627,6 +627,24 @@ impl CveSeverity {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Development Auth DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Request payload for dev mode login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevLoginRequest {
+    pub email: String,
+}
+
+/// Response from dev mode login endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevLoginResponse {
+    pub user_id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────────────────
 

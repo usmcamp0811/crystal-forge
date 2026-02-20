@@ -20,12 +20,12 @@ impl UserType {
     }
 }
 
-#[derive(Debug, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct User {
     pub id: Uuid,
     pub username: String,
-    pub first_name: String,
-    pub last_name: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
     pub email: String,
     pub user_type: UserType,
     pub is_active: bool,

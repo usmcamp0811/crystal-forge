@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::components::layout::DevModeBanner;
 use crate::components::layout::SidebarNav;
 use crate::components::layout::TopBar;
 use crate::routes::Route;
@@ -23,6 +24,7 @@ pub fn AppShell() -> Element {
             div {
                 class: "flex-1 flex flex-col min-w-0",
                 TopBar { title: current_route.title() }
+                DevModeBanner {}
                 main {
                     class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
                     Outlet::<Route> {}

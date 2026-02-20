@@ -1,7 +1,7 @@
-use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
 use crate::config::CacheType;
 use crate::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::derivations::{Derivation, DerivationType};
+use crate::log::{WorkerState, WorkerStatus, get_build_status, get_cve_status};
 use crate::queries::build_reservations;
 use crate::queries::cache_push::CachePushJob;
 use crate::queries::cache_push::create_cache_push_job;
@@ -156,11 +156,9 @@ async fn resolve_commit_context(pool: &PgPool, derivation: &Derivation) -> Commi
     };
 
     let distance_from_head = match commit.get_flake(pool).await {
-        Ok(flake) => {
-            crate::queries::commits::get_commit_distance_from_head(pool, &flake, &commit)
-                .await
-                .ok()
-        }
+        Ok(flake) => crate::queries::commits::get_commit_distance_from_head(pool, &flake, &commit)
+            .await
+            .ok(),
         Err(_) => None,
     };
 
@@ -1191,10 +1189,8 @@ mod tests {
 
         #[test]
         fn unresolved_commit_includes_commit_id() {
-            let result = format_task_description(
-                "web-server",
-                CommitContext::Unresolved { commit_id: 42 },
-            );
+            let result =
+                format_task_description("web-server", CommitContext::Unresolved { commit_id: 42 });
             assert_eq!(result, "web-server @ commit#42");
         }
 
@@ -1243,10 +1239,7 @@ mod tests {
                     distance_from_head: Some(1),
                 },
             );
-            assert_eq!(
-                result,
-                "nixos-system-web.example.com @ 1a2b3c4d (HEAD~1)"
-            );
+            assert_eq!(result, "nixos-system-web.example.com @ 1a2b3c4d (HEAD~1)");
         }
 
         #[test]
@@ -1326,13 +1319,9 @@ mod tests {
 
         #[test]
         fn successful_commit_with_distance_produces_full_description() {
-            let derivation = DerivationBuilder::new()
-                .name("production-server")
-                .build();
+            let derivation = DerivationBuilder::new().name("production-server").build();
 
-            let commit = CommitBuilder::new()
-                .hash("a1b2c3d4e5f6a7b8")
-                .build();
+            let commit = CommitBuilder::new().hash("a1b2c3d4e5f6a7b8").build();
 
             // Simulate resolved context from the first 8 chars of commit hash
             let ctx = CommitContext::Resolved {
@@ -1346,13 +1335,9 @@ mod tests {
 
         #[test]
         fn successful_commit_without_distance_omits_head_notation() {
-            let derivation = DerivationBuilder::new()
-                .name("staging-server")
-                .build();
+            let derivation = DerivationBuilder::new().name("staging-server").build();
 
-            let commit = CommitBuilder::new()
-                .hash("deadbeefcafebabe")
-                .build();
+            let commit = CommitBuilder::new().hash("deadbeefcafebabe").build();
 
             let ctx = CommitContext::Resolved {
                 short_hash: commit.git_commit_hash[..8].to_owned(),
@@ -1401,7 +1386,10 @@ mod tests {
 
         #[test]
         fn commit_context_variants_are_not_equal() {
-            assert_ne!(CommitContext::None, CommitContext::Unresolved { commit_id: 1 });
+            assert_ne!(
+                CommitContext::None,
+                CommitContext::Unresolved { commit_id: 1 }
+            );
         }
     }
 
@@ -1435,7 +1423,10 @@ mod tests {
             assert!(updated);
             assert_eq!(workers[0].state, WorkerState::Working);
             assert_eq!(workers[0].current_task.as_deref(), Some("building foo"));
-            assert!(workers[0].started_at.is_some(), "started_at should be set when Working");
+            assert!(
+                workers[0].started_at.is_some(),
+                "started_at should be set when Working"
+            );
         }
 
         #[test]
@@ -1451,17 +1442,15 @@ mod tests {
             assert!(workers[0].started_at.is_some());
 
             // Then back to Idle
-            let updated = apply_worker_status_update(
-                &mut workers,
-                0,
-                WorkerState::Idle,
-                None,
-            );
+            let updated = apply_worker_status_update(&mut workers, 0, WorkerState::Idle, None);
 
             assert!(updated);
             assert_eq!(workers[0].state, WorkerState::Idle);
             assert_eq!(workers[0].current_task, None);
-            assert!(workers[0].started_at.is_none(), "started_at should be cleared when Idle");
+            assert!(
+                workers[0].started_at.is_none(),
+                "started_at should be cleared when Idle"
+            );
         }
 
         #[test]
@@ -1553,7 +1542,10 @@ mod tests {
 
             // Worker 1: updated
             assert_eq!(workers[1].state, WorkerState::Working);
-            assert_eq!(workers[1].current_task.as_deref(), Some("building package-x"));
+            assert_eq!(
+                workers[1].current_task.as_deref(),
+                Some("building package-x")
+            );
             assert!(workers[1].started_at.is_some());
 
             // Worker 2: unchanged
@@ -1608,12 +1600,7 @@ mod tests {
         #[test]
         fn working_with_none_task_is_valid() {
             let mut workers = make_workers(&[0]);
-            let updated = apply_worker_status_update(
-                &mut workers,
-                0,
-                WorkerState::Working,
-                None,
-            );
+            let updated = apply_worker_status_update(&mut workers, 0, WorkerState::Working, None);
 
             assert!(updated);
             assert_eq!(workers[0].state, WorkerState::Working);

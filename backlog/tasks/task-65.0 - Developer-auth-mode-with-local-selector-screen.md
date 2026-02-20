@@ -1,11 +1,11 @@
 ---
 id: TASK-65.0
 title: Developer auth mode with local selector screen
-status: To Do
+status: Review
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 04:27'
+updated_date: '2026-02-20 14:13'
 labels:
   - security
   - auth
@@ -68,4 +68,32 @@ Follow-up possibility: per-role dev fixture customization.
 Selected for auth micro-sprint planning (2026-02-20).
 
 Backlog structure fix: sequence dev auth mode after identity/RBAC data model foundation.
+
+LOCK: gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-65.0-developer-auth-mode
+
+WIP commit ebc3105: Added AUTH_MODE config support, dev fixture user provider, auth/user query helpers, and dev login API endpoint. Remaining: wire dev routes with guards in server.rs, add dev user initialization on startup, create UI login selector component, add dev-mode banner, export AUTH_MODE=dev in devshell, add production profile guard, and tests.
+
+Commit 854c3cd: Wired dev auth into server with conditional routing, production guard (rejects AUTH_MODE=dev in release builds), dev user initialization on startup, and AUTH_MODE=dev export in devshell. Remaining: UI login selector component, dev-mode banner, and tests.
+
+Commit dac1eb3: Added DevLoginView with role selector UI (Admin/Operator/Viewer), registered /dev/login route, and dev-mode warning banner. Remaining: wire login API call, add dev-mode indicator banner to main UI, and tests.
+
+---
+
+MR #120 created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/120
+
+Implementation complete (6 commits total). All acceptance criteria satisfied.
+
+**Issues discovered during review:**
+
+1. **process-compose issue**: `server-stack up` fails because it uses packaged release binary which rejects AUTH_MODE=dev due to production guard. Workaround: use `cargo run` directly or wait for TASK-71 fix.
+   - Created TASK-71: Fix process-compose server-stack for dev auth mode
+
+2. **Missing OIDC infrastructure**: No real OIDC provider available for local testing or VM tests. Currently forced to rely on dev auth bypass.
+   - Created TASK-72: Add Keycloak/Authentik to process-compose for OIDC testing
+   - Created TASK-73: Add OIDC provider to VM integration tests
+
+**Current workarounds:**
+- For local dev: Use `db-only up` and run server with `cargo run` from packages/default
+- For testing: Use dev auth mode via /dev/login
+- For OIDC: Wait for TASK-65.2 (OIDC integration) and TASK-72 (local OIDC stack)
 <!-- SECTION:NOTES:END -->

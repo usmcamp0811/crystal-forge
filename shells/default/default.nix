@@ -196,6 +196,7 @@ in mkShell {
     fi
     export RUST_LOG=info
     export CRYSTAL_FORGE__CLIENT__PRIVATE_KEY="$CF_KEY_DIR/agent.key"
+    export AUTH_MODE=dev
     hostname="$(hostname)"
     pubkey="$(cat "$CF_KEY_DIR/agent.pub")"
     export "CRYSTAL_FORGE__SERVER__AUTHORIZED_KEYS__''${hostname}"="$pubkey"

@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_style, event_level_style, mock_artifacts, mock_events, mock_logs,
-    BuildAction, BuildItem, BuildStatus, PendingAction,
+    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_style,
+    event_level_style, mock_artifacts, mock_events, mock_logs,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -8,6 +8,7 @@ use crate::components::layout::AppShell;
 use crate::views::builds::BuildsView;
 use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
+use crate::views::dev_login::DevLoginView;
 use crate::views::environments::EnvironmentsView;
 use crate::views::flakes::FlakesView;
 use crate::views::not_found::NotFoundView;
@@ -51,6 +52,9 @@ pub enum Route {
     StyleGuideView {},
 
     #[end_layout]
+    #[route("/dev/login")]
+    DevLoginView {},
+
     #[route("/:..route")]
     NotFoundView { route: Vec<String> },
 }
@@ -67,6 +71,7 @@ impl Route {
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::StyleGuideView { .. } => "Style Guide".to_string(),
+            Route::DevLoginView { .. } => "Development Login".to_string(),
             Route::NotFoundView { .. } => "Not Found".to_string(),
         }
     }
