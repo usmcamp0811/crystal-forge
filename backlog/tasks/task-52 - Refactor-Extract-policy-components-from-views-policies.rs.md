@@ -1,11 +1,11 @@
 ---
 id: TASK-52
 title: 'Refactor: Extract policy components from views/policies.rs'
-status: In Progress
+status: Review
 assignee:
   - Claude Opus 4.5
 created_date: '2026-02-18 02:46'
-updated_date: '2026-02-20 02:33'
+updated_date: '2026-02-20 02:37'
 labels:
   - refactoring
   - web-ui
@@ -72,4 +72,6 @@ LOCK: gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-52-extract-po
 Extracted PolicyCard and PolicyEditorModal into packages/web-ui/src/components/policy/ with shared types module.
 
 Verification executed: rustfmt (touched files), cargo check (web-ui), cargo test (web-ui), nix build .#checks.x86_64-linux.web-ui - all passed.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/115
 <!-- SECTION:NOTES:END -->
