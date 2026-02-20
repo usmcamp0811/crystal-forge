@@ -55,6 +55,26 @@ Crystal Forge has comprehensive testing across multiple levels. When contributin
 - Cache tests: `nix build .#checks.x86_64-linux.s3-cache` or `.#checks.x86_64-linux.attic-cache`
 - Full test suite: `nix flake check`
 
+**For code coverage analysis**:
+
+This repository uses a Snowfall flake structure with Rust code under `packages/default/`. To run code coverage:
+
+```bash
+# From within the dev environment
+nix develop -c bash -c 'nix run .#coverage.coverage-report'
+```
+
+The coverage script automatically:
+- Runs `cargo-tarpaulin` with `SQLX_OFFLINE=true` (required for SQLx compile-time checks)
+- Analyzes all Rust packages under `packages/default/`
+- Generates HTML reports in `coverage-report/`
+- Produces Markdown summaries and JUnit XML for CI
+
+**Important notes**:
+- The script must run from the dev environment for Rust build dependencies
+- SQLx offline mode is enabled automatically (no database required)
+- Coverage artifacts are excluded from git via `.gitignore`
+
 See the [Test Plan](docs/test_plan.md) for detailed testing guidance.
 
 ## Project Management & Process
