@@ -56,11 +56,6 @@ None. Task may start immediately when selected for execution.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Review views/policies.rs for extractable components
-- [ ] #2 Create component files in components/policy/
-- [ ] #3 Update components/policy/mod.rs with proper exports
-- [ ] #4 Update views/policies.rs to import from components
-- [ ] #5 Remove TODO comments from mod.rs
-- [ ] #6 Build passes: nix build .#checks.x86_64-linux.web-ui
-- [ ] #7 Manual policies-page smoke test passes (render, open modal, submit/cancel paths).
+- [ ] #1 Manual policies-page smoke test passes (render, open modal, submit/cancel paths).
+- [ ] #2 Manual policies view smoke test passes with no regressions observed.
 <!-- AC:END -->
