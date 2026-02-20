@@ -1,7 +1,7 @@
 ---
 id: TASK-66
 title: Investigate 0% code coverage reporting in Snowfall/Nix workspace
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-20 01:56'
 updated_date: '2026-02-20 04:36'
@@ -45,3 +45,9 @@ Make coverage collection target the actual Rust crates under `packages/default`,
 - [ ] #4 Coverage summary is non-zero when existing tests execute successfully (unless a reproducible edge case is explicitly documented).
 - [ ] #5 Documentation is added/updated with the correct invocation and assumptions for Snowfall/Nix layout coverage execution.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-66-coverage-investigation
+<!-- SECTION:NOTES:END -->
