@@ -1,11 +1,11 @@
 ---
 id: TASK-65.0
 title: Developer auth mode with local selector screen
-status: To Do
+status: In Progress
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 04:27'
+updated_date: '2026-02-20 05:19'
 labels:
   - security
   - auth
@@ -68,4 +68,6 @@ Follow-up possibility: per-role dev fixture customization.
 Selected for auth micro-sprint planning (2026-02-20).
 
 Backlog structure fix: sequence dev auth mode after identity/RBAC data model foundation.
+
+LOCK: gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-65.0-developer-auth-mode
 <!-- SECTION:NOTES:END -->
