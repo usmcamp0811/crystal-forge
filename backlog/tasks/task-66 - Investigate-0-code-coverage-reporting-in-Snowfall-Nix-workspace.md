@@ -4,7 +4,7 @@ title: Investigate 0% code coverage reporting in Snowfall/Nix workspace
 status: In Progress
 assignee: []
 created_date: '2026-02-20 01:56'
-updated_date: '2026-02-20 04:44'
+updated_date: '2026-02-20 04:45'
 labels:
   - coverage
   - ci
@@ -43,7 +43,7 @@ Make coverage collection target the actual Rust crates under `packages/default`,
 - [x] #2 Coverage job/configuration is updated to run against the Rust workspace/crates under `packages/default`.
 - [x] #3 Running the documented coverage command in the repo environment generates a report with file entries from `packages/default`.
 - [x] #4 Coverage summary is non-zero when existing tests execute successfully (unless a reproducible edge case is explicitly documented).
-- [ ] #5 Documentation is added/updated with the correct invocation and assumptions for Snowfall/Nix layout coverage execution.
+- [x] #5 Documentation is added/updated with the correct invocation and assumptions for Snowfall/Nix layout coverage execution.
 <!-- AC:END -->
 
 ## Implementation Notes
