@@ -1,11 +1,11 @@
 ---
 id: TASK-65.1
 title: Identity and RBAC data model plus migrations
-status: To Do
+status: In Progress
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 04:27'
+updated_date: '2026-02-20 04:28'
 labels:
   - security
   - auth
@@ -13,8 +13,7 @@ labels:
   - database
   - backend
 milestone: m-14
-dependencies:
-  - TASK-65
+dependencies: []
 priority: high
 ---
 
@@ -65,4 +64,6 @@ Follow-up possibility: dedicated multi-tenant identity partitioning task.
 Selected for auth micro-sprint planning (2026-02-20).
 
 Backlog structure fix: removed parent dependency so this foundational child can execute first.
+
+LOCK: openai-gpt-5.3-codex on gray in ~/code/crystal-forge/TASK-65.1-identity-rbac-data-model-migrations
 <!-- SECTION:NOTES:END -->
