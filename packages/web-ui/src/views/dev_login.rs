@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::api::client::dev_login;
 use crate::theme;
 
 const DEV_ADMIN_EMAIL: &str = "dev-admin@crystal-forge.local";
@@ -42,6 +43,8 @@ const DEV_ROLES: &[DevRole] = &[
 pub fn DevLoginView() -> Element {
     let mut selected_role = use_signal(|| None::<String>);
     let mut error_message = use_signal(|| None::<String>);
+    let mut is_loading = use_signal(|| false);
+    let nav = navigator();
 
     rsx! {
         div {
@@ -103,7 +106,6 @@ pub fn DevLoginView() -> Element {
                         class: "space-y-3 mb-6",
                         for role in DEV_ROLES {
                             div {
-                                key: "{role.email}",
                                 class: "relative",
                                 button {
                                     class: if selected_role.read().as_ref() == Some(&role.email.to_string()) {
@@ -156,19 +158,39 @@ pub fn DevLoginView() -> Element {
                     // Continue button
                     button {
                         class: "w-full py-3 px-4 rounded-lg font-semibold text-sm transition-all",
-                        class: if selected_role.read().is_some() {
+                        class: if selected_role.read().is_some() && !is_loading() {
                             "bg-violet-600 hover:bg-violet-500 text-white shadow-lg shadow-violet-900/30"
                         } else {
                             "bg-gray-700 text-gray-400 cursor-not-allowed"
                         },
-                        disabled: selected_role.read().is_none(),
+                        disabled: selected_role.read().is_none() || is_loading(),
                         onclick: move |_| {
                             if let Some(email) = selected_role.read().clone() {
-                                // TODO: Call /api/auth/dev/login and handle session
-                                error_message.set(Some(format!("Login API not yet wired (selected: {})", email)));
+                                spawn(async move {
+                                    is_loading.set(true);
+                                    error_message.set(None);
+
+                                    match dev_login(&email).await {
+                                        Ok(_response) => {
+                                            // TODO: Store session/user info in context or local storage
+                                            // Redirect to dashboard
+                                            nav.push("/dashboard");
+                                        }
+                                        Err(e) => {
+                                            error_message.set(Some(format!("Login failed: {}", e)));
+                                            is_loading.set(false);
+                                        }
+                                    }
+                                });
                             }
                         },
-                        "Continue"
+                        {
+                            if is_loading() {
+                                "Logging in..."
+                            } else {
+                                "Continue"
+                            }
+                        }
                     }
                 }
 

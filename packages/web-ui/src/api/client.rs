@@ -18,6 +18,16 @@ fn base_url() -> String {
     format!("{origin}/api/v1")
 }
 
+/// Base URL for auth endpoints (not under /api/v1).
+fn auth_base_url() -> String {
+    let window = web_sys::window().expect("no global window");
+    let location = window.location();
+    let origin = location
+        .origin()
+        .unwrap_or_else(|_| "http://localhost:3000".into());
+    format!("{origin}/api/auth")
+}
+
 /// Fetch the dashboard summary.
 pub async fn fetch_dashboard() -> Result<DashboardSummary, ApiClientError> {
     let url = format!("{}/dashboard/summary", base_url());
@@ -61,6 +71,15 @@ pub async fn create_flake(
 pub async fn delete_flake(id: i32) -> Result<(), ApiClientError> {
     let url = format!("{}/flakes/{id}", base_url());
     send_empty("DELETE", &url).await
+}
+
+/// Development mode login.
+pub async fn dev_login(email: &str) -> Result<DevLoginResponse, ApiClientError> {
+    let url = format!("{}/dev/login", auth_base_url());
+    let request = DevLoginRequest {
+        email: email.to_string(),
+    };
+    send_json("POST", &url, Some(&request)).await
 }
 
 /// Errors that can occur when making API requests.
