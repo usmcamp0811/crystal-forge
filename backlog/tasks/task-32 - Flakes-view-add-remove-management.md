@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 02:20'
-updated_date: '2026-02-20 01:02'
+updated_date: '2026-02-20 01:13'
 labels:
   - ui
   - web-ui
@@ -29,4 +29,8 @@ Refinement (2026-02-19 sprint review): keep In Progress. Frontend add/remove flo
 Suggested remaining steps: document/confirm exact backend endpoints used for create/remove, add handler/query tests for add/remove semantics, and verify UI+API integration in dev stack.
 
 LOCK: gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-32-flakes-view-add-remove-management
+
+Implemented backend flakes management API: GET /api/v1/flakes, POST /api/v1/flakes, DELETE /api/v1/flakes/:id; wired FlakesListView add/remove flows to call these endpoints with API error surfacing and local fallback for fetch failure.
+
+Validation and checks executed in task worktree: rustfmt --check (touched files), SQLX_OFFLINE=true cargo check (packages/default), cargo check (packages/web-ui), SQLX_OFFLINE=true cargo test handlers::api::flakes::tests, cargo test (packages/web-ui).
 <!-- SECTION:NOTES:END -->
