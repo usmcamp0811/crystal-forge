@@ -56,6 +56,10 @@ None. Task may start immediately when selected for execution.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Manual policies-page smoke test passes (render, open modal, submit/cancel paths).
-- [ ] #2 Manual policies view smoke test passes with no regressions observed.
+- [ ] #1 `PolicyCard` and `PolicyEditorModal` are extracted into dedicated files under `packages/web-ui/src/components/policy/`.
+- [ ] #2 `packages/web-ui/src/components/policy/mod.rs` exports extracted components and has no placeholder TODO entries for those exports.
+- [ ] #3 `packages/web-ui/src/views/policies.rs` composes extracted components instead of defining extracted UI blocks inline.
+- [ ] #4 Policy list rendering and policy edit modal interactions preserve existing behavior (open, cancel, submit).
+- [ ] #5 `nix build .#checks.x86_64-linux.web-ui` completes successfully.
+- [ ] #6 Manual policies-page smoke test passes with no regressions observed.
 <!-- AC:END -->
