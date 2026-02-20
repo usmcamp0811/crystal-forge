@@ -1,11 +1,11 @@
 ---
 id: TASK-64
 title: Refine flakes git history card density and visual styling
-status: In Progress
+status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-19 13:26'
-updated_date: '2026-02-20 01:14'
+updated_date: '2026-02-20 03:11'
 labels:
   - ui
   - flakes
@@ -46,5 +46,7 @@ Verification Plan
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: openai-gpt-5.3-codex on gray in ~/code/crystal-forge/TASK-64-refine-flakes-git-history-card-density-and-visual-styling
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/116\nScreenshots: docs/screenshots/task-64/flakes-history-after.png, docs/screenshots/task-64/builds-reference.png
+
+Screenshot links updated to MR uploads (not repository files).
 <!-- SECTION:NOTES:END -->
