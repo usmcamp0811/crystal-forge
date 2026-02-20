@@ -60,7 +60,7 @@ pub fn DevLoginView() -> Element {
                     div {
                         class: "flex items-start gap-3",
                         svg {
-                            class: "w-6 h-6 text-amber-400 flex-shrink-0 mt-0.5",
+                            class: "w-5 h-5 text-amber-400 flex-shrink-0 mt-0.5",
                             fill: "none",
                             stroke: "currentColor",
                             view_box: "0 0 24 24",
@@ -128,7 +128,7 @@ pub fn DevLoginView() -> Element {
                                         }
                                         if selected_role.read().as_ref() == Some(&role.email.to_string()) {
                                             svg {
-                                                class: "w-5 h-5",
+                                                class: "w-4 h-4",
                                                 fill: "currentColor",
                                                 view_box: "0 0 20 20",
                                                 path {
