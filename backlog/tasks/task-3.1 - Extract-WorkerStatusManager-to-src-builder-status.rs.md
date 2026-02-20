@@ -2,9 +2,10 @@
 id: TASK-3.1
 title: Extract WorkerStatusManager to src/builder/status.rs
 status: Backlog
-assignee: ["KimiK2.5"]
+assignee:
+  - '@Matt'
 created_date: '2026-02-04 21:12'
-updated_date: '2026-02-19 03:39'
+updated_date: '2026-02-20 18:12'
 labels:
   - refactoring
   - builder
