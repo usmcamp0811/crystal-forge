@@ -2,9 +2,10 @@
 id: TASK-5
 title: 'Phase 4: Improve Error Handling'
 status: Backlog
-assignee: ["Codex 5.3"]
+assignee:
+  - '@Matt'
 created_date: '2026-02-04 20:16'
-updated_date: '2026-02-19 03:39'
+updated_date: '2026-02-20 18:12'
 labels:
   - refactoring
   - error-handling
