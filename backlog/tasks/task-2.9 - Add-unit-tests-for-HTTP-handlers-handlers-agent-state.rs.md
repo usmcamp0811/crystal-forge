@@ -1,10 +1,10 @@
 ---
 id: TASK-2.9
 title: Add unit tests for HTTP handlers - handlers/agent/state.rs
-status: In Progress
+status: Review
 assignee: ["Codex 5.3"]
 created_date: '2026-02-04 20:39'
-updated_date: '2026-02-20 02:10'
+updated_date: '2026-02-20 03:00'
 labels:
   - testing
   - handlers
@@ -78,6 +78,8 @@ None.
 ## Implementation Notes
 
 LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-2.9-agent-state-handler-tests
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/117
 
 Added a testable handler core (`update_with_lookup_and_insert`) with injected lookup/insert dependencies, then covered success, invalid payload, version compatibility (current vs V1), and insert failure paths in unit tests.
 
