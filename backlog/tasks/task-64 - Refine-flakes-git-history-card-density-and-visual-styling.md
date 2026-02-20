@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-19 13:26'
-updated_date: '2026-02-20 03:05'
+updated_date: '2026-02-20 03:11'
 labels:
   - ui
   - flakes
@@ -47,4 +47,6 @@ Verification Plan
 
 <!-- SECTION:NOTES:BEGIN -->
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/116\nScreenshots: docs/screenshots/task-64/flakes-history-after.png, docs/screenshots/task-64/builds-reference.png
+
+Screenshot links updated to MR uploads (not repository files).
 <!-- SECTION:NOTES:END -->
