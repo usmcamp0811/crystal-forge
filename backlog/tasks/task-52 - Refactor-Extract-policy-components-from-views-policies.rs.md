@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - Claude Opus 4.5
 created_date: '2026-02-18 02:46'
-updated_date: '2026-02-20 02:20'
+updated_date: '2026-02-20 02:33'
 labels:
   - refactoring
   - web-ui
@@ -68,4 +68,8 @@ None. Task may start immediately when selected for execution.
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-52-extract-policy-components
+
+Extracted PolicyCard and PolicyEditorModal into packages/web-ui/src/components/policy/ with shared types module.
+
+Verification executed: rustfmt (touched files), cargo check (web-ui), cargo test (web-ui), nix build .#checks.x86_64-linux.web-ui - all passed.
 <!-- SECTION:NOTES:END -->
