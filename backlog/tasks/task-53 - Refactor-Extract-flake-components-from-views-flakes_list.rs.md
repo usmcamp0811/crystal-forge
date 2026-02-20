@@ -2,16 +2,17 @@
 id: TASK-53
 title: 'Refactor: Extract flake components from views/flakes_list.rs'
 status: Backlog
-assignee: ["KimiK2.5"]
+assignee:
+  - '@Matt'
 created_date: '2026-02-18 02:46'
-updated_date: '2026-02-19 03:39'
+updated_date: '2026-02-20 18:12'
 labels:
   - refactoring
   - web-ui
   - flake
+milestone: m-10
 dependencies: []
 priority: low
-milestone: m-10
 ---
 
 ## Description
