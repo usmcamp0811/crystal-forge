@@ -1,10 +1,10 @@
 ---
 id: TASK-66
 title: Investigate 0% code coverage reporting in Snowfall/Nix workspace
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-20 01:56'
-updated_date: '2026-02-20 04:45'
+updated_date: '2026-02-20 04:46'
 labels:
   - coverage
   - ci
@@ -62,4 +62,6 @@ All three issues combined to report 0% coverage.
 Actual coverage: 11.15% (497/4456 lines)
 
 Fix applied in packages/coverage/default.nix.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/119
 <!-- SECTION:NOTES:END -->
