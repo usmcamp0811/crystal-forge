@@ -1,9 +1,10 @@
 ---
 id: TASK-66
 title: Investigate 0% code coverage reporting in Snowfall/Nix workspace
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-20 01:56'
+updated_date: '2026-02-20 04:36'
 labels:
   - coverage
   - ci
@@ -44,39 +45,3 @@ Make coverage collection target the actual Rust crates under `packages/default`,
 - [ ] #4 Coverage summary is non-zero when existing tests execute successfully (unless a reproducible edge case is explicitly documented).
 - [ ] #5 Documentation is added/updated with the correct invocation and assumptions for Snowfall/Nix layout coverage execution.
 <!-- AC:END -->
-
-## Architectural Constraints
-
-- Keep changes scoped to coverage tooling/configuration and related documentation.
-- Do not introduce business logic changes in application modules.
-- Follow deterministic repo workflows: use Nix-based commands and tracked files only.
-
-## Verification Plan
-
-Automated:
-
-- `nix build .#checks.x86_64-linux.coverage`
-- `nix develop -c cargo test --manifest-path packages/default/Cargo.toml`
-
-Manual:
-
-- Inspect generated coverage artifacts and confirm included source files are under `packages/default`.
-- Validate coverage summary percentage is not 0% after test execution.
-
-## Impact Areas
-
-- Infrastructure (CI and Nix checks)
-- Rust testing and coverage reporting
-- Developer documentation for local/CI coverage workflows
-
-## Risk Level
-
-Medium - changes affect CI quality signals and could cause false positives/false negatives if misconfigured.
-
-## Dependencies
-
-- TASK-58 (historical baseline for current coverage job setup)
-
-## Follow-Up Tasks
-
-- If deeper coverage gaps are discovered by module, create separate Backlog tasks for targeted test improvements.
