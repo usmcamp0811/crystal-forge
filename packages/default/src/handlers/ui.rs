@@ -29,7 +29,10 @@ pub async fn serve_ui(OriginalUri(uri): OriginalUri) -> Response {
 fn serve_index() -> Response {
     if let Some(file) = UI_DIST.get_file("index.html") {
         let mut headers = HeaderMap::new();
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("text/html; charset=utf-8"));
+        headers.insert(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        );
         headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-cache"));
         return (headers, file.contents().to_vec()).into_response();
     }

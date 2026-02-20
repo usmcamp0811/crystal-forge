@@ -11,7 +11,7 @@ pub mod tabs;
 
 pub use cards::{AgentCard, HardwareCard, NetworkCard, SecurityCard, SystemInfoCard};
 pub use helpers::{
-    deployment_policy_label, environment_style, format_memory, format_uptime, EnvStyle,
+    EnvStyle, deployment_policy_label, environment_style, format_memory, format_uptime,
 };
 pub use info_row::{BooleanRow, InfoRow, InfoRowMono, StatusBadge};
 pub use system_card::SystemCard;

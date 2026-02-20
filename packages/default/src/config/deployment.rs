@@ -87,7 +87,8 @@ mod tests {
     fn test_deployment_strategy_serde_immediate_persist() {
         let json = r#"{"strategy": "immediate_persist"}"#;
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-        let strategy: DeploymentStrategy = serde_json::from_value(parsed["strategy"].clone()).unwrap();
+        let strategy: DeploymentStrategy =
+            serde_json::from_value(parsed["strategy"].clone()).unwrap();
         assert_eq!(strategy, DeploymentStrategy::ImmediatePersist);
     }
 
@@ -95,7 +96,8 @@ mod tests {
     fn test_deployment_strategy_serde_boot_only() {
         let json = r#"{"strategy": "boot_only"}"#;
         let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
-        let strategy: DeploymentStrategy = serde_json::from_value(parsed["strategy"].clone()).unwrap();
+        let strategy: DeploymentStrategy =
+            serde_json::from_value(parsed["strategy"].clone()).unwrap();
         assert_eq!(strategy, DeploymentStrategy::BootOnly);
     }
 

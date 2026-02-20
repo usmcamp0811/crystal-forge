@@ -6,13 +6,15 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tracing::{debug, error, info, warn};
 
-use crate::models::commits::Commit;
 use crate::config::{BuildConfig, ServerConfig};
+use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
     DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
 };
 use crate::models::flakes::Flake;
-use crate::queries::derivations::{EvaluationStatus, insert_derivation_with_target, mark_derivation_dry_run_complete};
+use crate::queries::derivations::{
+    EvaluationStatus, insert_derivation_with_target, mark_derivation_dry_run_complete,
+};
 
 /// NixEvalJobResult with meta field
 #[derive(Debug, Clone, Serialize, Deserialize)]

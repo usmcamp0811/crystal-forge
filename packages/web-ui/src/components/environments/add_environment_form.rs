@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use super::{
-    normalize_color_hex, normalize_optional, required_policy_names,
-    validate_environment as validate_env, EnvironmentItem, NewEnvironmentDraft, PolicyOption,
+    EnvironmentItem, NewEnvironmentDraft, PolicyOption, normalize_color_hex, normalize_optional,
+    required_policy_names, validate_environment as validate_env,
 };
 use crate::components::layout::Card;
 use crate::theme;

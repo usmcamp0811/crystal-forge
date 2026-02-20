@@ -2,7 +2,7 @@
 
 use dioxus::prelude::*;
 
-use super::{normalize_color_hex, normalize_optional, EditEnvironmentDraft, EnvironmentItem};
+use super::{EditEnvironmentDraft, EnvironmentItem, normalize_color_hex, normalize_optional};
 use crate::theme;
 
 /// Validate an environment edit draft.

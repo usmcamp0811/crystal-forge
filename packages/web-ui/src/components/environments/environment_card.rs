@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use super::{required_policy_names, with_alpha, EnvironmentItem, PolicyOption};
+use super::{EnvironmentItem, PolicyOption, required_policy_names, with_alpha};
 use crate::theme;
 
 /// Props for the environment card.

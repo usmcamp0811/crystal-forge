@@ -633,7 +633,7 @@ fn TimelineGraph(
     let node_center = node_top + (node_size / 2); // Center at y=14
     let line_thickness = 5;
     let line_top = node_center - 2; // Line at y=12, 5px thick, centers at y=14
-                                    // Height for node + text labels only
+    // Height for node + text labels only
     let container_height = 65;
 
     rsx! {

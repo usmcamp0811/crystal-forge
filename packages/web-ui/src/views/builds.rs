@@ -3,10 +3,9 @@
 use dioxus::prelude::*;
 
 use crate::components::builds::{
-    apply_action, mock_builds, mock_workers, selected_build_data, BuildAction, BuildDetailPane,
-    BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal, DetailTab, MetricsRow,
-    PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem, WorkerStatus,
-    WorkerStrip,
+    BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
+    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
+    WorkerStatus, WorkerStrip, apply_action, mock_builds, mock_workers, selected_build_data,
 };
 use crate::theme;
 
