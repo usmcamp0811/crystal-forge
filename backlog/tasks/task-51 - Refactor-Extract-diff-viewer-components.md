@@ -2,16 +2,17 @@
 id: TASK-51
 title: 'Refactor: Extract diff viewer components'
 status: Backlog
-assignee: ["KimiK2.5"]
+assignee:
+  - '@Matt'
 created_date: '2026-02-18 02:46'
-updated_date: '2026-02-19 03:39'
+updated_date: '2026-02-20 18:12'
 labels:
   - refactoring
   - web-ui
   - diff
+milestone: m-3
 dependencies: []
 priority: low
-milestone: m-3
 ---
 
 ## Description
