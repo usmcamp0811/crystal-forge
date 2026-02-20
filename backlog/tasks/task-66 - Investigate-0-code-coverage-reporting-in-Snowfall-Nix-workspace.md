@@ -39,10 +39,10 @@ Make coverage collection target the actual Rust crates under `packages/default`,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Root cause of 0% coverage is identified and documented (for example: wrong working directory, wrong package selection, or incorrect source path filtering).
-- [ ] #2 Coverage job/configuration is updated to run against the Rust workspace/crates under `packages/default`.
-- [ ] #3 Running the documented coverage command in the repo environment generates a report with file entries from `packages/default`.
-- [ ] #4 Coverage summary is non-zero when existing tests execute successfully (unless a reproducible edge case is explicitly documented).
+- [x] #1 Root cause of 0% coverage is identified and documented (for example: wrong working directory, wrong package selection, or incorrect source path filtering).
+- [x] #2 Coverage job/configuration is updated to run against the Rust workspace/crates under `packages/default`.
+- [x] #3 Running the documented coverage command in the repo environment generates a report with file entries from `packages/default`.
+- [x] #4 Coverage summary is non-zero when existing tests execute successfully (unless a reproducible edge case is explicitly documented).
 - [ ] #5 Documentation is added/updated with the correct invocation and assumptions for Snowfall/Nix layout coverage execution.
 <!-- AC:END -->
 
