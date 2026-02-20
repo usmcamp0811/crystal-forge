@@ -173,8 +173,8 @@ pub fn DevLoginView() -> Element {
                                     match dev_login(&email).await {
                                         Ok(_response) => {
                                             // TODO: Store session/user info in context or local storage
-                                            // Redirect to dashboard
-                                            nav.push("/dashboard");
+                                            // Redirect to dashboard (root route)
+                                            nav.push("/");
                                         }
                                         Err(e) => {
                                             error_message.set(Some(format!("Login failed: {}", e)));

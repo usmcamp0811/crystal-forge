@@ -7,7 +7,7 @@ use crate::auth::models::Role;
 use crate::models::auth_identity::{AuthRole, UserRoleAssignment};
 use crate::models::users::User;
 use crate::queries::auth_identity::{assign_role_to_user, find_user_roles};
-use crate::queries::users::{get_user_by_email, insert_user};
+use crate::queries::users::{get_by_email, get_user_by_email, insert_user};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -50,9 +50,10 @@ pub fn dev_user_fixtures() -> Vec<DevUser> {
 /// This is idempotent and safe to call on startup in dev mode.
 pub async fn ensure_dev_users(pool: &PgPool) -> Result<()> {
     for fixture in dev_user_fixtures() {
-        let user = match get_user_by_email(pool, &fixture.email).await {
-            Ok(user) => user,
-            Err(_) => insert_user(pool, &fixture.email, Some(&fixture.display_name))
+        // Use get_by_email which returns Option<User> to distinguish "not found" from DB errors
+        let user = match get_by_email(pool, &fixture.email).await? {
+            Some(user) => user,
+            None => insert_user(pool, &fixture.email, Some(&fixture.display_name))
                 .await
                 .context("Failed to insert dev fixture user")?,
         };

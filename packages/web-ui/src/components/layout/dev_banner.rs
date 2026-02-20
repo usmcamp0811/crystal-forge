@@ -6,10 +6,22 @@ use dioxus::prelude::*;
 ///
 /// This banner should be displayed at the top of all authenticated pages
 /// when AUTH_MODE=dev is enabled on the server.
+///
+/// # Current Limitation
+///
+/// This banner is currently rendered unconditionally in the AppShell.
+/// This means it will appear even when AUTH_MODE=oidc/production, which is incorrect.
+///
+/// TODO: Gate rendering behind a reliable dev-mode signal:
+/// - Option 1: Add auth_mode field to /api/v1/status endpoint
+/// - Option 2: Check if /api/auth/dev/login returns 200 vs 404
+/// - Option 3: Add compile-time flag (requires build-time coordination)
+///
+/// For now, this limitation is documented in TASK-65.0 notes.
 #[component]
 pub fn DevModeBanner() -> Element {
-    // In a production build, we could check server config via API
-    // For now, we'll display the banner and let CSS handle visibility
+    // TODO: Add runtime check for AUTH_MODE=dev before rendering
+    // For now, banner displays unconditionally (see limitation note above)
     rsx! {
         div {
             class: "bg-yellow-500 border-b-2 border-yellow-600 px-4 py-2",
