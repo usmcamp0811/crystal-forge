@@ -1,13 +1,15 @@
 ---
 id: TASK-59
 title: 'BUG: server fails when systems[].deployment_policy missing'
-status: To Do
-assignee: ["Claude Opus 4.5"]
+status: Done
+assignee:
+  - Claude Opus 4.5
 created_date: '2026-02-19 03:04'
+updated_date: '2026-02-20 01:14'
 labels: []
+milestone: m-0
 dependencies: []
 priority: high
-milestone: m-0
 ---
 
 ## Description
@@ -37,3 +39,9 @@ Verification Plan
 - [ ] #4 Unit tests cover both missing and explicit deployment_policy cases
 - [ ] #5 nix build .#packages.x86_64-linux.server succeeds with fix
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Marked Done after user-confirmed merge; status had drifted in backlog.
+<!-- SECTION:NOTES:END -->
