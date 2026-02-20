@@ -1,8 +1,11 @@
 ---
 id: TASK-65
-title: "Feature: End-to-end OIDC authentication and multi-user RBAC"
-status: Backlog
-assignee: ["Claude Opus 4.5"]
+title: 'Feature: End-to-end OIDC authentication and multi-user RBAC'
+status: To Do
+assignee:
+  - Claude Opus 4.5
+created_date: ''
+updated_date: '2026-02-20 04:27'
 labels:
   - security
   - auth
@@ -11,7 +14,16 @@ labels:
   - ui
   - api
 milestone: m-14
-dependencies: []
+dependencies:
+  - TASK-65.0
+  - TASK-65.1
+  - TASK-65.2
+  - TASK-65.3
+  - TASK-65.4
+  - TASK-65.5
+  - TASK-65.6
+  - TASK-65.7
+  - TASK-65.8
 priority: high
 ---
 
@@ -58,4 +70,8 @@ Risk Level
 
 <!-- SECTION:NOTES:BEGIN -->
 Follow-up backlog item expected: future multi-tenant IAM design and migration strategy.
+
+Selected for auth micro-sprint planning (2026-02-20).
+
+Backlog structure fix: TASK-65 treated as epic umbrella; child tasks drive completion.
 <!-- SECTION:NOTES:END -->

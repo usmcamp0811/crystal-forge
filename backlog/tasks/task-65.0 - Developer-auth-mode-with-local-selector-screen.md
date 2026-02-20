@@ -1,8 +1,11 @@
 ---
 id: TASK-65.0
 title: Developer auth mode with local selector screen
-status: Backlog
-assignee: ["Codex 5.3"]
+status: To Do
+assignee:
+  - Codex 5.3
+created_date: ''
+updated_date: '2026-02-20 04:27'
 labels:
   - security
   - auth
@@ -11,7 +14,7 @@ labels:
   - api
 milestone: m-14
 dependencies:
-  - TASK-65
+  - TASK-65.1
 priority: high
 ---
 
@@ -61,4 +64,8 @@ Risk Level
 
 <!-- SECTION:NOTES:BEGIN -->
 Follow-up possibility: per-role dev fixture customization.
+
+Selected for auth micro-sprint planning (2026-02-20).
+
+Backlog structure fix: sequence dev auth mode after identity/RBAC data model foundation.
 <!-- SECTION:NOTES:END -->

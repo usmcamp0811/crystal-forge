@@ -1,8 +1,11 @@
 ---
 id: TASK-65.2
 title: OIDC provider integration foundation
-status: Backlog
-assignee: ["Claude Opus 4.5"]
+status: To Do
+assignee:
+  - Claude Opus 4.5
+created_date: ''
+updated_date: '2026-02-20 04:22'
 labels:
   - security
   - auth
@@ -57,4 +60,6 @@ Risk Level
 
 <!-- SECTION:NOTES:BEGIN -->
 Follow-up possibility: provider-specific UX tuning if needed.
+
+Selected for auth micro-sprint planning (2026-02-20).
 <!-- SECTION:NOTES:END -->

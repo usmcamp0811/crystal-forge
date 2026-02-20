@@ -1,8 +1,11 @@
 ---
 id: TASK-65.3
 title: Server session and secure cookie lifecycle
-status: Backlog
-assignee: ["Codex 5.3"]
+status: To Do
+assignee:
+  - Codex 5.3
+created_date: ''
+updated_date: '2026-02-20 04:22'
 labels:
   - security
   - auth
@@ -57,4 +60,6 @@ Risk Level
 
 <!-- SECTION:NOTES:BEGIN -->
 Follow-up possibility: additional session hardening after security review.
+
+Selected for auth micro-sprint planning (2026-02-20).
 <!-- SECTION:NOTES:END -->
