@@ -1,5 +1,6 @@
 //! OIDC provider configuration.
 
+use crate::auth::role_mapping::RoleMappingConfig;
 use serde::{Deserialize, Serialize};
 
 /// OIDC provider configuration.
@@ -27,6 +28,10 @@ pub struct OidcConfig {
     /// Claim mapping configuration
     #[serde(default)]
     pub claims: ClaimMappingConfig,
+
+    /// Role mapping configuration
+    #[serde(default)]
+    pub role_mapping: RoleMappingConfig,
 }
 
 /// Configuration for extracting claims from OIDC tokens.
@@ -147,6 +152,8 @@ impl OidcConfig {
                 .unwrap_or_else(|_| default_preferred_username_claim()),
         };
 
+        let role_mapping = RoleMappingConfig::from_env();
+
         Ok(Self {
             issuer_url,
             client_id,
@@ -154,6 +161,7 @@ impl OidcConfig {
             redirect_uri,
             scopes,
             claims,
+            role_mapping,
         })
     }
 }
