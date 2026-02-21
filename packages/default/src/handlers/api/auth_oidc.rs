@@ -26,7 +26,8 @@ use crate::auth::oidc::{
 use crate::auth::repository::normalize_tenant_discriminator;
 use crate::config::OidcConfig;
 use crate::handlers::api::auth_session::establish_user_session;
-use crate::queries::auth_identity::AuthIdentityRepository;
+use crate::models::auth_identity::AuthRole;
+use crate::queries::auth_identity::{AuthIdentityRepository, sync_user_role};
 
 /// Shared OIDC client state.
 #[derive(Clone)]
@@ -467,10 +468,26 @@ pub async fn oidc_callback(
 
     let ip_address = Some(addr.ip().to_string());
 
+    let mapped_role = map_oidc_roles_to_auth_role(&user_info.roles).ok_or_else(|| {
+        tracing::error!(
+            "OIDC user {} has no mappable roles in claims {:?}",
+            user.id,
+            user_info.roles
+        );
+        OidcError::RoleAssignmentFailed
+    })?;
+
+    sync_user_role(&pool, user.id, mapped_role)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to synchronize OIDC role for {}: {}", user.id, e);
+            OidcError::DatabaseError
+        })?;
+
     let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
         .await
         .map_err(|_| OidcError::SessionCreationFailed)?;
-    // TODO: Assign roles based on OIDC groups (future task)
+
     // TODO: Update external_identity claims on each login (keep profile fresh)
 
     tracing::info!(
@@ -533,6 +550,7 @@ pub enum OidcError {
     ClaimExtractionFailed,
     MissingEmail,
     UnverifiedEmail,
+    RoleAssignmentFailed,
     SessionCreationFailed,
     DatabaseError,
 }
@@ -592,6 +610,10 @@ impl IntoResponse for OidcError {
                 StatusCode::FORBIDDEN,
                 "Email not verified by OIDC provider - cannot create/link account".to_string(),
             ),
+            OidcError::RoleAssignmentFailed => (
+                StatusCode::FORBIDDEN,
+                "No valid OIDC role mapping found for user".to_string(),
+            ),
             OidcError::SessionCreationFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Authenticated but failed to create session".to_string(),
@@ -603,5 +625,51 @@ impl IntoResponse for OidcError {
         };
 
         (status, message).into_response()
+    }
+}
+
+fn map_oidc_roles_to_auth_role(roles: &[String]) -> Option<AuthRole> {
+    let normalized = roles
+        .iter()
+        .map(|r| r.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if normalized.iter().any(|r| r == "admin") {
+        return Some(AuthRole::Admin);
+    }
+    if normalized.iter().any(|r| r == "operator") {
+        return Some(AuthRole::Operator);
+    }
+    if normalized.iter().any(|r| r == "viewer") {
+        return Some(AuthRole::Viewer);
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_oidc_roles_to_auth_role;
+    use crate::models::auth_identity::AuthRole;
+
+    #[test]
+    fn map_roles_uses_admin_precedence() {
+        let roles = vec!["viewer".to_string(), "admin".to_string()];
+        assert_eq!(map_oidc_roles_to_auth_role(&roles), Some(AuthRole::Admin));
+    }
+
+    #[test]
+    fn map_roles_trims_and_normalizes_case() {
+        let roles = vec!["  OpErAtOr  ".to_string()];
+        assert_eq!(
+            map_oidc_roles_to_auth_role(&roles),
+            Some(AuthRole::Operator)
+        );
+    }
+
+    #[test]
+    fn map_roles_returns_none_when_unmapped() {
+        let roles = vec!["team-a".to_string(), "team-b".to_string()];
+        assert_eq!(map_oidc_roles_to_auth_role(&roles), None);
     }
 }

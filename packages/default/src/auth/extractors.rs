@@ -4,17 +4,16 @@
 //! Extractors validate session cookies, load user roles, and enforce permission requirements.
 
 use axum::{
-    async_trait,
+    Json, async_trait,
     extract::{FromRef, FromRequestParts},
-    http::{request::Parts, StatusCode},
+    http::{StatusCode, request::Parts},
     response::{IntoResponse, Response},
-    Json,
 };
 use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::session::{extract_cookie, hash_token, SESSION_COOKIE_NAME};
+use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::auth_identity::{find_active_session_by_token_hash, find_user_roles};
 
@@ -23,6 +22,7 @@ use crate::queries::auth_identity::{find_active_session_by_token_hash, find_user
 pub enum AuthError {
     Unauthorized,
     Forbidden,
+    Internal,
 }
 
 impl IntoResponse for AuthError {
@@ -37,6 +37,11 @@ impl IntoResponse for AuthError {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "Insufficient permissions",
+            ),
+            AuthError::Internal => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Authentication service unavailable",
             ),
         };
 
@@ -98,8 +103,8 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         // Extract session cookie
-        let session_token = extract_cookie(&parts.headers, SESSION_COOKIE_NAME)
-            .ok_or(AuthError::Unauthorized)?;
+        let session_token =
+            extract_cookie(&parts.headers, SESSION_COOKIE_NAME).ok_or(AuthError::Unauthorized)?;
 
         // Hash the token
         let session_hash = hash_token(&session_token);
@@ -110,13 +115,17 @@ where
         // Look up active session
         let session = find_active_session_by_token_hash(&pool, &session_hash)
             .await
-            .map_err(|_| AuthError::Unauthorized)?
+            .map_err(|e| {
+                tracing::error!("failed to query active session: {}", e);
+                AuthError::Internal
+            })?
             .ok_or(AuthError::Unauthorized)?;
 
         // Fetch user roles
-        let role_assignments = find_user_roles(&pool, session.user_id)
-            .await
-            .map_err(|_| AuthError::Unauthorized)?;
+        let role_assignments = find_user_roles(&pool, session.user_id).await.map_err(|e| {
+            tracing::error!("failed to query user roles for {}: {}", session.user_id, e);
+            AuthError::Internal
+        })?;
 
         let roles = role_assignments.into_iter().map(|ra| ra.role).collect();
 
@@ -127,9 +136,10 @@ where
     }
 }
 
-/// Extractor that requires any authenticated user (any role).
+/// Extractor that requires an authenticated user with at least one role.
 ///
 /// Returns 401 if no valid session exists.
+/// Returns 403 if the session is valid but the user has no role assignments.
 ///
 /// # Example
 /// ```ignore
@@ -152,6 +162,11 @@ where
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let user = AuthenticatedUser::from_request_parts(parts, state).await?;
+
+        if !user.has_any_role() {
+            return Err(AuthError::Forbidden);
+        }
+
         Ok(RequireAuth(user))
     }
 }
@@ -275,5 +290,23 @@ mod tests {
         assert!(multi_role_user.is_operator_or_higher());
         assert!(multi_role_user.has_role(AuthRole::Admin));
         assert!(multi_role_user.has_role(AuthRole::Operator));
+    }
+
+    #[test]
+    fn test_has_any_role_false_for_empty_roles() {
+        let user = AuthenticatedUser {
+            user_id: Uuid::new_v4(),
+            roles: vec![],
+        };
+
+        assert!(!user.has_any_role());
+        assert!(!user.is_operator_or_higher());
+        assert!(!user.is_admin());
+    }
+
+    #[test]
+    fn test_auth_error_internal_response_shape() {
+        let response = AuthError::Internal.into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }
