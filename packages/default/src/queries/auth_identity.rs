@@ -166,6 +166,41 @@ impl<'a> AuthIdentityRepository<'a> {
 
         Ok(created_session)
     }
+
+    pub async fn find_active_session_by_token_hash(
+        &self,
+        session_token_hash: &str,
+    ) -> Result<Option<UserSession>, AuthRepositoryError> {
+        let session = sqlx::query_as::<_, UserSession>(
+            "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address
+             FROM user_sessions
+             WHERE session_token_hash = $1
+               AND invalidated_at IS NULL
+               AND expires_at > NOW()",
+        )
+        .bind(session_token_hash)
+        .fetch_optional(self.pool)
+        .await?;
+
+        Ok(session)
+    }
+
+    pub async fn invalidate_session_by_token_hash(
+        &self,
+        session_token_hash: &str,
+    ) -> Result<bool, AuthRepositoryError> {
+        let result = sqlx::query(
+            "UPDATE user_sessions
+             SET invalidated_at = NOW()
+             WHERE session_token_hash = $1
+               AND invalidated_at IS NULL",
+        )
+        .bind(session_token_hash)
+        .execute(self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 // Convenience wrapper functions for common operations
@@ -213,4 +248,22 @@ pub async fn create_user_session(
         ip_address,
     };
     repo.create_session(&session).await
+}
+
+pub async fn find_active_session_by_token_hash(
+    pool: &PgPool,
+    session_token_hash: &str,
+) -> Result<Option<UserSession>, AuthRepositoryError> {
+    let repo = AuthIdentityRepository::new(pool);
+    repo.find_active_session_by_token_hash(session_token_hash)
+        .await
+}
+
+pub async fn invalidate_session_by_token_hash(
+    pool: &PgPool,
+    session_token_hash: &str,
+) -> Result<bool, AuthRepositoryError> {
+    let repo = AuthIdentityRepository::new(pool);
+    repo.invalidate_session_by_token_hash(session_token_hash)
+        .await
 }

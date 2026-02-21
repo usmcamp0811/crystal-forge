@@ -1,4 +1,5 @@
 use anyhow::Context;
+use axum::Extension;
 use axum::{
     Router,
     routing::{delete, get, post},
@@ -11,7 +12,7 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
-        api::{auth_dev, dashboard, flakes},
+        api::{auth_dev, auth_oidc, auth_session, dashboard, flakes},
         status,
         webhook::webhook_handler,
     },
@@ -21,6 +22,7 @@ use crystal_forge::{
 };
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use tracing::{debug, info, warn};
@@ -106,6 +108,20 @@ async fn main() -> anyhow::Result<()> {
     if auth_mode == "dev" {
         info!("Registering development auth endpoints at /api/auth/dev/*");
         app = app.route("/api/auth/dev/login", post(auth_dev::dev_login));
+    } else if auth_mode == "oidc" {
+        info!("Registering OIDC auth endpoints at /api/auth/oidc/*");
+        let oidc_config = crystal_forge::config::OidcConfig::from_env()
+            .context("Failed to load OIDC configuration from environment")?;
+        let oidc_state = Arc::new(auth_oidc::OidcClientState::new(oidc_config).await?);
+
+        let oidc_router = Router::new()
+            .route("/api/auth/oidc/login", get(auth_oidc::oidc_login))
+            .route("/api/auth/oidc/callback", get(auth_oidc::oidc_callback))
+            .layer(Extension(oidc_state));
+
+        app = app
+            .merge(oidc_router)
+            .route("/api/auth/logout", post(auth_session::logout));
     }
 
     #[cfg(feature = "embedded-ui")]
