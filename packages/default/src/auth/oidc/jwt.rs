@@ -43,6 +43,11 @@ pub struct IdTokenClaims {
     #[serde(deserialize_with = "deserialize_aud")]
     pub aud: Vec<String>,
 
+    /// Authorized party (azp) - the party to which the ID token was issued
+    /// Required when aud contains multiple values (OIDC Core 1.0 §3.1.3.7)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub azp: Option<String>,
+
     /// Expiration time (exp) - Unix timestamp
     pub exp: i64,
 
@@ -172,6 +177,29 @@ impl JwtValidator {
                 self.client_id,
                 token_data.claims.aud
             );
+        }
+
+        // OIDC Core 1.0 §3.1.3.7: If aud contains multiple values, azp MUST be present
+        // and MUST equal our client_id (prevents token substitution attacks)
+        if token_data.claims.aud.len() > 1 {
+            match &token_data.claims.azp {
+                Some(azp) if azp == &self.client_id => {
+                    tracing::debug!("Multi-audience token: azp validated ({})", azp);
+                }
+                Some(azp) => {
+                    anyhow::bail!(
+                        "Multi-audience token: azp='{}' does not match client_id='{}'",
+                        azp,
+                        self.client_id
+                    );
+                }
+                None => {
+                    anyhow::bail!(
+                        "Multi-audience token (aud={:?}) missing required azp claim",
+                        token_data.claims.aud
+                    );
+                }
+            }
         }
 
         Ok(token_data.claims)

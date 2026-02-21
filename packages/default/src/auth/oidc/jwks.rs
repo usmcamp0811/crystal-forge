@@ -83,30 +83,89 @@ impl JwksCache {
         Ok(jwks)
     }
 
+    /// Force refresh JWKS from the provider, bypassing cache entirely.
+    ///
+    /// Use this when:
+    /// - Token validation fails with "key not found" (possible key rotation)
+    /// - You need to guarantee fresh keys
+    ///
+    /// This method updates the cache with the fresh JWKS.
+    pub async fn force_refresh(&self) -> Result<CoreJsonWebKeySet> {
+        tracing::info!("Force refreshing JWKS (cache bypassed)");
+        let jwks = self.fetch_from_provider().await?;
+        
+        // Update cache
+        {
+            let mut cache = self.cache.write().await;
+            *cache = Some(CachedJwks::new(jwks.clone(), self.ttl));
+        }
+        
+        Ok(jwks)
+    }
+
     /// Fetch JWKS directly from the provider (bypasses cache).
+    ///
+    /// Implements:
+    /// - 10-second timeout (prevents hanging on slow providers)
+    /// - Single retry on transient failures (network glitches, rate limits)
     async fn fetch_from_provider(&self) -> Result<CoreJsonWebKeySet> {
         tracing::debug!("Fetching JWKS from {}", self.jwks_uri);
 
-        let response = reqwest::get(&self.jwks_uri)
-            .await
-            .context("Failed to fetch JWKS from provider")?;
+        // Try with timeout and retry once on failure
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .context("Failed to build HTTP client")?;
 
-        if !response.status().is_success() {
-            anyhow::bail!(
-                "JWKS fetch failed with status {}: {}",
-                response.status(),
-                response.text().await.unwrap_or_default()
-            );
+        let mut last_error = None;
+        
+        for attempt in 1..=2 {
+            match client.get(&self.jwks_uri).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let status = response.status();
+                        let body = response.text().await.unwrap_or_default();
+                        
+                        if attempt == 1 && (status.is_server_error() || status == 429) {
+                            tracing::warn!(
+                                "JWKS fetch failed (attempt {}/2): {} - retrying",
+                                attempt, status
+                            );
+                            last_error = Some(anyhow::anyhow!(
+                                "JWKS fetch failed with status {}: {}",
+                                status, body
+                            ));
+                            continue;
+                        }
+                        
+                        anyhow::bail!("JWKS fetch failed with status {}: {}", status, body);
+                    }
+
+                    let jwks: CoreJsonWebKeySet = response
+                        .json()
+                        .await
+                        .context("Failed to parse JWKS response")?;
+
+                    tracing::debug!(
+                        "Successfully fetched JWKS with {} keys (attempt {})",
+                        jwks.keys().len(),
+                        attempt
+                    );
+
+                    return Ok(jwks);
+                }
+                Err(e) if attempt == 1 => {
+                    tracing::warn!("JWKS fetch failed (attempt {}/2): {} - retrying", attempt, e);
+                    last_error = Some(e.into());
+                    continue;
+                }
+                Err(e) => {
+                    return Err(e).context("Failed to fetch JWKS from provider");
+                }
+            }
         }
 
-        let jwks: CoreJsonWebKeySet = response
-            .json()
-            .await
-            .context("Failed to parse JWKS response")?;
-
-        tracing::debug!("Successfully fetched JWKS with {} keys", jwks.keys().len());
-
-        Ok(jwks)
+        Err(last_error.unwrap_or_else(|| anyhow::anyhow!("JWKS fetch failed after retries")))
     }
 
     /// Force refresh the JWKS cache (useful for key rotation).

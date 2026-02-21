@@ -170,10 +170,11 @@ pub async fn oidc_callback(
         })?;
 
     if cookie_state != params.state {
+        // Don't log raw state tokens (sensitive values)
         tracing::error!(
-            "State mismatch: cookie='{}' param='{}'",
-            cookie_state,
-            params.state
+            "State mismatch: cookie_len={} param_len={} match=false",
+            cookie_state.len(),
+            params.state.len()
         );
         return Err(OidcError::StateMismatch);
     }
@@ -186,7 +187,8 @@ pub async fn oidc_callback(
         .retrieve(&params.state)
         .await
         .ok_or_else(|| {
-            tracing::error!("Invalid or expired CSRF state token: {}", params.state);
+            // Don't log raw state token (sensitive value)
+            tracing::error!("Invalid or expired CSRF state token (len={})", params.state.len());
             OidcError::InvalidCsrfToken
         })?;
 
@@ -222,13 +224,39 @@ pub async fn oidc_callback(
         })?;
 
     // Validate and decode ID token
-    let claims = oidc_state
+    // If validation fails due to missing key (kid not found), retry with fresh JWKS
+    // This handles provider key rotation scenarios
+    let claims = match oidc_state
         .jwt_validator
         .validate_id_token(id_token.to_string().as_str(), &jwks)
-        .map_err(|e| {
+    {
+        Ok(claims) => claims,
+        Err(e) if e.to_string().contains("No matching key found in JWKS") => {
+            tracing::warn!("Key not found in cached JWKS, force refreshing (possible key rotation)");
+            
+            // Force refresh JWKS cache (bypass TTL) and retry once
+            let fresh_jwks = oidc_state
+                .jwks_cache
+                .force_refresh()
+                .await
+                .map_err(|e| {
+                    tracing::error!("JWKS force refresh failed: {}", e);
+                    OidcError::JwksFetchFailed
+                })?;
+            
+            oidc_state
+                .jwt_validator
+                .validate_id_token(id_token.to_string().as_str(), &fresh_jwks)
+                .map_err(|e| {
+                    tracing::error!("ID token validation failed after JWKS refresh: {}", e);
+                    OidcError::InvalidIdToken
+                })?
+        }
+        Err(e) => {
             tracing::error!("ID token validation failed: {}", e);
-            OidcError::InvalidIdToken
-        })?;
+            return Err(OidcError::InvalidIdToken);
+        }
+    };
 
     // Validate nonce (protects against token replay attacks)
     // The nonce claim might be in custom_claims
@@ -241,7 +269,12 @@ pub async fn oidc_callback(
         })?;
 
     if token_nonce != session.nonce.secret() {
-        tracing::error!("Nonce mismatch: expected {}, got {}", session.nonce.secret(), token_nonce);
+        // Don't log raw nonce values (sensitive)
+        tracing::error!(
+            "Nonce mismatch: expected_len={} token_len={} match=false",
+            session.nonce.secret().len(),
+            token_nonce.len()
+        );
         return Err(OidcError::InvalidNonce);
     }
 
@@ -272,24 +305,39 @@ pub async fn oidc_callback(
         user_info.subject
     );
 
+    // SECURITY: Require email_verified=true before account linking/creation
+    // Prevents account takeover on providers that don't verify email addresses
+    // Attack scenario: Attacker claims victim@example.com without verification
+    //                  → Links/creates account → Takes over victim's account
+    let email = user_info.email.as_ref().ok_or(OidcError::MissingEmail)?;
+    
+    if !user_info.email_verified {
+        tracing::error!(
+            "Email '{}' not verified by provider (email_verified=false) - rejecting authentication",
+            email
+        );
+        return Err(OidcError::UnverifiedEmail);
+    }
+
+    tracing::debug!("Email verified by provider: {}", email);
+
     // Find or create user in database
-    let user = if let Some(email) = &user_info.email {
-        match get_by_email(&pool, email).await.map_err(|_| OidcError::DatabaseError)? {
-            Some(user) => user,
-            None => {
-                // Create new user
-                tracing::info!("Creating new user: {}", email);
-                insert_user(
-                    &pool,
-                    email,
-                    user_info.display_name.as_deref(),
-                )
-                .await
-                .map_err(|_| OidcError::DatabaseError)?
-            }
+    let user = match get_by_email(&pool, email).await.map_err(|_| OidcError::DatabaseError)? {
+        Some(user) => {
+            tracing::debug!("Existing user found: {}", email);
+            user
         }
-    } else {
-        return Err(OidcError::MissingEmail);
+        None => {
+            // Create new user (only if email is verified)
+            tracing::info!("Creating new verified user: {}", email);
+            insert_user(
+                &pool,
+                email,
+                user_info.display_name.as_deref(),
+            )
+            .await
+            .map_err(|_| OidcError::DatabaseError)?
+        }
     };
 
     // TODO: Create session (TASK-65.3)
@@ -345,6 +393,7 @@ pub enum OidcError {
     InvalidNonce,
     ClaimExtractionFailed,
     MissingEmail,
+    UnverifiedEmail,
     DatabaseError,
 }
 
@@ -398,6 +447,10 @@ impl IntoResponse for OidcError {
             OidcError::MissingEmail => (
                 StatusCode::BAD_REQUEST,
                 "User email not found in OIDC claims".to_string(),
+            ),
+            OidcError::UnverifiedEmail => (
+                StatusCode::FORBIDDEN,
+                "Email not verified by OIDC provider - cannot create/link account".to_string(),
             ),
             OidcError::DatabaseError => (
                 StatusCode::INTERNAL_SERVER_ERROR,

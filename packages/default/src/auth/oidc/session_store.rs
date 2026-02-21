@@ -47,28 +47,69 @@ impl OidcSession {
 /// - Encrypted cookies for single-server deployments
 /// - Database-backed sessions for persistence
 ///
+/// **DoS Protection**: 
+/// - Hard cap at 10,000 sessions (prevents unbounded memory growth)
+/// - Opportunistic cleanup on insert/retrieve (evicts expired sessions)
+/// - LRU eviction when at capacity (oldest sessions removed first)
+///
 /// See TASK-65.3 for proper session management implementation.
 #[derive(Debug, Clone)]
 pub struct OidcSessionStore {
     sessions: Arc<RwLock<HashMap<String, OidcSession>>>,
     ttl: Duration,
+    max_sessions: usize,
 }
 
 impl OidcSessionStore {
-    /// Create a new session store with the given TTL.
+    /// Create a new session store with the given TTL and max capacity.
     ///
     /// Default TTL is 10 minutes (OAuth2 authorization code is short-lived).
+    /// Default max capacity is 10,000 sessions (prevents memory DoS).
     pub fn new(ttl: Option<Duration>) -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             ttl: ttl.unwrap_or(Duration::from_secs(600)), // 10 minutes
+            max_sessions: 10_000, // Hard cap to prevent DoS
         }
     }
 
     /// Store OIDC session data keyed by state token.
+    ///
+    /// **DoS Protection**: 
+    /// - Opportunistically cleans expired sessions before insert
+    /// - Enforces max capacity (10,000 sessions)
+    /// - Evicts oldest session if at capacity (LRU)
     pub async fn store(&self, state: String, session: OidcSession) {
         let mut sessions = self.sessions.write().await;
-        tracing::debug!("Storing OIDC session for state: {}", state);
+        
+        // Opportunistic cleanup: remove expired sessions before inserting
+        let before_cleanup = sessions.len();
+        sessions.retain(|_, s| !s.is_expired(self.ttl));
+        let after_cleanup = sessions.len();
+        
+        if before_cleanup != after_cleanup {
+            tracing::debug!(
+                "Opportunistic cleanup: removed {} expired sessions",
+                before_cleanup - after_cleanup
+            );
+        }
+        
+        // Enforce max capacity (DoS protection)
+        if sessions.len() >= self.max_sessions {
+            // LRU eviction: find and remove oldest session
+            if let Some(oldest_key) = sessions
+                .iter()
+                .min_by_key(|(_, s)| s.created_at)
+                .map(|(k, _)| k.clone())
+            {
+                sessions.remove(&oldest_key);
+                tracing::warn!(
+                    "Session store at capacity ({}), evicted oldest session",
+                    self.max_sessions
+                );
+            }
+        }
+        
         sessions.insert(state, session);
     }
 
@@ -79,19 +120,32 @@ impl OidcSessionStore {
     /// - Session expired
     ///
     /// **Note**: This is a consume operation - session is removed after retrieval.
+    ///
+    /// **DoS Protection**: Opportunistically cleans expired sessions during retrieval.
     pub async fn retrieve(&self, state: &str) -> Option<OidcSession> {
         let mut sessions = self.sessions.write().await;
         
+        // Opportunistic cleanup: remove expired sessions during retrieval
+        let before_cleanup = sessions.len();
+        sessions.retain(|k, s| k == state || !s.is_expired(self.ttl));
+        let after_cleanup = sessions.len();
+        
+        if before_cleanup != after_cleanup {
+            tracing::debug!(
+                "Opportunistic cleanup on retrieve: removed {} expired sessions",
+                before_cleanup - after_cleanup
+            );
+        }
+        
         if let Some(session) = sessions.remove(state) {
             if session.is_expired(self.ttl) {
-                tracing::warn!("OIDC session expired for state: {}", state);
+                // Should not happen after cleanup above, but double-check
+                tracing::warn!("Retrieved session was expired (edge case)");
                 return None;
             }
-            tracing::debug!("Retrieved OIDC session for state: {}", state);
             return Some(session);
         }
         
-        tracing::warn!("OIDC session not found for state: {}", state);
         None
     }
 
