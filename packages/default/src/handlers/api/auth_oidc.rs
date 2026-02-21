@@ -5,25 +5,28 @@
 //! 2. /api/auth/oidc/callback - Handles provider redirect, exchanges code for tokens
 
 use axum::{
-    extract::{Query, State},
-    http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect, Response},
+    extract::{ConnectInfo, Extension, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use openidconnect::{
-    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, Nonce, PkceCodeChallenge, RedirectUrl,
+    Scope, TokenResponse,
+    core::{CoreAuthenticationFlow, CoreClient},
     reqwest::async_http_client,
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    RedirectUrl, Scope, TokenResponse,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::PgPool;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use uuid::Uuid;
 
-use crate::auth::oidc::{ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore};
-use crate::config::OidcConfig;
+use crate::auth::oidc::{
+    ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore,
+};
 use crate::auth::repository::normalize_tenant_discriminator;
-use crate::queries::auth_identity::{AuthIdentityRepository, NewExternalIdentity};
+use crate::config::OidcConfig;
+use crate::handlers::api::auth_session::establish_user_session;
+use crate::queries::auth_identity::AuthIdentityRepository;
 
 /// Shared OIDC client state.
 #[derive(Clone)]
@@ -40,8 +43,7 @@ impl OidcClientState {
     /// Initialize OIDC client from configuration.
     pub async fn new(config: OidcConfig) -> anyhow::Result<Self> {
         // Discover provider metadata
-        let provider_metadata =
-            OidcProviderMetadata::discover(&config.issuer_url).await?;
+        let provider_metadata = OidcProviderMetadata::discover(&config.issuer_url).await?;
 
         // Get JWKS URI before moving metadata
         let jwks_uri = provider_metadata.jwks_uri();
@@ -55,10 +57,7 @@ impl OidcClientState {
         .set_redirect_uri(RedirectUrl::new(config.redirect_uri.clone())?);
 
         let claim_extractor = ClaimExtractor::new(config.claims.clone());
-        let jwt_validator = JwtValidator::new(
-            config.issuer_url.clone(),
-            config.client_id.clone(),
-        );
+        let jwt_validator = JwtValidator::new(config.issuer_url.clone(), config.client_id.clone());
         let jwks_cache = JwksCache::new(jwks_uri.clone(), None); // Use default 1-hour TTL
         let session_store = OidcSessionStore::new(None); // Use default 10-minute TTL
 
@@ -77,7 +76,9 @@ impl OidcClientState {
 ///
 /// This endpoint redirects the user to the OIDC provider's authorization endpoint.
 /// Sets a secure cookie binding the OIDC state to this browser session.
-pub async fn oidc_login(State(oidc_state): State<Arc<OidcClientState>>) -> impl IntoResponse {
+pub async fn oidc_login(
+    Extension(oidc_state): Extension<Arc<OidcClientState>>,
+) -> impl IntoResponse {
     // Generate PKCE challenge and verifier
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -102,7 +103,10 @@ pub async fn oidc_login(State(oidc_state): State<Arc<OidcClientState>>) -> impl 
     // Store CSRF token, nonce, and PKCE verifier in session for validation
     let session = OidcSession::new(csrf_token.clone(), nonce, pkce_verifier);
     let state_value = csrf_token.secret().clone();
-    oidc_state.session_store.store(state_value.clone(), session).await;
+    oidc_state
+        .session_store
+        .store(state_value.clone(), session)
+        .await;
 
     tracing::info!("Initiating OIDC login flow, redirecting to: {}", auth_url);
 
@@ -146,8 +150,9 @@ pub struct OidcCallbackParams {
 /// **Security**: Validates that the state parameter matches the session cookie
 /// to prevent login CSRF and account confusion attacks.
 pub async fn oidc_callback(
-    State(oidc_state): State<Arc<OidcClientState>>,
+    Extension(oidc_state): Extension<Arc<OidcClientState>>,
     State(pool): State<PgPool>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(params): Query<OidcCallbackParams>,
 ) -> Result<impl IntoResponse, OidcError> {
@@ -155,21 +160,17 @@ pub async fn oidc_callback(
     if let Some(error) = params.error {
         let description = params.error_description.unwrap_or_default();
         tracing::error!("OIDC provider error: {} - {}", error, description);
-        return Err(OidcError::ProviderError {
-            error,
-            description,
-        });
+        return Err(OidcError::ProviderError { error, description });
     }
 
     // SECURITY: Validate state parameter matches session cookie
     // This binds the OAuth2 flow to the browser session, preventing:
     // - Login CSRF attacks (attacker can't force victim to use attacker's account)
     // - Account confusion (multiple concurrent logins don't mix state)
-    let cookie_state = extract_oidc_state_cookie(&headers)
-        .ok_or_else(|| {
-            tracing::error!("Missing or invalid __Host-oidc-state cookie");
-            OidcError::MissingStateCookie
-        })?;
+    let cookie_state = extract_oidc_state_cookie(&headers).ok_or_else(|| {
+        tracing::error!("Missing or invalid __Host-oidc-state cookie");
+        OidcError::MissingStateCookie
+    })?;
 
     if cookie_state != params.state {
         // Don't log raw state tokens (sensitive values)
@@ -190,7 +191,10 @@ pub async fn oidc_callback(
         .await
         .ok_or_else(|| {
             // Don't log raw state token (sensitive value)
-            tracing::error!("Invalid or expired CSRF state token (len={})", params.state.len());
+            tracing::error!(
+                "Invalid or expired CSRF state token (len={})",
+                params.state.len()
+            );
             OidcError::InvalidCsrfToken
         })?;
 
@@ -211,19 +215,13 @@ pub async fn oidc_callback(
         })?;
 
     // Get ID token
-    let id_token = token_response
-        .id_token()
-        .ok_or(OidcError::MissingIdToken)?;
+    let id_token = token_response.id_token().ok_or(OidcError::MissingIdToken)?;
 
     // Fetch JWKS for validation (uses cache with 1-hour TTL)
-    let jwks = oidc_state
-        .jwks_cache
-        .fetch()
-        .await
-        .map_err(|e| {
-            tracing::error!("JWKS fetch failed: {}", e);
-            OidcError::JwksFetchFailed
-        })?;
+    let jwks = oidc_state.jwks_cache.fetch().await.map_err(|e| {
+        tracing::error!("JWKS fetch failed: {}", e);
+        OidcError::JwksFetchFailed
+    })?;
 
     // Validate and decode ID token
     // If validation fails due to missing key (kid not found), retry with fresh JWKS
@@ -234,18 +232,16 @@ pub async fn oidc_callback(
     {
         Ok(claims) => claims,
         Err(e) if e.to_string().contains("No matching key found in JWKS") => {
-            tracing::warn!("Key not found in cached JWKS, force refreshing (possible key rotation)");
-            
+            tracing::warn!(
+                "Key not found in cached JWKS, force refreshing (possible key rotation)"
+            );
+
             // Force refresh JWKS cache (bypass TTL) and retry once
-            let fresh_jwks = oidc_state
-                .jwks_cache
-                .force_refresh()
-                .await
-                .map_err(|e| {
-                    tracing::error!("JWKS force refresh failed: {}", e);
-                    OidcError::JwksFetchFailed
-                })?;
-            
+            let fresh_jwks = oidc_state.jwks_cache.force_refresh().await.map_err(|e| {
+                tracing::error!("JWKS force refresh failed: {}", e);
+                OidcError::JwksFetchFailed
+            })?;
+
             oidc_state
                 .jwt_validator
                 .validate_id_token(id_token.to_string().as_str(), &fresh_jwks)
@@ -262,7 +258,8 @@ pub async fn oidc_callback(
 
     // Validate nonce (protects against token replay attacks)
     // The nonce claim might be in custom_claims
-    let token_nonce = claims.custom_claims
+    let token_nonce = claims
+        .custom_claims
         .get("nonce")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
@@ -310,7 +307,7 @@ pub async fn oidc_callback(
     // SECURITY: Require email_verified=true before account linking/creation
     // Prevents account takeover on providers that don't verify email addresses
     let email = user_info.email.as_ref().ok_or(OidcError::MissingEmail)?;
-    
+
     if !user_info.email_verified {
         tracing::error!(
             "Email not verified by provider (email_verified=false) - rejecting authentication"
@@ -354,7 +351,7 @@ pub async fn oidc_callback(
                 subject,
                 identity.user_id
             );
-            
+
             // Load user by ID (not email - email may have changed at provider)
             sqlx::query_as::<_, crate::models::users::User>(
                 "SELECT id, username, email, first_name, last_name, created_at, updated_at, password_hash
@@ -371,7 +368,7 @@ pub async fn oidc_callback(
         None => {
             // New OIDC identity - create user and bind identity atomically
             tracing::info!("New OIDC identity, creating user: email={}", email);
-            
+
             // Use transaction to ensure user creation + identity binding are atomic
             // If either fails, both roll back (prevents orphaned users or identities)
             let mut tx = pool.begin().await.map_err(|e| {
@@ -395,7 +392,7 @@ pub async fn oidc_callback(
 
             sqlx::query(
                 "INSERT INTO users (id, username, first_name, last_name, email)
-                 VALUES ($1, $2, $3, $4, $5)"
+                 VALUES ($1, $2, $3, $4, $5)",
             )
             .bind(user_id)
             .bind(username)
@@ -463,24 +460,45 @@ pub async fn oidc_callback(
         }
     };
 
-    // TODO: Create session (TASK-65.3)
-    // TODO: Set session cookie (TASK-65.3)
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string);
+
+    let ip_address = Some(addr.ip().to_string());
+
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
+        .await
+        .map_err(|_| OidcError::SessionCreationFailed)?;
     // TODO: Assign roles based on OIDC groups (future task)
     // TODO: Update external_identity claims on each login (keep profile fresh)
 
-    tracing::info!("User authenticated via OIDC: user_id={} email={}", user.id, user.email);
+    tracing::info!(
+        "User authenticated via OIDC: user_id={} email={}",
+        user.id,
+        user.email
+    );
 
-    // Redirect to dashboard (clear state cookie)
-    let response = Response::builder()
+    // Redirect to dashboard with authenticated session cookies.
+    let mut response = Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, "/")
-        .header(
-            header::SET_COOKIE,
-            "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0",
-        )
         .body(axum::body::Body::empty())
         .unwrap();
-    
+
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        ),
+    );
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.session_cookie);
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.csrf_cookie);
+
     Ok(response)
 }
 
@@ -502,10 +520,7 @@ fn extract_oidc_state_cookie(headers: &HeaderMap) -> Option<String> {
 /// OIDC error responses.
 #[derive(Debug)]
 pub enum OidcError {
-    ProviderError {
-        error: String,
-        description: String,
-    },
+    ProviderError { error: String, description: String },
     MissingStateCookie,
     StateMismatch,
     InvalidCsrfToken,
@@ -518,6 +533,7 @@ pub enum OidcError {
     ClaimExtractionFailed,
     MissingEmail,
     UnverifiedEmail,
+    SessionCreationFailed,
     DatabaseError,
 }
 
@@ -575,6 +591,10 @@ impl IntoResponse for OidcError {
             OidcError::UnverifiedEmail => (
                 StatusCode::FORBIDDEN,
                 "Email not verified by OIDC provider - cannot create/link account".to_string(),
+            ),
+            OidcError::SessionCreationFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Authenticated but failed to create session".to_string(),
             ),
             OidcError::DatabaseError => (
                 StatusCode::INTERNAL_SERVER_ERROR,

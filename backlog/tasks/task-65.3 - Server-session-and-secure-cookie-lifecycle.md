@@ -5,7 +5,7 @@ status: Review
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-21 04:03'
+updated_date: '2026-02-21 03:46'
 labels:
   - security
   - auth
@@ -50,10 +50,10 @@ Risk Level
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Backend issues HttpOnly secure cookies for authenticated sessions
-- [ ] #2 Session expiry and invalidation behavior is defined and enforced
-- [ ] #3 Logout invalidates server-side session
-- [ ] #4 CSRF and session protection strategy is documented and implemented
+- [x] #1 Backend issues HttpOnly secure cookies for authenticated sessions
+- [x] #2 Session expiry and invalidation behavior is defined and enforced
+- [x] #3 Logout invalidates server-side session
+- [x] #4 CSRF and session protection strategy is documented and implemented
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -63,5 +63,16 @@ Follow-up possibility: additional session hardening after security review.
 
 Selected for auth micro-sprint planning (2026-02-20).
 
-MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/123
+LOCK: codex on gray in /home/mcamp/code/crystal-forge/TASK-65.3-session-cookie-lifecycle
+
+Implementation complete in branch `TASK-65.3-session-cookie-lifecycle`.
+
+Verification executed:
+- `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml -- --check` (pass)
+- `SQLX_OFFLINE=true nix develop -c cargo test --package crystal-forge auth::session` (pass)
+- `SQLX_OFFLINE=true nix develop -c cargo test --package crystal-forge handlers::api::auth_session` (pass)
+- `SQLX_OFFLINE=true nix develop -c cargo check --package crystal-forge` (pass)
+- `SQLX_OFFLINE=true nix develop -c cargo clippy --package crystal-forge -- -D warnings` (fails due pre-existing repository-wide warnings and transient rustc target-cache mismatch, not introduced by this task)
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/123
 <!-- SECTION:NOTES:END -->

@@ -3,11 +3,19 @@
 //! Provides traditional username/password authentication for self-hosted deployments
 //! that don't have OIDC configured.
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{
+    Json,
+    extract::ConnectInfo,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::IntoResponse,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::net::SocketAddr;
 
 use crate::auth::password::{hash_password, verify_password};
+use crate::handlers::api::auth_session::establish_user_session;
 use crate::queries::users::{get_by_email, get_by_username, insert_user};
 
 /// Request payload for user registration.
@@ -57,8 +65,8 @@ pub async fn register(
     }
 
     // Hash password
-    let password_hash = hash_password(&payload.password)
-        .map_err(|_| LocalAuthError::PasswordHashingFailed)?;
+    let password_hash =
+        hash_password(&payload.password).map_err(|_| LocalAuthError::PasswordHashingFailed)?;
 
     // Create display name from first/last name if provided
     let display_name = match (&payload.first_name, &payload.last_name) {
@@ -75,15 +83,13 @@ pub async fn register(
 
     // Update username and password hash
     // Note: insert_user generates username from email, but we want to use the provided username
-    sqlx::query(
-        "UPDATE users SET username = $1, password_hash = $2 WHERE id = $3"
-    )
-    .bind(&payload.username)
-    .bind(&password_hash)
-    .bind(user.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| LocalAuthError::DatabaseError)?;
+    sqlx::query("UPDATE users SET username = $1, password_hash = $2 WHERE id = $3")
+        .bind(&payload.username)
+        .bind(&password_hash)
+        .bind(user.id)
+        .execute(&pool)
+        .await
+        .map_err(|_| LocalAuthError::DatabaseError)?;
 
     user.username = payload.username.clone();
 
@@ -113,7 +119,6 @@ pub struct LoginResponse {
     pub user_id: String,
     pub username: String,
     pub email: String,
-    // TODO: Add session token (TASK-65.3)
 }
 
 /// Authenticate with username/password.
@@ -121,6 +126,8 @@ pub struct LoginResponse {
 /// Verifies credentials and creates a session.
 pub async fn login(
     State(pool): State<PgPool>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, LocalAuthError> {
     // Try to find user by username first, then email
@@ -135,14 +142,13 @@ pub async fn login(
     let user = user.ok_or(LocalAuthError::InvalidCredentials)?;
 
     // Get password hash
-    let password_hash = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT password_hash FROM users WHERE id = $1"
-    )
-    .bind(user.id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| LocalAuthError::DatabaseError)?
-    .ok_or(LocalAuthError::InvalidCredentials)?; // No password hash means OIDC-only user
+    let password_hash =
+        sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user.id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| LocalAuthError::DatabaseError)?
+            .ok_or(LocalAuthError::InvalidCredentials)?; // No password hash means OIDC-only user
 
     // Verify password
     verify_password(&payload.password, &password_hash)
@@ -150,14 +156,32 @@ pub async fn login(
 
     tracing::info!("User logged in: {} ({})", user.email, user.id);
 
-    // TODO: Create session (TASK-65.3)
-    // TODO: Set session cookie (TASK-65.3)
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string);
 
-    Ok(Json(LoginResponse {
+    let ip_address = Some(addr.ip().to_string());
+
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
+        .await
+        .map_err(|_| LocalAuthError::SessionCreationFailed)?;
+
+    let mut response = Json(LoginResponse {
         user_id: user.id.to_string(),
         username: user.username,
         email: user.email,
-    }))
+    })
+    .into_response();
+
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.session_cookie);
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.csrf_cookie);
+
+    Ok(response)
 }
 
 /// Local authentication error responses.
@@ -168,6 +192,7 @@ pub enum LocalAuthError {
     EmailTaken,
     PasswordHashingFailed,
     InvalidCredentials,
+    SessionCreationFailed,
     DatabaseError,
 }
 
@@ -178,14 +203,12 @@ impl IntoResponse for LocalAuthError {
                 StatusCode::BAD_REQUEST,
                 "Password must be at least 8 characters long".to_string(),
             ),
-            LocalAuthError::UsernameTaken => (
-                StatusCode::CONFLICT,
-                "Username already taken".to_string(),
-            ),
-            LocalAuthError::EmailTaken => (
-                StatusCode::CONFLICT,
-                "Email already registered".to_string(),
-            ),
+            LocalAuthError::UsernameTaken => {
+                (StatusCode::CONFLICT, "Username already taken".to_string())
+            }
+            LocalAuthError::EmailTaken => {
+                (StatusCode::CONFLICT, "Email already registered".to_string())
+            }
             LocalAuthError::PasswordHashingFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to hash password".to_string(),
@@ -193,6 +216,10 @@ impl IntoResponse for LocalAuthError {
             LocalAuthError::InvalidCredentials => (
                 StatusCode::UNAUTHORIZED,
                 "Invalid username or password".to_string(),
+            ),
+            LocalAuthError::SessionCreationFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create authenticated session".to_string(),
             ),
             LocalAuthError::DatabaseError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
