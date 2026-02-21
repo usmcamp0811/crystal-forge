@@ -11,6 +11,7 @@ pub mod flakes_list;
 pub mod login;
 pub mod not_found;
 pub mod policies;
+pub mod register;
 pub mod style_guide;
 pub mod system_detail;
 pub mod systems;

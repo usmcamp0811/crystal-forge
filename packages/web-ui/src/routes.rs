@@ -14,6 +14,7 @@ use crate::views::flakes::FlakesView;
 use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
 use crate::views::policies::PoliciesView;
+use crate::views::register::RegisterView;
 use crate::views::style_guide::StyleGuideView;
 use crate::views::system_detail::SystemDetailView;
 use crate::views::systems::SystemsView;
@@ -56,6 +57,9 @@ pub enum Route {
     #[route("/login")]
     LoginView {},
 
+    #[route("/register")]
+    RegisterView {},
+
     #[route("/dev/login")]
     DevLoginView {},
 
@@ -76,6 +80,7 @@ impl Route {
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::StyleGuideView { .. } => "Style Guide".to_string(),
             Route::LoginView { .. } => "Sign In".to_string(),
+            Route::RegisterView { .. } => "Register".to_string(),
             Route::DevLoginView { .. } => "Development Login".to_string(),
             Route::NotFoundView { .. } => "Not Found".to_string(),
         }

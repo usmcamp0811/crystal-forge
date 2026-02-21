@@ -12,7 +12,7 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
-        api::{auth_dev, auth_local, auth_oidc, auth_session, auth_whoami, dashboard, flakes},
+        api::{auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami, dashboard, flakes},
         status,
         webhook::webhook_handler,
     },
@@ -106,6 +106,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
         // Auth context endpoint (publicly accessible)
         .route("/api/auth/whoami", get(auth_whoami::whoami))
+        // Setup status endpoint (publicly accessible)
+        .route("/api/auth/setup-status", get(auth_status::setup_status))
         // Logout is valid for any mode that issues cookie sessions.
         .route("/api/auth/logout", post(auth_session::logout));
 
