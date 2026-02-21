@@ -7,6 +7,9 @@ pub const SESSION_COOKIE_NAME: &str = "__Host-cf-session";
 pub const CSRF_COOKIE_NAME: &str = "__Host-cf-csrf";
 pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 
+const SESSION_COOKIE_ATTRIBUTES: &str = "Path=/; Secure; HttpOnly; SameSite=Lax";
+const CSRF_COOKIE_ATTRIBUTES: &str = "Path=/; Secure; SameSite=Strict";
+
 pub fn generate_token() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -19,23 +22,19 @@ pub fn hash_token(token: &str) -> String {
 }
 
 pub fn build_session_cookie(token: &str, max_age_seconds: i64) -> String {
-    format!(
-        "{SESSION_COOKIE_NAME}={token}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age={max_age_seconds}"
-    )
+    format!("{SESSION_COOKIE_NAME}={token}; {SESSION_COOKIE_ATTRIBUTES}; Max-Age={max_age_seconds}")
 }
 
 pub fn clear_session_cookie() -> String {
-    format!("{SESSION_COOKIE_NAME}=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0")
+    format!("{SESSION_COOKIE_NAME}=; {SESSION_COOKIE_ATTRIBUTES}; Max-Age=0")
 }
 
 pub fn build_csrf_cookie(token: &str, max_age_seconds: i64) -> String {
-    format!(
-        "{CSRF_COOKIE_NAME}={token}; Path=/; Secure; SameSite=Strict; Max-Age={max_age_seconds}"
-    )
+    format!("{CSRF_COOKIE_NAME}={token}; {CSRF_COOKIE_ATTRIBUTES}; Max-Age={max_age_seconds}")
 }
 
 pub fn clear_csrf_cookie() -> String {
-    format!("{CSRF_COOKIE_NAME}=; Path=/; Secure; SameSite=Strict; Max-Age=0")
+    format!("{CSRF_COOKIE_NAME}=; {CSRF_COOKIE_ATTRIBUTES}; Max-Age=0")
 }
 
 pub fn extract_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
@@ -46,10 +45,12 @@ pub fn extract_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> 
         .split(';')
         .map(str::trim)
         .find_map(|cookie| {
-            cookie
-                .strip_prefix(cookie_name)
-                .and_then(|rest| rest.strip_prefix('='))
-                .map(ToString::to_string)
+            let (name, value) = cookie.split_once('=')?;
+            if name.trim() != cookie_name {
+                return None;
+            }
+
+            Some(value.trim().trim_matches('"').to_string())
         })
 }
 
@@ -76,5 +77,25 @@ mod tests {
 
         let value = extract_cookie(&headers, SESSION_COOKIE_NAME);
         assert_eq!(value.as_deref(), Some("session123"));
+    }
+
+    #[test]
+    fn session_cookie_contains_host_invariants() {
+        let cookie = build_session_cookie("session123", 3600);
+
+        assert!(cookie.contains("__Host-cf-session=session123"));
+        assert!(cookie.contains("Path=/"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("HttpOnly"));
+    }
+
+    #[test]
+    fn csrf_cookie_is_secure_and_not_httponly() {
+        let cookie = build_csrf_cookie("csrf123", 3600);
+
+        assert!(cookie.contains("__Host-cf-csrf=csrf123"));
+        assert!(cookie.contains("Path=/"));
+        assert!(cookie.contains("Secure"));
+        assert!(!cookie.contains("HttpOnly"));
     }
 }

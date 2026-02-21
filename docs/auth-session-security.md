@@ -12,6 +12,7 @@ Crystal Forge uses server-authoritative sessions for browser authentication.
 ## Session Lifecycle
 
 - Created after successful OIDC callback or local username/password login
+- TTL defaults to 8h and can be overridden with `CRYSTAL_FORGE_SESSION_TTL_SECONDS`
 - Expiry is enforced by `expires_at` in `user_sessions`
 - Logout invalidates the server-side session by setting `invalidated_at`
 

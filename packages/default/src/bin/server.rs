@@ -102,7 +102,9 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
-        .route("/api/v1/flakes/:id", delete(flakes::delete_flake));
+        .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
+        // Logout is valid for any mode that issues cookie sessions.
+        .route("/api/auth/logout", post(auth_session::logout));
 
     // Dev-mode auth routes (only available when AUTH_MODE=dev)
     if auth_mode == "dev" {
@@ -119,9 +121,7 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/auth/oidc/callback", get(auth_oidc::oidc_callback))
             .layer(Extension(oidc_state));
 
-        app = app
-            .merge(oidc_router)
-            .route("/api/auth/logout", post(auth_session::logout));
+        app = app.merge(oidc_router);
     }
 
     #[cfg(feature = "embedded-ui")]

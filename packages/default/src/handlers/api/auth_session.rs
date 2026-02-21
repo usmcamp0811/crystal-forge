@@ -17,6 +17,9 @@ use crate::{
 };
 
 pub const SESSION_TTL_SECONDS: i64 = 60 * 60 * 8;
+const SESSION_TTL_ENV: &str = "CRYSTAL_FORGE_SESSION_TTL_SECONDS";
+const SESSION_TTL_MIN_SECONDS: i64 = 60;
+const SESSION_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 30;
 
 pub struct SessionCookies {
     pub session_cookie: String,
@@ -29,10 +32,11 @@ pub async fn establish_user_session(
     user_agent: Option<String>,
     ip_address: Option<String>,
 ) -> Result<SessionCookies, SessionError> {
+    let ttl_seconds = session_ttl_seconds();
     let session_token = generate_token();
     let csrf_token = generate_token();
     let session_hash = hash_token(&session_token);
-    let expires_at = Utc::now() + Duration::seconds(SESSION_TTL_SECONDS);
+    let expires_at = Utc::now() + Duration::seconds(ttl_seconds);
 
     create_user_session(
         pool,
@@ -46,8 +50,8 @@ pub async fn establish_user_session(
     .map_err(|_| SessionError::Database)?;
 
     Ok(SessionCookies {
-        session_cookie: build_session_cookie(&session_token, SESSION_TTL_SECONDS),
-        csrf_cookie: build_csrf_cookie(&csrf_token, SESSION_TTL_SECONDS),
+        session_cookie: build_session_cookie(&session_token, ttl_seconds),
+        csrf_cookie: build_csrf_cookie(&csrf_token, ttl_seconds),
     })
 }
 
@@ -74,6 +78,18 @@ pub async fn logout(
     Ok(response)
 }
 
+fn session_ttl_seconds() -> i64 {
+    let parsed = std::env::var(SESSION_TTL_ENV)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(SESSION_TTL_SECONDS);
+
+    parsed.clamp(SESSION_TTL_MIN_SECONDS, SESSION_TTL_MAX_SECONDS)
+}
+
+/// Reusable double-submit CSRF validation for state-changing cookie-auth endpoints.
+///
+/// Currently used by logout and intended to be reused by future cookie-auth write actions.
 pub fn validate_csrf(headers: &HeaderMap) -> Result<(), SessionError> {
     let csrf_cookie =
         extract_cookie(headers, CSRF_COOKIE_NAME).ok_or(SessionError::MissingCsrfCookie)?;
