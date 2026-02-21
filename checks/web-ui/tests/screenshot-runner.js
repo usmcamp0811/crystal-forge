@@ -16,7 +16,7 @@ const outputDir = process.argv[3] || "/tmp/screenshots";
 /**
  * Assert that a selector is visible on the page.
  */
-async function assertVisible(page, selector, timeout = 5000) {
+async function assertVisible(page, selector, timeout = 3000) {
   try {
     await page.locator(selector).first().waitFor({ state: "visible", timeout });
     return true;
@@ -64,10 +64,10 @@ async function assertNotVisible(page, selector) {
         ? `${baseUrl}${route.path}?ui_check_auth=1`
         : `${baseUrl}${route.path}`;
 
-      await page.goto(url, { waitUntil: "networkidle" });
+      await page.goto(url, { waitUntil: "networkidle", timeout: 10000 });
 
       // Wait for WASM to hydrate
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(500);
 
       // Run optional setup function (click buttons, open modals, etc.)
       if (route.setup) {
