@@ -1,8 +1,11 @@
 ---
 id: TASK-65.4
 title: JIT provisioning and claim-to-role mapping
-status: Backlog
-assignee: ["MiniMax M2.5"]
+status: To Do
+assignee:
+  - MiniMax M2.5
+created_date: ''
+updated_date: '2026-02-21 04:25'
 labels:
   - security
   - auth
