@@ -12,6 +12,7 @@ use sqlx::PgPool;
 use tracing::error;
 
 use crate::api::models::{BuildQueueSummary, DashboardSummary};
+use crate::auth::extractors::RequireAuth;
 use crate::queries::dashboard::{
     fetch_active_builds, fetch_cve_summary, fetch_deployment_status, fetch_fleet_health,
     fetch_recent_deployments, fetch_total_systems,
@@ -21,7 +22,12 @@ use crate::queries::dashboard::{
 ///
 /// Returns a [`DashboardSummary`] containing fleet health, deployment status,
 /// CVE counts, active builds, and recent deployments.
-pub async fn dashboard_summary(State(pool): State<PgPool>) -> impl IntoResponse {
+///
+/// **Authorization**: Requires any authenticated user (Viewer, Operator, or Admin).
+pub async fn dashboard_summary(
+    RequireAuth(_user): RequireAuth,
+    State(pool): State<PgPool>,
+) -> impl IntoResponse {
     let result = build_dashboard_summary(&pool).await;
 
     match result {
