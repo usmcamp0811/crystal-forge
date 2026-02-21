@@ -1,7 +1,7 @@
 //! JWT token validation.
 
 use anyhow::{Context, Result};
-use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
 use openidconnect::core::{CoreJsonWebKey, CoreJsonWebKeySet};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
@@ -99,11 +99,15 @@ impl JwtValidator {
     /// Validate and decode an ID token.
     ///
     /// Performs the following validations:
+    /// - Algorithm validation (CRITICAL: prevents algorithm substitution attacks)
     /// - Signature verification using JWKS
     /// - Issuer (`iss`) matches expected issuer
     /// - Audience (`aud`) matches client ID
     /// - Token not expired (`exp`)
     /// - Token not used before issued (`iat`)
+    ///
+    /// **Security**: Algorithm is explicitly enforced (RS256/RS384/RS512 only).
+    /// The token header `alg` is NOT trusted to prevent algorithm confusion attacks.
     ///
     /// # Arguments
     ///
@@ -114,16 +118,33 @@ impl JwtValidator {
         id_token: &str,
         jwks: &CoreJsonWebKeySet,
     ) -> Result<IdTokenClaims> {
-        // Decode header to get key ID (kid)
+        // Decode header to get key ID (kid) and algorithm
         let header = decode_header(id_token).context("Failed to decode JWT header")?;
 
         let kid = header
             .kid
             .ok_or_else(|| anyhow::anyhow!("JWT header missing 'kid' field"))?;
 
+        // SECURITY: Validate algorithm BEFORE any decoding
+        // Only allow RSA algorithms (RS256, RS384, RS512)
+        // DO NOT trust the token's alg header - explicitly enforce allowed algorithms
+        let allowed_algorithms = [Algorithm::RS256, Algorithm::RS384, Algorithm::RS512];
+
+        let token_alg: Algorithm = header
+            .alg
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse algorithm: {:?}", header.alg))?;
+
+        if !allowed_algorithms.contains(&token_alg) {
+            anyhow::bail!(
+                "Algorithm '{:?}' not allowed. Only RS256, RS384, RS512 are permitted (prevents algorithm confusion attacks)",
+                token_alg
+            );
+        }
+
+        tracing::debug!("Token algorithm validated: {:?}", token_alg);
+
         // Find matching key in JWKS by kid
-        // We need to serialize and check the kid manually since the openidconnect types
-        // don't expose it directly in a way we can easily use
         let jwk = self.find_key_by_kid(jwks, &kid)?;
 
         // Get the public key for verification
@@ -131,15 +152,14 @@ impl JwtValidator {
             Self::jwk_to_decoding_key(&jwk).context("Failed to convert JWK to decoding key")?;
 
         // Set up validation rules
-        let mut validation = Validation::new(
-            header
-                .alg
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("Unsupported algorithm: {:?}", header.alg))?,
-        );
+        // Use the validated algorithm (not blindly trusting token header)
+        let mut validation = Validation::new(token_alg);
         validation.set_issuer(&[&self.issuer]);
         validation.set_audience(&[&self.client_id]);
         validation.validate_exp = true;
+
+        // CRITICAL: Set allowed algorithms explicitly
+        validation.algorithms = allowed_algorithms.to_vec();
 
         // Decode and validate token
         let token_data = decode::<IdTokenClaims>(id_token, &decoding_key, &validation)

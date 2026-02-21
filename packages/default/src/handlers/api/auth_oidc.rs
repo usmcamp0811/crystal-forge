@@ -6,8 +6,8 @@
 
 use axum::{
     extract::{Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Redirect},
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Redirect, Response},
 };
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
@@ -74,6 +74,7 @@ impl OidcClientState {
 /// Initiate OIDC login flow.
 ///
 /// This endpoint redirects the user to the OIDC provider's authorization endpoint.
+/// Sets a secure cookie binding the OIDC state to this browser session.
 pub async fn oidc_login(State(oidc_state): State<Arc<OidcClientState>>) -> impl IntoResponse {
     // Generate PKCE challenge and verifier
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -98,11 +99,25 @@ pub async fn oidc_login(State(oidc_state): State<Arc<OidcClientState>>) -> impl 
 
     // Store CSRF token, nonce, and PKCE verifier in session for validation
     let session = OidcSession::new(csrf_token.clone(), nonce, pkce_verifier);
-    oidc_state.session_store.store(csrf_token.secret().clone(), session).await;
+    let state_value = csrf_token.secret().clone();
+    oidc_state.session_store.store(state_value.clone(), session).await;
 
     tracing::info!("Initiating OIDC login flow, redirecting to: {}", auth_url);
 
-    Redirect::to(auth_url.as_str())
+    // SECURITY: Bind state to browser session via secure cookie
+    // This prevents login CSRF and account confusion attacks
+    let cookie = format!(
+        "__Host-oidc-state={}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=600",
+        state_value
+    );
+
+    // Return redirect with Set-Cookie header
+    Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, auth_url.as_str())
+        .header(header::SET_COOKIE, cookie)
+        .body(axum::body::Body::empty())
+        .unwrap()
 }
 
 /// Query parameters for OIDC callback.
@@ -125,9 +140,13 @@ pub struct OidcCallbackParams {
 ///
 /// This endpoint receives the authorization code from the OIDC provider,
 /// exchanges it for tokens, validates the ID token, and creates a user session.
+///
+/// **Security**: Validates that the state parameter matches the session cookie
+/// to prevent login CSRF and account confusion attacks.
 pub async fn oidc_callback(
     State(oidc_state): State<Arc<OidcClientState>>,
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Query(params): Query<OidcCallbackParams>,
 ) -> Result<impl IntoResponse, OidcError> {
     // Check for errors from provider
@@ -140,6 +159,27 @@ pub async fn oidc_callback(
         });
     }
 
+    // SECURITY: Validate state parameter matches session cookie
+    // This binds the OAuth2 flow to the browser session, preventing:
+    // - Login CSRF attacks (attacker can't force victim to use attacker's account)
+    // - Account confusion (multiple concurrent logins don't mix state)
+    let cookie_state = extract_oidc_state_cookie(&headers)
+        .ok_or_else(|| {
+            tracing::error!("Missing or invalid __Host-oidc-state cookie");
+            OidcError::MissingStateCookie
+        })?;
+
+    if cookie_state != params.state {
+        tracing::error!(
+            "State mismatch: cookie='{}' param='{}'",
+            cookie_state,
+            params.state
+        );
+        return Err(OidcError::StateMismatch);
+    }
+
+    tracing::debug!("State cookie validated successfully");
+
     // Validate CSRF state token and retrieve session
     let session = oidc_state
         .session_store
@@ -150,7 +190,7 @@ pub async fn oidc_callback(
             OidcError::InvalidCsrfToken
         })?;
 
-    tracing::debug!("CSRF state validated successfully");
+    tracing::debug!("CSRF state token validated successfully");
 
     // Exchange authorization code for tokens with PKCE verifier
     tracing::debug!("Exchanging authorization code for tokens");
@@ -258,8 +298,33 @@ pub async fn oidc_callback(
 
     tracing::info!("User session created for: {}", user.email);
 
-    // Redirect to dashboard
-    Ok(Redirect::to("/"))
+    // Redirect to dashboard (clear state cookie)
+    let response = Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, "/")
+        .header(
+            header::SET_COOKIE,
+            "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0",
+        )
+        .body(axum::body::Body::empty())
+        .unwrap();
+    
+    Ok(response)
+}
+
+/// Extract OIDC state from __Host-oidc-state cookie.
+fn extract_oidc_state_cookie(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .find_map(|cookie| {
+            let cookie = cookie.trim();
+            cookie
+                .strip_prefix("__Host-oidc-state=")
+                .map(|v| v.to_string())
+        })
 }
 
 /// OIDC error responses.
@@ -269,6 +334,8 @@ pub enum OidcError {
         error: String,
         description: String,
     },
+    MissingStateCookie,
+    StateMismatch,
     InvalidCsrfToken,
     TokenExchangeFailed,
     MissingIdToken,
@@ -287,6 +354,14 @@ impl IntoResponse for OidcError {
             OidcError::ProviderError { error, description } => (
                 StatusCode::BAD_REQUEST,
                 format!("OIDC provider error: {} - {}", error, description),
+            ),
+            OidcError::MissingStateCookie => (
+                StatusCode::BAD_REQUEST,
+                "Missing OIDC state cookie - login session not found".to_string(),
+            ),
+            OidcError::StateMismatch => (
+                StatusCode::BAD_REQUEST,
+                "State mismatch - possible login CSRF attack".to_string(),
             ),
             OidcError::InvalidCsrfToken => (
                 StatusCode::BAD_REQUEST,
