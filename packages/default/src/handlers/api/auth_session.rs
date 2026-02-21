@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
 };
 use chrono::{Duration, Utc};
@@ -11,7 +11,7 @@ use crate::{
     auth::session::{
         CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, build_csrf_cookie,
         build_session_cookie, clear_csrf_cookie, clear_session_cookie, extract_cookie,
-        generate_token, hash_token,
+        generate_token, hash_token, parse_set_cookie_header,
     },
     queries::auth_identity::{create_user_session, invalidate_session_by_token_hash},
 };
@@ -22,8 +22,8 @@ const SESSION_TTL_MIN_SECONDS: i64 = 60;
 const SESSION_TTL_MAX_SECONDS: i64 = 60 * 60 * 24 * 30;
 
 pub struct SessionCookies {
-    pub session_cookie: String,
-    pub csrf_cookie: String,
+    pub session_cookie: HeaderValue,
+    pub csrf_cookie: HeaderValue,
 }
 
 pub async fn establish_user_session(
@@ -50,8 +50,10 @@ pub async fn establish_user_session(
     .map_err(|_| SessionError::Database)?;
 
     Ok(SessionCookies {
-        session_cookie: build_session_cookie(&session_token, ttl_seconds),
-        csrf_cookie: build_csrf_cookie(&csrf_token, ttl_seconds),
+        session_cookie: parse_set_cookie_header(&build_session_cookie(&session_token, ttl_seconds))
+            .map_err(|_| SessionError::InvalidCookieHeader)?,
+        csrf_cookie: parse_set_cookie_header(&build_csrf_cookie(&csrf_token, ttl_seconds))
+            .map_err(|_| SessionError::InvalidCookieHeader)?,
     })
 }
 
@@ -69,12 +71,17 @@ pub async fn logout(
     }
 
     let mut response = StatusCode::NO_CONTENT.into_response();
+    let clear_session = parse_set_cookie_header(&clear_session_cookie())
+        .map_err(|_| SessionError::InvalidCookieHeader)?;
+    let clear_csrf = parse_set_cookie_header(&clear_csrf_cookie())
+        .map_err(|_| SessionError::InvalidCookieHeader)?;
+
     response
         .headers_mut()
-        .append(header::SET_COOKIE, clear_session_cookie().parse().unwrap());
+        .append(header::SET_COOKIE, clear_session);
     response
         .headers_mut()
-        .append(header::SET_COOKIE, clear_csrf_cookie().parse().unwrap());
+        .append(header::SET_COOKIE, clear_csrf);
     Ok(response)
 }
 
@@ -112,6 +119,7 @@ pub enum SessionError {
     MissingCsrfHeader,
     CsrfMismatch,
     Database,
+    InvalidCookieHeader,
 }
 
 impl IntoResponse for SessionError {
@@ -129,6 +137,10 @@ impl IntoResponse for SessionError {
             SessionError::Database => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to persist session state".to_string(),
+            ),
+            SessionError::InvalidCookieHeader => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to construct cookie header".to_string(),
             ),
         };
 

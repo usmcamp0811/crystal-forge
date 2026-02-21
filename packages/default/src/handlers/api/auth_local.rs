@@ -169,14 +169,12 @@ pub async fn login(
     })
     .into_response();
 
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        session_cookies.session_cookie.parse().unwrap(),
-    );
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        session_cookies.csrf_cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.session_cookie);
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.csrf_cookie);
 
     Ok(response)
 }

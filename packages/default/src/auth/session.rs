@@ -1,4 +1,4 @@
-use axum::http::{HeaderMap, header};
+use axum::http::{HeaderMap, HeaderValue, header};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
@@ -9,6 +9,7 @@ pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 
 const SESSION_COOKIE_ATTRIBUTES: &str = "Path=/; Secure; HttpOnly; SameSite=Lax";
 const CSRF_COOKIE_ATTRIBUTES: &str = "Path=/; Secure; SameSite=Strict";
+const EXPIRES_CLEAR_ATTR: &str = "Expires=Thu, 01 Jan 1970 00:00:00 GMT";
 
 pub fn generate_token() -> String {
     let mut bytes = [0u8; 32];
@@ -26,7 +27,7 @@ pub fn build_session_cookie(token: &str, max_age_seconds: i64) -> String {
 }
 
 pub fn clear_session_cookie() -> String {
-    format!("{SESSION_COOKIE_NAME}=; {SESSION_COOKIE_ATTRIBUTES}; Max-Age=0")
+    format!("{SESSION_COOKIE_NAME}=; {SESSION_COOKIE_ATTRIBUTES}; Max-Age=0; {EXPIRES_CLEAR_ATTR}")
 }
 
 pub fn build_csrf_cookie(token: &str, max_age_seconds: i64) -> String {
@@ -34,7 +35,13 @@ pub fn build_csrf_cookie(token: &str, max_age_seconds: i64) -> String {
 }
 
 pub fn clear_csrf_cookie() -> String {
-    format!("{CSRF_COOKIE_NAME}=; {CSRF_COOKIE_ATTRIBUTES}; Max-Age=0")
+    format!("{CSRF_COOKIE_NAME}=; {CSRF_COOKIE_ATTRIBUTES}; Max-Age=0; {EXPIRES_CLEAR_ATTR}")
+}
+
+pub fn parse_set_cookie_header(
+    cookie: &str,
+) -> Result<HeaderValue, axum::http::header::InvalidHeaderValue> {
+    HeaderValue::from_str(cookie)
 }
 
 pub fn extract_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
@@ -97,5 +104,40 @@ mod tests {
         assert!(cookie.contains("Path=/"));
         assert!(cookie.contains("Secure"));
         assert!(!cookie.contains("HttpOnly"));
+    }
+
+    #[test]
+    fn clear_cookie_includes_expires_for_compatibility() {
+        let cookie = clear_session_cookie();
+        assert!(cookie.contains("Max-Age=0"));
+        assert!(cookie.contains("Expires=Thu, 01 Jan 1970 00:00:00 GMT"));
+    }
+
+    #[test]
+    fn extract_cookie_handles_quoted_value_and_spacing() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "foo=bar; __Host-cf-csrf=\"quoted-value\" ; baz=qux"
+                .parse()
+                .unwrap(),
+        );
+
+        let value = extract_cookie(&headers, CSRF_COOKIE_NAME);
+        assert_eq!(value.as_deref(), Some("quoted-value"));
+    }
+
+    #[test]
+    fn extract_cookie_does_not_match_similar_prefix() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "__Host-cf-session-extra=bad; __Host-cf-session=good"
+                .parse()
+                .unwrap(),
+        );
+
+        let value = extract_cookie(&headers, SESSION_COOKIE_NAME);
+        assert_eq!(value.as_deref(), Some("good"));
     }
 }

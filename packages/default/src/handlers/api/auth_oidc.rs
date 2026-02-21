@@ -6,7 +6,7 @@
 
 use axum::{
     extract::{Extension, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use openidconnect::{
@@ -484,18 +484,16 @@ pub async fn oidc_callback(
 
     response.headers_mut().append(
         header::SET_COOKIE,
-        "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0"
-            .parse()
-            .unwrap(),
+        HeaderValue::from_static(
+            "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        ),
     );
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        session_cookies.session_cookie.parse().unwrap(),
-    );
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        session_cookies.csrf_cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.session_cookie);
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.csrf_cookie);
 
     Ok(response)
 }

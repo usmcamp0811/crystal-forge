@@ -24,4 +24,6 @@ State-changing auth actions use double-submit CSRF protection:
 - Header: `x-csrf-token`
 - Request is rejected unless header value exactly matches cookie value
 
+Logout is expected to be performed via XHR/fetch so the client can copy the CSRF cookie value into the `x-csrf-token` header.
+
 `/api/auth/logout` requires CSRF validation and clears both auth cookies on success.
