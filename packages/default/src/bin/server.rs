@@ -113,16 +113,31 @@ async fn main() -> anyhow::Result<()> {
         app = app.route("/api/auth/dev/login", post(auth_dev::dev_login));
     } else if auth_mode == "oidc" {
         info!("Registering OIDC auth endpoints at /api/auth/oidc/*");
-        let oidc_config = crystal_forge::config::OidcConfig::from_env()
-            .context("Failed to load OIDC configuration from environment")?;
-        let oidc_state = Arc::new(auth_oidc::OidcClientState::new(oidc_config).await?);
+        match crystal_forge::config::OidcConfig::from_env() {
+            Ok(oidc_config) => {
+                let oidc_state = Arc::new(auth_oidc::OidcClientState::new(oidc_config).await?);
 
-        let oidc_router = Router::new()
-            .route("/api/auth/oidc/login", get(auth_oidc::oidc_login))
-            .route("/api/auth/oidc/callback", get(auth_oidc::oidc_callback))
-            .layer(Extension(oidc_state));
+                let oidc_router = Router::new()
+                    .route("/api/auth/oidc/login", get(auth_oidc::oidc_login))
+                    .route("/api/auth/oidc/callback", get(auth_oidc::oidc_callback))
+                    .layer(Extension(oidc_state));
 
-        app = app.merge(oidc_router);
+                app = app.merge(oidc_router);
+            }
+            Err(err) => {
+                // AUTH_MODE defaults to `oidc` if unset. In environments that do not
+                // configure OIDC (e.g., certain VM tests), keep server startup working
+                // unless oidc mode was explicitly requested.
+                if std::env::var("AUTH_MODE").as_deref() == Ok("oidc") {
+                    return Err(err).context("Failed to load OIDC configuration from environment");
+                }
+
+                warn!(
+                    "AUTH_MODE resolved to oidc but OIDC env is incomplete; skipping OIDC route registration: {}",
+                    err
+                );
+            }
+        }
     }
 
     #[cfg(feature = "embedded-ui")]
