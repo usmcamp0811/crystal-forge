@@ -1,7 +1,7 @@
 ---
 id: TASK-65.6
 title: Web UI auth UX and role-based guards
-status: In Progress
+status: Review
 assignee:
   - KimiK2.5
 created_date: ''
@@ -105,4 +105,29 @@ Requirements:
 Follow-up possibility: UX polish for auth states and empty states.
 
 LOCK: claude-sonnet-4.5 on gray in /home/mcamp/code/crystal-forge/TASK-65.6-web-ui-auth-ux
+
+---
+
+MR #126 created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/126
+
+Implementation complete. All acceptance criteria satisfied.
+
+**What was delivered:**
+
+Backend:
+- /api/auth/whoami endpoint for auth context
+- AuthContext, AuthMode, Role DTOs
+- Dev login session establishment
+- Local auth route registration
+- Session validation helpers
+
+Frontend:
+- Unified LoginView adapting to auth mode
+- Auth context in global state
+- Auth helper functions for role checks
+- Authentication guards in AppShell
+- User menu with logout and role display
+- Auth context auto-loaded on init
+
+**Ready for review and manual testing.**
 <!-- SECTION:NOTES:END -->
