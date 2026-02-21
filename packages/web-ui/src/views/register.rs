@@ -30,6 +30,7 @@ struct RegisterResponse {
 #[component]
 pub fn RegisterView() -> Element {
     let _app_state = use_context::<Signal<AppState>>();
+    let nav = navigator();
     let mut username = use_signal(|| String::new());
     let mut email = use_signal(|| String::new());
     let mut password = use_signal(|| String::new());
@@ -112,10 +113,15 @@ pub fn RegisterView() -> Element {
             };
 
             if resp.status() >= 200 && resp.status() < 300 {
-                // Registration successful - redirect to login using JavaScript
+                // Registration successful - redirect to login
+                error_message.set(Some("Registration successful. Redirecting to login...".to_string()));
                 is_loading.set(false);
-                let window = web_sys::window().expect("no global window");
-                window.location().set_href("/login").ok();
+                nav.replace("/login");
+
+                // Fallback hard redirect in case router navigation is not active yet.
+                if let Some(window) = web_sys::window() {
+                    let _ = window.location().set_href("/login");
+                }
             } else {
                 // Try to get error message from response
                 let status = resp.status();
