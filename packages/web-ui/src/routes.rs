@@ -53,7 +53,12 @@ pub enum Route {
     #[route("/style-guide")]
     StyleGuideView {},
 
+    // Catch-all for 404 - inside AppShell so auth guard applies
+    #[route("/:..route")]
+    NotFoundView { route: Vec<String> },
+
     #[end_layout]
+    // Auth routes - outside AppShell (no sidebar/topbar)
     #[route("/login")]
     LoginView {},
 
@@ -62,9 +67,6 @@ pub enum Route {
 
     #[route("/dev/login")]
     DevLoginView {},
-
-    #[route("/:..route")]
-    NotFoundView { route: Vec<String> },
 }
 
 impl Route {
