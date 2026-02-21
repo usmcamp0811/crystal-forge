@@ -52,6 +52,15 @@ Acceptance Criteria:
 - Documentation explains how to use OIDC stack for local testing
 <!-- SECTION:DESCRIPTION:END -->
 
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 includes an  profile with Keycloak or Authentik
+- [ ] #2 Provider starts with preconfigured realm/client metadata for Crystal Forge
+- [ ] #3 Test users (admin/operator/viewer) are pre-seeded for local auth validation
+- [ ] #4 Server with  can complete login against local provider
+- [ ] #5 Local dev docs explain startup and usage of the OIDC stack
+<!-- AC:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
