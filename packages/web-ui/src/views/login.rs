@@ -127,7 +127,7 @@ pub fn LoginView() -> Element {
             }
 
             div {
-                class: "relative w-full max-w-md z-10",
+                class: "relative max-w-md z-10",
 
                 // Card container
                 div {

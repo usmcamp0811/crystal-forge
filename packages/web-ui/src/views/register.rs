@@ -200,7 +200,7 @@ pub fn RegisterView() -> Element {
             }
 
             div {
-                class: "relative w-full max-w-md z-10",
+                class: "relative max-w-md z-10",
 
                 // First-run banner
                 div {
