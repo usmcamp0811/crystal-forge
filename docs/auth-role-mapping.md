@@ -13,13 +13,15 @@ Three roles are supported:
 
 ### Environment Variables
 
-**`CRYSTAL_FORGE_ROLE_MAPPING`** (required)  
+**`CRYSTAL_FORGE_ROLE_MAPPING`** (strongly recommended)  
 JSON object mapping OIDC group names to Crystal Forge roles.
 
 Example:
 ```bash
 export CRYSTAL_FORGE_ROLE_MAPPING='{"crystal-forge-admins":"admin","crystal-forge-operators":"operator","crystal-forge-viewers":"viewer"}'
 ```
+
+⚠️ **If JSON parsing fails**, the server will log an error and effectively lock everyone out unless `CRYSTAL_FORGE_DEFAULT_ROLE` is set.
 
 **`CRYSTAL_FORGE_DEFAULT_ROLE`** (optional)  
 Default role assigned when user's OIDC groups don't match any mapping.
@@ -29,7 +31,8 @@ Example:
 export CRYSTAL_FORGE_DEFAULT_ROLE="viewer"
 ```
 
-If not set, users without matching groups are denied access (safe-deny).
+**Default behavior (production):**  
+If both `CRYSTAL_FORGE_ROLE_MAPPING` and `CRYSTAL_FORGE_DEFAULT_ROLE` are unset (or JSON parsing fails), **all OIDC logins will be denied** (safe-deny). The server will log a warning at startup.
 
 ### Group Claim Source
 
