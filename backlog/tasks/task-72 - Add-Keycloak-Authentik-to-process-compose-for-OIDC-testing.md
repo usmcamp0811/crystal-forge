@@ -1,10 +1,10 @@
 ---
 id: TASK-72
 title: Add Keycloak/Authentik to process-compose for OIDC testing
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-20 14:28'
-updated_date: '2026-02-21 00:35'
+updated_date: '2026-02-21 02:51'
 labels:
   - devex
   - infra
@@ -60,4 +60,6 @@ Risk Level:
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: codex on gray in /home/mcamp/code/crystal-forge/TASK-72-add-oidc-process-compose
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/122
 <!-- SECTION:NOTES:END -->
