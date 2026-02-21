@@ -109,9 +109,9 @@ pub fn LoginView() -> Element {
 
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
-                class: "absolute right-[-60px] bottom-[-40px] opacity-10 pointer-events-none select-none",
+                class: "absolute right-[-60px] bottom-[-40px] opacity-[0.04] pointer-events-none select-none",
                 img {
-                    src: "/assets/cf.png",
+                    src: asset!("assets/cf.png"),
                     class: "max-w-[440px] blur-[1px]",
                     alt: ""
                 }
@@ -137,25 +137,24 @@ pub fn LoginView() -> Element {
                         class: "absolute top-0 left-0 right-0 h-[2px] rounded-t-2xl bg-gradient-to-r from-violet-500/0 via-violet-400/80 to-fuchsia-400/0"
                     }
 
-                    // Header with logo
+                    // Header with logo (sidebar style)
                     div {
-                        class: "text-center mb-8",
-                        // Crystal Forge logo
+                        class: "flex items-center gap-3 mb-8",
+                        img {
+                            class: "h-8 w-8",
+                            style: "transform: scale(1.67);",
+                            src: asset!("assets/crystal-forge-icon.png"),
+                            alt: "Crystal Forge"
+                        }
                         div {
-                            class: "flex justify-center mb-4",
-                            img {
-                                src: "/assets/cf.png",
-                                class: "h-16 w-auto opacity-90",
-                                alt: "Crystal Forge"
+                            h1 {
+                                class: "text-xl font-bold text-white",
+                                "Crystal Forge"
                             }
-                        }
-                        h1 {
-                            class: "text-2xl font-bold text-white mb-2",
-                            "Crystal Forge"
-                        }
-                        p {
-                            class: "text-sm {theme::text::SECONDARY}",
-                            "Sign in to continue"
+                            p {
+                                class: "text-xs {theme::text::MUTED} mt-1",
+                                "Sign in to continue"
+                            }
                         }
                     }
 
