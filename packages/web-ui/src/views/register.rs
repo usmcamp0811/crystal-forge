@@ -204,14 +204,14 @@ pub fn RegisterView() -> Element {
 
                 // First-run banner
                 div {
-                    class: "mb-6 p-3 rounded-lg border border-violet-500/40",
-                    style: "background-color: rgba(15, 23, 42, 0.95);",
+                    class: "mb-6 p-4 rounded-lg border border-violet-400/50",
+                    style: "background: linear-gradient(135deg, rgba(139, 92, 246, 0.9) 0%, rgba(124, 58, 237, 0.9) 100%);",
                     h3 {
-                        class: "text-sm font-semibold text-violet-300 mb-1",
+                        class: "text-sm font-semibold text-white mb-1",
                         "⚡ First-Time Setup"
                     }
                     p {
-                        class: "text-xs text-violet-200",
+                        class: "text-xs text-white/90",
                         "Create the initial administrator account. This user will have full system access."
                     }
                 }
