@@ -79,4 +79,12 @@ Pending:
 - Manual testing with dev-mode fixtures
 - Integration testing with OIDC
 - Merge approval
+
+Code review feedback addressed (commit b5f9c48):
+✅ Structured JSON error responses for auth failures
+✅ Idempotent logout (no CSRF required when no session exists)
+✅ Renamed is_authenticated() to has_any_role() for clarity
+✅ Type-safe CSRF_HEADER_NAME using HeaderName
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/125
 <!-- SECTION:NOTES:END -->
