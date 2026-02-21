@@ -1,7 +1,7 @@
 ---
 id: TASK-73
 title: Add OIDC provider to VM integration tests
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-20 14:28'
 labels:
@@ -10,16 +10,20 @@ labels:
   - auth
   - oidc
   - vm-tests
-dependencies: []
+dependencies:
+  - TASK-65.2
+  - TASK-72
 priority: medium
 ---
 
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem: VM integration tests lack real OIDC authentication testing. Auth flows are not tested in VM environment.
+Problem
+VM integration tests lack real OIDC authentication testing. Auth flows are not tested in VM environment.
 
-Goal: Integrate OIDC provider (Keycloak/Authentik) into VM test infrastructure to test full authentication flows.
+Goal
+Integrate OIDC provider (Keycloak/Authentik) into VM test infrastructure to test full authentication flows.
 
 Non-Goals:
 - Complex multi-provider scenarios
@@ -42,16 +46,16 @@ Verification Plan:
 Impact Areas:
 - Infrastructure, Testing, Security
 
-Dependencies:
-- TASK-65.2 (OIDC provider integration foundation)
-- TASK-72 (Keycloak/Authentik integration knowledge)
-
-Acceptance Criteria:
-- VM test includes OIDC provider (Keycloak or Authentik)
-- Provider configured with test realm and client
-- Test verifies OIDC discovery endpoint
-- Test completes full authorization code flow
-- Test verifies JWT validation and role extraction
-- Test verifies user session creation
-- nix flake check includes OIDC auth tests
+Risk Level:
+- Medium
 <!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 VM integration tests start an OIDC provider service (Keycloak or Authentik) in the test topology
+- [ ] #2 The provider is preconfigured with test realm/client metadata required by Crystal Forge
+- [ ] #3 A VM test asserts OIDC discovery endpoint reachability before login
+- [ ] #4 A VM test completes an auth flow and verifies JWT claim extraction/validation used by server auth
+- [ ] #5 A VM test verifies server-side session creation for an authenticated OIDC user
+- [ ] #6 `nix flake check` includes and executes the OIDC VM auth coverage path
+<!-- AC:END -->
