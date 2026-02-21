@@ -629,6 +629,7 @@ pub enum OidcError {
     ClaimExtractionFailed,
     MissingEmail,
     UnverifiedEmail,
+    RoleAssignmentFailed,
     SessionCreationFailed,
     DatabaseError,
 }
@@ -687,6 +688,10 @@ impl IntoResponse for OidcError {
             OidcError::UnverifiedEmail => (
                 StatusCode::FORBIDDEN,
                 "Email not verified by OIDC provider - cannot create/link account".to_string(),
+            ),
+            OidcError::RoleAssignmentFailed => (
+                StatusCode::FORBIDDEN,
+                "No valid OIDC role mapping found for user".to_string(),
             ),
             OidcError::SessionCreationFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,
