@@ -1,11 +1,11 @@
 ---
 id: TASK-65.4
 title: JIT provisioning and claim-to-role mapping
-status: In Progress
+status: Done
 assignee:
   - MiniMax M2.5
 created_date: ''
-updated_date: '2026-02-21 05:01'
+updated_date: '2026-02-21 15:02'
 labels:
   - security
   - auth

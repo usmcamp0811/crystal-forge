@@ -1,4 +1,5 @@
 use anyhow::Context;
+use axum::Extension;
 use axum::{
     Router,
     routing::{delete, get, post},
@@ -11,7 +12,7 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
-        api::{auth_dev, dashboard, flakes},
+        api::{auth_dev, auth_oidc, auth_session, dashboard, flakes},
         status,
         webhook::webhook_handler,
     },
@@ -21,6 +22,8 @@ use crystal_forge::{
 };
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpListener;
 
 use tracing::{debug, info, warn};
@@ -100,12 +103,41 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
-        .route("/api/v1/flakes/:id", delete(flakes::delete_flake));
+        .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
+        // Logout is valid for any mode that issues cookie sessions.
+        .route("/api/auth/logout", post(auth_session::logout));
 
     // Dev-mode auth routes (only available when AUTH_MODE=dev)
     if auth_mode == "dev" {
         info!("Registering development auth endpoints at /api/auth/dev/*");
         app = app.route("/api/auth/dev/login", post(auth_dev::dev_login));
+    } else if auth_mode == "oidc" {
+        info!("Registering OIDC auth endpoints at /api/auth/oidc/*");
+        match crystal_forge::config::OidcConfig::from_env() {
+            Ok(oidc_config) => {
+                let oidc_state = Arc::new(auth_oidc::OidcClientState::new(oidc_config).await?);
+
+                let oidc_router = Router::new()
+                    .route("/api/auth/oidc/login", get(auth_oidc::oidc_login))
+                    .route("/api/auth/oidc/callback", get(auth_oidc::oidc_callback))
+                    .layer(Extension(oidc_state));
+
+                app = app.merge(oidc_router);
+            }
+            Err(err) => {
+                // AUTH_MODE defaults to `oidc` if unset. In environments that do not
+                // configure OIDC (e.g., certain VM tests), keep server startup working
+                // unless oidc mode was explicitly requested.
+                if std::env::var("AUTH_MODE").as_deref() == Ok("oidc") {
+                    return Err(err).context("Failed to load OIDC configuration from environment");
+                }
+
+                warn!(
+                    "AUTH_MODE resolved to oidc but OIDC env is incomplete; skipping OIDC route registration: {}",
+                    err
+                );
+            }
+        }
     }
 
     #[cfg(feature = "embedded-ui")]
@@ -116,7 +148,11 @@ async fn main() -> anyhow::Result<()> {
     let app = app.with_state(state);
 
     let listener = TcpListener::bind(("0.0.0.0", server_cfg.port)).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

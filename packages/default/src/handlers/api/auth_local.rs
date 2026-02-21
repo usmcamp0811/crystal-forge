@@ -3,11 +3,19 @@
 //! Provides traditional username/password authentication for self-hosted deployments
 //! that don't have OIDC configured.
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::ConnectInfo,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::IntoResponse,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::net::SocketAddr;
 
 use crate::auth::password::{hash_password, verify_password};
+use crate::handlers::api::auth_session::establish_user_session;
 use crate::queries::users::{get_by_email, get_by_username, insert_user};
 
 /// Request payload for user registration.
@@ -111,7 +119,6 @@ pub struct LoginResponse {
     pub user_id: String,
     pub username: String,
     pub email: String,
-    // TODO: Add session token (TASK-65.3)
 }
 
 /// Authenticate with username/password.
@@ -119,6 +126,8 @@ pub struct LoginResponse {
 /// Verifies credentials and creates a session.
 pub async fn login(
     State(pool): State<PgPool>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, LocalAuthError> {
     // Try to find user by username first, then email
@@ -147,14 +156,32 @@ pub async fn login(
 
     tracing::info!("User logged in: {} ({})", user.email, user.id);
 
-    // TODO: Create session (TASK-65.3)
-    // TODO: Set session cookie (TASK-65.3)
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string);
 
-    Ok(Json(LoginResponse {
+    let ip_address = Some(addr.ip().to_string());
+
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
+        .await
+        .map_err(|_| LocalAuthError::SessionCreationFailed)?;
+
+    let mut response = Json(LoginResponse {
         user_id: user.id.to_string(),
         username: user.username,
         email: user.email,
-    }))
+    })
+    .into_response();
+
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.session_cookie);
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.csrf_cookie);
+
+    Ok(response)
 }
 
 /// Local authentication error responses.
@@ -165,6 +192,7 @@ pub enum LocalAuthError {
     EmailTaken,
     PasswordHashingFailed,
     InvalidCredentials,
+    SessionCreationFailed,
     DatabaseError,
 }
 
@@ -188,6 +216,10 @@ impl IntoResponse for LocalAuthError {
             LocalAuthError::InvalidCredentials => (
                 StatusCode::UNAUTHORIZED,
                 "Invalid username or password".to_string(),
+            ),
+            LocalAuthError::SessionCreationFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to create authenticated session".to_string(),
             ),
             LocalAuthError::DatabaseError => (
                 StatusCode::INTERNAL_SERVER_ERROR,

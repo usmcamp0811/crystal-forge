@@ -5,28 +5,29 @@
 //! 2. /api/auth/oidc/callback - Handles provider redirect, exchanges code for tokens
 
 use axum::{
-    extract::{Query, State},
-    http::{HeaderMap, StatusCode, header},
-    response::{IntoResponse, Redirect, Response},
+    extract::{ConnectInfo, Extension, Query, State},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use openidconnect::{
-    AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    RedirectUrl, Scope, TokenResponse,
-    core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata},
+    AuthorizationCode, ClientId, ClientSecret, CsrfToken, Nonce, PkceCodeChallenge, RedirectUrl,
+    Scope, TokenResponse,
+    core::{CoreAuthenticationFlow, CoreClient},
     reqwest::async_http_client,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::PgPool;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use uuid::Uuid;
 
 use crate::auth::oidc::{
     ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore,
 };
 use crate::auth::repository::normalize_tenant_discriminator;
-use crate::auth::role_mapping::RoleMappingConfig;
 use crate::config::OidcConfig;
-use crate::queries::auth_identity::{AuthIdentityRepository, NewExternalIdentity, sync_user_role};
+use crate::handlers::api::auth_session::establish_user_session;
+use crate::models::auth_identity::AuthRole;
+use crate::queries::auth_identity::{AuthIdentityRepository, sync_user_role};
 
 /// Shared OIDC client state.
 #[derive(Clone)]
@@ -76,7 +77,9 @@ impl OidcClientState {
 ///
 /// This endpoint redirects the user to the OIDC provider's authorization endpoint.
 /// Sets a secure cookie binding the OIDC state to this browser session.
-pub async fn oidc_login(State(oidc_state): State<Arc<OidcClientState>>) -> impl IntoResponse {
+pub async fn oidc_login(
+    Extension(oidc_state): Extension<Arc<OidcClientState>>,
+) -> impl IntoResponse {
     // Generate PKCE challenge and verifier
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -148,8 +151,9 @@ pub struct OidcCallbackParams {
 /// **Security**: Validates that the state parameter matches the session cookie
 /// to prevent login CSRF and account confusion attacks.
 pub async fn oidc_callback(
-    State(oidc_state): State<Arc<OidcClientState>>,
+    Extension(oidc_state): Extension<Arc<OidcClientState>>,
     State(pool): State<PgPool>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(params): Query<OidcCallbackParams>,
 ) -> Result<impl IntoResponse, OidcError> {
@@ -457,64 +461,60 @@ pub async fn oidc_callback(
         }
     };
 
-    // Assign role based on OIDC groups
-    // This is idempotent and runs on every login to keep roles in sync with provider
-    let role = oidc_state
-        .config
-        .role_mapping
-        .map_groups_to_role(&user_info.roles)
-        .map_err(|e| {
-            tracing::error!(
-                "Role mapping failed for user {} with groups {:?}: {}",
-                user.id,
-                user_info.roles,
-                e
-            );
-            OidcError::RoleMappingFailed
-        })?;
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string);
 
-    tracing::info!(
-        "Mapped OIDC groups {:?} to role {:?} for user {}",
-        user_info.roles,
-        role,
-        user.id
-    );
+    let ip_address = Some(addr.ip().to_string());
 
-    // Sync user role (removes old roles, assigns new role)
-    let db_role = match role {
-        crate::auth::role_mapping::Role::Admin => crate::models::auth_identity::AuthRole::Admin,
-        crate::auth::role_mapping::Role::Operator => {
-            crate::models::auth_identity::AuthRole::Operator
-        }
-        crate::auth::role_mapping::Role::Viewer => crate::models::auth_identity::AuthRole::Viewer,
-    };
-
-    sync_user_role(&pool, user.id, db_role).await.map_err(|e| {
-        tracing::error!("Failed to sync user role: {}", e);
-        OidcError::DatabaseError
+    let mapped_role = map_oidc_roles_to_auth_role(&user_info.roles).ok_or_else(|| {
+        tracing::error!(
+            "OIDC user {} has no mappable roles in claims {:?}",
+            user.id,
+            user_info.roles
+        );
+        OidcError::RoleAssignmentFailed
     })?;
 
-    // TODO: Create session (TASK-65.3)
-    // TODO: Set session cookie (TASK-65.3)
+    sync_user_role(&pool, user.id, mapped_role)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to synchronize OIDC role for {}: {}", user.id, e);
+            OidcError::DatabaseError
+        })?;
+
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
+        .await
+        .map_err(|_| OidcError::SessionCreationFailed)?;
+
     // TODO: Update external_identity claims on each login (keep profile fresh)
 
     tracing::info!(
-        "User authenticated via OIDC: user_id={} email={} role={:?}",
+        "User authenticated via OIDC: user_id={} email={}",
         user.id,
-        user.email,
-        role
+        user.email
     );
 
-    // Redirect to dashboard (clear state cookie)
-    let response = Response::builder()
+    // Redirect to dashboard with authenticated session cookies.
+    let mut response = Response::builder()
         .status(StatusCode::FOUND)
         .header(header::LOCATION, "/")
-        .header(
-            header::SET_COOKIE,
-            "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0",
-        )
         .body(axum::body::Body::empty())
         .unwrap();
+
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "__Host-oidc-state=; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        ),
+    );
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.session_cookie);
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, session_cookies.csrf_cookie);
 
     Ok(response)
 }
@@ -550,7 +550,8 @@ pub enum OidcError {
     ClaimExtractionFailed,
     MissingEmail,
     UnverifiedEmail,
-    RoleMappingFailed,
+    RoleAssignmentFailed,
+    SessionCreationFailed,
     DatabaseError,
 }
 
@@ -609,9 +610,13 @@ impl IntoResponse for OidcError {
                 StatusCode::FORBIDDEN,
                 "Email not verified by OIDC provider - cannot create/link account".to_string(),
             ),
-            OidcError::RoleMappingFailed => (
+            OidcError::RoleAssignmentFailed => (
                 StatusCode::FORBIDDEN,
-                "No matching role found for OIDC groups - access denied".to_string(),
+                "No valid OIDC role mapping found for user".to_string(),
+            ),
+            OidcError::SessionCreationFailed => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Authenticated but failed to create session".to_string(),
             ),
             OidcError::DatabaseError => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -620,5 +625,51 @@ impl IntoResponse for OidcError {
         };
 
         (status, message).into_response()
+    }
+}
+
+fn map_oidc_roles_to_auth_role(roles: &[String]) -> Option<AuthRole> {
+    let normalized = roles
+        .iter()
+        .map(|r| r.trim().to_ascii_lowercase())
+        .collect::<Vec<_>>();
+
+    if normalized.iter().any(|r| r == "admin") {
+        return Some(AuthRole::Admin);
+    }
+    if normalized.iter().any(|r| r == "operator") {
+        return Some(AuthRole::Operator);
+    }
+    if normalized.iter().any(|r| r == "viewer") {
+        return Some(AuthRole::Viewer);
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_oidc_roles_to_auth_role;
+    use crate::models::auth_identity::AuthRole;
+
+    #[test]
+    fn map_roles_uses_admin_precedence() {
+        let roles = vec!["viewer".to_string(), "admin".to_string()];
+        assert_eq!(map_oidc_roles_to_auth_role(&roles), Some(AuthRole::Admin));
+    }
+
+    #[test]
+    fn map_roles_trims_and_normalizes_case() {
+        let roles = vec!["  OpErAtOr  ".to_string()];
+        assert_eq!(
+            map_oidc_roles_to_auth_role(&roles),
+            Some(AuthRole::Operator)
+        );
+    }
+
+    #[test]
+    fn map_roles_returns_none_when_unmapped() {
+        let roles = vec!["team-a".to_string(), "team-b".to_string()];
+        assert_eq!(map_oidc_roles_to_auth_role(&roles), None);
     }
 }

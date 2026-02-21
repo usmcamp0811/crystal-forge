@@ -8,12 +8,19 @@ use sqlx::PgPool;
 use tracing::error;
 
 use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem};
+use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, get_flake_by_name, insert_flake,
     list_flake_registry,
 };
 
-pub async fn list_flakes(State(pool): State<PgPool>) -> impl IntoResponse {
+/// List all flakes in the registry.
+///
+/// **Authorization**: Requires any authenticated user (read-only operation).
+pub async fn list_flakes(
+    RequireAuth(_user): RequireAuth,
+    State(pool): State<PgPool>,
+) -> impl IntoResponse {
     match list_flake_registry(&pool).await {
         Ok(flakes) => (StatusCode::OK, Json(flakes)).into_response(),
         Err(e) => {
@@ -31,7 +38,11 @@ pub async fn list_flakes(State(pool): State<PgPool>) -> impl IntoResponse {
     }
 }
 
+/// Create a new flake in the registry.
+///
+/// **Authorization**: Requires Operator or Admin role (write operation).
 pub async fn create_flake(
+    RequireOperator(_user): RequireOperator,
     State(pool): State<PgPool>,
     Json(payload): Json<CreateFlakeRequest>,
 ) -> impl IntoResponse {
@@ -108,7 +119,11 @@ pub async fn create_flake(
     }
 }
 
+/// Delete a flake from the registry.
+///
+/// **Authorization**: Requires Admin role (destructive operation).
 pub async fn delete_flake(
+    RequireAdmin(_user): RequireAdmin,
     State(pool): State<PgPool>,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {

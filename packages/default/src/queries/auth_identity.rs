@@ -166,6 +166,41 @@ impl<'a> AuthIdentityRepository<'a> {
 
         Ok(created_session)
     }
+
+    pub async fn find_active_session_by_token_hash(
+        &self,
+        session_token_hash: &str,
+    ) -> Result<Option<UserSession>, AuthRepositoryError> {
+        let session = sqlx::query_as::<_, UserSession>(
+            "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address
+             FROM user_sessions
+             WHERE session_token_hash = $1
+               AND invalidated_at IS NULL
+               AND expires_at > NOW()",
+        )
+        .bind(session_token_hash)
+        .fetch_optional(self.pool)
+        .await?;
+
+        Ok(session)
+    }
+
+    pub async fn invalidate_session_by_token_hash(
+        &self,
+        session_token_hash: &str,
+    ) -> Result<bool, AuthRepositoryError> {
+        let result = sqlx::query(
+            "UPDATE user_sessions
+             SET invalidated_at = NOW()
+             WHERE session_token_hash = $1
+               AND invalidated_at IS NULL",
+        )
+        .bind(session_token_hash)
+        .execute(self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 // Convenience wrapper functions for common operations
@@ -195,27 +230,22 @@ pub async fn assign_role_to_user(
     repo.assign_role(&assignment).await
 }
 
-/// Sync user role assignment.
+/// Synchronize a user's role assignment to exactly one role.
 ///
-/// Ensures the user has exactly the specified role and removes any other roles.
-/// This is idempotent - can be called on every login without duplicating assignments.
-///
-/// Uses a transaction to ensure atomicity: either both delete + insert succeed, or neither does.
+/// Ensures the user has exactly the specified role and removes any others.
+/// Uses a transaction so delete+insert is atomic.
 pub async fn sync_user_role(
     pool: &PgPool,
     user_id: Uuid,
     role: AuthRole,
 ) -> Result<(), AuthRepositoryError> {
-    // Use transaction to ensure delete + insert are atomic
     let mut tx = pool.begin().await?;
 
-    // Delete all existing role assignments for this user
     sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
 
-    // Assign the new role (granted_by_user_id is None for OIDC-provisioned roles)
     sqlx::query(
         "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id)
          VALUES ($1, $2, $3)
@@ -228,7 +258,6 @@ pub async fn sync_user_role(
     .await?;
 
     tx.commit().await?;
-
     Ok(())
 }
 
@@ -250,4 +279,22 @@ pub async fn create_user_session(
         ip_address,
     };
     repo.create_session(&session).await
+}
+
+pub async fn find_active_session_by_token_hash(
+    pool: &PgPool,
+    session_token_hash: &str,
+) -> Result<Option<UserSession>, AuthRepositoryError> {
+    let repo = AuthIdentityRepository::new(pool);
+    repo.find_active_session_by_token_hash(session_token_hash)
+        .await
+}
+
+pub async fn invalidate_session_by_token_hash(
+    pool: &PgPool,
+    session_token_hash: &str,
+) -> Result<bool, AuthRepositoryError> {
+    let repo = AuthIdentityRepository::new(pool);
+    repo.invalidate_session_by_token_hash(session_token_hash)
+        .await
 }
