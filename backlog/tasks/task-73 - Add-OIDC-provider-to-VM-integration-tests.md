@@ -1,9 +1,10 @@
 ---
 id: TASK-73
 title: Add OIDC provider to VM integration tests
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-20 14:28'
+updated_date: '2026-02-21 04:04'
 labels:
   - testing
   - infra
@@ -59,3 +60,9 @@ Risk Level:
 - [ ] #5 A VM test verifies server-side session creation for an authenticated OIDC user
 - [ ] #6 `nix flake check` includes and executes the OIDC VM auth coverage path
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-sonnet-4-5 on gray in /home/mcamp/code/crystal-forge/TASK-73-add-oidc-vm-tests
+<!-- SECTION:NOTES:END -->
