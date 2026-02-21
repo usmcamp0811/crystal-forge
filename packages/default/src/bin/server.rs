@@ -22,6 +22,7 @@ use crystal_forge::{
 };
 use ed25519_dalek::VerifyingKey;
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -132,7 +133,11 @@ async fn main() -> anyhow::Result<()> {
     let app = app.with_state(state);
 
     let listener = TcpListener::bind(("0.0.0.0", server_cfg.port)).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }

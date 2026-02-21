@@ -86,12 +86,39 @@ pub async fn logout(
 }
 
 fn session_ttl_seconds() -> i64 {
-    let parsed = std::env::var(SESSION_TTL_ENV)
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .unwrap_or(SESSION_TTL_SECONDS);
+    let parsed = match std::env::var(SESSION_TTL_ENV) {
+        Ok(raw) => parse_session_ttl(Some(&raw)),
+        Err(_) => SESSION_TTL_SECONDS,
+    };
 
     parsed.clamp(SESSION_TTL_MIN_SECONDS, SESSION_TTL_MAX_SECONDS)
+}
+
+fn parse_session_ttl(raw: Option<&str>) -> i64 {
+    match raw {
+        Some(value) => match value.parse::<i64>() {
+            Ok(parsed) if parsed > 0 => parsed,
+            Ok(_) => {
+                tracing::warn!(
+                    "Ignoring non-positive {} value {}; using default {}",
+                    SESSION_TTL_ENV,
+                    value,
+                    SESSION_TTL_SECONDS
+                );
+                SESSION_TTL_SECONDS
+            }
+            Err(_) => {
+                tracing::warn!(
+                    "Ignoring invalid {} value '{}'; using default {}",
+                    SESSION_TTL_ENV,
+                    value,
+                    SESSION_TTL_SECONDS
+                );
+                SESSION_TTL_SECONDS
+            }
+        },
+        None => SESSION_TTL_SECONDS,
+    }
 }
 
 /// Reusable double-submit CSRF validation for state-changing cookie-auth endpoints.
@@ -177,5 +204,13 @@ mod tests {
             validate_csrf(&headers),
             Err(SessionError::CsrfMismatch)
         ));
+    }
+
+    #[test]
+    fn session_ttl_rejects_non_positive_and_invalid_values() {
+        assert_eq!(parse_session_ttl(Some("0")), SESSION_TTL_SECONDS);
+        assert_eq!(parse_session_ttl(Some("-10")), SESSION_TTL_SECONDS);
+        assert_eq!(parse_session_ttl(Some("abc")), SESSION_TTL_SECONDS);
+        assert_eq!(parse_session_ttl(Some("120")), 120);
     }
 }

@@ -5,12 +5,14 @@
 
 use axum::{
     Json,
+    extract::ConnectInfo,
     extract::State,
     http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::net::SocketAddr;
 
 use crate::auth::password::{hash_password, verify_password};
 use crate::handlers::api::auth_session::establish_user_session;
@@ -124,6 +126,7 @@ pub struct LoginResponse {
 /// Verifies credentials and creates a session.
 pub async fn login(
     State(pool): State<PgPool>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(payload): Json<LoginRequest>,
 ) -> Result<impl IntoResponse, LocalAuthError> {
@@ -158,7 +161,9 @@ pub async fn login(
         .and_then(|v| v.to_str().ok())
         .map(ToString::to_string);
 
-    let session_cookies = establish_user_session(&pool, user.id, user_agent, None)
+    let ip_address = Some(addr.ip().to_string());
+
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
         .await
         .map_err(|_| LocalAuthError::SessionCreationFailed)?;
 

@@ -5,7 +5,7 @@
 //! 2. /api/auth/oidc/callback - Handles provider redirect, exchanges code for tokens
 
 use axum::{
-    extract::{Extension, Query, State},
+    extract::{ConnectInfo, Extension, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -17,6 +17,7 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::auth::oidc::{
@@ -151,6 +152,7 @@ pub struct OidcCallbackParams {
 pub async fn oidc_callback(
     Extension(oidc_state): Extension<Arc<OidcClientState>>,
     State(pool): State<PgPool>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(params): Query<OidcCallbackParams>,
 ) -> Result<impl IntoResponse, OidcError> {
@@ -463,7 +465,9 @@ pub async fn oidc_callback(
         .and_then(|v| v.to_str().ok())
         .map(ToString::to_string);
 
-    let session_cookies = establish_user_session(&pool, user.id, user_agent, None)
+    let ip_address = Some(addr.ip().to_string());
+
+    let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
         .await
         .map_err(|_| OidcError::SessionCreationFailed)?;
     // TODO: Assign roles based on OIDC groups (future task)

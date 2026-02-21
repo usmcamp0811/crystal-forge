@@ -10,9 +10,10 @@ pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
 const SESSION_COOKIE_ATTRIBUTES: &str = "Path=/; Secure; HttpOnly; SameSite=Lax";
 const CSRF_COOKIE_ATTRIBUTES: &str = "Path=/; Secure; SameSite=Strict";
 const EXPIRES_CLEAR_ATTR: &str = "Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+const SESSION_TOKEN_BYTES: usize = 32;
 
 pub fn generate_token() -> String {
-    let mut bytes = [0u8; 32];
+    let mut bytes = [0u8; SESSION_TOKEN_BYTES];
     OsRng.fill_bytes(&mut bytes);
     URL_SAFE_NO_PAD.encode(bytes)
 }
@@ -27,6 +28,8 @@ pub fn build_session_cookie(token: &str, max_age_seconds: i64) -> String {
 }
 
 pub fn clear_session_cookie() -> String {
+    // SECURITY: Clearing a cookie must use the same path/samesite/security attributes
+    // as the cookie being set, otherwise some browsers may retain the cookie.
     format!("{SESSION_COOKIE_NAME}=; {SESSION_COOKIE_ATTRIBUTES}; Max-Age=0; {EXPIRES_CLEAR_ATTR}")
 }
 
@@ -35,6 +38,8 @@ pub fn build_csrf_cookie(token: &str, max_age_seconds: i64) -> String {
 }
 
 pub fn clear_csrf_cookie() -> String {
+    // SECURITY: Clearing a cookie must use the same path/samesite/security attributes
+    // as the cookie being set, otherwise some browsers may retain the cookie.
     format!("{CSRF_COOKIE_NAME}=; {CSRF_COOKIE_ATTRIBUTES}; Max-Age=0; {EXPIRES_CLEAR_ATTR}")
 }
 
