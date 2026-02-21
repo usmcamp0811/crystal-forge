@@ -62,4 +62,6 @@ Risk Level
 
 <!-- SECTION:NOTES:BEGIN -->
 Role matrix baseline: Admin (full config plus user and role management), Operator (systems/build/deploy, no auth settings), Viewer (read-only).
+
+LOCK: Claude Opus 4.5 on reckless in ~/code/crystal-forge/TASK-65.5-api-authz-enforcement
 <!-- SECTION:NOTES:END -->
