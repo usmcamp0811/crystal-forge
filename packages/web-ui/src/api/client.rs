@@ -172,9 +172,26 @@ async fn send_request_with_csrf(
             .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
     }
 
-    // TODO: Extract CSRF token from cookie and add to header
-    // This requires enabling the 'Document' cookie feature in web-sys
-    // For now, rely on same-origin cookie behavior
+    // Extract CSRF token from cookie and add to header
+    if let Some(document) = window.document() {
+        // Use js_sys to call document.cookie
+        let document_obj = js_sys::Object::from(js_sys::Reflect::get(&document, &JsValue::from_str("document")).unwrap_or(JsValue::NULL));
+        
+        // Simpler: just get the cookie string directly from the global document
+        let cookie_js = js_sys::eval("document.cookie").unwrap_or(JsValue::NULL);
+        if let Some(cookie_str) = cookie_js.as_string() {
+            for cookie in cookie_str.split(';') {
+                let cookie = cookie.trim();
+                if let Some(value) = cookie.strip_prefix("__Host-cf-csrf=") {
+                    request
+                        .headers()
+                        .set("X-CSRF-Token", value)
+                        .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
+                    break;
+                }
+            }
+        }
+    }
 
     let resp_value = JsFuture::from(window.fetch_with_request(&request))
         .await
