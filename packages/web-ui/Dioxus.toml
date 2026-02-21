@@ -1,0 +1,16 @@
+[application]
+name = "crystal-forge-ui"
+default_platform = "web"
+
+[web.app]
+title = "Crystal Forge"
+
+[web.watcher]
+reload_html = true
+watch_path = ["src"]
+
+[web.resource]
+style = []
+
+[web.resource.dev]
+style = []

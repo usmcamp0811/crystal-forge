@@ -3,6 +3,10 @@ name = "crystal-forge"
 version = "0.2.2"
 edition = "2024"  
 
+[features]
+default = []
+embedded-ui = ["dep:include_dir", "dep:mime_guess"]
+
 [dependencies]
 hostname = "0.3"
 anyhow = "1.0.98"
@@ -27,6 +31,10 @@ rand = "0.8"
 base64 = "0.21"
 reqwest = { version = "0.11", features = ["json","blocking", "rustls-tls"] }
 sha2 = "0.10.9"
+openidconnect = "3.5"
+jsonwebtoken = "9"
+url = "2"
+argon2 = "0.5"
 systemstat = "0.2.4"
 num_cpus = "1.16"
 futures = "0.3.31"
@@ -40,6 +48,8 @@ axum-test = "17.3.0"
 winnow = "0.7.11"
 bytes = "1.10.1"
 humantime-serde = "1.1.1"
+include_dir = { version = "0.7.4", optional = true }
+mime_guess = { version = "2.0.5", optional = true }
 
 [lib]
 path = "src/lib.rs"

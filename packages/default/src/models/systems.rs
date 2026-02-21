@@ -41,7 +41,7 @@ impl std::str::FromStr for DeploymentPolicy {
     }
 }
 
-#[derive(Debug, FromRow, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct System {
     pub id: Uuid,
     pub hostname: String,

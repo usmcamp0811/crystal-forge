@@ -1,12 +1,15 @@
 pub mod agent_heartbeat;
+pub mod auth_identity;
 pub mod build_reservations;
 pub mod cache_push;
 pub mod commits;
 pub mod cve_scans;
+pub mod dashboard;
 pub mod deployment;
 pub mod derivations;
 pub mod environments;
 pub mod flakes;
+pub mod status;
 pub mod system_states;
 pub mod systems;
 pub mod users;

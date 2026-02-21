@@ -1,5 +1,5 @@
-use crate::handlers::agent::heartbeat::LogResponse;
 use crate::config::{CacheType, deployment::DeploymentConfig};
+use crate::handlers::agent::heartbeat::LogResponse;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
@@ -451,6 +451,84 @@ impl AgentDeploymentManager {
             );
         }
 
+        // Step 1: Always create generation (for both strategies)
+        info!("Creating new NixOS generation...");
+        self.create_generation(store_path).await?;
+        self.verify_generation_created(store_path).await?;
+
+        // Step 2: Activate based on strategy
+        use crate::config::deployment::DeploymentStrategy;
+        let action = match self.config.strategy {
+            DeploymentStrategy::ImmediatePersist => {
+                info!("Using immediate_persist strategy: activating now");
+                "switch"
+            }
+            DeploymentStrategy::BootOnly => {
+                info!("Using boot_only strategy: will activate on next boot");
+                "boot"
+            }
+        };
+
+        self.activate_via_systemd(store_path, unit_name, action)
+            .await?;
+        Ok(())
+    }
+
+    /// Create a new NixOS generation
+    async fn create_generation(&self, store_path: &str) -> Result<()> {
+        let profile_path = "/nix/var/nix/profiles/system";
+
+        debug!(
+            "Creating generation: nix-env --profile {} --set {}",
+            profile_path, store_path
+        );
+
+        let output = Command::new("nix-env")
+            .args(&["--profile", profile_path, "--set", store_path])
+            .output()
+            .context("Failed to execute nix-env")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("Failed to create generation: {}", stderr);
+        }
+
+        info!("✅ Generation created successfully");
+        Ok(())
+    }
+
+    /// Verify that generation was created correctly
+    async fn verify_generation_created(&self, store_path: &str) -> Result<()> {
+        let profile_path = "/nix/var/nix/profiles/system";
+
+        let output = Command::new("readlink")
+            .arg(profile_path)
+            .output()
+            .context("Failed to read system profile")?;
+
+        let current_link = String::from_utf8_lossy(&output.stdout).trim().to_string();
+
+        if current_link != store_path {
+            anyhow::bail!(
+                "Generation verification failed: profile points to {} but expected {}",
+                current_link,
+                store_path
+            );
+        }
+
+        debug!("✅ Generation verified: {}", current_link);
+        Ok(())
+    }
+
+    /// Activate configuration via systemd-run
+    async fn activate_via_systemd(
+        &self,
+        store_path: &str,
+        unit_name: &str,
+        action: &str,
+    ) -> Result<()> {
+        let switch_script = format!("{}/bin/switch-to-configuration", store_path);
+
         let run_args = [
             "--unit",
             unit_name,
@@ -459,7 +537,7 @@ impl AgentDeploymentManager {
             "--collect",
             "--",
             &switch_script,
-            "switch",
+            action, // "switch" or "boot"
         ];
 
         debug!("Executing: systemd-run {}", shell_join(&run_args));
@@ -467,16 +545,13 @@ impl AgentDeploymentManager {
         let output = Command::new("systemd-run")
             .args(&run_args)
             .output()
-            .context("Failed to spawn systemd-run process")?;
+            .context("Failed to spawn systemd-run")?;
 
         if !output.status.success() {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            error!("systemd-run failed stdout: {}", stdout);
-            error!("systemd-run failed stderr: {}", stderr);
             anyhow::bail!(
-                "systemd-run failed with exit code {:?}\nstdout: {}\nstderr: {}",
-                output.status.code(),
+                "systemd-run failed: stdout={}, stderr={}",
                 stdout.trim(),
                 stderr.trim()
             );

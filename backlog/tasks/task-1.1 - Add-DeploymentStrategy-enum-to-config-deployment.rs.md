@@ -1,0 +1,31 @@
+---
+id: TASK-1.1
+title: Add DeploymentStrategy enum to config/deployment.rs
+status: Done
+assignee:
+  - Codex 5.3
+created_date: '2026-02-04 20:19'
+updated_date: '2026-02-21 03:28'
+labels:
+  - deployment
+  - config
+  - rust
+milestone: m-0
+dependencies: []
+parent_task_id: TASK-1
+ordinal: 46000
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Create enum with ImmediatePersist and BootOnly variants. Add Default trait implementation defaulting to ImmediatePersist.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 Define DeploymentStrategy enum with serde annotations
+- [ ] #2 Implement Default trait
+- [ ] #3 Add to DeploymentConfig struct with #[serde(default)]
+- [ ] #4 Add unit tests for enum serialization/deserialization
+<!-- AC:END -->

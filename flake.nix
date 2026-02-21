@@ -2,7 +2,7 @@
   description = "Simple flake exporting a Rust package";
 
   inputs = {
-    nixpkgs.url = "github:nixos/nixpkgs/release-25.05";
+    nixpkgs.url = "github:nixos/nixpkgs/release-25.11";
     flake-utils.url = "github:numtide/flake-utils";
     process-compose-flake.url = "github:Platonic-Systems/process-compose-flake";
     services-flake.url = "github:juspay/services-flake";
@@ -12,27 +12,27 @@
     };
     nixos-compose = {
       url = "github:oar-team/nixos-compose/25.05";
-      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.nixpkgs.url = "github:nixos/nixpkgs/release-25.05";
     };
+    # Stable nixpkgs for pre-built browser binaries (screenshots in web-ui check)
+    nixpkgs-stable.url = "github:NixOS/nixpkgs/nixos-25.05";
   };
 
-  outputs = inputs: let
-    lib = inputs.snowfall-lib.mkLib {
-      inherit inputs;
-      src = ./.;
-      snowfall = {
-        meta = {
-          name = "crystal-forge";
-          title = "Crystal Forge";
+  outputs = inputs:
+    let
+      lib = inputs.snowfall-lib.mkLib {
+        inherit inputs;
+        src = ./.;
+        snowfall = {
+          meta = {
+            name = "crystal-forge";
+            title = "Crystal Forge";
+          };
+          namespace = "crystal-forge";
         };
-        namespace = "crystal-forge";
       };
-    };
-  in
-    lib.mkFlake {
-      channels-config = {
-        allowUnfree = true;
-      };
+    in lib.mkFlake {
+      channels-config = { allowUnfree = true; };
 
       outputs-builder = channels: {
         packages = {
@@ -41,6 +41,7 @@
           builder = channels.nixpkgs.crystal-forge.default.builder;
           cf-keygen = channels.nixpkgs.crystal-forge.default.cf-keygen;
           test-agent = channels.nixpkgs.crystal-forge.default.test-agent;
+          web-ui = channels.nixpkgs.crystal-forge.web-ui;
         };
       };
     };

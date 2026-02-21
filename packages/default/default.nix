@@ -1,9 +1,5 @@
-{
-  lib,
-  pkgs,
-  inputs,
-  ...
-}: let
+{ lib, pkgs, inputs, ... }:
+let
   src = ./.;
   srcHash = builtins.hashString "sha256" (toString src);
 
@@ -14,12 +10,12 @@
   crystal-forge = pkgs.rustPlatform.buildRustPackage rec {
     inherit src version;
     pname = "crystal-forge";
-    cargoLock = {
-      lockFile = ./Cargo.lock;
-    };
+    cargoLock = { lockFile = ./Cargo.lock; };
+    cargoBuildFlags = [ "--features" "embedded-ui" ];
+    CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
 
     # Ensure all dependencies are included
-    nativeBuildInputs = with pkgs; [pkg-config];
+    nativeBuildInputs = with pkgs; [ pkg-config ];
     buildInputs = [
       pkgs.rustc
       pkgs.cargo
@@ -48,7 +44,7 @@
     };
   };
   # data-only output with your .sql files staged in a stable path
-  crystal-forge-migrations = pkgs.runCommand "crystal-forge-migrations" {} ''
+  crystal-forge-migrations = pkgs.runCommand "crystal-forge-migrations" { } ''
     set -euo pipefail
     mkdir -p $out/share/crystal-forge/migrations
     cp -v ${migrationsDir}/*.sql $out/share/crystal-forge/migrations/
@@ -58,7 +54,7 @@
 
   migrate = pkgs.writeShellApplication {
     name = "crystal-forge-migrate";
-    runtimeInputs = [pkgs.postgresql pkgs.coreutils pkgs.findutils pkgs.gawk];
+    runtimeInputs = [ pkgs.postgresql pkgs.coreutils pkgs.findutils pkgs.gawk ];
     text = ''
       set -euo pipefail
 
@@ -123,15 +119,16 @@
   };
   cf-keygen = pkgs.writeShellApplication {
     name = "cf-keygen";
-    text = "${crystal-forge}/bin/cf-keygen \"$@\"";
+    text = ''${crystal-forge}/bin/cf-keygen "$@"'';
   };
   test-agent = pkgs.writeShellApplication {
     name = "test-agent";
-    text = "${crystal-forge}/bin/test-agent \"$@\"";
+    text = ''${crystal-forge}/bin/test-agent "$@"'';
   };
   builder = pkgs.writeShellApplication {
     name = "builder";
-    text = "${crystal-forge}/bin/builder \"$@\"";
+    text = ''${crystal-forge}/bin/builder "$@"'';
   };
-in
-  crystal-forge // {inherit agent server builder cf-keygen test-agent srcHash migrate;}
+in crystal-forge // {
+  inherit agent server builder cf-keygen test-agent srcHash migrate;
+}

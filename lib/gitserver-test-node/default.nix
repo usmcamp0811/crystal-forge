@@ -1,31 +1,27 @@
-{
-  lib,
-  inputs,
-  system ? null,
-  ...
-}: rec {
+{ lib, inputs, system ? null, ... }: rec {
   # Create a reusable git server node for tests with cgit web interface
   # This provides a standardized git server that can serve repositories over git protocol and HTTP
-  makeGitServerNode = {
-    port ? 8080,
-    extraConfig ? {},
-    systemBuildClosure,
-    pkgs,
-  }:
+  makeGitServerNode =
+    { port ? 8080, extraConfig ? { }, systemBuildClosure, pkgs, }:
     {
       services.getty.autologinUser = "root";
-      networking.firewall.allowedTCPPorts = [port 80];
+      networking.firewall.allowedTCPPorts = [ port 80 ];
       virtualisation.writableStore = true;
       virtualisation.memorySize = 2048;
-      virtualisation.additionalPaths = [systemBuildClosure];
+      virtualisation.additionalPaths = [ systemBuildClosure ];
 
-      environment.systemPackages = [pkgs.git pkgs.jq pkgs.crystal-forge.cf-test-suite.runTests pkgs.crystal-forge.cf-test-suite.testRunner];
+      environment.systemPackages = [
+        pkgs.git
+        pkgs.jq
+        pkgs.crystal-forge.cf-test-suite.runTests
+        pkgs.crystal-forge.cf-test-suite.testRunner
+      ];
 
       nix = {
         package = pkgs.nixVersions.stable;
         settings = {
-          experimental-features = ["nix-command" "flakes"];
-          substituters = [];
+          experimental-features = [ "nix-command" "flakes" ];
+          substituters = [ ];
           builders-use-substitutes = true;
           fallback = true;
           sandbox = true;
@@ -34,21 +30,21 @@
         };
         extraOptions = ''
           accept-flake-config = true
-          flake-registry = ${pkgs.writeText "empty-registry.json" ''{"flakes":[]}''}
+          flake-registry = ${
+            pkgs.writeText "empty-registry.json" ''{"flakes":[]}''
+          }
         '';
-        registry =
-          lib.crystal-forge.registryEntries
-          // {
-            nixpkgs = {
-              to = {
-                type = "path";
-                path = pkgs.path;
-              };
+        registry = lib.crystal-forge.registryEntries // {
+          nixpkgs = {
+            to = {
+              type = "path";
+              path = pkgs.path;
             };
           };
+        };
       };
 
-      nix.nixPath = ["nixpkgs=${pkgs.path}"];
+      nix.nixPath = [ "nixpkgs=${pkgs.path}" ];
 
       # Create git user for proper permissions
       users.users.git = {
@@ -57,7 +53,7 @@
         home = "/srv/git";
         createHome = true;
       };
-      users.groups.git = {};
+      users.groups.git = { };
 
       # Create cgit user
       users.users.cgit = {
@@ -65,21 +61,19 @@
         group = "cgit";
         home = "/var/lib/cgit";
       };
-      users.groups.cgit = {};
+      users.groups.cgit = { };
 
-      systemd.tmpfiles.rules = [
-        "d /srv/git 0755 git git -"
-        "d /var/lib/cgit 0755 cgit cgit -"
-      ];
+      systemd.tmpfiles.rules =
+        [ "d /srv/git 0755 git git -" "d /var/lib/cgit 0755 cgit cgit -" ];
 
       # Service to create writable git repository
       # makeGitServerNode: setup bare repo safely from a Nix store source
       systemd.services.setup-git-repo = {
         enable = true;
         description = "Initialize bare test git repository";
-        after = ["systemd-tmpfiles-setup.service"];
-        before = ["git-daemon.service"];
-        wantedBy = ["multi-user.target"];
+        after = [ "systemd-tmpfiles-setup.service" ];
+        before = [ "git-daemon.service" ];
+        wantedBy = [ "multi-user.target" ];
 
         serviceConfig = {
           Type = "oneshot";
@@ -117,6 +111,7 @@
         gitserver = {
           enable = true;
           scanPath = "/srv/git";
+          gitHttpBackend.checkExportOkFiles = false;
 
           settings = {
             root-title = "Crystal Forge Git Server";
@@ -125,7 +120,8 @@
             enable-index-links = true;
             enable-log-filecount = true;
             enable-log-linecount = true;
-            source-filter = "${pkgs.cgit}/lib/cgit/filters/syntax-highlighting.py";
+            source-filter =
+              "${pkgs.cgit}/lib/cgit/filters/syntax-highlighting.py";
             about-filter = "${pkgs.cgit}/lib/cgit/filters/about-formatting.sh";
             cache-size = 1000;
             enable-git-config = true;
@@ -143,8 +139,8 @@
 
       # Override the fcgiwrap service to wait for git repo setup
       systemd.services.fcgiwrap-cgit-gitserver = {
-        after = ["setup-git-repo.service"];
-        wants = ["setup-git-repo.service"];
+        after = [ "setup-git-repo.service" ];
+        wants = [ "setup-git-repo.service" ];
 
         # Add restart on failure with delay
         serviceConfig = {
@@ -162,21 +158,23 @@
       systemd.services.git-daemon = {
         enable = true;
         description = "Git Daemon for git:// protocol";
-        after = ["network.target" "setup-git-repo.service"];
-        wants = ["setup-git-repo.service"];
-        wantedBy = ["multi-user.target"];
+        after = [ "network.target" "setup-git-repo.service" ];
+        wants = [ "setup-git-repo.service" ];
+        wantedBy = [ "multi-user.target" ];
 
         serviceConfig = {
           Type = "exec";
           User = "git";
           Group = "git";
           WorkingDirectory = "/srv/git";
-          ExecStart = "${pkgs.git}/bin/git daemon --verbose --export-all --base-path=/srv/git --reuseaddr --port=${toString port}";
+          ExecStart =
+            "${pkgs.git}/bin/git daemon --verbose --export-all --base-path=/srv/git --reuseaddr --port=${
+              toString port
+            }";
           Environment = "HOME=/srv/git";
           Restart = "on-failure";
           RestartSec = "5s";
         };
       };
-    }
-    // extraConfig;
+    } // extraConfig;
 }

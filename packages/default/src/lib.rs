@@ -1,3 +1,5 @@
+pub mod api;
+pub mod auth;
 pub mod builder;
 pub mod config;
 pub mod deployment;
@@ -9,3 +11,6 @@ pub mod models;
 pub mod queries;
 pub mod server;
 pub mod vulnix;
+
+#[cfg(test)]
+pub mod test_utils;
