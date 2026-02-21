@@ -3,7 +3,7 @@
 //! Provides traditional username/password authentication for self-hosted deployments
 //! that don't have OIDC configured.
 
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
@@ -57,8 +57,8 @@ pub async fn register(
     }
 
     // Hash password
-    let password_hash = hash_password(&payload.password)
-        .map_err(|_| LocalAuthError::PasswordHashingFailed)?;
+    let password_hash =
+        hash_password(&payload.password).map_err(|_| LocalAuthError::PasswordHashingFailed)?;
 
     // Create display name from first/last name if provided
     let display_name = match (&payload.first_name, &payload.last_name) {
@@ -75,15 +75,13 @@ pub async fn register(
 
     // Update username and password hash
     // Note: insert_user generates username from email, but we want to use the provided username
-    sqlx::query(
-        "UPDATE users SET username = $1, password_hash = $2 WHERE id = $3"
-    )
-    .bind(&payload.username)
-    .bind(&password_hash)
-    .bind(user.id)
-    .execute(&pool)
-    .await
-    .map_err(|_| LocalAuthError::DatabaseError)?;
+    sqlx::query("UPDATE users SET username = $1, password_hash = $2 WHERE id = $3")
+        .bind(&payload.username)
+        .bind(&password_hash)
+        .bind(user.id)
+        .execute(&pool)
+        .await
+        .map_err(|_| LocalAuthError::DatabaseError)?;
 
     user.username = payload.username.clone();
 
@@ -135,14 +133,13 @@ pub async fn login(
     let user = user.ok_or(LocalAuthError::InvalidCredentials)?;
 
     // Get password hash
-    let password_hash = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT password_hash FROM users WHERE id = $1"
-    )
-    .bind(user.id)
-    .fetch_one(&pool)
-    .await
-    .map_err(|_| LocalAuthError::DatabaseError)?
-    .ok_or(LocalAuthError::InvalidCredentials)?; // No password hash means OIDC-only user
+    let password_hash =
+        sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user.id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| LocalAuthError::DatabaseError)?
+            .ok_or(LocalAuthError::InvalidCredentials)?; // No password hash means OIDC-only user
 
     // Verify password
     verify_password(&payload.password, &password_hash)
@@ -178,14 +175,12 @@ impl IntoResponse for LocalAuthError {
                 StatusCode::BAD_REQUEST,
                 "Password must be at least 8 characters long".to_string(),
             ),
-            LocalAuthError::UsernameTaken => (
-                StatusCode::CONFLICT,
-                "Username already taken".to_string(),
-            ),
-            LocalAuthError::EmailTaken => (
-                StatusCode::CONFLICT,
-                "Email already registered".to_string(),
-            ),
+            LocalAuthError::UsernameTaken => {
+                (StatusCode::CONFLICT, "Username already taken".to_string())
+            }
+            LocalAuthError::EmailTaken => {
+                (StatusCode::CONFLICT, "Email already registered".to_string())
+            }
             LocalAuthError::PasswordHashingFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to hash password".to_string(),

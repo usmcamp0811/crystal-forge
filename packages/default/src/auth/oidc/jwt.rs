@@ -1,7 +1,7 @@
 //! JWT token validation.
 
 use anyhow::{Context, Result};
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use openidconnect::core::{CoreJsonWebKey, CoreJsonWebKeySet};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
