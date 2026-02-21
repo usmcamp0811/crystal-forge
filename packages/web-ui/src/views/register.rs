@@ -183,10 +183,10 @@ pub fn RegisterView() -> Element {
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
                 class: "absolute pointer-events-none select-none",
-                style: "opacity: 0.06; right: 16px; bottom: 16px;",
+                style: "opacity: 0.09; right: 6px; bottom: 6px;",
                 img {
                     src: asset!("assets/cf.png"),
-                    style: "max-width: 400px; filter: blur(1px);",
+                    style: "max-width: 600px; filter: blur(1px);",
                     alt: ""
                 }
             }
