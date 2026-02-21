@@ -1,8 +1,11 @@
 ---
 id: TASK-65.6
 title: Web UI auth UX and role-based guards
-status: Backlog
-assignee: ["KimiK2.5"]
+status: To Do
+assignee:
+  - KimiK2.5
+created_date: ''
+updated_date: '2026-02-21 04:25'
 labels:
   - ui
   - security
