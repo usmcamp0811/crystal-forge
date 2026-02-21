@@ -49,7 +49,25 @@ let
 
     const routes = [
       {
-        path: '/',
+        path: '/login',
+        name: 'login',
+        desc: 'Login screen',
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Crystal Forge', 'Login title');
+          await assertTextVisible(page, 'Sign in to continue', 'Login subtitle');
+        }
+      },
+      {
+        path: '/register',
+        name: 'registration',
+        desc: 'First-run registration screen',
+        assertions: async (page) => {
+          await assertTextVisible(page, 'Administrator Registration', 'Registration title');
+          await assertTextVisible(page, 'First-Time Setup', 'First-run setup banner');
+        }
+      },
+      {
+        path: '/?ui_check_auth=1',
         name: 'dashboard',
         desc: 'Dashboard (fleet overview)',
         assertions: async (page) => {
@@ -77,7 +95,20 @@ let
         }
       },
       {
-        path: '/systems',
+        path: '/?ui_check_auth=1',
+        name: 'topbar-user-dropdown',
+        desc: 'Topbar user dropdown menu',
+        setup: async (page) => {
+          await page.locator("[data-testid='user-menu-button']").click();
+          await page.waitForTimeout(250);
+        },
+        assertions: async (page) => {
+          await assertVisible(page, "[data-testid='user-menu-dropdown']", 'User dropdown container');
+          await assertTextVisible(page, 'Sign Out', 'Sign out action in user dropdown');
+        }
+      },
+      {
+        path: '/systems?ui_check_auth=1',
         name: 'systems-table',
         desc: 'Systems list (table view)',
         assertions: async (page) => {
@@ -91,7 +122,7 @@ let
         }
       },
       {
-        path: '/systems',
+        path: '/systems?ui_check_auth=1',
         name: 'systems-cards',
         desc: 'Systems list (card view)',
         clickCards: true,
@@ -106,7 +137,7 @@ let
         }
       },
       {
-        path: '/systems',
+        path: '/systems?ui_check_auth=1',
         name: 'systems-add-modal',
         desc: 'Systems add modal',
         setup: async (page) => {
@@ -119,7 +150,7 @@ let
         }
       },
       {
-        path: '/systems',
+        path: '/systems?ui_check_auth=1',
         name: 'systems-keypair-modal',
         desc: 'Systems keypair generation modal',
         setup: async (page) => {
@@ -134,7 +165,7 @@ let
         }
       },
       {
-        path: '/systems',
+        path: '/systems?ui_check_auth=1',
         name: 'systems-remove-modal',
         desc: 'Systems remove confirmation modal',
         setup: async (page) => {
@@ -147,7 +178,7 @@ let
         }
       },
       {
-        path: '/systems/00000000-0000-0000-0000-000000000001',
+        path: '/systems/00000000-0000-0000-0000-000000000001?ui_check_auth=1',
         name: 'system-detail',
         desc: 'System detail page',
         assertions: async (page) => {
@@ -161,7 +192,7 @@ let
         }
       },
       {
-        path: '/flakes',
+        path: '/flakes?ui_check_auth=1',
         name: 'flakes-table',
         desc: 'Flakes registry table view',
         setup: async (page) => {
@@ -177,7 +208,7 @@ let
         }
       },
       {
-        path: '/flakes',
+        path: '/flakes?ui_check_auth=1',
         name: 'flakes-cards',
         desc: 'Flakes registry card view',
         clickCards: true,
@@ -187,7 +218,7 @@ let
         }
       },
       {
-        path: '/flakes',
+        path: '/flakes?ui_check_auth=1',
         name: 'flakes-add-modal',
         desc: 'Flakes add modal',
         setup: async (page) => {
@@ -200,7 +231,7 @@ let
         }
       },
       {
-        path: '/flakes',
+        path: '/flakes?ui_check_auth=1',
         name: 'flakes-edit-modal',
         desc: 'Flakes edit modal',
         setup: async (page) => {
@@ -213,7 +244,7 @@ let
         }
       },
       {
-        path: '/flakes',
+        path: '/flakes?ui_check_auth=1',
         name: 'flakes-remove-modal',
         desc: 'Flakes remove confirmation modal',
         setup: async (page) => {
@@ -231,7 +262,7 @@ let
         }
       },
       {
-        path: '/environments',
+        path: '/environments?ui_check_auth=1',
         name: 'environments-registry',
         desc: 'Environment registry view',
         assertions: async (page) => {
@@ -241,7 +272,7 @@ let
         }
       },
       {
-        path: '/environments',
+        path: '/environments?ui_check_auth=1',
         name: 'environments-add-modal',
         desc: 'Environment add modal',
         setup: async (page) => {
@@ -254,7 +285,7 @@ let
         }
       },
       {
-        path: '/environments',
+        path: '/environments?ui_check_auth=1',
         name: 'environments-policy-picker-modal',
         desc: 'Environment policy picker modal',
         setup: async (page) => {
@@ -269,7 +300,7 @@ let
         }
       },
       {
-        path: '/environments',
+        path: '/environments?ui_check_auth=1',
         name: 'environments-edit-modal',
         desc: 'Environment edit metadata modal',
         setup: async (page) => {
@@ -282,7 +313,7 @@ let
         }
       },
       {
-        path: '/environments',
+        path: '/environments?ui_check_auth=1',
         name: 'environments-edit-requirements-modal',
         desc: 'Environment edit requirements modal',
         setup: async (page) => {
@@ -295,7 +326,7 @@ let
         }
       },
       {
-        path: '/environments',
+        path: '/environments?ui_check_auth=1',
         name: 'environments-remove-modal',
         desc: 'Environment remove confirmation modal',
         setup: async (page) => {
@@ -308,7 +339,7 @@ let
         }
       },
       {
-        path: '/builds',
+        path: '/builds?ui_check_auth=1',
         name: 'builds',
         desc: 'Builds pipeline',
         assertions: async (page) => {
@@ -317,7 +348,7 @@ let
         }
       },
       {
-        path: '/cves',
+        path: '/cves?ui_check_auth=1',
         name: 'cves',
         desc: 'CVE dashboard',
         assertions: async (page) => {
@@ -326,7 +357,7 @@ let
         }
       },
       {
-        path: '/style-guide',
+        path: '/style-guide?ui_check_auth=1',
         name: 'style-guide',
         desc: 'Design system style guide',
         assertions: async (page) => {
@@ -335,7 +366,7 @@ let
         }
       },
       {
-        path: '/not-a-real-page',
+        path: '/not-a-real-page?ui_check_auth=1',
         name: 'not-found',
         desc: '404 not found page',
         assertions: async (page) => {

@@ -54,6 +54,7 @@ pub fn TopBar(title: String) -> Element {
                     div {
                         class: "relative",
                         button {
+                            "data-testid": "user-menu-button",
                             class: "flex items-center gap-2 px-3 py-2 rounded-lg {theme::interactive::HOVER_BG} transition-colors",
                             onclick: move |_| show_user_menu.set(!show_user_menu()),
                             
@@ -84,6 +85,7 @@ pub fn TopBar(title: String) -> Element {
                         // Dropdown menu
                         if show_user_menu() {
                             div {
+                                "data-testid": "user-menu-dropdown",
                                 class: "absolute right-0 mt-2 w-56 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
                                 
                                 // User info section

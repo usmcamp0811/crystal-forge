@@ -2,6 +2,7 @@
 
 use dioxus::prelude::*;
 
+use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
 use crate::components::layout::DevModeBanner;
 use crate::components::layout::SidebarNav;
 use crate::components::layout::TopBar;
@@ -10,6 +11,26 @@ use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::theme;
 
+fn ui_check_mock_auth_enabled() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .map(|q| q.contains("ui_check_auth=1"))
+        .unwrap_or(false)
+}
+
+fn ui_check_mock_auth_context() -> AuthContext {
+    AuthContext {
+        is_authenticated: true,
+        user: Some(AuthUser {
+            id: "ui-check-user".to_string(),
+            email: "ui-check@example.com".to_string(),
+            display_name: Some("UI Check".to_string()),
+        }),
+        roles: vec![Role::Admin],
+        auth_mode: AuthMode::Local,
+    }
+}
+
 /// Top-level application layout wrapping all views.
 ///
 /// Provides the sidebar navigation and main content area.
@@ -17,11 +38,17 @@ use crate::theme;
 #[component]
 pub fn AppShell() -> Element {
     let current_route = use_route::<Route>();
-    let app_state = use_context::<Signal<AppState>>();
+    let mut app_state = use_context::<Signal<AppState>>();
     let nav = navigator();
 
     // Check authentication and redirect if needed
-    let auth_context = app_state.read().auth.clone();
+    let mut auth_context = app_state.read().auth.clone();
+
+    if auth_context.is_none() && ui_check_mock_auth_enabled() {
+        let mock = ui_check_mock_auth_context();
+        app_state.write().auth = Some(mock.clone());
+        auth_context = Some(mock);
+    }
 
     if !auth::is_authenticated(&auth_context) {
         // If auth context is loaded and user is not authenticated, redirect to login

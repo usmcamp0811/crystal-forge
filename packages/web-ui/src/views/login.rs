@@ -94,15 +94,38 @@ pub fn LoginView() -> Element {
 
     rsx! {
         div {
-            class: "min-h-screen flex items-center justify-center p-6",
-            style: "background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);",
+            class: "relative min-h-screen flex items-center justify-center p-6 overflow-hidden",
+            style: "background: radial-gradient(circle at 20% 20%, rgba(139,92,246,0.15) 0%, rgba(15,23,42,0) 45%), radial-gradient(circle at 80% 80%, rgba(168,85,247,0.12) 0%, rgba(15,23,42,0) 40%), linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);",
+
+            // Faded Crystal Forge logo backdrop (inspired by slide styling)
+            div {
+                class: "absolute right-[-60px] bottom-[-40px] opacity-10 pointer-events-none select-none",
+                img {
+                    src: "/assets/cf.png",
+                    class: "max-w-[440px] blur-[1px]",
+                    alt: ""
+                }
+            }
+
+            // Soft purple glow accents
+            div {
+                class: "absolute -top-24 -left-24 w-72 h-72 rounded-full bg-violet-500/10 blur-3xl pointer-events-none"
+            }
+            div {
+                class: "absolute -bottom-24 -right-16 w-80 h-80 rounded-full bg-fuchsia-500/10 blur-3xl pointer-events-none"
+            }
 
             div {
-                class: "w-full max-w-md",
+                class: "relative w-full max-w-md z-10",
 
                 // Card container
                 div {
-                    class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-8 shadow-2xl",
+                    class: "relative {theme::surface::CARD_BG} border border-violet-400/25 rounded-2xl p-8 shadow-2xl shadow-violet-950/40 backdrop-blur-sm",
+
+                    // Top accent line
+                    div {
+                        class: "absolute top-0 left-0 right-0 h-[2px] rounded-t-2xl bg-gradient-to-r from-violet-500/0 via-violet-400/80 to-fuchsia-400/0"
+                    }
 
                     // Header
                     div {
