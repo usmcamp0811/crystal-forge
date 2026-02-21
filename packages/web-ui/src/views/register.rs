@@ -23,10 +23,19 @@ struct RegisterResponse {
     email: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct SetupStatus {
+    requires_setup: bool,
+    allow_registration: bool,
+}
+
 /// First-run registration view.
 ///
-/// Only shown when no users exist in the system. The first registered user
-/// automatically becomes an Admin.
+/// Only shown when:
+/// - No users exist (first-time setup), OR
+/// - Registration is explicitly enabled in server config
+///
+/// The first registered user automatically becomes an Admin.
 #[component]
 pub fn RegisterView() -> Element {
     let _app_state = use_context::<Signal<AppState>>();
@@ -39,6 +48,56 @@ pub fn RegisterView() -> Element {
     let mut last_name = use_signal(|| String::new());
     let mut error_message = use_signal(|| None::<String>);
     let mut is_loading = use_signal(|| false);
+    let mut registration_allowed = use_signal(|| false);
+    let mut is_first_run = use_signal(|| false);
+    let mut status_checked = use_signal(|| false);
+
+    // Check if registration is allowed on mount
+    use_effect(move || {
+        spawn(async move {
+            use wasm_bindgen::JsCast;
+            use wasm_bindgen_futures::JsFuture;
+
+            let window = web_sys::window().expect("no global window");
+            let mut opts = web_sys::RequestInit::new();
+            opts.set_method("GET");
+
+            if let Ok(request) =
+                web_sys::Request::new_with_str_and_init("/api/auth/setup-status", &opts)
+            {
+                if let Ok(resp_value) = JsFuture::from(window.fetch_with_request(&request)).await {
+                    if let Ok(resp) = resp_value.dyn_into::<web_sys::Response>() {
+                        if resp.ok() {
+                            if let Ok(text_promise) = resp.text() {
+                                if let Ok(text_value) = JsFuture::from(text_promise).await {
+                                    if let Some(text) = text_value.as_string() {
+                                        if let Ok(status) = serde_json::from_str::<SetupStatus>(&text)
+                                        {
+                                            is_first_run.set(status.requires_setup);
+                                            // Allow registration if first-run OR explicitly enabled
+                                            registration_allowed
+                                                .set(status.requires_setup || status.allow_registration);
+                                            status_checked.set(true);
+
+                                            // If registration not allowed, redirect to login
+                                            if !status.requires_setup && !status.allow_registration {
+                                                nav.push("/login");
+                                            }
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // On error, redirect to login for safety
+            status_checked.set(true);
+            nav.push("/login");
+        });
+    });
 
     let password_match = password() == password_confirm() || password_confirm().is_empty();
     let form_valid = !username().is_empty()
@@ -175,6 +234,35 @@ pub fn RegisterView() -> Element {
         });
     };
 
+    // Show loading state while checking registration status
+    if !status_checked() {
+        return rsx! {
+            div {
+                class: "min-h-screen flex items-center justify-center",
+                style: "background: linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);",
+                p {
+                    class: "text-gray-400",
+                    "Loading..."
+                }
+            }
+        };
+    }
+
+    // If registration not allowed, this shouldn't render (redirect happens in effect)
+    // but just in case, show nothing
+    if !registration_allowed() {
+        return rsx! {
+            div {
+                class: "min-h-screen flex items-center justify-center",
+                style: "background: linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);",
+                p {
+                    class: "text-gray-400",
+                    "Redirecting..."
+                }
+            }
+        };
+    }
+
     rsx! {
         div {
             class: "relative min-h-screen flex items-center justify-center p-6 overflow-hidden",
@@ -183,10 +271,10 @@ pub fn RegisterView() -> Element {
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
                 class: "absolute pointer-events-none select-none",
-                style: "opacity: 0.09; right: 6px; bottom: 6px;",
+                style: "opacity: 0.06; right: 16px; bottom: 16px;",
                 img {
                     src: asset!("assets/cf.png"),
-                    style: "max-width: 600px; filter: blur(1px);",
+                    style: "max-width: 400px; filter: blur(1px);",
                     alt: ""
                 }
             }
@@ -202,17 +290,19 @@ pub fn RegisterView() -> Element {
             div {
                 class: "relative max-w-md z-10",
 
-                // First-run banner
-                div {
-                    class: "mb-6 p-4 rounded-lg border border-violet-400/50",
-                    style: "background: linear-gradient(135deg, rgba(139, 92, 246, 0.9) 0%, rgba(124, 58, 237, 0.9) 100%);",
-                    h3 {
-                        class: "text-sm font-semibold text-white mb-1",
-                        "⚡ First-Time Setup"
-                    }
-                    p {
-                        class: "text-xs text-white/90",
-                        "Create the initial administrator account. This user will have full system access."
+                // First-run banner (only shown for initial admin setup)
+                if is_first_run() {
+                    div {
+                        class: "mb-6 p-4 rounded-lg border border-violet-400/50",
+                        style: "background: linear-gradient(135deg, rgba(139, 92, 246, 0.9) 0%, rgba(124, 58, 237, 0.9) 100%);",
+                        h3 {
+                            class: "text-sm font-semibold text-white mb-1",
+                            "⚡ First-Time Setup"
+                        }
+                        p {
+                            class: "text-xs text-white/90",
+                            "Create the initial administrator account. This user will have full system access."
+                        }
                     }
                 }
 
@@ -241,7 +331,7 @@ pub fn RegisterView() -> Element {
                             }
                             p {
                                 class: "text-xs {theme::text::MUTED} mt-1",
-                                "Administrator Registration"
+                                if is_first_run() { "Administrator Registration" } else { "Create Account" }
                             }
                         }
                     }
@@ -387,10 +477,26 @@ pub fn RegisterView() -> Element {
                             disabled: !form_valid || is_loading(),
                             {
                                 if is_loading() {
-                                    "Creating Administrator Account..."
+                                    if is_first_run() { "Creating Administrator Account..." } else { "Creating Account..." }
                                 } else {
-                                    "Create Administrator Account"
+                                    if is_first_run() { "Create Administrator Account" } else { "Create Account" }
                                 }
+                            }
+                        }
+                    }
+
+                    // Back to login link (for non-first-run registration)
+                    if !is_first_run() {
+                        div {
+                            class: "mt-4 text-center",
+                            span {
+                                class: "text-sm text-gray-400",
+                                "Already have an account? "
+                            }
+                            a {
+                                href: "/login",
+                                class: "text-sm text-violet-400 hover:text-violet-300 transition-colors",
+                                "Sign in"
                             }
                         }
                     }
@@ -399,7 +505,11 @@ pub fn RegisterView() -> Element {
                 // Footer
                 div {
                     class: "mt-6 text-center text-xs text-gray-500",
-                    "Initial administrator setup • Full system access granted"
+                    if is_first_run() {
+                        "Initial administrator setup • Full system access granted"
+                    } else {
+                        "New account registration"
+                    }
                 }
             }
         }

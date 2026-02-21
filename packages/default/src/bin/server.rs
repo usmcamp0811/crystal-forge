@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
     info!("Host: 0.0.0.0");
     info!("Port: {}", server_cfg.port);
 
-    let state = CFState::new(pool);
+    let state = CFState::new(pool, server_cfg.clone());
     let mut app = Router::new()
         .route("/status", get(status::status))
         .route("/system_state", post(state::update))

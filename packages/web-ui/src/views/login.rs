@@ -19,7 +19,8 @@ pub fn LoginView() -> Element {
     let mut error_message = use_signal(|| None::<String>);
     let mut is_loading = use_signal(|| false);
     let mut auth_mode = use_signal(|| None::<AuthMode>);
-    let mut requires_setup = use_signal(|| false);
+    let mut _requires_setup = use_signal(|| false);
+    let mut allow_registration = use_signal(|| false);
     let nav = navigator();
 
     // Fetch auth mode and setup status on mount
@@ -59,6 +60,7 @@ pub fn LoginView() -> Element {
                                                 if let Ok(status) =
                                                     serde_json::from_str::<serde_json::Value>(&text)
                                                 {
+                                                    // Check if first-time setup is required
                                                     if status
                                                         .get("requires_setup")
                                                         .and_then(|v| v.as_bool())
@@ -66,6 +68,15 @@ pub fn LoginView() -> Element {
                                                     {
                                                         // Redirect to registration for first-time setup
                                                         nav.push("/register");
+                                                        return;
+                                                    }
+                                                    // Check if registration is allowed
+                                                    if status
+                                                        .get("allow_registration")
+                                                        .and_then(|v| v.as_bool())
+                                                        .unwrap_or(false)
+                                                    {
+                                                        allow_registration.set(true);
                                                     }
                                                 }
                                             }
@@ -110,7 +121,7 @@ pub fn LoginView() -> Element {
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
                 class: "absolute pointer-events-none select-none",
-                style: "opacity: 0.11; right: 16px; bottom: 16px;",
+                style: "opacity: 0.11; right: 6px; bottom: 6px;",
                 img {
                     src: asset!("assets/cf.png"),
                     style: "max-width: 600px; filter: blur(1px);",
@@ -259,6 +270,22 @@ pub fn LoginView() -> Element {
                                                 "Signing in..."
                                             } else {
                                                 "Sign In"
+                                            }
+                                        }
+                                    }
+
+                                    // Register link (only shown if registration is enabled)
+                                    if allow_registration() {
+                                        div {
+                                            class: "mt-4 text-center",
+                                            span {
+                                                class: "text-sm text-gray-400",
+                                                "Don't have an account? "
+                                            }
+                                            a {
+                                                href: "/register",
+                                                class: "text-sm text-violet-400 hover:text-violet-300 transition-colors",
+                                                "Register"
                                             }
                                         }
                                     }

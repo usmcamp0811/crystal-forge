@@ -29,6 +29,12 @@ pub struct ServerConfig {
     /// Default: "oidc" (read from AUTH_MODE env var)
     #[serde(default = "default_auth_mode")]
     pub auth_mode: String,
+
+    /// Whether to allow new user registration (for local auth mode).
+    /// When false, only the initial admin can be registered (when no users exist).
+    /// Default: false
+    #[serde(default)]
+    pub allow_registration: bool,
 }
 
 // Default value functions for serde
@@ -57,6 +63,7 @@ impl Default for ServerConfig {
             eval_max_memory_mb: default_eval_max_memory_mb(),
             eval_check_cache: default_eval_check_cache(),
             auth_mode: default_auth_mode(),
+            allow_registration: false,
         }
     }
 }
