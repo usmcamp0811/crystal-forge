@@ -108,21 +108,8 @@ pub fn RegisterView() -> Element {
             };
 
             if resp.status() >= 200 && resp.status() < 300 {
-                // Registration successful, now login
-                match local_login(&username(), &password()).await {
-                    Ok(_) => {
-                        // Fetch auth context
-                        if let Ok(auth_context) = fetch_whoami().await {
-                            app_state.write().auth = Some(auth_context);
-                        }
-                        // Redirect to dashboard
-                        nav.push("/");
-                    }
-                    Err(e) => {
-                        error_message.set(Some(format!("Registration succeeded but login failed: {}", e)));
-                        is_loading.set(false);
-                    }
-                }
+                // Registration successful, redirect to login page
+                nav.push("/login");
             } else {
                 let text_future = match resp.text() {
                     Ok(t) => t,
@@ -159,31 +146,14 @@ pub fn RegisterView() -> Element {
 
                 // First-run banner
                 div {
-                    class: "mb-6 p-4 rounded-lg border-2 border-violet-500/50 bg-violet-500/10",
-                    div {
-                        class: "flex items-start gap-3",
-                        svg {
-                            class: "w-5 h-5 text-violet-400 flex-shrink-0 mt-0.5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M13 10V3L4 14h7v7l9-11h-7z"
-                            }
-                        }
-                        div {
-                            h3 {
-                                class: "text-sm font-semibold text-violet-300 mb-1",
-                                "First-Time Setup"
-                            }
-                            p {
-                                class: "text-xs text-violet-200/80",
-                                "Create the initial administrator account. This user will have full system access."
-                            }
-                        }
+                    class: "mb-6 p-3 rounded-lg border border-violet-500/50 bg-violet-500/10",
+                    h3 {
+                        class: "text-sm font-semibold text-violet-300 mb-1",
+                        "⚡ First-Time Setup"
+                    }
+                    p {
+                        class: "text-xs text-violet-200/80",
+                        "Create the initial administrator account. This user will have full system access."
                     }
                 }
 
