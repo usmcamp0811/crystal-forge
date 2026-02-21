@@ -1,8 +1,11 @@
 ---
 id: TASK-65.5
 title: API authorization enforcement and machine-auth carve-outs
-status: Backlog
-assignee: ["Claude Opus 4.5"]
+status: To Do
+assignee:
+  - Claude Opus 4.5
+created_date: ''
+updated_date: '2026-02-21 04:25'
 labels:
   - security
   - authz
