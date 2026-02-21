@@ -1,11 +1,11 @@
 ---
 id: TASK-65.4
 title: JIT provisioning and claim-to-role mapping
-status: In Progress
+status: Review
 assignee:
   - MiniMax M2.5
 created_date: ''
-updated_date: '2026-02-21 05:01'
+updated_date: '2026-02-21 05:11'
 labels:
   - security
   - auth
@@ -65,4 +65,6 @@ Risk Level
 Follow-up possibility: finer role granularity as a separate backlog item.
 
 LOCK: claude-sonnet-4-5 on gray in /home/mcamp/code/crystal-forge/TASK-65.4-jit-provisioning-role-mapping
+
+MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/124
 <!-- SECTION:NOTES:END -->
