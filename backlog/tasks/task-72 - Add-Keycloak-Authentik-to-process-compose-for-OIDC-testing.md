@@ -1,10 +1,10 @@
 ---
 id: TASK-72
 title: Add Keycloak/Authentik to process-compose for OIDC testing
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-20 14:28'
-updated_date: '2026-02-21 02:51'
+updated_date: '2026-02-21 03:26'
 labels:
   - devex
   - infra
