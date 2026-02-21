@@ -18,11 +18,12 @@ use openidconnect::{
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::auth::oidc::{ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore};
 use crate::config::OidcConfig;
+use crate::auth::repository::normalize_tenant_discriminator;
 use crate::queries::auth_identity::{AuthIdentityRepository, NewExternalIdentity};
-use crate::queries::users::insert_user;
 
 /// Shared OIDC client state.
 #[derive(Clone)]
@@ -368,43 +369,97 @@ pub async fn oidc_callback(
             })?
         }
         None => {
-            // New OIDC identity - create user and bind identity
+            // New OIDC identity - create user and bind identity atomically
             tracing::info!("New OIDC identity, creating user: email={}", email);
             
-            // Create user with verified email
-            let new_user = insert_user(&pool, email, user_info.display_name.as_deref())
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to create user: {}", e);
-                    OidcError::DatabaseError
-                })?;
+            // Use transaction to ensure user creation + identity binding are atomic
+            // If either fails, both roll back (prevents orphaned users or identities)
+            let mut tx = pool.begin().await.map_err(|e| {
+                tracing::error!("Failed to start transaction: {}", e);
+                OidcError::DatabaseError
+            })?;
 
-            // Bind OIDC identity to user
-            let identity_record = NewExternalIdentity {
-                user_id: new_user.id,
-                provider_key: provider_key.to_string(),
-                subject: subject.to_string(),
-                tenant_discriminator: tenant_discriminator.map(|s| s.to_string()),
-                claims: serde_json::to_value(&user_info.custom_claims)
-                    .unwrap_or_else(|_| serde_json::json!({})),
+            // Create user within transaction (inline to use tx executor)
+            let user_id = uuid::Uuid::new_v4();
+            let username = email.split('@').next().unwrap_or(email);
+            let (first_name, last_name) = match user_info.display_name.as_deref() {
+                Some(name) => {
+                    let parts: Vec<&str> = name.splitn(2, ' ').collect();
+                    (
+                        Some(parts[0].to_string()),
+                        parts.get(1).map(|s| s.to_string()),
+                    )
+                }
+                None => (None, None),
             };
 
-            auth_repo
-                .upsert_external_identity(&identity_record)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to create external identity binding: {}", e);
-                    OidcError::DatabaseError
-                })?;
+            sqlx::query(
+                "INSERT INTO users (id, username, first_name, last_name, email)
+                 VALUES ($1, $2, $3, $4, $5)"
+            )
+            .bind(user_id)
+            .bind(username)
+            .bind(&first_name)
+            .bind(&last_name)
+            .bind(email)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to create user in transaction: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+            // Bind OIDC identity to user within same transaction
+            let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
+            let claims_json = serde_json::to_value(&user_info.custom_claims)
+                .unwrap_or_else(|_| serde_json::json!({}));
+
+            sqlx::query(
+                "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (provider_key, subject, tenant_discriminator)
+                 DO UPDATE SET
+                     user_id = EXCLUDED.user_id,
+                     claims = EXCLUDED.claims,
+                     updated_at = NOW()"
+            )
+            .bind(user_id)
+            .bind(provider_key)
+            .bind(subject)
+            .bind(&tenant_key)
+            .bind(claims_json)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to create external identity binding: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+            // Commit transaction (both user + identity created atomically)
+            tx.commit().await.map_err(|e| {
+                tracing::error!("Failed to commit user creation transaction: {}", e);
+                OidcError::DatabaseError
+            })?;
 
             tracing::info!(
-                "Created OIDC identity binding: user_id={} provider={} subject={}",
-                new_user.id,
+                "Created user + OIDC identity binding atomically: user_id={} provider={} subject={}",
+                user_id,
                 provider_key,
                 subject
             );
 
-            new_user
+            // Load the created user
+            sqlx::query_as::<_, crate::models::users::User>(
+                "SELECT id, username, email, first_name, last_name, created_at, updated_at, password_hash
+                 FROM users WHERE id = $1"
+            )
+            .bind(user_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load created user: {}", e);
+                OidcError::DatabaseError
+            })?
         }
     };
 
