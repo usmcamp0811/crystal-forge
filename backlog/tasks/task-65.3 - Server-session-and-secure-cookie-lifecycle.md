@@ -1,11 +1,11 @@
 ---
 id: TASK-65.3
 title: Server session and secure cookie lifecycle
-status: To Do
+status: In Progress
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 04:22'
+updated_date: '2026-02-21 03:32'
 labels:
   - security
   - auth
@@ -62,4 +62,6 @@ Risk Level
 Follow-up possibility: additional session hardening after security review.
 
 Selected for auth micro-sprint planning (2026-02-20).
+
+LOCK: codex on gray in /home/mcamp/code/crystal-forge/TASK-65.3-session-cookie-lifecycle
 <!-- SECTION:NOTES:END -->
