@@ -142,6 +142,7 @@ in mkShell {
 
     alias full-stack='sudo echo && nix run $PROJECT_ROOT#devScripts --'
     alias server-stack='nix run $PROJECT_ROOT#devScripts.server-only --'
+    alias oidc-stack='nix run $PROJECT_ROOT#devScripts.oidc-stack --'
     alias db-only='nix run $PROJECT_ROOT#devScripts.db-only --'
     alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
     alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
@@ -156,10 +157,12 @@ in mkShell {
     echo "  1️⃣  Start core services:"
     echo "      full-stack up"
     echo "      - Launches PostgreSQL, the Crystal Forge server and agent in process-compose"
-    echo "      server-stack up"
-    echo "      - Launches PostgreSQL and the Crystal Forge server in process-compose"
-    echo "      db-only up"
-    echo "      - Launches PostgreSQL in process-compose"
+      echo "      server-stack up"
+      echo "      - Launches PostgreSQL and the Crystal Forge server in process-compose"
+      echo "      oidc-stack up"
+      echo "      - Launches PostgreSQL, Keycloak OIDC provider, and server in OIDC mode"
+      echo "      db-only up"
+      echo "      - Launches PostgreSQL in process-compose"
     echo ""
     echo "  2️⃣  Run the agent:"
     echo "      run-agent"

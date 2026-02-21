@@ -300,6 +300,9 @@ This provides a complete development environment with:
 # Start database and server
 process-compose up
 
+# Start database + server + local OIDC provider (Keycloak)
+nix run .#devScripts.oidc-stack -- up
+
 # In another terminal, run agent
 run-agent
 
@@ -308,6 +311,28 @@ run-server --dev
 run-agent --dev
 run-builder --dev
 ```
+
+### Local OIDC Testing Stack
+
+Crystal Forge includes a local Keycloak profile for OIDC development flows:
+
+```bash
+# Start PostgreSQL + Keycloak + Crystal Forge server (AUTH_MODE=oidc)
+oidc-stack up
+
+# Confirm OIDC discovery endpoint is healthy
+curl -fsS http://127.0.0.1:38080/realms/crystal-forge/.well-known/openid-configuration
+```
+
+The OIDC stack seeds a development realm with test roles and users:
+
+- Realm: `crystal-forge`
+- Test users: `admin` / `operator` / `viewer`
+- Test passwords: same as username
+- Client IDs: `crystal-forge-web` (public), `crystal-forge-server` (confidential)
+- Confidential client secret: `dev-only-secret`
+
+This stack is for local development only and must not be used for production authentication.
 
 ### Testing
 
