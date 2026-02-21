@@ -1,11 +1,11 @@
 ---
 id: TASK-65.2
 title: OIDC provider integration foundation
-status: In Progress
+status: Review
 assignee:
   - Claude Opus 4.5
 created_date: ''
-updated_date: '2026-02-21 00:04'
+updated_date: '2026-02-21 00:59'
 labels:
   - security
   - auth
