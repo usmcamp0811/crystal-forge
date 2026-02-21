@@ -182,7 +182,8 @@ pub fn RegisterView() -> Element {
 
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
-                class: "absolute right-[-60px] bottom-[-40px] opacity-[0.04] pointer-events-none select-none",
+                class: "absolute right-[-100px] bottom-[-80px] pointer-events-none select-none",
+                style: "opacity: 0.04;",
                 img {
                     src: asset!("assets/cf.png"),
                     class: "max-w-[440px] blur-[1px]",
@@ -203,13 +204,13 @@ pub fn RegisterView() -> Element {
 
                 // First-run banner
                 div {
-                    class: "mb-6 p-3 rounded-lg border border-violet-500/50 bg-violet-500/10",
+                    class: "mb-6 p-3 rounded-lg border border-violet-500/40 bg-slate-900/95 backdrop-blur-sm",
                     h3 {
                         class: "text-sm font-semibold text-violet-300 mb-1",
                         "⚡ First-Time Setup"
                     }
                     p {
-                        class: "text-xs text-violet-200/80",
+                        class: "text-xs text-violet-200/90",
                         "Create the initial administrator account. This user will have full system access."
                     }
                 }

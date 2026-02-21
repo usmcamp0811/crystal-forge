@@ -109,7 +109,8 @@ pub fn LoginView() -> Element {
 
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
-                class: "absolute right-[-60px] bottom-[-40px] opacity-[0.04] pointer-events-none select-none",
+                class: "absolute right-[-100px] bottom-[-80px] pointer-events-none select-none",
+                style: "opacity: 0.04;",
                 img {
                     src: asset!("assets/cf.png"),
                     class: "max-w-[440px] blur-[1px]",
