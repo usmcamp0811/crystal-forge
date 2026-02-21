@@ -197,9 +197,18 @@ pub fn RegisterView() -> Element {
                         class: "absolute top-0 left-0 right-0 h-[2px] rounded-t-2xl bg-gradient-to-r from-violet-500/0 via-violet-400/80 to-fuchsia-400/0"
                     }
 
-                    // Header
+                    // Header with logo
                     div {
                         class: "text-center mb-8",
+                        // Crystal Forge logo
+                        div {
+                            class: "flex justify-center mb-4",
+                            img {
+                                src: "/assets/cf.png",
+                                class: "h-16 w-auto opacity-90",
+                                alt: "Crystal Forge"
+                            }
+                        }
                         h1 {
                             class: "text-2xl font-bold text-white mb-2",
                             "Crystal Forge"
@@ -228,7 +237,7 @@ pub fn RegisterView() -> Element {
                                 }
                                 input {
                                     r#type: "text",
-                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500",
+                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border border-violet-500/30 {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-400",
                                     placeholder: "admin",
                                     value: "{username}",
                                     oninput: move |evt| username.set(evt.value().clone()),
@@ -244,7 +253,7 @@ pub fn RegisterView() -> Element {
                                 }
                                 input {
                                     r#type: "email",
-                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500",
+                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border border-violet-500/30 {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-400",
                                     placeholder: "admin@example.com",
                                     value: "{email}",
                                     oninput: move |evt| email.set(evt.value().clone()),
@@ -260,7 +269,7 @@ pub fn RegisterView() -> Element {
                                 }
                                 input {
                                     r#type: "text",
-                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500",
+                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border border-violet-500/30 {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-400",
                                     placeholder: "Optional",
                                     value: "{first_name}",
                                     oninput: move |evt| first_name.set(evt.value().clone()),
@@ -275,7 +284,7 @@ pub fn RegisterView() -> Element {
                                 }
                                 input {
                                     r#type: "text",
-                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500",
+                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border border-violet-500/30 {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-400",
                                     placeholder: "Optional",
                                     value: "{last_name}",
                                     oninput: move |evt| last_name.set(evt.value().clone()),
@@ -290,7 +299,7 @@ pub fn RegisterView() -> Element {
                                 }
                                 input {
                                     r#type: "password",
-                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500",
+                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border border-violet-500/30 {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-400",
                                     placeholder: "Minimum 8 characters",
                                     value: "{password}",
                                     oninput: move |evt| password.set(evt.value().clone()),
@@ -313,7 +322,7 @@ pub fn RegisterView() -> Element {
                                 }
                                 input {
                                     r#type: "password",
-                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500",
+                                    class: "w-full px-4 py-2 rounded-lg {theme::surface::CARD_BG} border border-violet-500/30 {theme::text::PRIMARY} focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-400",
                                     placeholder: "Re-enter password",
                                     value: "{password_confirm}",
                                     oninput: move |evt| password_confirm.set(evt.value().clone()),
