@@ -28,32 +28,42 @@ pub fn LoginView() -> Element {
             // Check auth status
             if let Ok(context) = fetch_whoami().await {
                 auth_mode.set(Some(context.auth_mode));
-                
+
                 // If already authenticated, update app state and redirect to dashboard
                 if context.is_authenticated {
                     app_state.write().auth = Some(context);
                     nav.push("/");
                     return;
                 }
-                
+
                 // If local auth mode, check if initial setup is required
                 if context.auth_mode == AuthMode::Local {
                     use wasm_bindgen::JsCast;
                     use wasm_bindgen_futures::JsFuture;
-                    
+
                     let window = web_sys::window().expect("no global window");
                     let mut opts = web_sys::RequestInit::new();
                     opts.set_method("GET");
-                    
-                    if let Ok(request) = web_sys::Request::new_with_str_and_init("/api/auth/setup-status", &opts) {
-                        if let Ok(resp_value) = JsFuture::from(window.fetch_with_request(&request)).await {
+
+                    if let Ok(request) =
+                        web_sys::Request::new_with_str_and_init("/api/auth/setup-status", &opts)
+                    {
+                        if let Ok(resp_value) =
+                            JsFuture::from(window.fetch_with_request(&request)).await
+                        {
                             if let Ok(resp) = resp_value.dyn_into::<web_sys::Response>() {
                                 if resp.ok() {
                                     if let Ok(text_promise) = resp.text() {
                                         if let Ok(text_value) = JsFuture::from(text_promise).await {
                                             if let Some(text) = text_value.as_string() {
-                                                if let Ok(status) = serde_json::from_str::<serde_json::Value>(&text) {
-                                                    if status.get("requires_setup").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                                if let Ok(status) =
+                                                    serde_json::from_str::<serde_json::Value>(&text)
+                                                {
+                                                    if status
+                                                        .get("requires_setup")
+                                                        .and_then(|v| v.as_bool())
+                                                        .unwrap_or(false)
+                                                    {
                                                         // Redirect to registration for first-time setup
                                                         nav.push("/register");
                                                     }
@@ -187,10 +197,10 @@ pub fn LoginView() -> Element {
                                         evt.prevent_default();
                                         handle_login(evt);
                                     },
-                                    
+
                                     div {
                                         class: "space-y-4 mb-6",
-                                        
+
                                         // Username field
                                         div {
                                             label {
@@ -205,7 +215,7 @@ pub fn LoginView() -> Element {
                                                 oninput: move |evt| username.set(evt.value().clone()),
                                             }
                                         }
-                                        
+
                                         // Password field
                                         div {
                                             label {

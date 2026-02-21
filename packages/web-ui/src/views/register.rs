@@ -60,19 +60,27 @@ pub fn RegisterView() -> Element {
                 username: username(),
                 email: email(),
                 password: password(),
-                first_name: if first_name().is_empty() { None } else { Some(first_name()) },
-                last_name: if last_name().is_empty() { None } else { Some(last_name()) },
+                first_name: if first_name().is_empty() {
+                    None
+                } else {
+                    Some(first_name())
+                },
+                last_name: if last_name().is_empty() {
+                    None
+                } else {
+                    Some(last_name())
+                },
             };
 
             // Use web-sys fetch API directly
             use wasm_bindgen::JsCast;
             use wasm_bindgen::JsValue;
             use wasm_bindgen_futures::JsFuture;
-            
+
             let window = web_sys::window().expect("no global window");
             let mut opts = web_sys::RequestInit::new();
             opts.set_method("POST");
-            
+
             let json_body = match serde_json::to_string(&register_payload) {
                 Ok(j) => j,
                 Err(e) => {
@@ -83,15 +91,16 @@ pub fn RegisterView() -> Element {
             };
             opts.set_body(&JsValue::from_str(&json_body));
 
-            let request = match web_sys::Request::new_with_str_and_init("/api/auth/local/register", &opts) {
-                Ok(req) => req,
-                Err(e) => {
-                    error_message.set(Some(format!("Failed to create request: {:?}", e)));
-                    is_loading.set(false);
-                    return;
-                }
-            };
-            
+            let request =
+                match web_sys::Request::new_with_str_and_init("/api/auth/local/register", &opts) {
+                    Ok(req) => req,
+                    Err(e) => {
+                        error_message.set(Some(format!("Failed to create request: {:?}", e)));
+                        is_loading.set(false);
+                        return;
+                    }
+                };
+
             let _ = request.headers().set("Content-Type", "application/json");
 
             let resp_value = match JsFuture::from(window.fetch_with_request(&request)).await {
@@ -114,7 +123,9 @@ pub fn RegisterView() -> Element {
 
             if resp.status() >= 200 && resp.status() < 300 {
                 // Registration successful - redirect to login
-                error_message.set(Some("Registration successful. Redirecting to login...".to_string()));
+                error_message.set(Some(
+                    "Registration successful. Redirecting to login...".to_string(),
+                ));
                 is_loading.set(false);
                 nav.replace("/login");
 
@@ -126,23 +137,38 @@ pub fn RegisterView() -> Element {
                 // Try to get error message from response
                 let status = resp.status();
                 let status_text = resp.status_text();
-                
+
                 if let Ok(text_promise) = resp.text() {
                     if let Ok(text_value) = JsFuture::from(text_promise).await {
                         if let Some(text) = text_value.as_string() {
                             if !text.is_empty() {
-                                error_message.set(Some(format!("Registration failed ({}): {}", status, text)));
+                                error_message.set(Some(format!(
+                                    "Registration failed ({}): {}",
+                                    status, text
+                                )));
                             } else {
-                                error_message.set(Some(format!("Registration failed: {} {}", status, status_text)));
+                                error_message.set(Some(format!(
+                                    "Registration failed: {} {}",
+                                    status, status_text
+                                )));
                             }
                         } else {
-                            error_message.set(Some(format!("Registration failed: {} {}", status, status_text)));
+                            error_message.set(Some(format!(
+                                "Registration failed: {} {}",
+                                status, status_text
+                            )));
                         }
                     } else {
-                        error_message.set(Some(format!("Registration failed: {} {}", status, status_text)));
+                        error_message.set(Some(format!(
+                            "Registration failed: {} {}",
+                            status, status_text
+                        )));
                     }
                 } else {
-                    error_message.set(Some(format!("Registration failed: {} {}", status, status_text)));
+                    error_message.set(Some(format!(
+                        "Registration failed: {} {}",
+                        status, status_text
+                    )));
                 }
                 is_loading.set(false);
             }
