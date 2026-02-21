@@ -3,8 +3,32 @@
 use anyhow::{Context, Result};
 use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
 use openidconnect::core::{CoreJsonWebKey, CoreJsonWebKeySet};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
+
+/// Deserialize `aud` claim which can be either a string or an array of strings.
+fn deserialize_aud<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde_json::Value;
+
+    let value = Value::deserialize(deserializer)?;
+
+    match value {
+        Value::String(s) => Ok(vec![s]),
+        Value::Array(arr) => arr
+            .into_iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| Error::custom("aud array must contain strings"))
+            })
+            .collect(),
+        _ => Err(Error::custom("aud must be a string or array of strings")),
+    }
+}
 
 /// Standard OIDC ID token claims.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -15,8 +39,9 @@ pub struct IdTokenClaims {
     /// Subject (sub) - unique user identifier
     pub sub: String,
 
-    /// Audience (aud) - client ID
-    pub aud: String,
+    /// Audience (aud) - client ID (can be string or array per OIDC spec)
+    #[serde(deserialize_with = "deserialize_aud")]
+    pub aud: Vec<String>,
 
     /// Expiration time (exp) - Unix timestamp
     pub exp: i64,
@@ -119,6 +144,15 @@ impl JwtValidator {
         // Decode and validate token
         let token_data = decode::<IdTokenClaims>(id_token, &decoding_key, &validation)
             .context("JWT validation failed")?;
+
+        // Additional validation: ensure our client_id is in the audience list
+        if !token_data.claims.aud.contains(&self.client_id) {
+            anyhow::bail!(
+                "Client ID '{}' not found in token audience: {:?}",
+                self.client_id,
+                token_data.claims.aud
+            );
+        }
 
         Ok(token_data.claims)
     }

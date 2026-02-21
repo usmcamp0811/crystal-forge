@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::sync::Arc;
 
-use crate::auth::oidc::{ClaimExtractor, JwtValidator, OidcProviderMetadata};
+use crate::auth::oidc::{ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore};
 use crate::config::OidcConfig;
 use crate::queries::users::{get_by_email, insert_user};
 
@@ -30,7 +30,8 @@ pub struct OidcClientState {
     pub config: OidcConfig,
     pub claim_extractor: ClaimExtractor,
     pub jwt_validator: JwtValidator,
-    pub jwks_uri: String,
+    pub jwks_cache: JwksCache,
+    pub session_store: OidcSessionStore,
 }
 
 impl OidcClientState {
@@ -56,13 +57,16 @@ impl OidcClientState {
             config.issuer_url.clone(),
             config.client_id.clone(),
         );
+        let jwks_cache = JwksCache::new(jwks_uri.clone(), None); // Use default 1-hour TTL
+        let session_store = OidcSessionStore::new(None); // Use default 10-minute TTL
 
         Ok(Self {
             client,
             config,
             claim_extractor,
             jwt_validator,
-            jwks_uri,
+            jwks_cache,
+            session_store,
         })
     }
 }
@@ -71,11 +75,11 @@ impl OidcClientState {
 ///
 /// This endpoint redirects the user to the OIDC provider's authorization endpoint.
 pub async fn oidc_login(State(oidc_state): State<Arc<OidcClientState>>) -> impl IntoResponse {
-    // Generate PKCE challenge (recommended for security)
-    let (pkce_challenge, _pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+    // Generate PKCE challenge and verifier
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
-    // Generate CSRF token
-    let (auth_url, _csrf_token, _nonce) = oidc_state
+    // Generate CSRF token and nonce
+    let (auth_url, csrf_token, nonce) = oidc_state
         .client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
@@ -92,8 +96,9 @@ pub async fn oidc_login(State(oidc_state): State<Arc<OidcClientState>>) -> impl 
         )
         .url();
 
-    // TODO: Store CSRF token and nonce in session for validation in callback
-    // For now, we'll skip CSRF validation (NOT SECURE - fix in TASK-65.3)
+    // Store CSRF token, nonce, and PKCE verifier in session for validation
+    let session = OidcSession::new(csrf_token.clone(), nonce, pkce_verifier);
+    oidc_state.session_store.store(csrf_token.secret().clone(), session).await;
 
     tracing::info!("Initiating OIDC login flow, redirecting to: {}", auth_url);
 
@@ -106,8 +111,8 @@ pub struct OidcCallbackParams {
     /// Authorization code from provider
     code: String,
 
-    /// CSRF state token (should match what we sent)
-    state: Option<String>,
+    /// CSRF state token (must match what we sent)
+    state: String,
 
     /// Error code if authentication failed
     error: Option<String>,
@@ -135,15 +140,25 @@ pub async fn oidc_callback(
         });
     }
 
-    // TODO: Validate CSRF token (requires session storage - TASK-65.3)
+    // Validate CSRF state token and retrieve session
+    let session = oidc_state
+        .session_store
+        .retrieve(&params.state)
+        .await
+        .ok_or_else(|| {
+            tracing::error!("Invalid or expired CSRF state token: {}", params.state);
+            OidcError::InvalidCsrfToken
+        })?;
 
-    // Exchange authorization code for tokens
+    tracing::debug!("CSRF state validated successfully");
+
+    // Exchange authorization code for tokens with PKCE verifier
     tracing::debug!("Exchanging authorization code for tokens");
 
     let token_response = oidc_state
         .client
         .exchange_code(AuthorizationCode::new(params.code))
-        // TODO: Include PKCE verifier (requires storing it in session)
+        .set_pkce_verifier(session.pkce_verifier)
         .request_async(async_http_client)
         .await
         .map_err(|e| {
@@ -156,13 +171,15 @@ pub async fn oidc_callback(
         .id_token()
         .ok_or(OidcError::MissingIdToken)?;
 
-    // Fetch JWKS for validation
-    let jwks = reqwest::get(&oidc_state.jwks_uri)
+    // Fetch JWKS for validation (uses cache with 1-hour TTL)
+    let jwks = oidc_state
+        .jwks_cache
+        .fetch()
         .await
-        .map_err(|_| OidcError::JwksFetchFailed)?
-        .json()
-        .await
-        .map_err(|_| OidcError::JwksFetchFailed)?;
+        .map_err(|e| {
+            tracing::error!("JWKS fetch failed: {}", e);
+            OidcError::JwksFetchFailed
+        })?;
 
     // Validate and decode ID token
     let claims = oidc_state
@@ -173,10 +190,37 @@ pub async fn oidc_callback(
             OidcError::InvalidIdToken
         })?;
 
+    // Validate nonce (protects against token replay attacks)
+    // The nonce claim might be in custom_claims
+    let token_nonce = claims.custom_claims
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            tracing::error!("ID token missing nonce claim");
+            OidcError::MissingNonce
+        })?;
+
+    if token_nonce != session.nonce.secret() {
+        tracing::error!("Nonce mismatch: expected {}, got {}", session.nonce.secret(), token_nonce);
+        return Err(OidcError::InvalidNonce);
+    }
+
+    tracing::debug!("Nonce validated successfully");
+
     // Extract user info from claims
+    // Pass typed fields first, then custom claims for fallback
     let user_info = oidc_state
         .claim_extractor
-        .extract_user_info(&claims.custom_claims, claims.sub.clone())
+        .extract_user_info(
+            claims.email.clone(),
+            claims.email_verified,
+            claims.name.clone(),
+            claims.given_name.clone(),
+            claims.family_name.clone(),
+            claims.preferred_username.clone(),
+            &claims.custom_claims,
+            claims.sub.clone(),
+        )
         .map_err(|e| {
             tracing::error!("Claim extraction failed: {}", e);
             OidcError::ClaimExtractionFailed
@@ -225,10 +269,13 @@ pub enum OidcError {
         error: String,
         description: String,
     },
+    InvalidCsrfToken,
     TokenExchangeFailed,
     MissingIdToken,
     JwksFetchFailed,
     InvalidIdToken,
+    MissingNonce,
+    InvalidNonce,
     ClaimExtractionFailed,
     MissingEmail,
     DatabaseError,
@@ -240,6 +287,10 @@ impl IntoResponse for OidcError {
             OidcError::ProviderError { error, description } => (
                 StatusCode::BAD_REQUEST,
                 format!("OIDC provider error: {} - {}", error, description),
+            ),
+            OidcError::InvalidCsrfToken => (
+                StatusCode::BAD_REQUEST,
+                "Invalid or expired CSRF state token".to_string(),
             ),
             OidcError::TokenExchangeFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -256,6 +307,14 @@ impl IntoResponse for OidcError {
             OidcError::InvalidIdToken => (
                 StatusCode::UNAUTHORIZED,
                 "ID token validation failed".to_string(),
+            ),
+            OidcError::MissingNonce => (
+                StatusCode::UNAUTHORIZED,
+                "ID token missing nonce claim".to_string(),
+            ),
+            OidcError::InvalidNonce => (
+                StatusCode::UNAUTHORIZED,
+                "Nonce validation failed - possible token replay attack".to_string(),
             ),
             OidcError::ClaimExtractionFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,

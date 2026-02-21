@@ -50,39 +50,62 @@ impl ClaimExtractor {
 
     /// Extract user information from OIDC token claims.
     ///
+    /// Prioritizes standard typed claims over custom claims to avoid missing
+    /// standard fields when providers include them in both locations.
+    ///
     /// # Arguments
     ///
-    /// * `claims` - The custom claims from the ID token
+    /// * `typed_email` - Email from standard typed claim (if present)
+    /// * `typed_email_verified` - Email verified flag from typed claim
+    /// * `typed_name` - Full name from typed claim
+    /// * `typed_given_name` - Given name from typed claim
+    /// * `typed_family_name` - Family name from typed claim
+    /// * `typed_preferred_username` - Preferred username from typed claim
+    /// * `custom_claims` - Additional custom claims map
     /// * `subject` - The `sub` claim (unique user identifier)
     pub fn extract_user_info(
         &self,
-        claims: &HashMap<String, Value>,
+        typed_email: Option<String>,
+        typed_email_verified: Option<bool>,
+        typed_name: Option<String>,
+        typed_given_name: Option<String>,
+        typed_family_name: Option<String>,
+        typed_preferred_username: Option<String>,
+        custom_claims: &HashMap<String, Value>,
         subject: String,
     ) -> Result<OidcUserInfo> {
-        // Extract email
-        let email = self.extract_string_claim(claims, &self.config.email_claim);
+        // Extract email - prefer typed claim, fall back to custom claim
+        let email = typed_email
+            .or_else(|| self.extract_string_claim(custom_claims, &self.config.email_claim));
 
-        // Extract email_verified (defaults to false if not present)
-        let email_verified = claims
-            .get("email_verified")
-            .and_then(|v| v.as_bool())
+        // Extract email_verified - prefer typed claim, fall back to custom claim
+        let email_verified = typed_email_verified
+            .or_else(|| {
+                custom_claims
+                    .get("email_verified")
+                    .and_then(|v| v.as_bool())
+            })
             .unwrap_or(false);
 
-        // Extract display name
-        let display_name = self.extract_string_claim(claims, &self.config.name_claim);
+        // Extract display name - prefer typed claim, fall back to custom claim
+        let display_name = typed_name
+            .or_else(|| self.extract_string_claim(custom_claims, &self.config.name_claim));
 
-        // Extract given name
-        let given_name = self.extract_string_claim(claims, &self.config.given_name_claim);
+        // Extract given name - prefer typed claim, fall back to custom claim
+        let given_name = typed_given_name
+            .or_else(|| self.extract_string_claim(custom_claims, &self.config.given_name_claim));
 
-        // Extract family name
-        let family_name = self.extract_string_claim(claims, &self.config.family_name_claim);
+        // Extract family name - prefer typed claim, fall back to custom claim
+        let family_name = typed_family_name
+            .or_else(|| self.extract_string_claim(custom_claims, &self.config.family_name_claim));
 
-        // Extract preferred username
-        let preferred_username =
-            self.extract_string_claim(claims, &self.config.preferred_username_claim);
+        // Extract preferred username - prefer typed claim, fall back to custom claim
+        let preferred_username = typed_preferred_username.or_else(|| {
+            self.extract_string_claim(custom_claims, &self.config.preferred_username_claim)
+        });
 
-        // Extract roles/groups
-        let roles = self.extract_roles(claims)?;
+        // Extract roles/groups (only from custom claims)
+        let roles = self.extract_roles(custom_claims)?;
 
         Ok(OidcUserInfo {
             subject,
@@ -93,7 +116,7 @@ impl ClaimExtractor {
             family_name,
             preferred_username,
             roles,
-            custom_claims: claims.clone(),
+            custom_claims: custom_claims.clone(),
         })
     }
 
@@ -162,16 +185,19 @@ mod tests {
         let extractor = ClaimExtractor::new(default_config());
 
         let mut claims = HashMap::new();
-        claims.insert("email".to_string(), json!("user@example.com"));
-        claims.insert("email_verified".to_string(), json!(true));
-        claims.insert("name".to_string(), json!("John Doe"));
-        claims.insert("given_name".to_string(), json!("John"));
-        claims.insert("family_name".to_string(), json!("Doe"));
-        claims.insert("preferred_username".to_string(), json!("johndoe"));
         claims.insert("groups".to_string(), json!(["admin", "operator"]));
 
         let user_info = extractor
-            .extract_user_info(&claims, "user-123".to_string())
+            .extract_user_info(
+                Some("user@example.com".to_string()),
+                Some(true),
+                Some("John Doe".to_string()),
+                Some("John".to_string()),
+                Some("Doe".to_string()),
+                Some("johndoe".to_string()),
+                &claims,
+                "user-123".to_string(),
+            )
             .unwrap();
 
         assert_eq!(user_info.subject, "user-123");
@@ -233,7 +259,16 @@ mod tests {
         let claims = HashMap::new();
 
         let user_info = extractor
-            .extract_user_info(&claims, "user-456".to_string())
+            .extract_user_info(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                &claims,
+                "user-456".to_string(),
+            )
             .unwrap();
 
         assert_eq!(user_info.subject, "user-456");

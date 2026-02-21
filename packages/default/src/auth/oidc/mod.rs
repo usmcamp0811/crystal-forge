@@ -11,8 +11,10 @@ pub mod claims;
 pub mod discovery;
 pub mod jwks;
 pub mod jwt;
+pub mod session_store;
 
 pub use claims::*;
 pub use discovery::*;
 pub use jwks::*;
 pub use jwt::*;
+pub use session_store::*;
