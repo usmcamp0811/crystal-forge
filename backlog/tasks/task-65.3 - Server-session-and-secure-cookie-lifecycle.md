@@ -1,11 +1,11 @@
 ---
 id: TASK-65.3
 title: Server session and secure cookie lifecycle
-status: Review
+status: Done
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-21 04:03'
+updated_date: '2026-02-21 05:01'
 labels:
   - security
   - auth
