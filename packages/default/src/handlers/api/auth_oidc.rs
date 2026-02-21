@@ -354,7 +354,7 @@ pub async fn oidc_callback(
 
             // Load user by ID (not email - email may have changed at provider)
             sqlx::query_as::<_, crate::models::users::User>(
-                "SELECT id, username, email, first_name, last_name, created_at, updated_at, password_hash
+                "SELECT id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at
                  FROM users WHERE id = $1"
             )
             .bind(identity.user_id)
@@ -447,7 +447,7 @@ pub async fn oidc_callback(
 
             // Load the created user
             sqlx::query_as::<_, crate::models::users::User>(
-                "SELECT id, username, email, first_name, last_name, created_at, updated_at, password_hash
+                "SELECT id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at
                  FROM users WHERE id = $1"
             )
             .bind(user_id)
@@ -467,10 +467,33 @@ pub async fn oidc_callback(
 
     let ip_address = Some(addr.ip().to_string());
 
+    // TODO: Assign roles based on OIDC groups (TASK-65.4 - role mapping)
+    // For now, assign Viewer role as default to allow login
+    // This should be replaced with proper role mapping from OIDC claims
+    use crate::models::auth_identity::AuthRole;
+    use crate::queries::auth_identity::assign_role_to_user;
+    
+    // Check if user has any roles, if not assign Viewer as default
+    let existing_roles = crate::queries::auth_identity::get_user_roles(&pool, user.id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to check user roles: {}", e);
+            OidcError::DatabaseError
+        })?;
+    
+    if existing_roles.is_empty() {
+        tracing::info!("Assigning default Viewer role to new OIDC user: {}", user.id);
+        assign_role_to_user(&pool, user.id, AuthRole::Viewer, None)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to assign default role: {}", e);
+                OidcError::DatabaseError
+            })?;
+    }
+
     let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
         .await
         .map_err(|_| OidcError::SessionCreationFailed)?;
-    // TODO: Assign roles based on OIDC groups (future task)
     // TODO: Update external_identity claims on each login (keep profile fresh)
 
     tracing::info!(
