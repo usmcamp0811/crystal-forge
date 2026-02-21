@@ -2,17 +2,19 @@
 id: TASK-34
 title: Environments view and systems add-form enhancements
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 03:00'
-updated_date: '2026-02-17 03:29'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - web-ui
   - systems
   - environments
+milestone: m-9
 dependencies: []
 priority: high
-milestone: m-9
+ordinal: 32000
 ---
 
 ## Description

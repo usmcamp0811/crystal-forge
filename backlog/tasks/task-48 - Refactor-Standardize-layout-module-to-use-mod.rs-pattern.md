@@ -2,16 +2,18 @@
 id: TASK-48
 title: 'Refactor: Standardize layout module to use mod.rs pattern'
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-18 02:45'
-updated_date: '2026-02-18 04:26'
+updated_date: '2026-02-21 03:28'
 labels:
   - refactoring
   - web-ui
   - layout
+milestone: m-3
 dependencies: []
 priority: medium
-milestone: m-3
+ordinal: 18000
 ---
 
 ## Description

@@ -2,16 +2,18 @@
 id: TASK-33
 title: Systems view add/remove management
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 02:37'
-updated_date: '2026-02-17 02:38'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - web-ui
   - systems
+milestone: m-7
 dependencies: []
 priority: high
-milestone: m-7
+ordinal: 33000
 ---
 
 ## Description

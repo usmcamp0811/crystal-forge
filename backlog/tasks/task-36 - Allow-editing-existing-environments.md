@@ -2,16 +2,18 @@
 id: TASK-36
 title: Allow editing existing environments
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 03:51'
-updated_date: '2026-02-17 03:54'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - web-ui
   - environments
+milestone: m-9
 dependencies: []
 priority: high
-milestone: m-9
+ordinal: 31000
 ---
 
 ## Description

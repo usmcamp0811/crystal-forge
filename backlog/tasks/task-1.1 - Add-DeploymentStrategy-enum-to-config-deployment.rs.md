@@ -2,16 +2,18 @@
 id: TASK-1.1
 title: Add DeploymentStrategy enum to config/deployment.rs
 status: Done
-assignee: ["Codex 5.3"]
+assignee:
+  - Codex 5.3
 created_date: '2026-02-04 20:19'
-updated_date: '2026-02-05 14:53'
+updated_date: '2026-02-21 03:28'
 labels:
   - deployment
   - config
   - rust
+milestone: m-0
 dependencies: []
 parent_task_id: TASK-1
-milestone: m-0
+ordinal: 46000
 ---
 
 ## Description

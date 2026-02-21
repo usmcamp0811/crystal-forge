@@ -2,15 +2,17 @@
 id: TASK-43
 title: Enhance flakes view sync and git history
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 14:32'
-updated_date: '2026-02-17 14:38'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - flakes
+milestone: m-10
 dependencies: []
 priority: high
-milestone: m-10
+ordinal: 26000
 ---
 
 ## Description

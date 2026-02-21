@@ -2,15 +2,17 @@
 id: TASK-25
 title: Dashboard build queue widget
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-15 19:17'
-updated_date: '2026-02-19 04:06'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - dashboard
+milestone: m-6
 dependencies: []
 priority: high
-milestone: m-6
+ordinal: 9000
 ---
 
 ## Description

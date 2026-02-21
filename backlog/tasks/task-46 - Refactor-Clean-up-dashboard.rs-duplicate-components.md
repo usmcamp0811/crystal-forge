@@ -2,16 +2,18 @@
 id: TASK-46
 title: 'Refactor: Clean up dashboard.rs duplicate components'
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-18 02:44'
-updated_date: '2026-02-18 03:50'
+updated_date: '2026-02-21 03:28'
 labels:
   - refactoring
   - web-ui
   - dashboard
+milestone: m-6
 dependencies: []
 priority: high
-milestone: m-6
+ordinal: 20000
 ---
 
 ## Description

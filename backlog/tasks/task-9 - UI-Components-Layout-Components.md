@@ -2,9 +2,10 @@
 id: TASK-9
 title: UI Components - Layout Components
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-05 14:25'
-updated_date: '2026-02-19 04:06'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - components
@@ -13,6 +14,7 @@ dependencies:
   - TASK-8
   - TASK-8.4
 priority: high
+ordinal: 8000
 ---
 
 ## Description

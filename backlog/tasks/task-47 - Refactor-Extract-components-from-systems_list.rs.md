@@ -2,16 +2,18 @@
 id: TASK-47
 title: 'Refactor: Extract components from systems_list.rs'
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-18 02:45'
-updated_date: '2026-02-18 04:25'
+updated_date: '2026-02-21 03:28'
 labels:
   - refactoring
   - web-ui
   - systems
+milestone: m-7
 dependencies: []
 priority: high
-milestone: m-7
+ordinal: 19000
 ---
 
 ## Description

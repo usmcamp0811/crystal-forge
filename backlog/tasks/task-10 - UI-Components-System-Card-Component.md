@@ -2,9 +2,10 @@
 id: TASK-10
 title: UI Components - System Card Component
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-05 14:25'
-updated_date: '2026-02-14 04:05'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - components
@@ -13,6 +14,7 @@ dependencies:
   - TASK-8.4
   - TASK-8.5
 priority: high
+ordinal: 40000
 ---
 
 ## Description

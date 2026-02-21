@@ -2,12 +2,14 @@
 id: TASK-29
 title: Refine deploy-commit action UI
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-16 17:09'
-updated_date: '2026-02-19 04:06'
+updated_date: '2026-02-21 03:28'
 labels: []
-dependencies: []
 milestone: m-8
+dependencies: []
+ordinal: 11000
 ---
 
 ## Description

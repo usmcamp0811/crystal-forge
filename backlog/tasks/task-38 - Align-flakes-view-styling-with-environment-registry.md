@@ -2,16 +2,18 @@
 id: TASK-38
 title: Align flakes view styling with environment registry
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 04:08'
-updated_date: '2026-02-17 04:09'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - web-ui
   - flakes
+milestone: m-10
 dependencies: []
 priority: medium
-milestone: m-10
+ordinal: 30000
 ---
 
 ## Description

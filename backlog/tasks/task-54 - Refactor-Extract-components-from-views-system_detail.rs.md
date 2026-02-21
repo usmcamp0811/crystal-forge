@@ -2,15 +2,18 @@
 id: TASK-54
 title: 'Refactor: Extract components from views/system_detail.rs'
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-18 02:47'
+updated_date: '2026-02-21 03:28'
 labels:
   - refactoring
   - web-ui
   - system-detail
+milestone: m-8
 dependencies: []
 priority: medium
-milestone: m-8
+ordinal: 21000
 ---
 
 ## Description
@@ -38,12 +41,16 @@ The following components remain in system_detail.rs and would benefit from addit
 - HistoryTab and CommitTimelineNode (~400 lines) - tightly coupled with DiffViewer
 
 ## Acceptance Criteria
-- [x] Analyze system_detail.rs for extractable components
-- [x] Create appropriate component files in components/system/ or other directories
-- [x] Update views/system_detail.rs to import from components
-- [ ] Target reduction: < 800 lines (achieved: 2000 lines, 29% reduction from 2817)
-- [x] Build passes: nix build .#checks.x86_64-linux.web-ui
+<!-- AC:BEGIN -->
+- [x] #1 Analyze system_detail.rs for extractable components
+- [x] #2 Create appropriate component files in components/system/ or other directories
+- [x] #3 Update views/system_detail.rs to import from components
+- [ ] #4 Target reduction: < 800 lines (achieved: 2000 lines, 29% reduction from 2817)
+- [x] #5 Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->
+
+
 
 ## Notes
 

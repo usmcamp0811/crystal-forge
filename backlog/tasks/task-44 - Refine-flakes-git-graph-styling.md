@@ -2,15 +2,17 @@
 id: TASK-44
 title: Refine flakes git graph styling
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 14:42'
-updated_date: '2026-02-17 14:43'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - flakes
+milestone: m-10
 dependencies: []
 priority: medium
-milestone: m-10
+ordinal: 25000
 ---
 
 ## Description

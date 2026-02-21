@@ -2,16 +2,18 @@
 id: TASK-50
 title: 'Refactor: Extract build components from views/builds.rs'
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-18 02:45'
-updated_date: '2026-02-19 13:16'
+updated_date: '2026-02-21 03:28'
 labels:
   - refactoring
   - web-ui
   - builds
+milestone: m-11
 dependencies: []
 priority: low
-milestone: m-11
+ordinal: 6000
 ---
 
 ## Description

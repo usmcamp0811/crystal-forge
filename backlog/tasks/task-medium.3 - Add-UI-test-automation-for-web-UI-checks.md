@@ -2,16 +2,18 @@
 id: TASK-MEDIUM.3
 title: Add UI test automation for web UI checks
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-14 04:41'
-updated_date: '2026-02-14 05:16'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - testing
   - ci
+milestone: m-3
 dependencies: []
 parent_task_id: TASK-MEDIUM
-milestone: m-3
+ordinal: 39000
 ---
 
 ## Description

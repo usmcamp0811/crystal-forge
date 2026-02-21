@@ -2,16 +2,18 @@
 id: TASK-1.6
 title: Update NixOS module to expose deployment strategy option
 status: Done
-assignee: ["Codex 5.3"]
+assignee:
+  - Codex 5.3
 created_date: '2026-02-04 20:19'
-updated_date: '2026-02-05 15:03'
+updated_date: '2026-02-21 03:28'
 labels:
   - nixos
   - nix
   - config
+milestone: m-0
 dependencies: []
 parent_task_id: TASK-1
-milestone: m-0
+ordinal: 45000
 ---
 
 ## Description

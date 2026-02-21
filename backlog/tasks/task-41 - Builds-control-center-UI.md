@@ -2,16 +2,18 @@
 id: TASK-41
 title: Builds control center UI
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 04:42'
-updated_date: '2026-02-17 04:48'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - web-ui
   - builds
+milestone: m-11
 dependencies: []
 priority: high
-milestone: m-11
+ordinal: 27000
 ---
 
 ## Description

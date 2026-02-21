@@ -2,9 +2,10 @@
 id: TASK-8.11
 title: Embed Built UI Assets in Axum Server
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-11 10:00'
-updated_date: '2026-02-19 03:53'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - backend
@@ -15,6 +16,7 @@ dependencies:
   - TASK-8.10
 parent_task_id: TASK-8
 priority: high
+ordinal: 14000
 ---
 
 ## Description

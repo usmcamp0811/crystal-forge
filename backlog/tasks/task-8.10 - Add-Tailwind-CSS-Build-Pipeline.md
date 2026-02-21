@@ -2,9 +2,10 @@
 id: TASK-8.10
 title: Add Tailwind CSS Build Pipeline
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-11 10:00'
-updated_date: '2026-02-19 01:51'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - tooling
@@ -15,6 +16,7 @@ dependencies:
   - TASK-8.9
 parent_task_id: TASK-8
 priority: high
+ordinal: 15000
 ---
 
 ## Description

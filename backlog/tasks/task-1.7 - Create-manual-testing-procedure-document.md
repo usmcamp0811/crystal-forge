@@ -2,15 +2,17 @@
 id: TASK-1.7
 title: Create manual testing procedure document
 status: Done
-assignee: ["GLM5.1"]
+assignee:
+  - GLM5.1
 created_date: '2026-02-04 20:19'
-updated_date: '2026-02-05 15:04'
+updated_date: '2026-02-21 03:28'
 labels:
   - documentation
   - testing
+milestone: m-0
 dependencies: []
 parent_task_id: TASK-1
-milestone: m-0
+ordinal: 44000
 ---
 
 ## Description

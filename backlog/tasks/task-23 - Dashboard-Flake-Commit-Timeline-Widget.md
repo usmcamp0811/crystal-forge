@@ -2,16 +2,18 @@
 id: TASK-23
 title: Dashboard Flake Commit Timeline Widget
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-14 05:43'
-updated_date: '2026-02-14 05:50'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - dashboard
   - components
+milestone: m-6
 dependencies: []
 priority: high
-milestone: m-6
+ordinal: 36000
 ---
 
 ## Description

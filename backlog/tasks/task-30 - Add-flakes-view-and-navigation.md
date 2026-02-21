@@ -2,16 +2,18 @@
 id: TASK-30
 title: Add flakes view and navigation
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-16 17:30'
-updated_date: '2026-02-16 17:35'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - web-ui
   - navigation
+milestone: m-10
 dependencies: []
 priority: high
-milestone: m-10
+ordinal: 35000
 ---
 
 ## Description

@@ -2,16 +2,18 @@
 id: TASK-39
 title: Allow editing existing flakes
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 04:10'
-updated_date: '2026-02-17 04:12'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - web-ui
   - flakes
+milestone: m-10
 dependencies: []
 priority: high
-milestone: m-10
+ordinal: 29000
 ---
 
 ## Description

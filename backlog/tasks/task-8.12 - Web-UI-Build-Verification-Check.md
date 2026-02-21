@@ -2,9 +2,10 @@
 id: TASK-8.12
 title: Web UI Build Verification Check
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-12 10:00'
-updated_date: '2026-02-19 01:51'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - nix
@@ -16,6 +17,7 @@ dependencies:
   - TASK-8.9
 parent_task_id: TASK-8
 priority: high
+ordinal: 16000
 ---
 
 ## Description
@@ -41,12 +43,12 @@ Expected: `nix flake check` (or `nix build .#checks.x86_64-linux.web-ui`) passes
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 #1 `checks/web-ui/default.nix` exists and is discovered by Snowfall Lib
-- [ ] #2 #2 Check runs `dx build` successfully in a sandboxed derivation
-- [ ] #3 #3 Check verifies `index.html` exists in build output
-- [ ] #4 #4 Check verifies `.wasm` binary exists in build output
-- [ ] #5 #5 Check verifies `index.html` references the WASM loader
-- [ ] #6 #6 `nix build .#checks.x86_64-linux.web-ui` passes
+- [ ] #1 #1 #1 `checks/web-ui/default.nix` exists and is discovered by Snowfall Lib
+- [ ] #2 #2 #2 Check runs `dx build` successfully in a sandboxed derivation
+- [ ] #3 #3 #3 Check verifies `index.html` exists in build output
+- [ ] #4 #4 #4 Check verifies `.wasm` binary exists in build output
+- [ ] #5 #5 #5 Check verifies `index.html` references the WASM loader
+- [ ] #6 #6 #6 `nix build .#checks.x86_64-linux.web-ui` passes
 
 ## Implementation Notes
 

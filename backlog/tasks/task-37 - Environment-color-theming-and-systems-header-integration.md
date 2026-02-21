@@ -2,17 +2,19 @@
 id: TASK-37
 title: Environment color theming and systems header integration
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 03:55'
-updated_date: '2026-02-19 04:06'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - web-ui
   - environments
   - systems
+milestone: m-9
 dependencies: []
 priority: high
-milestone: m-9
+ordinal: 12000
 ---
 
 ## Description

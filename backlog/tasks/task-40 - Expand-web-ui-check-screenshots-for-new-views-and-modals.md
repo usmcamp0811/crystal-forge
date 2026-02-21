@@ -2,16 +2,18 @@
 id: TASK-40
 title: Expand web-ui check screenshots for new views and modals
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-17 04:23'
-updated_date: '2026-02-17 04:23'
+updated_date: '2026-02-21 03:28'
 labels:
   - web-ui
   - checks
   - testing
+milestone: m-3
 dependencies: []
 priority: high
-milestone: m-3
+ordinal: 28000
 ---
 
 ## Description

@@ -2,17 +2,19 @@
 id: TASK-57
 title: Add code complexity metrics CI job with MR artifacts
 status: Done
-assignee: ["Codex 5.3"]
+assignee:
+  - Codex 5.3
 created_date: '2026-02-18'
-updated_date: '2026-02-18'
+updated_date: '2026-02-21 03:28'
 labels:
   - ci
   - rust
   - code-quality
   - metrics
+milestone: m-1
 dependencies: []
 priority: high
-milestone: m-1
+ordinal: 24000
 ---
 
 ## Description
@@ -33,15 +35,18 @@ Create a GitLab CI job that computes code complexity metrics for Rust code and g
   - Code duplication detection
 
 ## Acceptance Criteria
-- [x] Create `packages/code-metrics/default.nix` with the complexity analysis script
-- [x] Use appropriate tools (clippy lints, tokei)
-- [x] Generate HTML report artifact
-- [x] Generate Markdown summary for MR comments
-- [x] Add CI job to `.gitlab-ci.yml` that runs on merge requests
-- [x] Configure job to expose artifacts for MR review
-- [x] Reports show per-file and per-function metrics
-- [x] Build passes: `nix build .#packages.x86_64-linux.code-metrics`
+<!-- AC:BEGIN -->
+- [x] #1 Create `packages/code-metrics/default.nix` with the complexity analysis script
+- [x] #2 Use appropriate tools (clippy lints, tokei)
+- [x] #3 Generate HTML report artifact
+- [x] #4 Generate Markdown summary for MR comments
+- [x] #5 Add CI job to `.gitlab-ci.yml` that runs on merge requests
+- [x] #6 Configure job to expose artifacts for MR review
+- [x] #7 Reports show per-file and per-function metrics
+- [x] #8 Build passes: `nix build .#packages.x86_64-linux.code-metrics`
 <!-- SECTION:DESCRIPTION:END -->
+
+<!-- AC:END -->
 
 ## Implementation Notes
 

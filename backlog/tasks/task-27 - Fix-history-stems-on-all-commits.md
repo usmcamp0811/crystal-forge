@@ -2,12 +2,14 @@
 id: TASK-27
 title: Fix history stems on all commits
 status: Done
-assignee: ["MiniMax M2.5"]
+assignee:
+  - MiniMax M2.5
 created_date: '2026-02-16 17:09'
-updated_date: '2026-02-16 18:21'
+updated_date: '2026-02-21 03:28'
 labels: []
-dependencies: []
 milestone: m-8
+dependencies: []
+ordinal: 34000
 ---
 
 ## Description

@@ -2,9 +2,10 @@
 id: TASK-12
 title: Systems List View - Table and Cards Toggle
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-05 14:25'
-updated_date: '2026-02-14 05:27'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - views
@@ -16,6 +17,7 @@ dependencies:
   - TASK-9
   - TASK-10
 priority: high
+ordinal: 38000
 ---
 
 ## Description

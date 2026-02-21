@@ -2,15 +2,18 @@
 id: TASK-55
 title: 'Refactor: Extract components from views/environments_list.rs'
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-18 02:47'
+updated_date: '2026-02-21 03:28'
 labels:
   - refactoring
   - web-ui
   - environments
+milestone: m-9
 dependencies: []
 priority: low
-milestone: m-9
+ordinal: 22000
 ---
 
 ## Description
@@ -35,12 +38,16 @@ The following components were successfully extracted to dedicated modules:
 - Build passes: nix build .#checks.x86_64-linux.web-ui
 
 ## Acceptance Criteria
-- [x] Analyze environments_list.rs for extractable components
-- [x] Create component files if warranted (components/environments/)
-- [x] Update views/environments_list.rs to import from components
-- [x] Target reduction: < 400 lines (achieved: 371 lines)
-- [x] Build passes: nix build .#checks.x86_64-linux.web-ui
+<!-- AC:BEGIN -->
+- [x] #1 Analyze environments_list.rs for extractable components
+- [x] #2 Create component files if warranted (components/environments/)
+- [x] #3 Update views/environments_list.rs to import from components
+- [x] #4 Target reduction: < 400 lines (achieved: 371 lines)
+- [x] #5 Build passes: nix build .#checks.x86_64-linux.web-ui
 <!-- SECTION:DESCRIPTION:END -->
+<!-- AC:END -->
+
+
 
 ## Notes
 

@@ -2,16 +2,18 @@
 id: TASK-1.5
 title: Add activate_via_systemd helper method
 status: Done
-assignee: ["Codex 5.3"]
+assignee:
+  - Codex 5.3
 created_date: '2026-02-04 20:19'
-updated_date: '2026-02-05 14:53'
+updated_date: '2026-02-21 03:28'
 labels:
   - deployment
   - refactoring
   - rust
+milestone: m-0
 dependencies: []
 parent_task_id: TASK-1
-milestone: m-0
+ordinal: 50000
 ---
 
 ## Description

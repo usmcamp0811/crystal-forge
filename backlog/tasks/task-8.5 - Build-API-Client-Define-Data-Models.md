@@ -2,17 +2,20 @@
 id: TASK-8.5
 title: Build API Client - Define Data Models
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-05 14:15'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - api
   - backend
+milestone: m-3
 dependencies:
   - TASK-8.3
 parent_task_id: TASK-8
 priority: high
-milestone: m-3
+ordinal: 51000
 ---
 
 ## Description
@@ -34,13 +37,14 @@ Expected: All models compile, tests pass, no warnings
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 All API models defined
-- [x] #2 Serde serialization works
-- [x] #3 Unit tests pass (16 tests)
-- [x] #4 Doc comments on all public types
+- [x] #1 #1 All API models defined
+- [x] #2 #2 Serde serialization works
+- [x] #3 #3 Unit tests pass (16 tests)
+- [x] #4 #4 Doc comments on all public types
 
 ## Implementation Notes
 
+<!-- SECTION:NOTES:BEGIN -->
 - Created `src/api/mod.rs` and `src/api/models.rs`
 - Registered `api` module in `src/lib.rs`
 - DTOs defined: DashboardSummary, FleetHealthSummary, DeploymentStatusSummary, CveSummary, RecentDeployment, SystemSummary, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, FlakeSummary, PaginatedResponse<T>, SystemsListParams, ApiError
@@ -50,3 +54,4 @@ Expected: All models compile, tests pass, no warnings
 - PaginatedResponse is generic and includes `total_pages()` helper
 - All types have doc comments explaining their purpose and data source
 <!-- AC:END -->
+<!-- SECTION:NOTES:END -->

@@ -2,15 +2,17 @@
 id: TASK-31
 title: Fix web-ui build errors
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-16 17:35'
-updated_date: '2026-02-18'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - build
+milestone: m-3
 dependencies: []
 priority: high
-milestone: m-3
+ordinal: 23000
 ---
 
 ## Description

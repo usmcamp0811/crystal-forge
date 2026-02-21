@@ -2,16 +2,19 @@
 id: TASK-8.1
 title: Dioxus Proof of Concept - Web Target
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-05 14:14'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - poc
   - web
+milestone: m-3
 dependencies: []
 parent_task_id: TASK-8
 priority: high
-milestone: m-3
+ordinal: 52000
 ---
 
 ## Description
@@ -41,14 +44,15 @@ Expected: Bundle < 500kb gzipped, hot reload works, no console errors
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Web app builds successfully with dx build
-- [x] #2 Counter component with increment/decrement implemented
-- [ ] #3 Hot reload works during development (requires dx serve with browser — validated build only)
-- [ ] #4 Bundle size documented and < 500kb gzipped (debug: 7.4MB gzip, release TBD)
-- [x] #5 Dioxus.toml and project structure established
+- [x] #1 #1 Web app builds successfully with dx build
+- [x] #2 #2 Counter component with increment/decrement implemented
+- [ ] #3 #3 Hot reload works during development (requires dx serve with browser — validated build only)
+- [ ] #4 #4 Bundle size documented and < 500kb gzipped (debug: 7.4MB gzip, release TBD)
+- [x] #5 #5 Dioxus.toml and project structure established
 
 ## Implementation Notes
 
+<!-- SECTION:NOTES:BEGIN -->
 - **Architecture change**: Web UI is a separate crate at `packages/web-ui/` (not inside packages/default/)
   - Reason: existing crystal-forge lib has native-only deps (sqlx, sysinfo, nix) that cannot compile to wasm32
   - API DTOs defined in `packages/default/src/api/models.rs` will be duplicated/shared via wire-level JSON compatibility
@@ -60,3 +64,4 @@ Expected: Bundle < 500kb gzipped, hot reload works, no console errors
 - Debug WASM: 28MB raw / 7.4MB gzipped. Release + wasm-opt will be much smaller.
 - All 35 existing tests pass after nixpkgs bump
 <!-- AC:END -->
+<!-- SECTION:NOTES:END -->

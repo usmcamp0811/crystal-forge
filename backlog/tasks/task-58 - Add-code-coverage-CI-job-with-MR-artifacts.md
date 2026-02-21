@@ -2,19 +2,21 @@
 id: TASK-58
 title: Add code coverage CI job with MR artifacts
 status: Done
-assignee: ["Codex 5.3"]
+assignee:
+  - Codex 5.3
 created_date: '2026-02-18'
-updated_date: '2026-02-19 13:16'
+updated_date: '2026-02-21 03:28'
 labels:
   - ci
   - rust
   - code-quality
   - coverage
   - testing
+milestone: m-1
 dependencies:
   - TASK-57
 priority: high
-milestone: m-1
+ordinal: 7000
 ---
 
 ## Description

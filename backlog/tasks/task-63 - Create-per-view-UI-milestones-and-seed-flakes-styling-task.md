@@ -2,13 +2,15 @@
 id: TASK-63
 title: Create per-view UI milestones and seed flakes styling task
 status: Done
-assignee: ["KimiK2.5"]
+assignee:
+  - KimiK2.5
 created_date: '2026-02-19 04:59'
-updated_date: '2026-02-19 13:29'
+updated_date: '2026-02-21 03:28'
 labels: []
 milestone: m-3
 dependencies: []
 priority: medium
+ordinal: 5000
 ---
 
 ## Description

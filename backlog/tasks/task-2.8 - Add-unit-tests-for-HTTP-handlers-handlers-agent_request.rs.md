@@ -2,9 +2,10 @@
 id: TASK-2.8
 title: Add unit tests for HTTP handlers - handlers/agent_request.rs
 status: Done
-assignee: ["Codex 5.3"]
+assignee:
+  - Codex 5.3
 created_date: '2026-02-04 20:39'
-updated_date: '2026-02-19 03:53'
+updated_date: '2026-02-21 03:28'
 labels:
   - testing
   - handlers
@@ -12,7 +13,14 @@ labels:
 milestone: m-1
 dependencies: []
 parent_task_id: TASK-2
+ordinal: 13000
 ---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Test authentication logic in isolation using mock requests and keys.
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Notes
 
@@ -35,12 +43,6 @@ Added comprehensive unit tests for `handlers/agent_request.rs`:
    - Wrong signature length
    - Tampered body detection
    - SystemState deserialization (current and V1 versions)
-
-## Description
-
-<!-- SECTION:DESCRIPTION:BEGIN -->
-Test authentication logic in isolation using mock requests and keys.
-<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
