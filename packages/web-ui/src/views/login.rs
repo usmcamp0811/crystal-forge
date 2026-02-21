@@ -21,14 +21,15 @@ pub fn LoginView() -> Element {
     let mut auth_mode = use_signal(|| None::<AuthMode>);
     let nav = navigator();
 
-    // Fetch auth mode on mount
+    // Fetch auth mode on mount and check if already authenticated
     use_effect(move || {
         spawn(async move {
             if let Ok(context) = fetch_whoami().await {
                 auth_mode.set(Some(context.auth_mode));
                 
-                // If already authenticated, redirect to dashboard
+                // If already authenticated, update app state and redirect to dashboard
                 if context.is_authenticated {
+                    app_state.write().auth = Some(context);
                     nav.push("/");
                 }
             }
