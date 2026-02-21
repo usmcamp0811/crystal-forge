@@ -45,7 +45,7 @@ pub struct RoleMappingConfig {
     /// Map OIDC group names to Crystal Forge roles.
     ///
     /// Example:
-    /// ```
+    /// ```json
     /// {
     ///   "crystal-forge-admins": "admin",
     ///   "crystal-forge-operators": "operator",
