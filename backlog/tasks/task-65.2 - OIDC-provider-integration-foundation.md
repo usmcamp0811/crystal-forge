@@ -62,4 +62,6 @@ Risk Level
 Follow-up possibility: provider-specific UX tuning if needed.
 
 Selected for auth micro-sprint planning (2026-02-20).
+
+LOCK: claude-sonnet-4-5 on gray in /home/mcamp/code/crystal-forge/TASK-65.2-oidc-provider-integration
 <!-- SECTION:NOTES:END -->
