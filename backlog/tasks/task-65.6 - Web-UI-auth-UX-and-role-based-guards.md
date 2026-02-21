@@ -1,7 +1,7 @@
 ---
 id: TASK-65.6
 title: Web UI auth UX and role-based guards
-status: To Do
+status: In Progress
 assignee:
   - KimiK2.5
 created_date: ''
@@ -103,4 +103,6 @@ Requirements:
 
 <!-- SECTION:NOTES:BEGIN -->
 Follow-up possibility: UX polish for auth states and empty states.
+
+LOCK: claude-sonnet-4.5 on gray in /home/mcamp/code/crystal-forge/TASK-65.6-web-ui-auth-ux
 <!-- SECTION:NOTES:END -->

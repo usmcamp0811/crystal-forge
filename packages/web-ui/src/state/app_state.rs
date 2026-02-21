@@ -2,6 +2,8 @@
 
 use dioxus::prelude::*;
 
+use crate::api::models::AuthContext;
+
 /// Global application configuration and shared state.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -9,6 +11,8 @@ pub struct AppState {
     pub api_base_url: String,
     /// Polling interval for dashboard data in seconds.
     pub poll_interval_secs: u64,
+    /// Current authentication context (None if not yet loaded).
+    pub auth: Option<AuthContext>,
 }
 
 impl Default for AppState {
@@ -16,6 +20,7 @@ impl Default for AppState {
         Self {
             api_base_url: "/api/v1".to_string(),
             poll_interval_secs: 30,
+            auth: None,
         }
     }
 }

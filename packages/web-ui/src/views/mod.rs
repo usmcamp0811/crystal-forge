@@ -8,6 +8,7 @@ pub mod environments;
 pub mod environments_list;
 pub mod flakes;
 pub mod flakes_list;
+pub mod login;
 pub mod not_found;
 pub mod policies;
 pub mod style_guide;

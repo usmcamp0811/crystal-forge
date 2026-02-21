@@ -12,7 +12,7 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
-        api::{auth_dev, auth_oidc, auth_session, dashboard, flakes},
+        api::{auth_dev, auth_local, auth_oidc, auth_session, auth_whoami, dashboard, flakes},
         status,
         webhook::webhook_handler,
     },
@@ -104,6 +104,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
+        // Auth context endpoint (publicly accessible)
+        .route("/api/auth/whoami", get(auth_whoami::whoami))
         // Logout is valid for any mode that issues cookie sessions.
         .route("/api/auth/logout", post(auth_session::logout));
 
@@ -111,6 +113,11 @@ async fn main() -> anyhow::Result<()> {
     if auth_mode == "dev" {
         info!("Registering development auth endpoints at /api/auth/dev/*");
         app = app.route("/api/auth/dev/login", post(auth_dev::dev_login));
+    } else if auth_mode == "local" {
+        info!("Registering local auth endpoints at /api/auth/local/*");
+        app = app
+            .route("/api/auth/local/login", post(auth_local::login))
+            .route("/api/auth/local/register", post(auth_local::register));
     } else if auth_mode == "oidc" {
         info!("Registering OIDC auth endpoints at /api/auth/oidc/*");
         match crystal_forge::config::OidcConfig::from_env() {

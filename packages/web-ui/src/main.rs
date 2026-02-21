@@ -24,6 +24,17 @@ fn main() {
 fn app() -> Element {
     provide_app_state();
 
+    // Fetch auth context on app initialization
+    let mut app_state = use_context::<Signal<state::app_state::AppState>>();
+    
+    use_effect(move || {
+        spawn(async move {
+            if let Ok(auth_context) = api::client::fetch_whoami().await {
+                app_state.write().auth = Some(auth_context);
+            }
+        });
+    });
+
     rsx! {
         // Load vendored Tailwind CSS (works offline).
         document::Stylesheet { href: asset!("assets/tailwind.min.css") }

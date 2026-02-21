@@ -627,6 +627,54 @@ impl CveSeverity {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Authentication Context DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Authentication mode the server is operating under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// Development mode with local fixture users.
+    Dev,
+    /// Local username/password authentication.
+    Local,
+    /// OIDC-based authentication.
+    Oidc,
+}
+
+/// User role in the RBAC system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum Role {
+    Admin,
+    Operator,
+    Viewer,
+}
+
+/// Authenticated user information for the current session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthUser {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+/// Authentication context exposed to the UI.
+///
+/// This is the single source of truth for auth state in the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthContext {
+    /// Whether the user is authenticated.
+    pub is_authenticated: bool,
+    /// Authenticated user information (None if not authenticated).
+    pub user: Option<AuthUser>,
+    /// Roles assigned to the current user (empty if not authenticated).
+    pub roles: Vec<Role>,
+    /// Authentication mode the server is using.
+    pub auth_mode: AuthMode,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Development Auth DTOs
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -642,6 +690,25 @@ pub struct DevLoginResponse {
     pub user_id: String,
     pub email: String,
     pub display_name: Option<String>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Local Auth DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Request payload for local login.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalLoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+/// Response from local login endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalLoginResponse {
+    pub user_id: String,
+    pub username: String,
+    pub email: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

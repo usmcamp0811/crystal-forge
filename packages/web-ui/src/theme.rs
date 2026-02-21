@@ -148,6 +148,8 @@ pub mod interactive {
     pub const SUCCESS_BTN: &str = "bg-emerald-600 hover:bg-emerald-700";
     /// Ghost / subtle button.
     pub const GHOST_BTN: &str = "hover:bg-gray-800";
+    /// Hover background for interactive elements.
+    pub const HOVER_BG: &str = "hover:bg-gray-800/50";
     /// Focus ring.
     pub const FOCUS_RING: &str = "focus:outline-none focus:ring-2 focus:ring-blue-500/50";
     /// Input field.
