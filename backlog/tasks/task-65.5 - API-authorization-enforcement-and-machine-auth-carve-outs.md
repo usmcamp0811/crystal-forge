@@ -87,4 +87,21 @@ Code review feedback addressed (commit b5f9c48):
 ✅ Type-safe CSRF_HEADER_NAME using HeaderName
 
 MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/125
+
+MR description completed and ready for review.
+
+Complete MR template filled with:
+✅ Comprehensive summary and problem statement
+✅ Implementation overview with architectural decisions
+✅ Cookie-based session management details
+✅ Role-based authorization extractor documentation
+✅ API usage examples with curl commands
+✅ Security considerations and improvements
+✅ Performance impact analysis
+✅ Breaking changes documentation
+✅ Manual testing scenarios documented
+✅ Reviewer guidance with review order
+
+The MR description is saved in /tmp/mr-description.md and ready to paste into:
+https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/125
 <!-- SECTION:NOTES:END -->
