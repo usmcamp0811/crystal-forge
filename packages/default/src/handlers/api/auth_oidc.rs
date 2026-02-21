@@ -384,10 +384,11 @@ pub async fn oidc_callback(
                     let parts: Vec<&str> = name.splitn(2, ' ').collect();
                     (
                         Some(parts[0].to_string()),
-                        parts.get(1).map(|s| s.to_string()),
+                        Some(parts.get(1).copied().unwrap_or("").to_string()),
                     )
                 }
-                None => (None, None),
+                // Current schema has NOT NULL first_name/last_name.
+                None => (Some(String::new()), Some(String::new())),
             };
 
             sqlx::query(
