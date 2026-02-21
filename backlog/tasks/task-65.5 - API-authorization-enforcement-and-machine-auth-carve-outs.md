@@ -64,4 +64,19 @@ Risk Level
 Role matrix baseline: Admin (full config plus user and role management), Operator (systems/build/deploy, no auth settings), Viewer (read-only).
 
 LOCK: Claude Opus 4.5 on reckless in ~/code/crystal-forge/TASK-65.5-api-authz-enforcement
+
+MR branch pushed: TASK-65.5-api-authz-enforcement
+MR URL: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-65.5-api-authz-enforcement
+
+Implementation complete:
+- Authorization extractors created with role hierarchy
+- All user API endpoints protected
+- Agent endpoints preserved (signature auth)
+- Unit tests passing
+- Code formatted and linted
+
+Pending:
+- Manual testing with dev-mode fixtures
+- Integration testing with OIDC
+- Merge approval
 <!-- SECTION:NOTES:END -->
