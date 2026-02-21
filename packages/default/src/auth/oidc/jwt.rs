@@ -54,6 +54,7 @@ pub struct IdTokenClaims {
 }
 
 /// JWT validator for OIDC ID tokens.
+#[derive(Debug, Clone)]
 pub struct JwtValidator {
     issuer: String,
     client_id: String,

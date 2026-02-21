@@ -37,6 +37,7 @@ pub struct OidcUserInfo {
 }
 
 /// OIDC claim extractor with configurable mappings.
+#[derive(Debug, Clone)]
 pub struct ClaimExtractor {
     config: ClaimMappingConfig,
 }
