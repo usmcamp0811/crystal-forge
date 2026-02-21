@@ -230,6 +230,43 @@ pub async fn assign_role_to_user(
     repo.assign_role(&assignment).await
 }
 
+/// Sync user role assignment.
+///
+/// Ensures the user has exactly the specified role and removes any other roles.
+/// This is idempotent - can be called on every login without duplicating assignments.
+///
+/// Uses a transaction to ensure atomicity: either both delete + insert succeed, or neither does.
+pub async fn sync_user_role(
+    pool: &PgPool,
+    user_id: Uuid,
+    role: AuthRole,
+) -> Result<(), AuthRepositoryError> {
+    // Use transaction to ensure delete + insert are atomic
+    let mut tx = pool.begin().await?;
+
+    // Delete all existing role assignments for this user
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Assign the new role (granted_by_user_id is None for OIDC-provisioned roles)
+    sqlx::query(
+        "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (user_id, role) DO NOTHING",
+    )
+    .bind(user_id)
+    .bind(role)
+    .bind(Option::<Uuid>::None)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(())
+}
+
 /// Create a new user session.
 pub async fn create_user_session(
     pool: &PgPool,
