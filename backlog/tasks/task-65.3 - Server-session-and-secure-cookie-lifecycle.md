@@ -1,11 +1,11 @@
 ---
 id: TASK-65.3
 title: Server session and secure cookie lifecycle
-status: In Progress
+status: Review
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-21 03:32'
+updated_date: '2026-02-21 03:46'
 labels:
   - security
   - auth
@@ -73,4 +73,6 @@ Verification executed:
 - `SQLX_OFFLINE=true nix develop -c cargo test --package crystal-forge handlers::api::auth_session` (pass)
 - `SQLX_OFFLINE=true nix develop -c cargo check --package crystal-forge` (pass)
 - `SQLX_OFFLINE=true nix develop -c cargo clippy --package crystal-forge -- -D warnings` (fails due pre-existing repository-wide warnings and transient rustc target-cache mismatch, not introduced by this task)
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/123
 <!-- SECTION:NOTES:END -->
