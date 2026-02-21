@@ -5,7 +5,7 @@ status: Review
 assignee:
   - Claude Opus 4.5
 created_date: '2026-02-18 02:46'
-updated_date: '2026-02-20 02:37'
+updated_date: '2026-02-21 03:28'
 labels:
   - refactoring
   - web-ui
@@ -13,6 +13,7 @@ labels:
 milestone: m-13
 dependencies: []
 priority: low
+ordinal: 2000
 ---
 
 ## Description

@@ -1,9 +1,10 @@
 ---
 id: TASK-66
 title: Investigate 0% code coverage reporting in Snowfall/Nix workspace
-status: Backlog
+status: Review
 assignee: []
 created_date: '2026-02-20 01:56'
+updated_date: '2026-02-21 03:28'
 labels:
   - coverage
   - ci
@@ -12,6 +13,7 @@ labels:
   - nix
 dependencies: []
 priority: high
+ordinal: 5000
 ---
 
 ## Description
@@ -38,45 +40,29 @@ Make coverage collection target the actual Rust crates under `packages/default`,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Root cause of 0% coverage is identified and documented (for example: wrong working directory, wrong package selection, or incorrect source path filtering).
-- [ ] #2 Coverage job/configuration is updated to run against the Rust workspace/crates under `packages/default`.
-- [ ] #3 Running the documented coverage command in the repo environment generates a report with file entries from `packages/default`.
-- [ ] #4 Coverage summary is non-zero when existing tests execute successfully (unless a reproducible edge case is explicitly documented).
-- [ ] #5 Documentation is added/updated with the correct invocation and assumptions for Snowfall/Nix layout coverage execution.
+- [x] #1 Root cause of 0% coverage is identified and documented (for example: wrong working directory, wrong package selection, or incorrect source path filtering).
+- [x] #2 Coverage job/configuration is updated to run against the Rust workspace/crates under `packages/default`.
+- [x] #3 Running the documented coverage command in the repo environment generates a report with file entries from `packages/default`.
+- [x] #4 Coverage summary is non-zero when existing tests execute successfully (unless a reproducible edge case is explicitly documented).
+- [x] #5 Documentation is added/updated with the correct invocation and assumptions for Snowfall/Nix layout coverage execution.
 <!-- AC:END -->
 
-## Architectural Constraints
+## Implementation Notes
 
-- Keep changes scoped to coverage tooling/configuration and related documentation.
-- Do not introduce business logic changes in application modules.
-- Follow deterministic repo workflows: use Nix-based commands and tracked files only.
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-66-coverage-investigation
 
-## Verification Plan
+Root Cause Analysis (2026-02-20):
 
-Automated:
+1. **Broken binary path**: Script used `${pkgs.cargo-tarpaulin}/bin/cargo tarpaulin` instead of `${pkgs.cargo-tarpaulin}/bin/cargo-tarpaulin`
+2. **Missing SQLX_OFFLINE**: SQLx compile-time checks failed without database connection
+3. **Incorrect JSON parsing**: Script used `.files | map(.line_count)` instead of `.files | map(.coverable)`
 
-- `nix build .#checks.x86_64-linux.coverage`
-- `nix develop -c cargo test --manifest-path packages/default/Cargo.toml`
+All three issues combined to report 0% coverage.
 
-Manual:
+Actual coverage: 11.15% (497/4456 lines)
 
-- Inspect generated coverage artifacts and confirm included source files are under `packages/default`.
-- Validate coverage summary percentage is not 0% after test execution.
+Fix applied in packages/coverage/default.nix.
 
-## Impact Areas
-
-- Infrastructure (CI and Nix checks)
-- Rust testing and coverage reporting
-- Developer documentation for local/CI coverage workflows
-
-## Risk Level
-
-Medium - changes affect CI quality signals and could cause false positives/false negatives if misconfigured.
-
-## Dependencies
-
-- TASK-58 (historical baseline for current coverage job setup)
-
-## Follow-Up Tasks
-
-- If deeper coverage gaps are discovered by module, create separate Backlog tasks for targeted test improvements.
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/119
+<!-- SECTION:NOTES:END -->

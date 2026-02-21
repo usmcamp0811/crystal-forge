@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-19 13:26'
-updated_date: '2026-02-20 03:11'
+updated_date: '2026-02-21 03:28'
 labels:
   - ui
   - flakes
@@ -13,6 +13,7 @@ labels:
 milestone: m-10
 dependencies: []
 priority: medium
+ordinal: 4000
 ---
 
 ## Description

@@ -2,9 +2,10 @@
 id: TASK-2.9
 title: Add unit tests for HTTP handlers - handlers/agent/state.rs
 status: Review
-assignee: ["Codex 5.3"]
+assignee:
+  - Codex 5.3
 created_date: '2026-02-04 20:39'
-updated_date: '2026-02-20 03:00'
+updated_date: '2026-02-21 03:28'
 labels:
   - testing
   - handlers
@@ -12,6 +13,7 @@ labels:
 milestone: m-1
 dependencies: []
 parent_task_id: TASK-2
+ordinal: 1000
 ---
 
 ## Description
@@ -42,6 +44,23 @@ Add unit tests for the handler logic in `handlers/agent/state.rs` so validation,
 - [x] #4 Test response serialization
 - [x] #5 Mock agent service calls
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-2.9-agent-state-handler-tests
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/117
+
+Added a testable handler core (`update_with_lookup_and_insert`) with injected lookup/insert dependencies, then covered success, invalid payload, version compatibility (current vs V1), and insert failure paths in unit tests.
+
+Verification run:
+- `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml handlers::agent::state` (pass)
+
+Verification issues observed:
+- `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml -- --check` fails due pre-existing unrelated formatting diffs in repository.
+- `SQLX_OFFLINE=true nix develop -c cargo clippy --manifest-path packages/default/Cargo.toml -- -D warnings` fails due existing repository-wide warnings and a local target toolchain mismatch requiring clean rebuild.
+<!-- SECTION:NOTES:END -->
 
 ## Architectural Constraints
 
@@ -74,18 +93,3 @@ Low - test-only changes scoped to a single handler module.
 ## Dependencies
 
 None.
-
-## Implementation Notes
-
-LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-2.9-agent-state-handler-tests
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/117
-
-Added a testable handler core (`update_with_lookup_and_insert`) with injected lookup/insert dependencies, then covered success, invalid payload, version compatibility (current vs V1), and insert failure paths in unit tests.
-
-Verification run:
-- `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml handlers::agent::state` (pass)
-
-Verification issues observed:
-- `nix develop -c cargo fmt --manifest-path packages/default/Cargo.toml -- --check` fails due pre-existing unrelated formatting diffs in repository.
-- `SQLX_OFFLINE=true nix develop -c cargo clippy --manifest-path packages/default/Cargo.toml -- -D warnings` fails due existing repository-wide warnings and a local target toolchain mismatch requiring clean rebuild.
