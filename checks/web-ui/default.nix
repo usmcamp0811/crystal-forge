@@ -48,6 +48,9 @@ let
     }
 
     const routes = [
+      // ============================================================
+      // AUTH SCREENS (unauthenticated)
+      // ============================================================
       {
         path: '/login',
         name: 'login',
@@ -55,6 +58,8 @@ let
         assertions: async (page) => {
           await assertTextVisible(page, 'Crystal Forge', 'Login title');
           await assertTextVisible(page, 'Sign in to continue', 'Login subtitle');
+          // Should show background logo (faded)
+          await assertVisible(page, 'img[alt=""]', 'Background logo');
         }
       },
       {
@@ -64,8 +69,85 @@ let
         assertions: async (page) => {
           await assertTextVisible(page, 'Administrator Registration', 'Registration title');
           await assertTextVisible(page, 'First-Time Setup', 'First-run setup banner');
+          // Should have registration form fields
+          await assertTextVisible(page, 'Username', 'Username field label');
+          await assertTextVisible(page, 'Email', 'Email field label');
+          await assertTextVisible(page, 'Password', 'Password field label');
+          await assertTextVisible(page, 'Confirm Password', 'Confirm password field label');
+          await assertTextVisible(page, 'Create Administrator Account', 'Submit button');
         }
       },
+
+      // ============================================================
+      // AUTH PROTECTION TESTS (verify redirects to login)
+      // These tests verify that protected routes redirect unauthenticated
+      // users to the login page.
+      // ============================================================
+      {
+        path: '/',
+        name: 'auth-redirect-dashboard',
+        desc: 'Dashboard redirects to login when unauthenticated',
+        assertions: async (page) => {
+          // Should be redirected to login page
+          await assertTextVisible(page, 'Sign in to continue', 'Redirected to login');
+          // Should NOT see dashboard content
+          await assertNotVisible(page, "[data-testid='dashboard']", 'Dashboard should not be visible');
+        }
+      },
+      {
+        path: '/systems',
+        name: 'auth-redirect-systems',
+        desc: 'Systems page redirects to login when unauthenticated',
+        assertions: async (page) => {
+          // Should be redirected to login page
+          await assertTextVisible(page, 'Sign in to continue', 'Redirected to login');
+          // Should NOT see systems content
+          await assertNotVisible(page, "[data-testid='systems-table']", 'Systems table should not be visible');
+          await assertNotVisible(page, "[data-testid='systems-cards']", 'Systems cards should not be visible');
+        }
+      },
+      {
+        path: '/flakes',
+        name: 'auth-redirect-flakes',
+        desc: 'Flakes page redirects to login when unauthenticated',
+        assertions: async (page) => {
+          // Should be redirected to login page
+          await assertTextVisible(page, 'Sign in to continue', 'Redirected to login');
+          // Should NOT see flakes content
+          await assertNotVisible(page, "[data-testid='flakes-table']", 'Flakes table should not be visible');
+        }
+      },
+      {
+        path: '/environments',
+        name: 'auth-redirect-environments',
+        desc: 'Environments page redirects to login when unauthenticated',
+        assertions: async (page) => {
+          // Should be redirected to login page
+          await assertTextVisible(page, 'Sign in to continue', 'Redirected to login');
+        }
+      },
+      {
+        path: '/builds',
+        name: 'auth-redirect-builds',
+        desc: 'Builds page redirects to login when unauthenticated',
+        assertions: async (page) => {
+          // Should be redirected to login page
+          await assertTextVisible(page, 'Sign in to continue', 'Redirected to login');
+        }
+      },
+      {
+        path: '/cves',
+        name: 'auth-redirect-cves',
+        desc: 'CVEs page redirects to login when unauthenticated',
+        assertions: async (page) => {
+          // Should be redirected to login page
+          await assertTextVisible(page, 'Sign in to continue', 'Redirected to login');
+        }
+      },
+
+      // ============================================================
+      // AUTHENTICATED ROUTES (with ui_check_auth=1 mock)
+      // ============================================================
       {
         path: '/?ui_check_auth=1',
         name: 'dashboard',
