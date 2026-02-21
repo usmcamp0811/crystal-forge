@@ -5,7 +5,7 @@ status: To Do
 assignee:
   - KimiK2.5
 created_date: ''
-updated_date: '2026-02-21 04:25'
+updated_date: '2026-02-21 17:09'
 labels:
   - ui
   - security
@@ -21,31 +21,73 @@ priority: medium
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem
-The UI currently lacks authenticated navigation, protected routes, and role-aware actions.
+<!-- SECTION:DESCRIPTION:BEGIN -->
+# TASK: Implement Authenticated Navigation, Protected Routes, and Role-Aware UI
 
-Goal
-Implement login and logout UX, protected routes, and role-aware action visibility and behavior.
+## Problem
 
-Non-Goals
-- Full IAM administration console in v1.
-- UI-only authorization without backend enforcement.
+The UI currently lacks authenticated navigation, protected routes, and role-aware action visibility. Users can access routes and UI actions without a structured authentication and authorization UX layer.
 
-Architectural Constraints
-- UI composes reusable components; no policy logic duplication in views.
-- Role checks consume backend-provided auth context.
-- No infrastructure imports from UI layer.
+## Goal
 
-Verification Plan
-- `nix build .#checks.x86_64-linux.web-ui`
-- `nix develop -c cargo test --package web-ui auth_ui`
-- Manual: validate navigation and action behavior for Admin, Operator, and Viewer in both auth modes.
+Implement:
 
-Impact Areas
-- UI, API integration, Security UX
+* Login and logout UX
+* Authenticated navigation
+* Protected routes
+* Role-aware action visibility and behavior
 
-Risk Level
-- Medium
+The UI must reflect backend authorization state while relying on backend enforcement for security decisions.
+
+---
+
+## Non-Goals
+
+* Full IAM administration console in v1
+* UI-only authorization without backend enforcement
+* Role editing or user management UI
+* Session management dashboard
+* Infrastructure or backend policy changes beyond required API consumption
+
+---
+
+## Architectural Constraints
+
+* UI composes reusable components; no policy logic duplication inside views.
+* Role checks must consume backend-provided auth context.
+* No infrastructure imports from the UI layer.
+* All policy decisions originate from backend role data.
+* UI must gracefully handle 401 and 403 responses from backend.
+
+---
+
+## Auth Context Contract
+
+UI must consume backend-provided auth context via a single source of truth.
+
+Expected shape (example):
+
+```json
+{
+  "is_authenticated": true,
+  "user": {
+    "id": "...",
+    "email": "...",
+    "display_name": "..."
+  },
+  "roles": ["Viewer", "Operator", "Admin"],
+  "auth_mode": "oidc" | "local"
+}
+```
+
+Requirements:
+
+* Auth context fetched at app start.
+* Refetched on 401 responses.
+* No hard-coded role logic in route components.
+* Centralized `can(role)` helper or equivalent.
+
+---
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
