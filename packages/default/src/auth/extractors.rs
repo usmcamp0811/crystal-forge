@@ -7,13 +7,49 @@ use axum::{
     async_trait,
     extract::{FromRef, FromRequestParts},
     http::{request::Parts, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
 };
+use serde_json::json;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::auth::session::{extract_cookie, hash_token, SESSION_COOKIE_NAME};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::auth_identity::{find_active_session_by_token_hash, find_user_roles};
+
+/// Authorization error response with consistent JSON structure
+#[derive(Debug)]
+pub enum AuthError {
+    Unauthorized,
+    Forbidden,
+}
+
+impl IntoResponse for AuthError {
+    fn into_response(self) -> Response {
+        let (status, error, message) = match self {
+            AuthError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Authentication required",
+            ),
+            AuthError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Insufficient permissions",
+            ),
+        };
+
+        (
+            status,
+            Json(json!({
+                "error": error,
+                "message": message,
+            })),
+        )
+            .into_response()
+    }
+}
 
 /// Authenticated user context extracted from session cookie.
 ///
@@ -43,8 +79,11 @@ impl AuthenticatedUser {
         self.has_role(AuthRole::Admin) || self.has_role(AuthRole::Operator)
     }
 
-    /// Check if the user has any role (authenticated).
-    pub fn is_authenticated(&self) -> bool {
+    /// Check if the user has any assigned roles.
+    ///
+    /// Note: A user can be validly authenticated but have zero roles
+    /// (e.g., during migration, misconfiguration, or new user provisioning).
+    pub fn has_any_role(&self) -> bool {
         !self.roles.is_empty()
     }
 }
@@ -55,12 +94,12 @@ where
     S: Send + Sync,
     PgPool: FromRef<S>,
 {
-    type Rejection = StatusCode;
+    type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         // Extract session cookie
         let session_token = extract_cookie(&parts.headers, SESSION_COOKIE_NAME)
-            .ok_or(StatusCode::UNAUTHORIZED)?;
+            .ok_or(AuthError::Unauthorized)?;
 
         // Hash the token
         let session_hash = hash_token(&session_token);
@@ -71,13 +110,13 @@ where
         // Look up active session
         let session = find_active_session_by_token_hash(&pool, &session_hash)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::UNAUTHORIZED)?;
+            .map_err(|_| AuthError::Unauthorized)?
+            .ok_or(AuthError::Unauthorized)?;
 
         // Fetch user roles
         let role_assignments = find_user_roles(&pool, session.user_id)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .map_err(|_| AuthError::Unauthorized)?;
 
         let roles = role_assignments.into_iter().map(|ra| ra.role).collect();
 
@@ -109,7 +148,7 @@ where
     S: Send + Sync,
     PgPool: FromRef<S>,
 {
-    type Rejection = StatusCode;
+    type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let user = AuthenticatedUser::from_request_parts(parts, state).await?;
@@ -140,13 +179,13 @@ where
     S: Send + Sync,
     PgPool: FromRef<S>,
 {
-    type Rejection = StatusCode;
+    type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let user = AuthenticatedUser::from_request_parts(parts, state).await?;
 
         if !user.is_operator_or_higher() {
-            return Err(StatusCode::FORBIDDEN);
+            return Err(AuthError::Forbidden);
         }
 
         Ok(RequireOperator(user))
@@ -176,13 +215,13 @@ where
     S: Send + Sync,
     PgPool: FromRef<S>,
 {
-    type Rejection = StatusCode;
+    type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let user = AuthenticatedUser::from_request_parts(parts, state).await?;
 
         if !user.is_admin() {
-            return Err(StatusCode::FORBIDDEN);
+            return Err(AuthError::Forbidden);
         }
 
         Ok(RequireAdmin(user))
@@ -222,7 +261,7 @@ mod tests {
         assert!(!viewer_user.is_admin());
         assert!(!viewer_user.is_operator_or_higher());
         assert!(viewer_user.has_role(AuthRole::Viewer));
-        assert!(viewer_user.is_authenticated());
+        assert!(viewer_user.has_any_role());
     }
 
     #[test]
