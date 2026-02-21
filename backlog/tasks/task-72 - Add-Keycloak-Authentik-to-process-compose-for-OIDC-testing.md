@@ -1,9 +1,10 @@
 ---
 id: TASK-72
 title: Add Keycloak/Authentik to process-compose for OIDC testing
-status: Backlog
+status: In Progress
 assignee: []
 created_date: '2026-02-20 14:28'
+updated_date: '2026-02-21 00:35'
 labels:
   - devex
   - infra
@@ -50,3 +51,9 @@ Acceptance Criteria:
 - Server AUTH_MODE=oidc can authenticate against local provider
 - Documentation explains how to use OIDC stack for local testing
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: codex on gray in /home/mcamp/code/crystal-forge/TASK-72-add-oidc-process-compose
+<!-- SECTION:NOTES:END -->
