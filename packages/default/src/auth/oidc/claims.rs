@@ -244,6 +244,17 @@ mod tests {
     }
 
     #[test]
+    fn extract_roles_handles_whitespace_in_comma_separated() {
+        let extractor = ClaimExtractor::new(default_config());
+
+        let mut claims = HashMap::new();
+        claims.insert("groups".to_string(), json!("admin , operator ,  viewer  "));
+
+        let roles = extractor.extract_roles(&claims).unwrap();
+        assert_eq!(roles, vec!["admin", "operator", "viewer"]);
+    }
+
+    #[test]
     fn extract_roles_missing_claim() {
         let extractor = ClaimExtractor::new(default_config());
         let claims = HashMap::new();

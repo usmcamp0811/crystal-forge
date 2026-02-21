@@ -63,10 +63,18 @@ pub struct RoleMappingConfig {
 }
 
 impl Default for RoleMappingConfig {
+    /// Default configuration for role mapping.
+    ///
+    /// **IMPORTANT**: This default is NOT used in production.
+    /// Production uses `from_env()` which implements safe-deny (no default role).
+    ///
+    /// This Default impl exists only for:
+    /// - Deserialization fallback when parsing config files
+    /// - Test convenience
     fn default() -> Self {
         Self {
             group_role_map: HashMap::new(),
-            default_role: Some("viewer".to_string()),
+            default_role: None, // Safe-deny: no default role
         }
     }
 }
@@ -82,12 +90,37 @@ impl RoleMappingConfig {
     ///
     /// If CRYSTAL_FORGE_DEFAULT_ROLE is not set, uses safe-deny (no default role).
     pub fn from_env() -> Self {
-        let group_role_map = std::env::var("CRYSTAL_FORGE_ROLE_MAPPING")
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let group_role_map = match std::env::var("CRYSTAL_FORGE_ROLE_MAPPING") {
+            Ok(json_str) => match serde_json::from_str(&json_str) {
+                Ok(map) => map,
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to parse CRYSTAL_FORGE_ROLE_MAPPING as JSON: {}. \
+                         All OIDC logins will fail unless CRYSTAL_FORGE_DEFAULT_ROLE is set. \
+                         Expected format: {{\"group-name\":\"role\"}}",
+                        e
+                    );
+                    HashMap::new()
+                }
+            },
+            Err(_) => {
+                tracing::warn!(
+                    "CRYSTAL_FORGE_ROLE_MAPPING not set. \
+                     All OIDC logins will fail unless CRYSTAL_FORGE_DEFAULT_ROLE is set."
+                );
+                HashMap::new()
+            }
+        };
 
         let default_role = std::env::var("CRYSTAL_FORGE_DEFAULT_ROLE").ok();
+
+        if group_role_map.is_empty() && default_role.is_none() {
+            tracing::warn!(
+                "Role mapping is completely unconfigured (no mapping and no default role). \
+                 All OIDC logins will be denied. Set CRYSTAL_FORGE_ROLE_MAPPING or \
+                 CRYSTAL_FORGE_DEFAULT_ROLE to allow access."
+            );
+        }
 
         Self {
             group_role_map,
