@@ -1,11 +1,11 @@
 ---
 id: TASK-65.1
 title: Identity and RBAC data model plus migrations
-status: To Do
+status: Done
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-20 04:27'
+updated_date: '2026-02-21 00:03'
 labels:
   - security
   - auth
