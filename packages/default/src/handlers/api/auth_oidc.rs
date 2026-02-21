@@ -21,7 +21,8 @@ use std::sync::Arc;
 
 use crate::auth::oidc::{ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore};
 use crate::config::OidcConfig;
-use crate::queries::users::{get_by_email, insert_user};
+use crate::queries::auth_identity::{AuthIdentityRepository, NewExternalIdentity};
+use crate::queries::users::insert_user;
 
 /// Shared OIDC client state.
 #[derive(Clone)]
@@ -307,44 +308,112 @@ pub async fn oidc_callback(
 
     // SECURITY: Require email_verified=true before account linking/creation
     // Prevents account takeover on providers that don't verify email addresses
-    // Attack scenario: Attacker claims victim@example.com without verification
-    //                  → Links/creates account → Takes over victim's account
     let email = user_info.email.as_ref().ok_or(OidcError::MissingEmail)?;
     
     if !user_info.email_verified {
         tracing::error!(
-            "Email '{}' not verified by provider (email_verified=false) - rejecting authentication",
-            email
+            "Email not verified by provider (email_verified=false) - rejecting authentication"
         );
         return Err(OidcError::UnverifiedEmail);
     }
 
-    tracing::debug!("Email verified by provider: {}", email);
+    tracing::debug!("Email verified by provider");
 
-    // Find or create user in database
-    let user = match get_by_email(&pool, email).await.map_err(|_| OidcError::DatabaseError)? {
-        Some(user) => {
-            tracing::debug!("Existing user found: {}", email);
-            user
+    // SECURITY: Bind account using stable OIDC identity (sub + iss), NOT email
+    // This prevents account takeover when emails are reassigned at the provider level
+    //
+    // Attack scenarios prevented:
+    // 1. User alice@example.com authenticates → Creates account A
+    // 2. Alice leaves company, email reassigned to Bob at provider
+    // 3. Bob authenticates with alice@example.com
+    //    - Email-based: Bob gets account A (Alice's account) ❌
+    //    - Subject-based: Bob gets new account B (correct) ✅
+    //
+    // Using (provider_key, subject, tenant_discriminator) as unique identity
+    let auth_repo = AuthIdentityRepository::new(&pool);
+    let provider_key = "oidc"; // Generic OIDC provider
+    let subject = &user_info.subject;
+    let tenant_discriminator = Some(claims.iss.as_str()); // Use issuer as tenant
+
+    // Find existing identity binding
+    let external_identity = auth_repo
+        .find_external_identity(provider_key, subject, tenant_discriminator)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to find external identity: {}", e);
+            OidcError::DatabaseError
+        })?;
+
+    let user = match external_identity {
+        Some(identity) => {
+            // Existing OIDC identity found - load the linked user
+            tracing::debug!(
+                "Existing OIDC identity found: provider={} subject={} user_id={}",
+                provider_key,
+                subject,
+                identity.user_id
+            );
+            
+            // Load user by ID (not email - email may have changed at provider)
+            sqlx::query_as::<_, crate::models::users::User>(
+                "SELECT id, username, email, first_name, last_name, created_at, updated_at, password_hash
+                 FROM users WHERE id = $1"
+            )
+            .bind(identity.user_id)
+            .fetch_one(&pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load user for identity: {}", e);
+                OidcError::DatabaseError
+            })?
         }
         None => {
-            // Create new user (only if email is verified)
-            tracing::info!("Creating new verified user: {}", email);
-            insert_user(
-                &pool,
-                email,
-                user_info.display_name.as_deref(),
-            )
-            .await
-            .map_err(|_| OidcError::DatabaseError)?
+            // New OIDC identity - create user and bind identity
+            tracing::info!("New OIDC identity, creating user: email={}", email);
+            
+            // Create user with verified email
+            let new_user = insert_user(&pool, email, user_info.display_name.as_deref())
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to create user: {}", e);
+                    OidcError::DatabaseError
+                })?;
+
+            // Bind OIDC identity to user
+            let identity_record = NewExternalIdentity {
+                user_id: new_user.id,
+                provider_key: provider_key.to_string(),
+                subject: subject.to_string(),
+                tenant_discriminator: tenant_discriminator.map(|s| s.to_string()),
+                claims: serde_json::to_value(&user_info.custom_claims)
+                    .unwrap_or_else(|_| serde_json::json!({})),
+            };
+
+            auth_repo
+                .upsert_external_identity(&identity_record)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to create external identity binding: {}", e);
+                    OidcError::DatabaseError
+                })?;
+
+            tracing::info!(
+                "Created OIDC identity binding: user_id={} provider={} subject={}",
+                new_user.id,
+                provider_key,
+                subject
+            );
+
+            new_user
         }
     };
 
     // TODO: Create session (TASK-65.3)
     // TODO: Set session cookie (TASK-65.3)
     // TODO: Assign roles based on OIDC groups (future task)
+    // TODO: Update external_identity claims on each login (keep profile fresh)
 
-    tracing::info!("User session created for: {}", user.email);
+    tracing::info!("User authenticated via OIDC: user_id={} email={}", user.id, user.email);
 
     // Redirect to dashboard (clear state cookie)
     let response = Response::builder()
