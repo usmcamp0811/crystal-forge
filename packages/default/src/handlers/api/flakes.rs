@@ -37,7 +37,11 @@ pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl
     }
 }
 
+/// Create a new flake in the registry.
+///
+/// **Authorization**: Requires Operator or Admin role (write operation).
 pub async fn create_flake(
+    RequireOperator(_user): RequireOperator,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Json(payload): Json<CreateFlakeRequest>,
@@ -119,7 +123,11 @@ pub async fn create_flake(
     }
 }
 
+/// Delete a flake from the registry.
+///
+/// **Authorization**: Requires Admin role (destructive operation).
 pub async fn delete_flake(
+    RequireAdmin(_user): RequireAdmin,
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(flake_id): Path<i32>,
