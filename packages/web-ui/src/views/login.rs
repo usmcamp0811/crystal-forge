@@ -109,11 +109,11 @@ pub fn LoginView() -> Element {
 
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
-                class: "absolute right-4 bottom-4 pointer-events-none select-none",
-                style: "opacity: 0.04;",
+                class: "absolute pointer-events-none select-none",
+                style: "opacity: 0.04; right: 16px; bottom: 16px;",
                 img {
                     src: asset!("assets/cf.png"),
-                    class: "max-w-[400px] blur-[1px]",
+                    style: "max-width: 400px; filter: blur(1px);",
                     alt: ""
                 }
             }
@@ -127,7 +127,8 @@ pub fn LoginView() -> Element {
             }
 
             div {
-                class: "relative w-96 z-10",
+                class: "relative z-10",
+                style: "width: 384px;",
 
                 // Card container
                 div {
