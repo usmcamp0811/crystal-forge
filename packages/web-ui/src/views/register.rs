@@ -189,8 +189,10 @@ pub fn RegisterView() -> Element {
 
                     // Registration form
                     form {
-                        onsubmit: handle_register,
-                        prevent_default: "onsubmit",
+                        onsubmit: move |evt| {
+                            evt.prevent_default();
+                            handle_register(evt);
+                        },
 
                         div {
                             class: "space-y-4 mb-6",

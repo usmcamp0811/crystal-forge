@@ -151,8 +151,10 @@ pub fn LoginView() -> Element {
                             div {
                                 // Local login form
                                 form {
-                                    onsubmit: handle_login,
-                                    prevent_default: "onsubmit",
+                                    onsubmit: move |evt| {
+                                        evt.prevent_default();
+                                        handle_login(evt);
+                                    },
                                     
                                     div {
                                         class: "space-y-4 mb-6",
