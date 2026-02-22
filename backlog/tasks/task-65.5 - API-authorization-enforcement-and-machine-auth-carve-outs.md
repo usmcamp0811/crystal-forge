@@ -62,4 +62,46 @@ Risk Level
 
 <!-- SECTION:NOTES:BEGIN -->
 Role matrix baseline: Admin (full config plus user and role management), Operator (systems/build/deploy, no auth settings), Viewer (read-only).
+
+LOCK: Claude Opus 4.5 on reckless in ~/code/crystal-forge/TASK-65.5-api-authz-enforcement
+
+MR branch pushed: TASK-65.5-api-authz-enforcement
+MR URL: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-65.5-api-authz-enforcement
+
+Implementation complete:
+- Authorization extractors created with role hierarchy
+- All user API endpoints protected
+- Agent endpoints preserved (signature auth)
+- Unit tests passing
+- Code formatted and linted
+
+Pending:
+- Manual testing with dev-mode fixtures
+- Integration testing with OIDC
+- Merge approval
+
+Code review feedback addressed (commit b5f9c48):
+✅ Structured JSON error responses for auth failures
+✅ Idempotent logout (no CSRF required when no session exists)
+✅ Renamed is_authenticated() to has_any_role() for clarity
+✅ Type-safe CSRF_HEADER_NAME using HeaderName
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/125
+
+MR description completed and ready for review.
+
+Complete MR template filled with:
+✅ Comprehensive summary and problem statement
+✅ Implementation overview with architectural decisions
+✅ Cookie-based session management details
+✅ Role-based authorization extractor documentation
+✅ API usage examples with curl commands
+✅ Security considerations and improvements
+✅ Performance impact analysis
+✅ Breaking changes documentation
+✅ Manual testing scenarios documented
+✅ Reviewer guidance with review order
+
+The MR description is saved in /tmp/mr-description.md and ready to paste into:
+https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/125
 <!-- SECTION:NOTES:END -->
