@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::api::models::{
     ApiError, CveSummary, DeploymentStatus, PaginatedResponse, PipelineStage, SortOrder,
+    SystemMutationResponse, SystemRollbackRequest,
     SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, SystemSummary,
     SystemsListParams,
 };
@@ -39,7 +40,9 @@ pub async fn list_systems(
         return forbidden();
     };
 
-    let caller_role = highest_role(&roles);
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
     let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
@@ -108,7 +111,9 @@ pub async fn get_system(
         return forbidden();
     };
 
-    let caller_role = highest_role(&roles);
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
     let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
@@ -187,13 +192,156 @@ pub async fn get_system(
     (StatusCode::OK, Json(detail)).into_response()
 }
 
-fn highest_role(roles: &[AuthRole]) -> Role {
+pub async fn sync_system(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match sqlx::query_as::<_, SystemListRow>(
+        "SELECT s.id,
+                s.hostname,
+                s.environment_id,
+                e.name AS environment,
+                s.is_active,
+                s.deployment_policy,
+                s.created_at,
+                s.updated_at
+         FROM systems s
+         LEFT JOIN environments e ON e.id = s.environment_id
+         WHERE s.id = $1",
+    )
+    .bind(system_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    if sqlx::query("UPDATE systems SET updated_at = NOW() WHERE id = $1")
+        .bind(system_id)
+        .execute(&pool)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to queue sync");
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(SystemMutationResponse {
+            status: "accepted".to_string(),
+            message: format!("Sync requested for {}", row.hostname),
+        }),
+    )
+        .into_response()
+}
+
+pub async fn rollback_system(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<SystemRollbackRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let target_commit = payload.target_commit.trim();
+    if target_commit.is_empty() {
+        return bad_request("Target commit is required");
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match sqlx::query_as::<_, SystemListRow>(
+        "SELECT s.id,
+                s.hostname,
+                s.environment_id,
+                e.name AS environment,
+                s.is_active,
+                s.deployment_policy,
+                s.created_at,
+                s.updated_at
+         FROM systems s
+         LEFT JOIN environments e ON e.id = s.environment_id
+         WHERE s.id = $1",
+    )
+    .bind(system_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    if sqlx::query("UPDATE systems SET desired_target = $1, updated_at = NOW() WHERE id = $2")
+        .bind(target_commit)
+        .bind(system_id)
+        .execute(&pool)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to request rollback");
+    }
+
+    (
+        StatusCode::ACCEPTED,
+        Json(SystemMutationResponse {
+            status: "accepted".to_string(),
+            message: format!("Rollback requested for {}", row.hostname),
+        }),
+    )
+        .into_response()
+}
+
+fn highest_role(roles: &[AuthRole]) -> Option<Role> {
     if roles.contains(&AuthRole::Admin) {
-        Role::Admin
+        Some(Role::Admin)
     } else if roles.contains(&AuthRole::Operator) {
-        Role::Operator
+        Some(Role::Operator)
+    } else if roles.contains(&AuthRole::Viewer) {
+        Some(Role::Viewer)
     } else {
-        Role::Viewer
+        None
     }
 }
 
@@ -270,6 +418,30 @@ fn forbidden() -> axum::response::Response {
         .into_response()
 }
 
+fn forbidden_mutation() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Operator or admin privileges are required".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn bad_request(message: &str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            error: "validation_error".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
 fn not_found() -> axum::response::Response {
     (
         StatusCode::NOT_FOUND,
@@ -302,9 +474,10 @@ mod tests {
 
     #[test]
     fn highest_role_prefers_admin_then_operator_then_viewer() {
-        assert_eq!(highest_role(&[AuthRole::Admin]), Role::Admin);
-        assert_eq!(highest_role(&[AuthRole::Operator]), Role::Operator);
-        assert_eq!(highest_role(&[AuthRole::Viewer]), Role::Viewer);
+        assert_eq!(highest_role(&[AuthRole::Admin]), Some(Role::Admin));
+        assert_eq!(highest_role(&[AuthRole::Operator]), Some(Role::Operator));
+        assert_eq!(highest_role(&[AuthRole::Viewer]), Some(Role::Viewer));
+        assert_eq!(highest_role(&[]), None);
     }
 
     #[test]
@@ -356,6 +529,43 @@ mod tests {
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn sync_system_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = sync_system(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn rollback_system_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = rollback_system(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Json(SystemRollbackRequest {
+                target_commit: "abc123".to_string(),
+            }),
         )
         .await
         .into_response();

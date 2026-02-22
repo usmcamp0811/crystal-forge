@@ -98,10 +98,10 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 ### Environment-scoped visibility and authorization (core security behavior)
 - [x] #4 Systems are associated with an Environment (existing or added association as part of this task).
 - [x] #5 A user only sees systems belonging to environments they are a member of.
-- [ ] #6 Viewer can view system details but cannot deploy/sync/perform mutating actions.
-- [ ] #7 Operator can deploy/sync/perform allowed system operations within their environments, but cannot create environments.
-- [ ] #8 Admin can perform all operations, including environment management.
-- [ ] #9 Backend enforces the above rules (UI behavior must match backend enforcement).
+- [x] #6 Viewer can view system details but cannot deploy/sync/perform mutating actions.
+- [x] #7 Operator can deploy/sync/perform allowed system operations within their environments, but cannot create environments.
+- [x] #8 Admin can perform all operations, including environment management.
+- [x] #9 Backend enforces the above rules (UI behavior must match backend enforcement).
 
 ### Admin UI - Users (local auth mode)
 - [x] #10 Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
@@ -167,4 +167,6 @@ Latest progress:
 - Enforced viewer-or-above session gating on dashboard summary and flake list read APIs with forbidden-path tests.
 - Added backend systems list/detail APIs with membership-scoped visibility filtering and viewer-or-above authentication gating.
 - Added systems endpoint tests for authenticated-role requirements and filter helper behavior.
+- Added backend sync/rollback system mutation endpoints with operator-or-admin checks and environment-scope enforcement.
+- Updated system detail UI to call sync/rollback APIs and disable mutation actions for viewer-role users.
 <!-- SECTION:NOTES:END -->

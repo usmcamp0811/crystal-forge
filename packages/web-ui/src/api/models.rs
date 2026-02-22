@@ -519,6 +519,17 @@ pub struct SystemsListParams {
     pub sort_order: Option<SortOrder>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackRequest {
+    pub target_commit: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMutationResponse {
+    pub status: String,
+    pub message: String,
+}
+
 /// Sort direction for list queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

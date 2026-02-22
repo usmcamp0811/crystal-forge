@@ -53,6 +53,21 @@ pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientErro
     fetch_json(&url).await
 }
 
+pub async fn request_system_sync(
+    id: &uuid::Uuid,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/sync", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+pub async fn request_system_rollback(
+    id: &uuid::Uuid,
+    request: &SystemRollbackRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/rollback", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());

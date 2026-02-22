@@ -363,6 +363,19 @@ pub struct SystemsListParams {
     pub sort_order: Option<SortOrder>,
 }
 
+/// Request payload for rolling a system back to a specific commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackRequest {
+    pub target_commit: String,
+}
+
+/// Generic response for accepted system mutation actions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMutationResponse {
+    pub status: String,
+    pub message: String,
+}
+
 /// Sort direction for list queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

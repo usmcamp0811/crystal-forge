@@ -106,6 +106,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/systems", get(systems::list_systems))
         .route("/api/v1/systems/:id", get(systems::get_system))
+        .route("/api/v1/systems/:id/sync", post(systems::sync_system))
+        .route(
+            "/api/v1/systems/:id/rollback",
+            post(systems::rollback_system),
+        )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
