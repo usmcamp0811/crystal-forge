@@ -178,5 +178,6 @@ Latest progress:
 - Tightened system rollback input validation (length + hexadecimal format) with explicit `400` responses on invalid targets.
 - Updated environment-scope access semantics so systems without an environment are admin-only.
 - Created follow-up TASK-116 for admin/audit/systems query-path performance optimization.
+- Added client-side validation for admin environment assignment inputs and explicit UX guidance that wildcard patterns are not currently supported.
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->

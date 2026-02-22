@@ -141,6 +141,10 @@ pub fn AdminView() -> Element {
                     class: "text-xs {theme::text::SECONDARY}",
                     "Users sourced from OIDC are IdP-derived and their role/memberships are managed through OIDC group mappings."
                 }
+                p {
+                    class: "text-xs {theme::text::SECONDARY}",
+                    "Environment entries must be exact names (comma-separated); wildcard patterns are not supported."
+                }
 
                 div {
                     class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
@@ -172,7 +176,7 @@ pub fn AdminView() -> Element {
                         input {
                             class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
                             r#type: "text",
-                            placeholder: "Environments (comma-separated)",
+                            placeholder: "Environments (exact names, comma-separated)",
                             value: "{create_environments.read()}",
                             oninput: move |evt| create_environments.set(evt.value())
                         }
@@ -186,7 +190,13 @@ pub fn AdminView() -> Element {
                                 let email = create_email.read().clone();
                                 let display_name = create_display_name.read().clone();
                                 let role = role_from_string(&create_role.read());
-                                let environments = parse_environments(&create_environments.read());
+                                let environments = match validate_and_parse_environments(&create_environments.read()) {
+                                    Ok(value) => value,
+                                    Err(message) => {
+                                        users_error.set(Some(message));
+                                        return;
+                                    }
+                                };
 
                                 let request = AdminCreateUserRequest {
                                     email,
@@ -363,10 +373,18 @@ pub fn AdminView() -> Element {
                                                                     return;
                                                                 };
 
+                                                                let environments = match validate_and_parse_environments(&draft.environments) {
+                                                                    Ok(value) => value,
+                                                                    Err(message) => {
+                                                                        users_error.set(Some(message));
+                                                                        return;
+                                                                    }
+                                                                };
+
                                                                 let request = AdminUpdateUserRequest {
                                                                     role: Some(role_from_string(&draft.role)),
                                                                     enabled: Some(draft.enabled),
-                                                                    environments: Some(parse_environments(&draft.environments)),
+                                                                    environments: Some(environments),
                                                                 };
 
                                                                 let user_id = user_id.clone();
@@ -428,7 +446,7 @@ pub fn AdminView() -> Element {
                         input {
                             class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
                             r#type: "text",
-                            placeholder: "Environments (comma-separated)",
+                            placeholder: "Environments (exact names, comma-separated)",
                             value: "{mapping_environments.read()}",
                             oninput: move |evt| mapping_environments.set(evt.value())
                         }
@@ -439,10 +457,18 @@ pub fn AdminView() -> Element {
                             class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
                             disabled: *mapping_submitting.read(),
                             onclick: move |_| {
+                                let environments = match validate_and_parse_environments(&mapping_environments.read()) {
+                                    Ok(value) => value,
+                                    Err(message) => {
+                                        oidc_error.set(Some(message));
+                                        return;
+                                    }
+                                };
+
                                 let request = AdminUpsertOidcMappingRequest {
                                     group_name: mapping_group.read().clone(),
                                     role: Some(role_from_string(&mapping_role.read())),
-                                    environments: parse_environments(&mapping_environments.read()),
+                                    environments,
                                 };
 
                                 let mut oidc_mappings = oidc_mappings.clone();
@@ -778,6 +804,30 @@ fn parse_environments(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn validate_and_parse_environments(value: &str) -> Result<Vec<String>, String> {
+    let parsed = parse_environments(value);
+    for entry in &parsed {
+        if entry.contains('*') {
+            return Err(
+                "Wildcard patterns are not supported yet; use exact environment names."
+                    .to_string(),
+            );
+        }
+
+        let valid = entry
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+        if !valid {
+            return Err(format!(
+                "Invalid environment '{}': only letters, numbers, '-', '_', and '.' are allowed.",
+                entry
+            ));
+        }
+    }
+
+    Ok(parsed)
+}
+
 #[derive(Debug, Clone)]
 struct UserEditDraft {
     role: String,
@@ -878,6 +928,26 @@ mod tests {
     #[test]
     fn format_environments_shows_unscoped_when_empty() {
         assert_eq!(format_environments(&[]), "All / Unscoped");
+    }
+
+    #[test]
+    fn validate_and_parse_environments_rejects_wildcards() {
+        let err = validate_and_parse_environments("company-*").expect_err("wildcard must fail");
+        assert!(err.contains("Wildcard patterns are not supported"));
+    }
+
+    #[test]
+    fn validate_and_parse_environments_accepts_expected_tokens() {
+        let values = validate_and_parse_environments("prod-west, staging_1, qa.env")
+            .expect("valid names");
+        assert_eq!(
+            values,
+            vec![
+                "prod-west".to_string(),
+                "staging_1".to_string(),
+                "qa.env".to_string()
+            ]
+        );
     }
 
     #[test]
