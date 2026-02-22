@@ -1,8 +1,11 @@
 ---
 id: TASK-65.8
 title: Operations documentation and runbooks for auth and RBAC
-status: Backlog
-assignee: ["GLM5.1"]
+status: To Do
+assignee:
+  - GLM5.1
+created_date: ''
+updated_date: '2026-02-22 02:08'
 labels:
   - docs
   - security
@@ -12,6 +15,7 @@ milestone: m-14
 dependencies:
   - TASK-65.7
 priority: medium
+ordinal: 3000
 ---
 
 ## Description
