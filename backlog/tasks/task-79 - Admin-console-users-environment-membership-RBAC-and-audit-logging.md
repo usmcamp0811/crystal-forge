@@ -156,4 +156,5 @@ Latest progress:
 - Added AppShell route-guard unit coverage for non-admin denial behavior on the admin route.
 - Added admin-role predicate unit coverage that explicitly denies operator/viewer-only role sets.
 - Added admin view helper tests covering user-row draft shaping and environment display defaults.
+- Added systems-list environment filter tests for case-insensitive membership visibility behavior.
 <!-- SECTION:NOTES:END -->

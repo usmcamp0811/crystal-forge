@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
 use uuid::Uuid;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 use crate::api::models::{
     CveSummary, DeploymentStatus, FlakeSummary, HealthStatus, PipelineStage, SystemSummary,
@@ -14,10 +14,10 @@ use crate::api::models::{
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
-use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
+use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, generate_key_pair,
+    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog,
 };
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
@@ -451,4 +451,56 @@ fn mock_systems() -> Vec<SystemSummary> {
             deployment_policy: "manual".to_string(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn sample_system(environment: Option<&str>) -> SystemSummary {
+        SystemSummary {
+            id: Uuid::parse_str("00000000-0000-0000-0000-0000000000aa").expect("valid uuid"),
+            hostname: "sample-host".to_string(),
+            environment: environment.map(ToString::to_string),
+            primary_ip: None,
+            health_status: HealthStatus::Healthy,
+            deployment_status: DeploymentStatus::UpToDate,
+            pipeline_stage: Some(PipelineStage::BuildComplete),
+            cve_counts: CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 0,
+                low: 0,
+            },
+            nixos_version: Some("24.11".to_string()),
+            last_seen: Some(Utc::now()),
+            deployment_policy: "manual".to_string(),
+        }
+    }
+
+    #[test]
+    fn matches_environment_allows_when_filters_empty() {
+        let system = sample_system(Some("production"));
+        assert!(matches_environment(&system, &[]));
+    }
+
+    #[test]
+    fn matches_environment_is_case_insensitive() {
+        let system = sample_system(Some("Production"));
+        assert!(matches_environment(&system, &["production".to_string()]));
+        assert!(matches_environment(&system, &["PRODUCTION".to_string()]));
+    }
+
+    #[test]
+    fn matches_environment_rejects_non_member_environment() {
+        let system = sample_system(Some("staging"));
+        assert!(!matches_environment(&system, &["production".to_string()]));
+    }
+
+    #[test]
+    fn matches_environment_rejects_unscoped_system_when_filtering() {
+        let system = sample_system(None);
+        assert!(!matches_environment(&system, &["production".to_string()]));
+    }
 }
