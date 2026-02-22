@@ -172,19 +172,19 @@ pub async fn upsert_oidc_mapping(
         return forbidden();
     };
 
-    let group_name = payload.group_name.trim().to_string();
-    if group_name.is_empty() {
-        return bad_request("Group name is required");
-    }
+    let group_name = match normalize_oidc_group_name(&payload.group_name) {
+        Ok(value) => value,
+        Err(message) => return bad_request(&message),
+    };
 
-    let environments = payload
-        .environments
-        .into_iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let environments = match normalize_environment_names_with_duplicate_check(&payload.environments) {
+        Ok(value) => value,
+        Err(message) => return bad_request(&message),
+    };
+
+    if let Err(message) = validate_environment_names_exist(&pool, &environments).await {
+        return bad_request(&message);
+    }
 
     let role = payload.role.map(role_to_auth_role);
 
@@ -964,6 +964,85 @@ async fn sync_user_environments(
     Ok(())
 }
 
+fn normalize_oidc_group_name(value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err("Group name is required".to_string());
+    }
+
+    if normalized.len() > 128 {
+        return Err("Group name must be 128 characters or fewer".to_string());
+    }
+
+    let valid = normalized
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '/'));
+    if !valid {
+        return Err(
+            "Group name may only contain letters, numbers, '-', '_', '.', ':', '/'".to_string(),
+        );
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_environment_names_with_duplicate_check(
+    values: &[String],
+) -> Result<Vec<String>, String> {
+    let mut seen = BTreeSet::new();
+    let mut duplicates = BTreeSet::new();
+
+    for value in values {
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if !seen.insert(normalized.clone()) {
+            duplicates.insert(normalized);
+        }
+    }
+
+    if !duplicates.is_empty() {
+        return Err(format!(
+            "Duplicate environment(s): {}",
+            duplicates.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    Ok(seen.into_iter().collect())
+}
+
+async fn validate_environment_names_exist(pool: &PgPool, names: &[String]) -> Result<(), String> {
+    if names.is_empty() {
+        return Ok(());
+    }
+
+    let resolved = sqlx::query_as::<_, EnvironmentLookupRow>(
+        "SELECT id, name FROM environments WHERE name = ANY($1)",
+    )
+    .bind(names)
+    .fetch_all(pool)
+    .await
+    .map_err(|_| "Failed to validate environments".to_string())?;
+
+    if resolved.len() == names.len() {
+        return Ok(());
+    }
+
+    let known = resolved
+        .into_iter()
+        .map(|row| row.name)
+        .collect::<BTreeSet<_>>();
+    let missing = names
+        .iter()
+        .filter(|name| !known.contains((*name).as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Err(format!("Unknown environment(s): {}", missing.join(", ")))
+}
+
 fn role_to_auth_role(role: Role) -> AuthRole {
     match role {
         Role::Admin => AuthRole::Admin,
@@ -1276,6 +1355,40 @@ mod tests {
         ));
         assert!(should_block_final_admin_role_removal(Role::Viewer, true, false) == false);
         assert!(should_block_final_admin_role_removal(Role::Viewer, false, true) == false);
+    }
+
+    #[test]
+    fn normalize_oidc_group_name_requires_allowed_characters() {
+        assert_eq!(
+            normalize_oidc_group_name(" Team:Platform/Admin ").expect("valid group"),
+            "team:platform/admin"
+        );
+        assert!(normalize_oidc_group_name("").is_err());
+        assert!(normalize_oidc_group_name("engineering team").is_err());
+    }
+
+    #[test]
+    fn normalize_environment_names_rejects_duplicates() {
+        let err = normalize_environment_names_with_duplicate_check(&[
+            "prod".to_string(),
+            "PROD".to_string(),
+            "staging".to_string(),
+        ])
+        .expect_err("duplicate should fail");
+
+        assert!(err.contains("Duplicate environment(s): prod"));
+    }
+
+    #[test]
+    fn normalize_environment_names_trims_and_sorts() {
+        let values = normalize_environment_names_with_duplicate_check(&[
+            " staging ".to_string(),
+            "prod".to_string(),
+            "".to_string(),
+        ])
+        .expect("normalization should succeed");
+
+        assert_eq!(values, vec!["prod".to_string(), "staging".to_string()]);
     }
 
     fn lazy_pool() -> PgPool {
