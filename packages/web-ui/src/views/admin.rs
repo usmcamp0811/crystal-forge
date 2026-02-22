@@ -811,3 +811,41 @@ async fn refresh_users(
         Err(e) => users_error.set(Some(format!("Failed to load admin users: {e}"))),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn sample_user(role: Option<Role>, environments: Vec<&str>) -> AdminUserSummary {
+        AdminUserSummary {
+            id: "user-1".to_string(),
+            identifier: "user@example.com".to_string(),
+            identity_source: IdentitySource::LocalManaged,
+            role,
+            enabled: true,
+            environments: environments.into_iter().map(ToString::to_string).collect(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn user_edit_draft_reflects_user_fields() {
+        let user = sample_user(Some(Role::Operator), vec!["staging", "prod"]);
+        let draft = UserEditDraft::from_user(&user);
+
+        assert_eq!(draft.role, "Operator");
+        assert_eq!(draft.environments, "staging, prod");
+        assert!(draft.enabled);
+    }
+
+    #[test]
+    fn editable_role_label_defaults_to_viewer_when_unassigned() {
+        assert_eq!(editable_role_label(None), "Viewer");
+    }
+
+    #[test]
+    fn format_environments_shows_unscoped_when_empty() {
+        assert_eq!(format_environments(&[]), "All / Unscoped");
+    }
+}
