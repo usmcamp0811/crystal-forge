@@ -440,14 +440,10 @@ pub async fn oidc_callback(
             })?;
     }
 
-    clear_user_environment_memberships(&pool, user.id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to reset environment memberships: {}", e);
-            OidcError::DatabaseError
-        })?;
+    let mut apply_environment_mappings = false;
+    let mut resolved_environment_ids = Vec::new();
 
-    if !mapped_environments.is_empty() {
+    if !mapping_rows.is_empty() && !mapped_environments.is_empty() {
         let environment_ids = get_environment_ids_by_names(&pool, &mapped_environments)
             .await
             .map_err(|e| {
@@ -455,7 +451,34 @@ pub async fn oidc_callback(
                 OidcError::DatabaseError
             })?;
 
-        for environment_id in environment_ids {
+        match evaluate_environment_mapping_apply(
+            mapping_rows.len(),
+            mapped_environments.len(),
+            environment_ids.len(),
+        ) {
+            EnvironmentMappingApply::Apply => {
+                apply_environment_mappings = true;
+                resolved_environment_ids = environment_ids;
+            }
+            EnvironmentMappingApply::SkipNoMappings | EnvironmentMappingApply::SkipNoMappedEnvironments => {}
+            EnvironmentMappingApply::SkipUnknownMappedEnvironments => {
+                tracing::warn!(
+                    "OIDC mapped environments include unknown names; preserving existing memberships for user_id={}",
+                    user.id
+                );
+            }
+        }
+    }
+
+    if apply_environment_mappings {
+        clear_user_environment_memberships(&pool, user.id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to reset environment memberships: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+        for environment_id in resolved_environment_ids {
             insert_user_environment_membership(&pool, user.id, environment_id)
                 .await
                 .map_err(|e| {
@@ -463,6 +486,16 @@ pub async fn oidc_callback(
                     OidcError::DatabaseError
                 })?;
         }
+    } else if mapping_rows.is_empty() {
+        tracing::debug!(
+            "No OIDC mappings matched groups; preserving existing environment memberships for user_id={}",
+            user.id
+        );
+    } else if mapped_environments.is_empty() {
+        tracing::warn!(
+            "OIDC mappings resolved without environments; preserving existing memberships for user_id={}",
+            user.id
+        );
     }
 
     let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
@@ -535,6 +568,34 @@ fn collect_mapped_environments(rows: &[OidcMappingMatchRow]) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvironmentMappingApply {
+    Apply,
+    SkipNoMappings,
+    SkipNoMappedEnvironments,
+    SkipUnknownMappedEnvironments,
+}
+
+fn evaluate_environment_mapping_apply(
+    mapping_row_count: usize,
+    mapped_environment_count: usize,
+    resolved_environment_count: usize,
+) -> EnvironmentMappingApply {
+    if mapping_row_count == 0 {
+        return EnvironmentMappingApply::SkipNoMappings;
+    }
+
+    if mapped_environment_count == 0 {
+        return EnvironmentMappingApply::SkipNoMappedEnvironments;
+    }
+
+    if resolved_environment_count != mapped_environment_count {
+        return EnvironmentMappingApply::SkipUnknownMappedEnvironments;
+    }
+
+    EnvironmentMappingApply::Apply
 }
 
 /// Extract OIDC state from __Host-oidc-state cookie.
@@ -689,6 +750,26 @@ mod tests {
         assert_eq!(
             environments,
             vec!["prod".to_string(), "staging".to_string()]
+        );
+    }
+
+    #[test]
+    fn environment_mapping_apply_requires_actionable_and_resolved_mappings() {
+        assert_eq!(
+            evaluate_environment_mapping_apply(0, 2, 2),
+            EnvironmentMappingApply::SkipNoMappings
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 0, 0),
+            EnvironmentMappingApply::SkipNoMappedEnvironments
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 2, 1),
+            EnvironmentMappingApply::SkipUnknownMappedEnvironments
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 2, 2),
+            EnvironmentMappingApply::Apply
         );
     }
 }
