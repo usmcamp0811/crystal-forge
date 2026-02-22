@@ -1,10 +1,10 @@
 ---
 id: TASK-79
 title: 'Admin console - users, environment membership, RBAC, and audit logging'
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-02-22 02:34'
-updated_date: '2026-02-22 04:54'
+updated_date: '2026-02-22 17:17'
 labels:
   - web-ui
   - auth
