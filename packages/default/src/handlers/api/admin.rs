@@ -197,7 +197,7 @@ pub async fn update_user(
     let had_admin = roles.iter().any(|role| role.role == AuthRole::Admin);
 
     if let Some(enabled) = payload.enabled {
-        if !enabled && current.is_active && had_admin {
+        if should_block_last_admin_disable(enabled, current.is_active, had_admin) {
             match enabled_admin_count(&pool).await {
                 Ok(1) => return conflict("Cannot disable the last enabled admin"),
                 Ok(_) => {}
@@ -217,7 +217,7 @@ pub async fn update_user(
     }
 
     if let Some(role) = payload.role {
-        if role != Role::Admin && had_admin && current.is_active {
+        if should_block_final_admin_role_removal(role, had_admin, current.is_active) {
             match enabled_admin_count(&pool).await {
                 Ok(1) => return conflict("Cannot remove the final admin role assignment"),
                 Ok(_) => {}
@@ -646,6 +646,18 @@ fn role_to_auth_role(role: Role) -> AuthRole {
     }
 }
 
+fn should_block_last_admin_disable(enabled: bool, is_currently_active: bool, had_admin: bool) -> bool {
+    !enabled && is_currently_active && had_admin
+}
+
+fn should_block_final_admin_role_removal(
+    next_role: Role,
+    had_admin: bool,
+    is_currently_active: bool,
+) -> bool {
+    next_role != Role::Admin && had_admin && is_currently_active
+}
+
 fn is_valid_email(value: &str) -> bool {
     if value.is_empty() || value.len() > 255 {
         return false;
@@ -719,6 +731,8 @@ fn not_found(message: &str) -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State;
+    use sqlx::postgres::PgPoolOptions;
     use chrono::TimeZone;
 
     #[test]
@@ -824,5 +838,67 @@ mod tests {
         assert!(!is_valid_email(""));
         assert!(!is_valid_email("missing-at"));
         assert!(!is_valid_email("missing-domain@"));
+    }
+
+    #[test]
+    fn blocks_last_admin_disable_only_for_active_admin() {
+        assert!(should_block_last_admin_disable(true, true, true) == false);
+        assert!(should_block_last_admin_disable(false, true, true));
+        assert!(should_block_last_admin_disable(false, false, true) == false);
+        assert!(should_block_last_admin_disable(false, true, false) == false);
+    }
+
+    #[test]
+    fn blocks_final_admin_role_removal_only_when_demoting_active_admin() {
+        assert!(should_block_final_admin_role_removal(Role::Admin, true, true) == false);
+        assert!(should_block_final_admin_role_removal(
+            Role::Operator,
+            true,
+            true
+        ));
+        assert!(should_block_final_admin_role_removal(Role::Viewer, true, false) == false);
+        assert!(should_block_final_admin_role_removal(Role::Viewer, false, true) == false);
+    }
+
+    fn lazy_pool() -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct")
+    }
+
+    #[tokio::test]
+    async fn create_user_requires_admin_session() {
+        let response = create_user(
+            State(lazy_pool()),
+            HeaderMap::new(),
+            Json(CreateAdminUserRequest {
+                email: "new-user@example.com".to_string(),
+                display_name: Some("New User".to_string()),
+                role: Role::Viewer,
+                environments: vec![],
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_user_requires_admin_session() {
+        let response = update_user(
+            State(lazy_pool()),
+            Path(Uuid::new_v4().to_string()),
+            HeaderMap::new(),
+            Json(UpdateAdminUserRequest {
+                role: Some(Role::Operator),
+                enabled: Some(true),
+                environments: Some(vec![]),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }

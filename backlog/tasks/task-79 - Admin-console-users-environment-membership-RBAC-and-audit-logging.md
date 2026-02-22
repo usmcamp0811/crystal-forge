@@ -105,9 +105,9 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 
 ### Admin UI - Users (local auth mode)
 - [x] #10 Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
-- [ ] #11 Admin can create a local user with email, optional display name, initial role, and initial environment memberships; API returns validation errors for invalid email/duplicate email.
-- [ ] #12 Admin can update a local user role, enabled/disabled status, and environment memberships; role/membership changes are persisted and reflected in subsequent auth context after next login.
-- [ ] #13 Guardrails: cannot disable the last enabled admin, cannot remove the final admin role assignment, and non-admin callers receive `403` for all admin mutation endpoints.
+- [x] #11 Admin can create a local user with email, optional display name, initial role, and initial environment memberships; API returns validation errors for invalid email/duplicate email.
+- [x] #12 Admin can update a local user role, enabled/disabled status, and environment memberships; role/membership changes are persisted and reflected in subsequent auth context after next login.
+- [x] #13 Guardrails: cannot disable the last enabled admin, cannot remove the final admin role assignment, and non-admin callers receive `403` for all admin mutation endpoints.
 
 ### Admin UI - OIDC mapping (OIDC enabled)
 - [ ] #14 Provide an admin screen to manage mappings for `group -> role` and `group -> environments`, including create/edit/delete, duplicate detection, and input validation.
@@ -136,9 +136,15 @@ Progress update:
 - Added web UI auth helper unit tests for admin/operator role gating.
 
 Remaining major scope:
-- User management mutations (create/update/disable) and guardrails.
 - Environment membership persistence/enforcement across systems visibility/actions.
 - OIDC mapping CRUD and IdP-derived/local attribute UX distinctions.
 - Expanded audit event capture for required admin mutation actions.
 - Integration/UI coverage for AC #20 scenarios.
+
+Latest progress:
+- Implemented admin mutation endpoints: create user and update user.
+- Added guardrails preventing disabling/removing the final enabled admin.
+- Added user environment memberships persistence table and API wiring.
+- Added admin UI create/edit controls for role/status/environment assignments.
+- Added guardrail predicate tests in admin handler module.
 <!-- SECTION:NOTES:END -->
