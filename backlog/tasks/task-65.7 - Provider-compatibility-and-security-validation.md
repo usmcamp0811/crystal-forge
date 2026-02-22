@@ -1,8 +1,11 @@
 ---
 id: TASK-65.7
 title: Provider compatibility and security validation
-status: Backlog
-assignee: ["Claude Opus 4.5"]
+status: Review
+assignee:
+  - Claude Opus 4.5
+created_date: ''
+updated_date: '2026-02-22 04:36'
 labels:
   - security
   - oidc
@@ -16,6 +19,7 @@ dependencies:
   - TASK-65.5
   - TASK-65.6
 priority: medium
+ordinal: 6000
 ---
 
 ## Description
@@ -60,4 +64,11 @@ Risk Level
 
 <!-- SECTION:NOTES:BEGIN -->
 Follow-up possibility: expanded reliability and chaos testing for auth stack.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/128
+Verification:
+- nix develop -c cargo test --package crystal-forge auth::integration_matrix (pass)
+- nix develop -c cargo test --package crystal-forge auth::security_regression (pass)
+- nix develop -c cargo clippy -- -D warnings (fail: existing workspace lint debt and rustc artifact mismatch E0514)
+Follow-up: TASK-80 created for clippy/toolchain stabilization.
 <!-- SECTION:NOTES:END -->
