@@ -7,10 +7,13 @@ use crate::components::layout::DevModeBanner;
 use crate::components::layout::SidebarNav;
 use crate::components::layout::TopBar;
 use crate::routes::Route;
-use crate::state::app_state::AppState;
+use crate::state::app_state::{AppState, AuthFetchState};
 use crate::state::auth;
 use crate::theme;
 
+/// Check if UI check mock auth mode is enabled via query param.
+/// Only available in debug builds to prevent production auth bypass.
+#[cfg(debug_assertions)]
 fn ui_check_mock_auth_enabled() -> bool {
     web_sys::window()
         .and_then(|w| w.location().search().ok())
@@ -18,6 +21,12 @@ fn ui_check_mock_auth_enabled() -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(not(debug_assertions))]
+fn ui_check_mock_auth_enabled() -> bool {
+    false
+}
+
+#[cfg(debug_assertions)]
 fn ui_check_mock_auth_context() -> AuthContext {
     AuthContext {
         is_authenticated: true,
@@ -41,36 +50,67 @@ pub fn AppShell() -> Element {
     let mut app_state = use_context::<Signal<AppState>>();
     let nav = navigator();
 
-    // Check authentication and redirect if needed
-    let mut auth_context = app_state.read().auth.clone();
+    let state = app_state.read();
+    let auth_fetch_state = state.auth_fetch_state.clone();
+    let mut auth_context = state.auth.clone();
+    drop(state);
 
+    // In debug builds, allow mock auth for screenshot tests
+    #[cfg(debug_assertions)]
     if auth_context.is_none() && ui_check_mock_auth_enabled() {
         let mock = ui_check_mock_auth_context();
         app_state.write().auth = Some(mock.clone());
         auth_context = Some(mock);
     }
 
-    if !auth::is_authenticated(&auth_context) {
-        // If auth context is loaded and user is not authenticated, redirect to login
-        if auth_context.is_some() {
-            nav.push("/login");
-        }
-        // Show loading while auth context is being fetched
-        return rsx! {
-            div {
-                class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
+    // Handle auth fetch states
+    match auth_fetch_state {
+        AuthFetchState::Loading => {
+            // Show loading spinner while auth context is being fetched
+            return rsx! {
                 div {
-                    class: "text-center",
+                    class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
                     div {
-                        class: "animate-spin rounded-full h-12 w-12 border-b-2 border-violet-500 mx-auto mb-4"
-                    }
-                    p {
-                        class: "{theme::text::SECONDARY}",
-                        "Loading..."
+                        class: "text-center",
+                        div {
+                            class: "animate-spin rounded-full h-12 w-12 border-b-2 border-violet-500 mx-auto mb-4"
+                        }
+                        p {
+                            class: "{theme::text::SECONDARY}",
+                            "Loading..."
+                        }
                     }
                 }
+            };
+        }
+        AuthFetchState::Error => {
+            // Auth fetch failed - redirect to login
+            nav.push("/login");
+            return rsx! {
+                div {
+                    class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
+                    p {
+                        class: "{theme::text::SECONDARY}",
+                        "Redirecting to login..."
+                    }
+                }
+            };
+        }
+        AuthFetchState::Loaded => {
+            // Auth loaded - check if authenticated
+            if !auth::is_authenticated(&auth_context) {
+                nav.push("/login");
+                return rsx! {
+                    div {
+                        class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
+                        p {
+                            class: "{theme::text::SECONDARY}",
+                            "Redirecting to login..."
+                        }
+                    }
+                };
             }
-        };
+        }
     }
 
     rsx! {

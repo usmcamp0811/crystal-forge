@@ -52,11 +52,14 @@ pub fn RegisterView() -> Element {
     let mut is_first_run = use_signal(|| false);
     let mut status_checked = use_signal(|| false);
 
-    // Check if UI screenshot test mode is enabled
+    // Check if UI screenshot test mode is enabled (debug builds only)
+    #[cfg(debug_assertions)]
     let ui_check_mode = web_sys::window()
         .and_then(|w| w.location().search().ok())
         .map(|q| q.contains("ui_check_auth=1"))
         .unwrap_or(false);
+    #[cfg(not(debug_assertions))]
+    let ui_check_mode = false;
 
     // Check if registration is allowed on mount
     use_effect(move || {
