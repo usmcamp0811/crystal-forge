@@ -806,12 +806,16 @@ async fn require_admin(pool: &PgPool, headers: &HeaderMap) -> Option<Uuid> {
     }
 
     let roles = get_user_roles(pool, session.user_id).await.ok()?;
-    let is_admin = roles.iter().any(|r| r.role == AuthRole::Admin);
+    let is_admin = has_admin_role(&roles.into_iter().map(|assignment| assignment.role).collect::<Vec<_>>());
     if is_admin {
         Some(session.user_id)
     } else {
         None
     }
+}
+
+fn has_admin_role(roles: &[AuthRole]) -> bool {
+    roles.contains(&AuthRole::Admin)
 }
 
 fn highest_role(roles: Vec<AuthRole>) -> Option<Role> {
@@ -1270,6 +1274,14 @@ mod tests {
             Some(Role::Admin)
         );
         assert_eq!(highest_role(vec![]), None);
+    }
+
+    #[test]
+    fn has_admin_role_only_accepts_admin_role() {
+        assert!(has_admin_role(&[AuthRole::Admin]));
+        assert!(!has_admin_role(&[AuthRole::Operator]));
+        assert!(!has_admin_role(&[AuthRole::Viewer]));
+        assert!(!has_admin_role(&[AuthRole::Viewer, AuthRole::Operator]));
     }
 
     fn event(timestamp: DateTime<Utc>, actor: Option<&str>, action: AuditAction) -> AuditEvent {

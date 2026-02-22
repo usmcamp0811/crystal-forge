@@ -154,4 +154,5 @@ Latest progress:
 - Added dedicated OIDC mapping derivation unit coverage for role precedence and environment normalization at login.
 - Added audit metadata coverage for request-origin extraction precedence and persisted admin audit action keys.
 - Added AppShell route-guard unit coverage for non-admin denial behavior on the admin route.
+- Added admin-role predicate unit coverage that explicitly denies operator/viewer-only role sets.
 <!-- SECTION:NOTES:END -->
