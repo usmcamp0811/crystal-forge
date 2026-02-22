@@ -714,6 +714,23 @@ pub struct AdminAuditEventsParams {
     pub per_page: Option<i64>,
 }
 
+/// Request payload for creating a local admin-managed user.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminCreateUserRequest {
+    pub email: String,
+    pub display_name: Option<String>,
+    pub role: Role,
+    pub environments: Vec<String>,
+}
+
+/// Request payload for updating a local admin-managed user.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminUpdateUserRequest {
+    pub role: Option<Role>,
+    pub enabled: Option<bool>,
+    pub environments: Option<Vec<String>>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Development Auth DTOs
 // ─────────────────────────────────────────────────────────────────────────────

@@ -2,7 +2,7 @@ use anyhow::Context;
 use axum::Extension;
 use axum::{
     Router,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
@@ -108,6 +108,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
         .route("/api/v1/admin/users", get(admin::list_users))
+        .route("/api/v1/admin/users", post(admin::create_user))
+        .route("/api/v1/admin/users/:id", patch(admin::update_user))
         .route("/api/v1/admin/audit-events", get(admin::list_audit_events))
         // Auth context endpoint (publicly accessible)
         .route("/api/auth/whoami", get(auth_whoami::whoami))

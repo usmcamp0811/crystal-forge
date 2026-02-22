@@ -1,8 +1,14 @@
 use chrono::Local;
 use dioxus::prelude::*;
+use std::collections::HashMap;
 
-use crate::api::client::{fetch_admin_audit_events, fetch_admin_users};
-use crate::api::models::{AdminAuditEventsParams, AdminUserSummary, AuditEvent};
+use crate::api::client::{
+    create_admin_user, fetch_admin_audit_events, fetch_admin_users, update_admin_user,
+};
+use crate::api::models::{
+    AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest, AdminUserSummary,
+    AuditEvent, Role,
+};
 use crate::theme;
 
 const AUDIT_PER_PAGE: i64 = 20;
@@ -10,6 +16,8 @@ const AUDIT_PER_PAGE: i64 = 20;
 #[component]
 pub fn AdminView() -> Element {
     let mut users = use_signal(Vec::<AdminUserSummary>::new);
+    let mut user_drafts = use_signal(HashMap::<String, UserEditDraft>::new);
+
     let mut audit_events = use_signal(Vec::<AuditEvent>::new);
     let mut audit_total = use_signal(|| 0_i64);
     let mut audit_page = use_signal(|| 1_i64);
@@ -24,21 +32,20 @@ pub fn AdminView() -> Element {
     let mut from_filter = use_signal(String::new);
     let mut to_filter = use_signal(String::new);
 
+    let mut create_email = use_signal(String::new);
+    let mut create_display_name = use_signal(String::new);
+    let mut create_role = use_signal(|| "Viewer".to_string());
+    let mut create_environments = use_signal(String::new);
+    let mut create_submitting = use_signal(|| false);
+
     {
         let mut users = users.clone();
+        let mut user_drafts = user_drafts.clone();
         let mut users_loading = users_loading.clone();
         let mut users_error = users_error.clone();
         use_effect(move || {
             spawn(async move {
-                match fetch_admin_users().await {
-                    Ok(next_users) => {
-                        users.set(next_users);
-                        users_error.set(None);
-                    }
-                    Err(e) => {
-                        users_error.set(Some(format!("Failed to load admin users: {e}")));
-                    }
-                }
+                refresh_users(users, user_drafts, users_error).await;
 
                 users_loading.set(false);
             });
@@ -109,6 +116,87 @@ pub fn AdminView() -> Element {
             section {
                 class: "space-y-3",
                 h2 { class: "text-lg font-semibold text-white", "Users" }
+
+                div {
+                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
+                    h3 { class: "text-sm font-semibold text-white", "Create user" }
+                    div {
+                        class: "grid gap-3 sm:grid-cols-2 xl:grid-cols-4",
+                        input {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            r#type: "email",
+                            placeholder: "Email",
+                            value: "{create_email.read()}",
+                            oninput: move |evt| create_email.set(evt.value())
+                        }
+                        input {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            r#type: "text",
+                            placeholder: "Display name (optional)",
+                            value: "{create_display_name.read()}",
+                            oninput: move |evt| create_display_name.set(evt.value())
+                        }
+                        select {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            value: "{create_role.read()}",
+                            onchange: move |evt| create_role.set(evt.value()),
+                            option { value: "Admin", "Admin" }
+                            option { value: "Operator", "Operator" }
+                            option { value: "Viewer", "Viewer" }
+                        }
+                        input {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            r#type: "text",
+                            placeholder: "Environments (comma-separated)",
+                            value: "{create_environments.read()}",
+                            oninput: move |evt| create_environments.set(evt.value())
+                        }
+                    }
+                    div {
+                        class: "flex justify-end",
+                        button {
+                            class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            disabled: *create_submitting.read(),
+                            onclick: move |_| {
+                                let email = create_email.read().clone();
+                                let display_name = create_display_name.read().clone();
+                                let role = role_from_string(&create_role.read());
+                                let environments = parse_environments(&create_environments.read());
+
+                                let request = AdminCreateUserRequest {
+                                    email,
+                                    display_name: optional_value(display_name),
+                                    role,
+                                    environments,
+                                };
+
+                                let mut users = users.clone();
+                                let mut user_drafts = user_drafts.clone();
+                                let mut users_error = users_error.clone();
+                                let mut create_submitting = create_submitting.clone();
+                                let mut create_email = create_email.clone();
+                                let mut create_display_name = create_display_name.clone();
+                                let mut create_environments = create_environments.clone();
+
+                                create_submitting.set(true);
+                                spawn(async move {
+                                    match create_admin_user(&request).await {
+                                        Ok(_) => {
+                                            refresh_users(users, user_drafts, users_error).await;
+                                            create_email.set(String::new());
+                                            create_display_name.set(String::new());
+                                            create_environments.set(String::new());
+                                        }
+                                        Err(e) => users_error.set(Some(format!("Failed to create user: {e}"))),
+                                    }
+                                    create_submitting.set(false);
+                                });
+                            },
+                            if *create_submitting.read() { "Creating..." } else { "Create user" }
+                        }
+                    }
+                }
+
                 if *users_loading.read() {
                     div { class: "text-sm {theme::text::SECONDARY}", "Loading users..." }
                 } else if let Some(message) = users_error.read().clone() {
@@ -129,18 +217,124 @@ pub fn AdminView() -> Element {
                                     th { class: "px-4 py-3", "Status" }
                                     th { class: "px-4 py-3", "Environments" }
                                     th { class: "px-4 py-3", "Updated" }
+                                    th { class: "px-4 py-3", "Actions" }
                                 }
                             }
                             tbody {
                                 class: "divide-y {theme::surface::CARD_BORDER}",
                                 for user in users.read().iter() {
-                                    tr {
-                                        class: "{theme::surface::CARD_BG}",
-                                        td { class: "px-4 py-3 text-white", {user.identifier.clone()} }
-                                        td { class: "px-4 py-3 {theme::text::SECONDARY}", {format_role(user.role)} }
-                                        td { class: "px-4 py-3 {theme::text::SECONDARY}", {format_status(user.enabled)} }
-                                        td { class: "px-4 py-3 text-slate-300", {format_user_environments(user)} }
-                                        td { class: "px-4 py-3 {theme::text::MUTED}", {format_time(user.updated_at)} }
+                                    {
+                                        let user_id = user.id.clone();
+                                        let draft = user_drafts
+                                            .read()
+                                            .get(&user_id)
+                                            .cloned()
+                                            .unwrap_or_else(|| UserEditDraft::from_user(user));
+
+                                        rsx! {
+                                            tr {
+                                                class: "{theme::surface::CARD_BG}",
+                                                td { class: "px-4 py-3 text-white", {user.identifier.clone()} }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    select {
+                                                        class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2 py-1 text-xs text-white",
+                                                        value: "{draft.role}",
+                                                        onchange: {
+                                                            let mut user_drafts = user_drafts.clone();
+                                                            let user_id = user_id.clone();
+                                                            move |evt| {
+                                                                let mut drafts = user_drafts.write();
+                                                                if let Some(entry) = drafts.get_mut(&user_id) {
+                                                                    entry.role = evt.value();
+                                                                }
+                                                            }
+                                                        },
+                                                        option { value: "Admin", "Admin" }
+                                                        option { value: "Operator", "Operator" }
+                                                        option { value: "Viewer", "Viewer" }
+                                                    }
+                                                }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    label { class: "inline-flex items-center gap-2 text-xs {theme::text::SECONDARY}",
+                                                        input {
+                                                            r#type: "checkbox",
+                                                            checked: draft.enabled,
+                                                            onchange: {
+                                                                let mut user_drafts = user_drafts.clone();
+                                                                let user_id = user_id.clone();
+                                                                move |evt| {
+                                                                    let mut drafts = user_drafts.write();
+                                                                    if let Some(entry) = drafts.get_mut(&user_id) {
+                                                                        entry.enabled = evt.checked();
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                        if draft.enabled { "Enabled" } else { "Disabled" }
+                                                    }
+                                                }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    input {
+                                                        class: "w-full rounded-md border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2 py-1 text-xs text-white",
+                                                        r#type: "text",
+                                                        value: "{draft.environments}",
+                                                        oninput: {
+                                                            let mut user_drafts = user_drafts.clone();
+                                                            let user_id = user_id.clone();
+                                                            move |evt| {
+                                                                let mut drafts = user_drafts.write();
+                                                                if let Some(entry) = drafts.get_mut(&user_id) {
+                                                                    entry.environments = evt.value();
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                td { class: "px-4 py-3 {theme::text::MUTED}", {format_time(user.updated_at)} }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    button {
+                                                        class: "rounded-md border {theme::surface::CARD_BORDER} px-2 py-1 text-xs font-medium text-white {theme::interactive::GHOST_BTN}",
+                                                        onclick: {
+                                                            let user_id = user_id.clone();
+                                                            let mut users = users.clone();
+                                                            let mut user_drafts = user_drafts.clone();
+                                                            let mut users_error = users_error.clone();
+                                                            move |_| {
+                                                                let draft = user_drafts
+                                                                    .read()
+                                                                    .get(&user_id)
+                                                                    .cloned();
+                                                                let Some(draft) = draft else {
+                                                                    return;
+                                                                };
+
+                                                                let request = AdminUpdateUserRequest {
+                                                                    role: Some(role_from_string(&draft.role)),
+                                                                    enabled: Some(draft.enabled),
+                                                                    environments: Some(parse_environments(&draft.environments)),
+                                                                };
+
+                                                                let user_id = user_id.clone();
+                                                                let mut users = users.clone();
+                                                                let mut user_drafts = user_drafts.clone();
+                                                                let mut users_error = users_error.clone();
+                                                                spawn(async move {
+                                                                    match update_admin_user(&user_id, &request).await {
+                                                                        Ok(_) => refresh_users(users, user_drafts, users_error).await,
+                                                                        Err(e) => users_error.set(Some(format!("Failed to update user: {e}"))),
+                                                                    }
+                                                                });
+                                                            }
+                                                        },
+                                                        "Save"
+                                                    }
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -285,10 +479,6 @@ fn format_role(role: Option<crate::api::models::Role>) -> &'static str {
     }
 }
 
-fn format_status(enabled: bool) -> &'static str {
-    if enabled { "Enabled" } else { "Disabled" }
-}
-
 fn format_action(event: &AuditEvent) -> &'static str {
     match event.action {
         crate::api::models::AuditAction::UserRoleAssigned => "Role assignment",
@@ -326,5 +516,66 @@ fn optional_value(value: String) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+fn role_from_string(value: &str) -> Role {
+    match value {
+        "Admin" => Role::Admin,
+        "Operator" => Role::Operator,
+        _ => Role::Viewer,
+    }
+}
+
+fn parse_environments(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[derive(Debug, Clone)]
+struct UserEditDraft {
+    role: String,
+    enabled: bool,
+    environments: String,
+}
+
+impl UserEditDraft {
+    fn from_user(user: &AdminUserSummary) -> Self {
+        Self {
+            role: editable_role_label(user.role).to_string(),
+            enabled: user.enabled,
+            environments: user.environments.join(", "),
+        }
+    }
+}
+
+fn editable_role_label(role: Option<Role>) -> &'static str {
+    match role {
+        Some(Role::Admin) => "Admin",
+        Some(Role::Operator) => "Operator",
+        Some(Role::Viewer) | None => "Viewer",
+    }
+}
+
+async fn refresh_users(
+    mut users: Signal<Vec<AdminUserSummary>>,
+    mut user_drafts: Signal<HashMap<String, UserEditDraft>>,
+    mut users_error: Signal<Option<String>>,
+) {
+    match fetch_admin_users().await {
+        Ok(next_users) => {
+            let next_drafts = next_users
+                .iter()
+                .map(|user| (user.id.clone(), UserEditDraft::from_user(user)))
+                .collect::<HashMap<_, _>>();
+            users.set(next_users);
+            user_drafts.set(next_drafts);
+            users_error.set(None);
+        }
+        Err(e) => users_error.set(Some(format!("Failed to load admin users: {e}"))),
     }
 }

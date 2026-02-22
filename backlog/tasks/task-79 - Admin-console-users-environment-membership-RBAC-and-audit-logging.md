@@ -91,8 +91,8 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 ### Navigation + access control
-- [ ] #1 Add an Admin-only navigation entry (e.g., “Admin” / “Server Management”).
-- [ ] #2 Non-admin users cannot access admin routes (safe denial UX).
+- [x] #1 Add an Admin-only navigation entry (e.g., “Admin” / “Server Management”).
+- [x] #2 Non-admin users cannot access admin routes (safe denial UX).
 - [ ] #3 Role changes take effect **on next login** (documented behavior).
 
 ### Environment-scoped visibility and authorization (core security behavior)
@@ -104,7 +104,7 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 - [ ] #9 Backend enforces the above rules (UI behavior must match backend enforcement).
 
 ### Admin UI - Users (local auth mode)
-- [ ] #10 Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
+- [x] #10 Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
 - [ ] #11 Admin can create a local user with email, optional display name, initial role, and initial environment memberships; API returns validation errors for invalid email/duplicate email.
 - [ ] #12 Admin can update a local user role, enabled/disabled status, and environment memberships; role/membership changes are persisted and reflected in subsequent auth context after next login.
 - [ ] #13 Guardrails: cannot disable the last enabled admin, cannot remove the final admin role assignment, and non-admin callers receive `403` for all admin mutation endpoints.
@@ -116,10 +116,10 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 
 ### Audit logging (required)
 - [ ] #17 Backend records audit events for user create/update/disable, role changes, environment membership changes, and OIDC mapping changes, with actor, target, action, timestamp, and request origin metadata.
-- [ ] #18 Admin UI includes an audit log view with timestamp, actor, action, target, and filter controls (actor, action type, date range), plus pagination.
+- [x] #18 Admin UI includes an audit log view with timestamp, actor, action, target, and filter controls (actor, action type, date range), plus pagination.
 
 ### Tests
-- [ ] #19 Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
+- [x] #19 Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
 - [ ] #20 Integration/UI check coverage includes at least: non-admin route denial, admin users list render, role-based mutation denial (viewer/operator), and environment-scoped systems visibility.
 <!-- AC:END -->
 
@@ -127,4 +127,18 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode-gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-79-admin-console-rbac-audit
+
+Progress update:
+- Added admin navigation and route denial UX in web UI (admin-only sidebar entry, guarded admin route rendering).
+- Added admin users list API + UI wiring with role/status/environments/updated columns.
+- Added admin audit log API + UI with actor/action/date filters and pagination.
+- Added backend tests for audit filter/pagination helpers and role precedence.
+- Added web UI auth helper unit tests for admin/operator role gating.
+
+Remaining major scope:
+- User management mutations (create/update/disable) and guardrails.
+- Environment membership persistence/enforcement across systems visibility/actions.
+- OIDC mapping CRUD and IdP-derived/local attribute UX distinctions.
+- Expanded audit event capture for required admin mutation actions.
+- Integration/UI coverage for AC #20 scenarios.
 <!-- SECTION:NOTES:END -->

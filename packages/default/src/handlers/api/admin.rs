@@ -1,12 +1,13 @@
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
@@ -14,7 +15,10 @@ use crate::api::models::{
 };
 use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
 use crate::models::auth_identity::AuthRole;
-use crate::queries::auth_identity::{get_session_by_token_hash, get_user_roles};
+use crate::queries::auth_identity::{
+    assign_role_to_user, get_session_by_token_hash, get_user_roles,
+};
+use crate::queries::users::insert_user;
 
 #[derive(Debug, sqlx::FromRow)]
 struct AdminUserRow {
@@ -39,6 +43,33 @@ struct AuditSessionRow {
     user_email: Option<String>,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct EnvironmentMembershipRow {
+    environment_name: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct EnvironmentLookupRow {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateAdminUserRequest {
+    pub email: String,
+    pub display_name: Option<String>,
+    pub role: Role,
+    #[serde(default)]
+    pub environments: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateAdminUserRequest {
+    pub role: Option<Role>,
+    pub enabled: Option<bool>,
+    pub environments: Option<Vec<String>>,
+}
+
 pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     let Some(_admin_user) = require_admin(&pool, &headers).await else {
         return forbidden();
@@ -61,6 +92,10 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
             Err(_) => None,
         };
 
+        let environments = load_user_environments(&pool, row.id)
+            .await
+            .unwrap_or_default();
+
         result.push(AdminUserSummary {
             id: row.id.to_string(),
             identifier: if row.username.trim().is_empty() {
@@ -70,12 +105,146 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
             },
             role,
             enabled: row.is_active,
-            environments: vec![],
+            environments,
             updated_at: row.updated_at,
         });
     }
 
     (StatusCode::OK, Json(result)).into_response()
+}
+
+pub async fn create_user(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateAdminUserRequest>,
+) -> impl IntoResponse {
+    let Some(admin_user_id) = require_admin(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let email = payload.email.trim().to_ascii_lowercase();
+    if !is_valid_email(&email) {
+        return bad_request("Email must be a valid address");
+    }
+
+    let exists = match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE email = $1")
+        .bind(&email)
+        .fetch_one(&pool)
+        .await
+    {
+        Ok(count) => count > 0,
+        Err(_) => return internal_error("Failed to validate user email"),
+    };
+    if exists {
+        return conflict("Email already exists");
+    }
+
+    let user = match insert_user(&pool, &email, payload.display_name.as_deref()).await {
+        Ok(user) => user,
+        Err(_) => return internal_error("Failed to create user"),
+    };
+
+    if set_user_primary_role(&pool, user.id, payload.role, admin_user_id)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to assign role");
+    }
+
+    if let Err(message) =
+        sync_user_environments(&pool, user.id, admin_user_id, &payload.environments).await
+    {
+        return bad_request(&message);
+    }
+
+    match fetch_admin_user_summary(&pool, user.id).await {
+        Ok(summary) => (StatusCode::CREATED, Json(summary)).into_response(),
+        Err(_) => internal_error("Failed to load created user"),
+    }
+}
+
+pub async fn update_user(
+    State(pool): State<PgPool>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateAdminUserRequest>,
+) -> impl IntoResponse {
+    let Some(admin_user_id) = require_admin(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let target_user_id = match Uuid::parse_str(&user_id) {
+        Ok(value) => value,
+        Err(_) => return bad_request("User id must be a valid UUID"),
+    };
+
+    let current = match sqlx::query_as::<_, AdminUserRow>(
+        "SELECT id, username, email, is_active, updated_at FROM users WHERE id = $1",
+    )
+    .bind(target_user_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found("User not found"),
+        Err(_) => return internal_error("Failed to load user"),
+    };
+
+    let roles = match get_user_roles(&pool, target_user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load user roles"),
+    };
+    let had_admin = roles.iter().any(|role| role.role == AuthRole::Admin);
+
+    if let Some(enabled) = payload.enabled {
+        if !enabled && current.is_active && had_admin {
+            match enabled_admin_count(&pool).await {
+                Ok(1) => return conflict("Cannot disable the last enabled admin"),
+                Ok(_) => {}
+                Err(_) => return internal_error("Failed to validate admin guardrail"),
+            }
+        }
+
+        if sqlx::query("UPDATE users SET is_active = $1 WHERE id = $2")
+            .bind(enabled)
+            .bind(target_user_id)
+            .execute(&pool)
+            .await
+            .is_err()
+        {
+            return internal_error("Failed to update user status");
+        }
+    }
+
+    if let Some(role) = payload.role {
+        if role != Role::Admin && had_admin && current.is_active {
+            match enabled_admin_count(&pool).await {
+                Ok(1) => return conflict("Cannot remove the final admin role assignment"),
+                Ok(_) => {}
+                Err(_) => return internal_error("Failed to validate admin guardrail"),
+            }
+        }
+
+        if set_user_primary_role(&pool, target_user_id, role, admin_user_id)
+            .await
+            .is_err()
+        {
+            return internal_error("Failed to update user role");
+        }
+    }
+
+    if let Some(environments) = payload.environments {
+        if let Err(message) =
+            sync_user_environments(&pool, target_user_id, admin_user_id, &environments).await
+        {
+            return bad_request(&message);
+        }
+    }
+
+    match fetch_admin_user_summary(&pool, target_user_id).await {
+        Ok(summary) => (StatusCode::OK, Json(summary)).into_response(),
+        Err(_) => internal_error("Failed to load updated user"),
+    }
 }
 
 pub async fn list_audit_events(
@@ -317,6 +486,176 @@ fn highest_role(roles: Vec<AuthRole>) -> Option<Role> {
     }
 }
 
+async fn fetch_admin_user_summary(pool: &PgPool, user_id: Uuid) -> Result<AdminUserSummary, ()> {
+    let row = sqlx::query_as::<_, AdminUserRow>(
+        "SELECT id, username, email, is_active, updated_at FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ())?;
+
+    let roles = get_user_roles(pool, user_id).await.map_err(|_| ())?;
+    let role = highest_role(roles.into_iter().map(|r| r.role).collect());
+    let environments = load_user_environments(pool, user_id)
+        .await
+        .map_err(|_| ())?;
+
+    Ok(AdminUserSummary {
+        id: row.id.to_string(),
+        identifier: if row.username.trim().is_empty() {
+            row.email
+        } else {
+            format!("{} ({})", row.username, row.email)
+        },
+        role,
+        enabled: row.is_active,
+        environments,
+        updated_at: row.updated_at,
+    })
+}
+
+async fn load_user_environments(pool: &PgPool, user_id: Uuid) -> Result<Vec<String>, ()> {
+    sqlx::query_as::<_, EnvironmentMembershipRow>(
+        "SELECT e.name AS environment_name
+         FROM user_environment_memberships uem
+         JOIN environments e ON e.id = uem.environment_id
+         WHERE uem.user_id = $1
+         ORDER BY e.name ASC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await
+    .map(|rows| rows.into_iter().map(|row| row.environment_name).collect())
+    .map_err(|_| ())
+}
+
+async fn enabled_admin_count(pool: &PgPool) -> Result<i64, ()> {
+    sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(DISTINCT u.id)
+         FROM users u
+         JOIN user_role_assignments ura ON ura.user_id = u.id
+         WHERE u.is_active = TRUE AND ura.role = 'admin'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| ())
+}
+
+async fn set_user_primary_role(
+    pool: &PgPool,
+    user_id: Uuid,
+    role: Role,
+    granted_by_user_id: Uuid,
+) -> Result<(), ()> {
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await
+        .map_err(|_| ())?;
+
+    assign_role_to_user(
+        pool,
+        user_id,
+        role_to_auth_role(role),
+        Some(granted_by_user_id),
+    )
+    .await
+    .map_err(|_| ())?;
+
+    Ok(())
+}
+
+async fn sync_user_environments(
+    pool: &PgPool,
+    user_id: Uuid,
+    assigned_by_user_id: Uuid,
+    environments: &[String],
+) -> Result<(), String> {
+    let normalized: Vec<String> = environments
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| "Failed to start membership update".to_string())?;
+
+    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Failed to update environment memberships".to_string())?;
+
+    if normalized.is_empty() {
+        tx.commit()
+            .await
+            .map_err(|_| "Failed to commit environment memberships".to_string())?;
+        return Ok(());
+    }
+
+    let resolved = sqlx::query_as::<_, EnvironmentLookupRow>(
+        "SELECT id, name FROM environments WHERE name = ANY($1)",
+    )
+    .bind(&normalized)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| "Failed to validate environments".to_string())?;
+
+    if resolved.len() != normalized.len() {
+        let known = resolved
+            .iter()
+            .map(|row| row.name.clone())
+            .collect::<BTreeSet<_>>();
+        let missing = normalized
+            .iter()
+            .filter(|name| !known.contains((*name).as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        return Err(format!("Unknown environment(s): {}", missing.join(", ")));
+    }
+
+    for env in resolved {
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id)
+             VALUES ($1, $2, $3)",
+        )
+        .bind(user_id)
+        .bind(env.id)
+        .bind(assigned_by_user_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "Failed to insert environment membership".to_string())?;
+    }
+
+    tx.commit()
+        .await
+        .map_err(|_| "Failed to commit environment memberships".to_string())?;
+    Ok(())
+}
+
+fn role_to_auth_role(role: Role) -> AuthRole {
+    match role {
+        Role::Admin => AuthRole::Admin,
+        Role::Operator => AuthRole::Operator,
+        Role::Viewer => AuthRole::Viewer,
+    }
+}
+
+fn is_valid_email(value: &str) -> bool {
+    if value.is_empty() || value.len() > 255 {
+        return false;
+    }
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty() && domain.contains('.')
+}
+
 fn forbidden() -> axum::response::Response {
     (
         StatusCode::FORBIDDEN,
@@ -346,6 +685,30 @@ fn bad_request(message: &str) -> axum::response::Response {
         StatusCode::BAD_REQUEST,
         Json(ApiError {
             error: "validation_error".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn conflict(message: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "conflict".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn not_found(message: &str) -> axum::response::Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiError {
+            error: "not_found".to_string(),
             message: message.to_string(),
             details: None,
         }),
@@ -453,5 +816,13 @@ mod tests {
         let page = paginate_events(events, 2, 2);
         assert_eq!(page.total, 3);
         assert_eq!(page.items.len(), 1);
+    }
+
+    #[test]
+    fn validates_email_format() {
+        assert!(is_valid_email("admin@example.com"));
+        assert!(!is_valid_email(""));
+        assert!(!is_valid_email("missing-at"));
+        assert!(!is_valid_email("missing-domain@"));
     }
 }

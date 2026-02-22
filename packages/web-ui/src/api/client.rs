@@ -129,6 +129,23 @@ pub async fn fetch_admin_audit_events(
     fetch_json(&url).await
 }
 
+/// Create a local user from the admin console.
+pub async fn create_admin_user(
+    request: &AdminCreateUserRequest,
+) -> Result<AdminUserSummary, ApiClientError> {
+    let url = format!("{}/admin/users", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Update a local user from the admin console.
+pub async fn update_admin_user(
+    user_id: &str,
+    request: &AdminUpdateUserRequest,
+) -> Result<AdminUserSummary, ApiClientError> {
+    let url = format!("{}/admin/users/{user_id}", base_url());
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
 /// Send JSON request with CSRF token from cookie.
 async fn send_json_with_csrf<T: serde::de::DeserializeOwned, B: serde::Serialize>(
     method: &str,
