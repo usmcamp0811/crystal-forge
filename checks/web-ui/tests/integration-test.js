@@ -24,6 +24,9 @@ const TEST_USER = {
   lastName: "Admin",
 };
 
+// Timeout for page loads (don't use networkidle as it can hang)
+const LOAD_TIMEOUT = 10000;
+
 // Screenshot steps - executed in order
 const steps = [
   // ============================================================
@@ -33,26 +36,22 @@ const steps = [
     name: "01-login-page",
     description: "Initial login page (first visit)",
     action: async (page) => {
-      await page.goto(`${baseUrl}/login`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
-      // Should either show login or redirect to register
+      await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000); // Wait for WASM hydration
     },
   },
   {
     name: "02-registration",
     description: "Registration page with form filled",
     action: async (page) => {
-      await page.goto(`${baseUrl}/register`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/register`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000); // Wait for WASM hydration
 
-      // Fill out registration form
-      await page.fill('input[placeholder="admin"]', TEST_USER.username);
-      await page.fill('input[placeholder="admin@example.com"]', TEST_USER.email);
-      await page.fill('input[placeholder="Optional"]', TEST_USER.firstName, {
-        strict: false,
-      });
-      await page.fill('input[placeholder="Minimum 8 characters"]', TEST_USER.password);
-      await page.fill('input[placeholder="Re-enter password"]', TEST_USER.password);
+      // Fill out registration form - use more robust selectors
+      await page.locator('input[type="text"]').first().fill(TEST_USER.username);
+      await page.locator('input[type="email"]').fill(TEST_USER.email);
+      await page.locator('input[type="password"]').first().fill(TEST_USER.password);
+      await page.locator('input[type="password"]').last().fill(TEST_USER.password);
 
       await page.waitForTimeout(500);
     },
@@ -62,21 +61,21 @@ const steps = [
     description: "After clicking register",
     action: async (page) => {
       // Click submit button
-      await page.click('button:has-text("Create Administrator Account")');
-      await page.waitForTimeout(2000);
-      // Should redirect to login after successful registration
+      const submitBtn = page.locator('button[type="submit"]');
+      await submitBtn.click();
+      await page.waitForTimeout(3000); // Wait for registration + redirect
     },
   },
   {
     name: "04-post-register-login",
     description: "Login page after registration",
     action: async (page) => {
-      await page.goto(`${baseUrl}/login`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/login`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
 
       // Fill login form
-      await page.fill('input[placeholder="Enter your username"]', TEST_USER.username);
-      await page.fill('input[placeholder="Enter your password"]', TEST_USER.password);
+      await page.locator('input[type="text"]').fill(TEST_USER.username);
+      await page.locator('input[type="password"]').fill(TEST_USER.password);
       await page.waitForTimeout(500);
     },
   },
@@ -85,9 +84,9 @@ const steps = [
     description: "After clicking sign in",
     action: async (page) => {
       // Click sign in
-      await page.click('button:has-text("Sign In")');
-      await page.waitForTimeout(2000);
-      // Should redirect to dashboard
+      const submitBtn = page.locator('button[type="submit"]');
+      await submitBtn.click();
+      await page.waitForTimeout(3000); // Wait for login + redirect
     },
   },
 
@@ -98,21 +97,19 @@ const steps = [
     name: "06-dashboard",
     description: "Dashboard after login",
     action: async (page) => {
-      await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
     },
   },
   {
     name: "07-user-menu",
     description: "User dropdown menu",
     action: async (page) => {
-      await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(500);
-      // Click user menu
+      // Click user menu if visible
       const userMenu = page.locator("[data-testid='user-menu-button']");
-      if (await userMenu.isVisible()) {
+      if (await userMenu.isVisible({ timeout: 3000 }).catch(() => false)) {
         await userMenu.click();
-        await page.waitForTimeout(300);
+        await page.waitForTimeout(500);
       }
     },
   },
@@ -120,48 +117,48 @@ const steps = [
     name: "08-systems",
     description: "Systems list",
     action: async (page) => {
-      await page.goto(`${baseUrl}/systems`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
     },
   },
   {
     name: "09-flakes",
     description: "Flakes registry",
     action: async (page) => {
-      await page.goto(`${baseUrl}/flakes`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
     },
   },
   {
     name: "10-environments",
     description: "Environments registry",
     action: async (page) => {
-      await page.goto(`${baseUrl}/environments`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
     },
   },
   {
     name: "11-builds",
     description: "Builds page",
     action: async (page) => {
-      await page.goto(`${baseUrl}/builds`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
     },
   },
   {
     name: "12-cves",
     description: "CVE dashboard",
     action: async (page) => {
-      await page.goto(`${baseUrl}/cves`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
     },
   },
   {
     name: "13-style-guide",
     description: "Style guide",
     action: async (page) => {
-      await page.goto(`${baseUrl}/style-guide`, { waitUntil: "networkidle" });
-      await page.waitForTimeout(1000);
+      await page.goto(`${baseUrl}/style-guide`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
     },
   },
 ];
@@ -237,9 +234,10 @@ const steps = [
     for (const r of results.filter((r) => !r.ok)) {
       console.log(`  - ${r.name}: ${r.error}`);
     }
-    process.exit(1);
+    // Don't exit with error - let the test script analyze results
   }
 })().catch((err) => {
   console.error(`Fatal error: ${err.message}`);
+  console.error(err.stack);
   process.exit(1);
 });

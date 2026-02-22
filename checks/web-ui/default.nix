@@ -58,7 +58,7 @@ in pkgs.testers.runNixOSTest {
     services.crystal-forge = {
       enable = true;
       local-database = true;
-      log_level = "debug";
+      log_level = "warn"; # Reduce log noise
 
       database = {
         host = "localhost";
@@ -75,6 +75,13 @@ in pkgs.testers.runNixOSTest {
 
       # Disable build/flakes - we just need the server for auth testing
       build.enable = false;
+
+      # Set very long polling intervals to avoid noise during test
+      flakes = {
+        flake_polling_interval = "24h";
+        commit_evaluation_interval = "24h";
+        build_processing_interval = "24h";
+      };
     };
 
     # Set auth mode to local via environment
