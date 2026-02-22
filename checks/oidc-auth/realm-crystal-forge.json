@@ -1,6 +1,7 @@
 {
   "realm": "crystal-forge",
   "enabled": true,
+  "sslRequired": "none",
   "displayName": "Crystal Forge VM Test OIDC",
   "roles": {
     "realm": [

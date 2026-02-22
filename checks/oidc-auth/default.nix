@@ -36,7 +36,7 @@ in
         networking.useDHCP = true;
         networking.firewall.allowedTCPPorts = [KEYCLOAK_PORT];
 
-        # PostgreSQL for Keycloak - use TCP with trust auth
+        # PostgreSQL for Keycloak - use TCP with trust auth (VM test only)
         services.postgresql = {
           enable = true;
           ensureDatabases = ["keycloak"];
@@ -66,15 +66,24 @@ in
             passwordFile = "/etc/keycloak-db-pass";
             useSSL = false;
           };
+
           settings = {
+            # Make issuer stable for both local + cross-VM access.
             hostname = "keycloak";
             hostname-strict = false;
             hostname-strict-https = false;
+
+            health-enabled = true;
+
             http-enabled = true;
             http-host = "0.0.0.0";
             http-port = KEYCLOAK_PORT;
-            proxy-headers = "xforwarded";
+
+            # NOTE: Do NOT set proxy headers in this VM test unless you're actually
+            # running behind a reverse proxy that injects X-Forwarded-* headers.
+            # proxy-headers = "xforwarded";
           };
+
           initialAdminPassword = "admin";
         };
 
@@ -94,27 +103,30 @@ in
             KEYCLOAK_URL="http://localhost:${toString KEYCLOAK_PORT}"
             REALM_FILE="${realmImport}"
 
-            echo "Waiting for Keycloak to be ready..."
-            for i in $(seq 1 60); do
-              if curl -sf "$KEYCLOAK_URL/health/ready" >/dev/null 2>&1; then
-                echo "Keycloak is ready"
+            echo "Waiting for Keycloak to accept admin token requests..."
+            TOKEN=""
+            for i in $(seq 1 120); do
+              token_json=$(curl -fsS -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
+                -H "Content-Type: application/x-www-form-urlencoded" \
+                -d "username=admin" \
+                -d "password=admin" \
+                -d "grant_type=password" \
+                -d "client_id=admin-cli" 2>/dev/null || true)
+
+              TOKEN=$(printf '%s' "$token_json" | jq -r '.access_token // empty')
+              if [ -n "$TOKEN" ]; then
+                echo "Keycloak token endpoint is ready"
                 break
               fi
-              echo "Waiting... ($i/60)"
+
+              echo "Waiting... ($i/120)"
               sleep 2
             done
 
-            # Get admin token
-            echo "Obtaining admin token..."
-            TOKEN=$(curl -sf -X POST "$KEYCLOAK_URL/realms/master/protocol/openid-connect/token" \
-              -H "Content-Type: application/x-www-form-urlencoded" \
-              -d "username=admin" \
-              -d "password=admin" \
-              -d "grant_type=password" \
-              -d "client_id=admin-cli" | jq -r '.access_token')
-
-            if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-              echo "Failed to get admin token"
+            if [ -z "$TOKEN" ]; then
+              echo "Keycloak did not become ready within timeout"
+              echo "--- keycloak.service (last 200 lines) ---"
+              journalctl -u keycloak.service --no-pager -n 200 || true
               exit 1
             fi
 
@@ -181,6 +193,16 @@ in
             port = CF_TEST_SERVER_PORT;
             host = "0.0.0.0";
             auth_mode = "oidc";
+            oidc = {
+              issuerUrl = "http://keycloak:${toString KEYCLOAK_PORT}/realms/${OIDC_REALM}";
+              clientId = OIDC_CLIENT_ID;
+              clientSecret = OIDC_CLIENT_SECRET;
+              redirectUri = "http://server:${toString CF_TEST_SERVER_PORT}/api/auth/oidc/callback";
+
+              # FIX: our realm import maps *realm roles* into a claim.
+              # Don't call it "groups" unless it's actually group membership.
+              rolesClaim = "roles";
+            };
           };
 
           # Disable build-related services
@@ -194,21 +216,8 @@ in
           };
         };
 
-        # Configure OIDC environment for the server
-        # Note: Server starts AFTER test script manually starts it when Keycloak is ready
-        systemd.services.crystal-forge-server = {
-          environment = {
-            AUTH_MODE = "oidc";
-            CRYSTAL_FORGE_OIDC_ISSUER_URL = "http://keycloak:${toString KEYCLOAK_PORT}/realms/${OIDC_REALM}";
-            CRYSTAL_FORGE_OIDC_CLIENT_ID = OIDC_CLIENT_ID;
-            CRYSTAL_FORGE_OIDC_CLIENT_SECRET = OIDC_CLIENT_SECRET;
-            CRYSTAL_FORGE_OIDC_REDIRECT_URI = "http://server:${
-              toString CF_TEST_SERVER_PORT
-            }/api/auth/oidc/callback";
-          };
-          # Don't start automatically - we'll start it after Keycloak is ready
-          wantedBy = lib.mkForce [];
-        };
+        # Start server manually after Keycloak realm import has completed.
+        systemd.services.crystal-forge-server = {wantedBy = lib.mkForce [];};
       };
     };
 
@@ -216,9 +225,8 @@ in
 
     testScript = ''
       import json
-      import urllib.request
-      import urllib.parse
       import time
+      import base64
 
       start_all()
 
@@ -227,52 +235,23 @@ in
       # ==========================================
       print("=== Phase 1: Waiting for services ===")
 
-      # Wait for Keycloak first (it takes a while to start)
       print("Waiting for Keycloak to start...")
       keycloak.wait_for_unit("keycloak.service")
       keycloak.wait_for_open_port(${toString KEYCLOAK_PORT})
 
-      # Wait for realm import to complete - this confirms Keycloak is fully ready
-      # The realm import service waits for Keycloak to be ready before importing
       print("Waiting for realm import (this waits for Keycloak to be fully ready)...")
       keycloak.wait_for_unit("keycloak-realm-import.service", timeout=240)
       print("Realm import complete - Keycloak is ready!")
 
-      # Debug: Check network connectivity between VMs
-      print("Debug: Checking network configuration...")
-      print("Keycloak network:")
-      kc_ip = keycloak.succeed("ip addr show")
-      print(kc_ip)
-      kc_hosts = keycloak.succeed("cat /etc/hosts")
-      print(kc_hosts)
-      print("Server network:")
-      srv_ip = server.succeed("ip addr show")
-      print(srv_ip)
-      srv_hosts = server.succeed("cat /etc/hosts")
-      print(srv_hosts)
-
-      # Test basic connectivity
-      print("Testing ping from server to keycloak (IPv4)...")
-      ping_result = server.execute("ping -c 3 -4 192.168.1.1 2>&1")
-      print(f"Ping IPv4 result (code={ping_result[0]}): {ping_result[1]}")
-
-      # Try resolving keycloak hostname
-      print("Testing hostname resolution...")
+      # Debug: basic cross-VM connectivity / DNS
+      print("Debug: Checking hostname resolution from server -> keycloak...")
       resolve_result = server.execute("getent hosts keycloak 2>&1")
       print(f"getent hosts keycloak (code={resolve_result[0]}): {resolve_result[1]}")
 
-      # Test curl to Keycloak using IPv4 directly
-      print("Testing curl to Keycloak health endpoint (IPv4)...")
-      curl_result = server.execute("curl -v -4 http://192.168.1.1:8080/health/ready 2>&1")
-      print(f"curl result (code={curl_result[0]}): {curl_result[1][:500]}")
-
       # Verify Keycloak OIDC discovery is reachable from server node before starting CF server
-      # Use -4 to force IPv4 since Keycloak binds to 0.0.0.0 (IPv4 only)
       print("Verifying Keycloak OIDC discovery reachable from server node...")
       server.wait_until_succeeds(
-          "curl -sf -4 http://keycloak:${
-        toString KEYCLOAK_PORT
-      }/realms/${OIDC_REALM}/.well-known/openid-configuration",
+          "curl -sf http://keycloak:${toString KEYCLOAK_PORT}/realms/${OIDC_REALM}/.well-known/openid-configuration",
           timeout=60
       )
 
@@ -289,11 +268,8 @@ in
       # ==========================================
       print("=== AC#3: Testing OIDC discovery endpoint ===")
 
-      # Test from keycloak node (localhost)
       discovery_local = keycloak.succeed(
-          "curl -sf http://localhost:${
-        toString KEYCLOAK_PORT
-      }/realms/${OIDC_REALM}/.well-known/openid-configuration"
+          "curl -sf http://localhost:${toString KEYCLOAK_PORT}/realms/${OIDC_REALM}/.well-known/openid-configuration"
       )
       discovery_data = json.loads(discovery_local)
       assert "issuer" in discovery_data, "Discovery response missing 'issuer'"
@@ -302,11 +278,8 @@ in
       assert "userinfo_endpoint" in discovery_data, "Discovery response missing 'userinfo_endpoint'"
       print(f"OIDC Discovery OK: issuer={discovery_data['issuer']}")
 
-      # Test from server node (cross-VM network)
       discovery_remote = server.succeed(
-          "curl -sf http://keycloak:${
-        toString KEYCLOAK_PORT
-      }/realms/${OIDC_REALM}/.well-known/openid-configuration"
+          "curl -sf http://keycloak:${toString KEYCLOAK_PORT}/realms/${OIDC_REALM}/.well-known/openid-configuration"
       )
       discovery_remote_data = json.loads(discovery_remote)
       assert discovery_remote_data["issuer"] == discovery_data["issuer"], "Issuer mismatch between local and remote"
@@ -317,12 +290,8 @@ in
       # ==========================================
       print("=== AC#4: Testing OIDC token exchange ===")
 
-      # Use Resource Owner Password Credentials grant to get tokens
-      # This simulates what the server does when validating tokens
       token_cmd = (
-          'curl -sf -X POST "http://localhost:${
-        toString KEYCLOAK_PORT
-      }/realms/${OIDC_REALM}/protocol/openid-connect/token" '
+          'curl -sf -X POST "http://localhost:${toString KEYCLOAK_PORT}/realms/${OIDC_REALM}/protocol/openid-connect/token" '
           '-H "Content-Type: application/x-www-form-urlencoded" '
           '-d "grant_type=password" '
           '-d "client_id=${OIDC_CLIENT_ID}" '
@@ -340,12 +309,8 @@ in
       print("OIDC token exchange successful")
 
       access_token = token_data["access_token"]
-      id_token = token_data["id_token"]
 
-      # Verify token at userinfo endpoint
-      userinfo_cmd = f'curl -sf "http://localhost:${
-        toString KEYCLOAK_PORT
-      }/realms/${OIDC_REALM}/protocol/openid-connect/userinfo" -H "Authorization: Bearer {access_token}"'
+      userinfo_cmd = f'curl -sf "http://localhost:${toString KEYCLOAK_PORT}/realms/${OIDC_REALM}/protocol/openid-connect/userinfo" -H "Authorization: Bearer {access_token}"'
       userinfo_response = keycloak.succeed(userinfo_cmd)
       userinfo_data = json.loads(userinfo_response)
 
@@ -354,19 +319,14 @@ in
       assert userinfo_data["email"] == "admin@crystal-forge.local", f"Unexpected email: {userinfo_data['email']}"
       print(f"Userinfo verified: sub={userinfo_data['sub']}, email={userinfo_data['email']}")
 
-      # Check groups/roles claim (if present in access token)
-      # JWT payload is base64url encoded in the middle section
-      import base64
-
       def decode_jwt_payload(token):
-          parts = token.split('.')
+          parts = token.split(".")
           if len(parts) != 3:
               return {}
           payload_b64 = parts[1]
-          # Add padding if needed
-          padding = 4 - len(payload_b64) % 4
+          padding = 4 - (len(payload_b64) % 4)
           if padding != 4:
-              payload_b64 += '=' * padding
+              payload_b64 += "=" * padding
           try:
               payload_json = base64.urlsafe_b64decode(payload_b64)
               return json.loads(payload_json)
@@ -377,14 +337,13 @@ in
       access_claims = decode_jwt_payload(access_token)
       print(f"Access token claims: {json.dumps(access_claims, indent=2)}")
 
-      # Verify groups claim is present (configured in realm mapper)
-      if "groups" in access_claims:
-          print(f"Groups claim present: {access_claims['groups']}")
-          assert "admin" in access_claims["groups"], "Admin role not in groups claim"
+      # FIX: We expect realm roles mapped into claim "roles" (not "groups").
+      if "roles" in access_claims:
+          print(f"Roles claim present: {access_claims['roles']}")
+          assert "admin" in access_claims["roles"], "Admin role not in roles claim"
       else:
-          print("Warning: 'groups' claim not found in access token (may be in realm_access)")
+          print("Warning: 'roles' claim not found in access token (may be in realm_access.roles)")
 
-      # Check realm_access.roles as alternative location
       if "realm_access" in access_claims and "roles" in access_claims["realm_access"]:
           roles = access_claims["realm_access"]["roles"]
           print(f"Realm roles: {roles}")
@@ -395,52 +354,37 @@ in
       # ==========================================
       print("=== AC#5: Testing server auth integration ===")
 
-      # Verify Crystal Forge server is responding
       server_status = server.succeed(
           "curl -sf http://localhost:${toString CF_TEST_SERVER_PORT}/status"
       )
       print(f"Server status: {server_status}")
 
-      # Check auth setup status endpoint
       setup_status = server.succeed(
-          "curl -sf http://localhost:${
-        toString CF_TEST_SERVER_PORT
-      }/api/auth/setup-status"
+          "curl -sf http://localhost:${toString CF_TEST_SERVER_PORT}/api/auth/setup-status"
       )
       setup_data = json.loads(setup_status)
       print(f"Setup status: {setup_data}")
 
-      # Verify whoami returns OIDC mode
       whoami_response = server.succeed(
-          "curl -sf http://localhost:${
-        toString CF_TEST_SERVER_PORT
-      }/api/auth/whoami"
+          "curl -sf http://localhost:${toString CF_TEST_SERVER_PORT}/api/auth/whoami"
       )
       whoami_data = json.loads(whoami_response)
       assert whoami_data.get("auth_mode") == "oidc", f"Expected auth_mode=oidc, got {whoami_data.get('auth_mode')}"
       assert whoami_data.get("is_authenticated") == False, "Should not be authenticated without session"
       print("Server correctly reports OIDC auth mode")
 
-      # Test that OIDC login endpoint exists and redirects
-      # (We can't fully test the redirect flow without a browser, but we can verify the endpoint exists)
       login_check = server.execute(
-          "curl -s -o /dev/null -w '%{http_code}' http://localhost:${
-        toString CF_TEST_SERVER_PORT
-      }/api/auth/oidc/login"
+          "curl -s -o /dev/null -w '%{http_code}' http://localhost:${toString CF_TEST_SERVER_PORT}/api/auth/oidc/login"
       )
       http_code = login_check[1].strip()
-      # Should redirect (302/303) to Keycloak
       assert http_code in ["302", "303", "307"], f"OIDC login should redirect, got HTTP {http_code}"
       print(f"OIDC login endpoint returns redirect (HTTP {http_code})")
 
-      # Verify the redirect location points to Keycloak
       login_headers = server.succeed(
-          "curl -s -i http://localhost:${
-        toString CF_TEST_SERVER_PORT
-      }/api/auth/oidc/login | head -20"
+          "curl -s -i http://localhost:${toString CF_TEST_SERVER_PORT}/api/auth/oidc/login | head -20"
       )
       assert "keycloak" in login_headers.lower() or "realms/${OIDC_REALM}" in login_headers, \
-          f"OIDC login redirect should point to Keycloak"
+          "OIDC login redirect should point to Keycloak"
       print("OIDC login correctly redirects to Keycloak")
 
       # ==========================================
@@ -448,21 +392,18 @@ in
       # ==========================================
       print("=== Verifying database schema for sessions ===")
 
-      # Check that user_sessions table exists (for OIDC session storage)
       session_table_check = server.succeed(
           "sudo -u postgres psql -d crystal_forge -c \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'user_sessions');\""
       )
       assert "t" in session_table_check, "user_sessions table should exist"
       print("user_sessions table exists")
 
-      # Check users table exists
       users_table_check = server.succeed(
           "sudo -u postgres psql -d crystal_forge -c \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'users');\""
       )
       assert "t" in users_table_check, "users table should exist"
       print("users table exists")
 
-      # Check external_identities table exists (for OIDC identity binding)
       identities_table_check = server.succeed(
           "sudo -u postgres psql -d crystal_forge -c \"SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'external_identities');\""
       )
