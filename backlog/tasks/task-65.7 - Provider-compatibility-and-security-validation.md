@@ -1,8 +1,11 @@
 ---
 id: TASK-65.7
 title: Provider compatibility and security validation
-status: Backlog
-assignee: ["Claude Opus 4.5"]
+status: To Do
+assignee:
+  - Claude Opus 4.5
+created_date: ''
+updated_date: '2026-02-22 02:08'
 labels:
   - security
   - oidc
@@ -16,6 +19,7 @@ dependencies:
   - TASK-65.5
   - TASK-65.6
 priority: medium
+ordinal: 2000
 ---
 
 ## Description
