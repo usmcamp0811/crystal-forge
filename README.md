@@ -12,7 +12,7 @@
 
 Crystal Forge now includes a **full-featured web-based dashboard** built with Dioxus, replacing the Grafana dependency for core operational features:
 
-![Dashboard](./docs/dashboard.png)
+![Dashboard](./docs/screenshots/06-dashboard.png)
 
 ### Web UI Views
 
@@ -51,8 +51,7 @@ services.crystal-forge.server.auth_mode = "local";
 services.crystal-forge.server.auth_mode = "local";  # Use local, not dev!
 ```
 
-![Login with OIDC](./docs/screenshots/05-login-submit.png)
-![User Menu](./docs/screenshots/07-user-menu.png)
+![Login with OIDC](./docs/screenshots/04-post-register-login.png)
 
 ### Role-Based Access Control
 
