@@ -7,3 +7,4 @@ pub mod auth_status;
 pub mod auth_whoami;
 pub mod dashboard;
 pub mod flakes;
+pub mod rbac;

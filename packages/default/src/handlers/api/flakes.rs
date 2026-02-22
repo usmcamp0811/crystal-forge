@@ -7,12 +7,9 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use sqlx::PgPool;
 use tracing::error;
-use uuid::Uuid;
 
 use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem};
-use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
-use crate::models::auth_identity::AuthRole;
-use crate::queries::auth_identity::{get_session_by_token_hash, get_user_roles};
+use crate::handlers::api::rbac::require_operator_or_admin;
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, get_flake_by_name, insert_flake,
     list_flake_registry,
@@ -182,30 +179,6 @@ pub async fn delete_flake(
     }
 }
 
-async fn require_operator_or_admin(pool: &PgPool, headers: &HeaderMap) -> Option<Uuid> {
-    let token = extract_cookie(headers, SESSION_COOKIE_NAME)?;
-    let token_hash = hash_token(&token);
-    let session = get_session_by_token_hash(pool, &token_hash).await.ok()??;
-
-    if session.is_expired() || session.is_invalidated() {
-        return None;
-    }
-
-    let roles = get_user_roles(pool, session.user_id).await.ok()?;
-    let has_operator_or_admin = has_operator_or_admin_role(
-        &roles
-            .into_iter()
-            .map(|assignment| assignment.role)
-            .collect::<Vec<_>>(),
-    );
-
-    if has_operator_or_admin {
-        Some(session.user_id)
-    } else {
-        None
-    }
-}
-
 fn forbidden() -> axum::response::Response {
     (
         StatusCode::FORBIDDEN,
@@ -216,12 +189,6 @@ fn forbidden() -> axum::response::Response {
         }),
     )
         .into_response()
-}
-
-fn has_operator_or_admin_role(roles: &[AuthRole]) -> bool {
-    roles
-        .iter()
-        .any(|role| matches!(role, AuthRole::Admin | AuthRole::Operator))
 }
 
 fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
@@ -255,6 +222,7 @@ mod tests {
     use super::*;
     use axum::extract::State;
     use axum::response::IntoResponse;
+    use crate::models::auth_identity::AuthRole;
     use sqlx::postgres::PgPoolOptions;
 
     #[test]
@@ -298,13 +266,17 @@ mod tests {
 
     #[test]
     fn require_operator_or_admin_checks_role_membership() {
-        assert!(has_operator_or_admin_role(&[AuthRole::Operator]));
-        assert!(has_operator_or_admin_role(&[AuthRole::Admin]));
-        assert!(has_operator_or_admin_role(&[
+        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
+            AuthRole::Operator,
+        ]));
+        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[AuthRole::Admin]));
+        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
             AuthRole::Viewer,
             AuthRole::Operator,
         ]));
-        assert!(!has_operator_or_admin_role(&[AuthRole::Viewer]));
+        assert!(!crate::handlers::api::rbac::has_operator_or_admin_role(&[
+            AuthRole::Viewer,
+        ]));
     }
 
     #[tokio::test]

@@ -14,11 +14,9 @@ use crate::api::models::{
     AdminUserSummary, ApiError, AuditAction, AuditEvent, IdentitySource, OidcGroupMapping,
     PaginatedResponse, Role,
 };
-use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
+use crate::handlers::api::rbac::require_admin as require_admin_user;
 use crate::models::auth_identity::AuthRole;
-use crate::queries::auth_identity::{
-    assign_role_to_user, get_session_by_token_hash, get_user_roles,
-};
+use crate::queries::auth_identity::{assign_role_to_user, get_user_roles};
 use crate::queries::users::insert_user;
 
 #[derive(Debug, sqlx::FromRow)]
@@ -99,7 +97,7 @@ pub struct UpsertOidcMappingRequest {
 }
 
 pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
-    let Some(_admin_user) = require_admin(&pool, &headers).await else {
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -157,7 +155,7 @@ pub async fn list_oidc_mappings(
     State(pool): State<PgPool>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(_admin_user) = require_admin(&pool, &headers).await else {
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -182,7 +180,7 @@ pub async fn upsert_oidc_mapping(
     headers: HeaderMap,
     Json(payload): Json<UpsertOidcMappingRequest>,
 ) -> impl IntoResponse {
-    let Some(admin_user_id) = require_admin(&pool, &headers).await else {
+    let Some(admin_user_id) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -241,7 +239,7 @@ pub async fn delete_oidc_mapping(
     Path(mapping_id): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(admin_user_id) = require_admin(&pool, &headers).await else {
+    let Some(admin_user_id) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -289,7 +287,7 @@ pub async fn create_user(
     headers: HeaderMap,
     Json(payload): Json<CreateAdminUserRequest>,
 ) -> impl IntoResponse {
-    let Some(admin_user_id) = require_admin(&pool, &headers).await else {
+    let Some(admin_user_id) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
     let request_origin = extract_request_origin(&headers);
@@ -384,7 +382,7 @@ pub async fn update_user(
     headers: HeaderMap,
     Json(payload): Json<UpdateAdminUserRequest>,
 ) -> impl IntoResponse {
-    let Some(admin_user_id) = require_admin(&pool, &headers).await else {
+    let Some(admin_user_id) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
     let request_origin = extract_request_origin(&headers);
@@ -549,7 +547,7 @@ pub async fn list_audit_events(
     Query(params): Query<AuditEventsQuery>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let Some(_admin_user) = require_admin(&pool, &headers).await else {
+    let Some(_admin_user) = require_admin_user(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -794,28 +792,6 @@ fn paginate_events(
         page,
         per_page,
     }
-}
-
-async fn require_admin(pool: &PgPool, headers: &HeaderMap) -> Option<Uuid> {
-    let token = extract_cookie(headers, SESSION_COOKIE_NAME)?;
-    let token_hash = hash_token(&token);
-    let session = get_session_by_token_hash(pool, &token_hash).await.ok()??;
-
-    if session.is_expired() || session.is_invalidated() {
-        return None;
-    }
-
-    let roles = get_user_roles(pool, session.user_id).await.ok()?;
-    let is_admin = has_admin_role(&roles.into_iter().map(|assignment| assignment.role).collect::<Vec<_>>());
-    if is_admin {
-        Some(session.user_id)
-    } else {
-        None
-    }
-}
-
-fn has_admin_role(roles: &[AuthRole]) -> bool {
-    roles.contains(&AuthRole::Admin)
 }
 
 fn highest_role(roles: Vec<AuthRole>) -> Option<Role> {
@@ -1278,10 +1254,13 @@ mod tests {
 
     #[test]
     fn has_admin_role_only_accepts_admin_role() {
-        assert!(has_admin_role(&[AuthRole::Admin]));
-        assert!(!has_admin_role(&[AuthRole::Operator]));
-        assert!(!has_admin_role(&[AuthRole::Viewer]));
-        assert!(!has_admin_role(&[AuthRole::Viewer, AuthRole::Operator]));
+        assert!(crate::handlers::api::rbac::has_admin_role(&[AuthRole::Admin]));
+        assert!(!crate::handlers::api::rbac::has_admin_role(&[AuthRole::Operator]));
+        assert!(!crate::handlers::api::rbac::has_admin_role(&[AuthRole::Viewer]));
+        assert!(!crate::handlers::api::rbac::has_admin_role(&[
+            AuthRole::Viewer,
+            AuthRole::Operator,
+        ]));
     }
 
     fn event(timestamp: DateTime<Utc>, actor: Option<&str>, action: AuditAction) -> AuditEvent {

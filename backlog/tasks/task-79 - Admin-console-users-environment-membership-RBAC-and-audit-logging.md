@@ -163,4 +163,5 @@ Latest progress:
 - Added environment-scope access helper coverage for role-aware membership checks.
 - Added web UI auth capability helpers/tests for mutate-systems vs manage-environments role gating.
 - Enforced operator-or-admin authorization on flake mutation APIs (create/delete) with explicit forbidden-path tests.
+- Added shared backend API RBAC guard module and wired admin/flake handlers to common session-role checks.
 <!-- SECTION:NOTES:END -->
