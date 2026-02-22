@@ -1,7 +1,7 @@
 ---
 id: TASK-79
 title: 'Admin console - users, environment membership, RBAC, and audit logging'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-22 02:34'
 updated_date: '2026-02-22 04:54'
@@ -169,4 +169,5 @@ Latest progress:
 - Added systems endpoint tests for authenticated-role requirements and filter helper behavior.
 - Added backend sync/rollback system mutation endpoints with operator-or-admin checks and environment-scope enforcement.
 - Updated system detail UI to call sync/rollback APIs and disable mutation actions for viewer-role users.
+- MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->
