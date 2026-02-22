@@ -27,6 +27,24 @@ impl From<AuthRole> for Role {
     }
 }
 
+impl Role {
+    pub fn can_view_systems(self) -> bool {
+        true
+    }
+
+    pub fn can_mutate_systems(self) -> bool {
+        matches!(self, Role::Admin | Role::Operator)
+    }
+
+    pub fn can_manage_environments(self) -> bool {
+        matches!(self, Role::Admin)
+    }
+
+    pub fn can_manage_admin_console(self) -> bool {
+        matches!(self, Role::Admin)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Role, *};
@@ -36,5 +54,23 @@ mod tests {
         assert_eq!(AuthRole::from(Role::Admin), AuthRole::Admin);
         assert_eq!(AuthRole::from(Role::Operator), AuthRole::Operator);
         assert_eq!(AuthRole::from(Role::Viewer), AuthRole::Viewer);
+    }
+
+    #[test]
+    fn role_policy_matrix_matches_rbac_expectations() {
+        assert!(Role::Viewer.can_view_systems());
+        assert!(!Role::Viewer.can_mutate_systems());
+        assert!(!Role::Viewer.can_manage_environments());
+        assert!(!Role::Viewer.can_manage_admin_console());
+
+        assert!(Role::Operator.can_view_systems());
+        assert!(Role::Operator.can_mutate_systems());
+        assert!(!Role::Operator.can_manage_environments());
+        assert!(!Role::Operator.can_manage_admin_console());
+
+        assert!(Role::Admin.can_view_systems());
+        assert!(Role::Admin.can_mutate_systems());
+        assert!(Role::Admin.can_manage_environments());
+        assert!(Role::Admin.can_manage_admin_console());
     }
 }

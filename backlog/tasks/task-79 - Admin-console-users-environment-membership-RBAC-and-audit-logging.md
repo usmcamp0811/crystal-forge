@@ -159,4 +159,5 @@ Latest progress:
 - Added systems-list environment filter tests for case-insensitive membership visibility behavior.
 - Added admin users render-state helper coverage for loading/error/table view transitions.
 - Completed AC #20 minimum coverage set across AppShell/admin/systems/admin-guard test paths.
+- Added shared role-capability policy helpers with unit coverage for viewer/operator/admin permission matrix.
 <!-- SECTION:NOTES:END -->
