@@ -120,7 +120,7 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 
 ### Tests
 - [x] #19 Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
-- [ ] #20 Integration/UI check coverage includes at least: non-admin route denial, admin users list render, role-based mutation denial (viewer/operator), and environment-scoped systems visibility.
+- [x] #20 Integration/UI check coverage includes at least: non-admin route denial, admin users list render, role-based mutation denial (viewer/operator), and environment-scoped systems visibility.
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -158,4 +158,5 @@ Latest progress:
 - Added admin view helper tests covering user-row draft shaping and environment display defaults.
 - Added systems-list environment filter tests for case-insensitive membership visibility behavior.
 - Added admin users render-state helper coverage for loading/error/table view transitions.
+- Completed AC #20 minimum coverage set across AppShell/admin/systems/admin-guard test paths.
 <!-- SECTION:NOTES:END -->
