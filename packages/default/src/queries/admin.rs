@@ -267,7 +267,7 @@ pub async fn disable_user_with_admin_guard(
     let mut tx = pool.begin().await?;
 
     let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
-        "SELECT DISTINCT u.id
+        "SELECT u.id
          FROM users u
          JOIN user_role_assignments ura ON ura.user_id = u.id
          WHERE u.is_active = TRUE AND ura.role = 'admin'
@@ -301,7 +301,7 @@ pub async fn replace_user_primary_role_with_admin_guard(
 
     if enforce_last_admin_guard {
         let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
-            "SELECT DISTINCT u.id
+            "SELECT u.id
              FROM users u
              JOIN user_role_assignments ura ON ura.user_id = u.id
              WHERE u.is_active = TRUE AND ura.role = 'admin'
@@ -342,7 +342,7 @@ pub async fn delete_user_with_admin_guard(
     let mut tx = pool.begin().await?;
 
     let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
-        "SELECT DISTINCT u.id
+        "SELECT u.id
          FROM users u
          JOIN user_role_assignments ura ON ura.user_id = u.id
          WHERE u.is_active = TRUE AND ura.role = 'admin'
