@@ -15,12 +15,12 @@ use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
+use crate::api::client::{request_system_rollback, request_system_sync};
 use crate::api::models::{
     BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
     PipelineStage, SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo,
     SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
 };
-use crate::api::client::{request_system_rollback, request_system_sync};
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
 use crate::components::layout::Card;
@@ -30,8 +30,8 @@ use crate::components::system::{
     AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
     SecurityCard, StatusBadge, SystemInfoCard, environment_style,
 };
-use crate::theme;
 use crate::state::{app_state::AppState, auth};
+use crate::theme;
 use crate::views::systems_mock::mock_system_detail_by_id;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
@@ -161,83 +161,57 @@ pub fn SystemDetailView(id: String) -> Element {
             "data-testid": "system-detail",
 
             // Back link
-            div {
-                Link {
-                    to: crate::routes::Route::SystemsView {},
-                    class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
-                    svg {
-                        class: "w-4 h-4",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
-                    }
-                    "Back to Systems"
+            Link {
+                to: crate::routes::Route::SystemsView {},
+                class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
+                svg {
+                    class: "w-4 h-4",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
                 }
+                "Back to Systems"
             }
 
             // Page header
             header {
-                class: "flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between",
-
-                // Left side: hostname, env, status, last seen
+                class: "flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between",
                 div {
-                    class: "space-y-2",
-                    div {
-                        class: "flex items-center gap-3",
-                        div {
-                            class: "flex flex-col",
-                            h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
-                            span {
-                                class: "text-xs {theme::text::MUTED}",
-                                "{system.id}"
-                            }
-                        }
-                        span {
-                            class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
-                            "{environment}"
-                        }
+                    class: "flex items-center gap-3 flex-wrap",
+                    h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
+                    span {
+                        class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
+                        "{environment}"
                     }
-
-                    // Status row
-                    div {
-                        class: "flex flex-wrap items-center gap-3",
-                        StatusBadge {
-                            label: system.health_status.label(),
-                            color_class: system.health_status.color_class(),
-                            bg_class: system.health_status.bg_class()
-                        }
-                        StatusBadge {
-                            label: system.deployment_status.label(),
-                            color_class: system.deployment_status.color_class(),
-                            bg_class: system.deployment_status.bg_class()
-                        }
-
-                        // Last seen
-                        span {
-                            class: "text-sm {theme::text::MUTED}",
-                            "Last seen: {last_seen_text}"
-                        }
-
-                        // Current commit hash
-                        if let Some(ref store_path) = system.current_store_path {
-                            {
-                                // Extract hash from store path
-                                let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
-                                rsx! {
-                                    if !hash.is_empty() {
-                                        span {
-                                            class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
-                                            "{hash}"
-                                        }
+                    StatusBadge {
+                        label: system.health_status.label(),
+                        color_class: system.health_status.color_class(),
+                        bg_class: system.health_status.bg_class()
+                    }
+                    StatusBadge {
+                        label: system.deployment_status.label(),
+                        color_class: system.deployment_status.color_class(),
+                        bg_class: system.deployment_status.bg_class()
+                    }
+                    span {
+                        class: "text-sm {theme::text::MUTED}",
+                        "Last seen: {last_seen_text}"
+                    }
+                    if let Some(ref store_path) = system.current_store_path {
+                        {
+                            let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
+                            rsx! {
+                                if !hash.is_empty() {
+                                    span {
+                                        class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
+                                        "{hash}"
                                     }
                                 }
                             }
                         }
                     }
                 }
-
-                // Right side: Sync Now button
                 div {
                     class: "flex items-center gap-2",
                     button {
@@ -246,7 +220,6 @@ pub fn SystemDetailView(id: String) -> Element {
                         onclick: move |_| show_sync_dialog.set(true),
 
                         if *sync_in_progress.read() {
-                            // Spinner
                             svg {
                                 class: "w-4 h-4 animate-spin",
                                 fill: "none",
@@ -291,14 +264,14 @@ pub fn SystemDetailView(id: String) -> Element {
             div {
                 class: "border-b {theme::surface::CARD_BORDER}",
                 nav {
-                    class: "flex gap-1",
+                    class: "flex gap-1 -mb-px",
                     for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-medium text-white border-b-2 border-blue-500 -mb-px"
+                                "px-4 py-2 text-sm font-medium text-white border-b-2 border-blue-500"
                             } else {
-                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white transition-colors"
+                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white transition-colors border-b-2 border-transparent"
                             };
                             rsx! {
                                 button {
@@ -306,8 +279,6 @@ pub fn SystemDetailView(id: String) -> Element {
                                     class: "{tab_class}",
                                     onclick: move |_| active_tab.set(tab),
                                     "{tab.label()}"
-
-                                    // Badge for CVE count
                                     if tab == Tab::Cves && system.cve_counts.total() > 0 {
                                         span {
                                             class: "ml-2 px-1.5 py-0.5 text-xs rounded-full bg-red-500/20 text-red-400",

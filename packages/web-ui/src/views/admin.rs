@@ -877,9 +877,7 @@ fn confirm_user_delete(identifier: &str) -> bool {
     web_sys::window()
         .and_then(|window| {
             window
-                .confirm_with_message(&format!(
-                    "Delete user {identifier}? This cannot be undone."
-                ))
+                .confirm_with_message(&format!("Delete user {identifier}? This cannot be undone."))
                 .ok()
         })
         .unwrap_or(false)
@@ -945,8 +943,7 @@ fn validate_and_parse_environments(value: &str) -> Result<Vec<String>, String> {
     for entry in &parsed {
         if entry.contains('*') {
             return Err(
-                "Wildcard patterns are not supported yet; use exact environment names."
-                    .to_string(),
+                "Wildcard patterns are not supported yet; use exact environment names.".to_string(),
             );
         }
 
@@ -1074,8 +1071,8 @@ mod tests {
 
     #[test]
     fn validate_and_parse_environments_accepts_expected_tokens() {
-        let values = validate_and_parse_environments("prod-west, staging_1, qa.env")
-            .expect("valid names");
+        let values =
+            validate_and_parse_environments("prod-west, staging_1, qa.env").expect("valid names");
         assert_eq!(
             values,
             vec![

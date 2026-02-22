@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 use crate::api::models::{
     CveSummary, DeploymentStatus, FlakeSummary, HealthStatus, PipelineStage, SystemSummary,
@@ -14,10 +14,10 @@ use crate::api::models::{
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
-use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
+use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog,
+    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, generate_key_pair,
 };
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
@@ -207,8 +207,7 @@ pub fn SystemsListView() -> Element {
 
             // Filters Bar
             div {
-                class: "relative z-[2000] grid grid-cols-1 lg:grid-cols-4 gap-4",
-                style: "position: sticky; top: 0;",
+                class: "grid grid-cols-1 lg:grid-cols-4 gap-4",
                 input {
                     class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                     r#type: "search",
@@ -244,17 +243,9 @@ pub fn SystemsListView() -> Element {
                     class: "grid grid-cols-1 xl:grid-cols-2 gap-6",
                     "data-testid": "systems-cards",
                     for system in filtered_systems.clone() {
-                        div {
-                            class: "space-y-2",
-                            SystemCard { system: system.clone() }
-                            div {
-                                class: "px-1 flex justify-end",
-                                button {
-                                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                    onclick: move |_| remove_system_by_id(systems, pending_remove, system.id),
-                                    "Remove"
-                                }
-                            }
+                        SystemCard {
+                            system: system.clone(),
+                            on_remove: move |_| remove_system_by_id(systems, pending_remove, system.id),
                         }
                     }
                 }
