@@ -162,4 +162,5 @@ Latest progress:
 - Added shared role-capability policy helpers with unit coverage for viewer/operator/admin permission matrix.
 - Added environment-scope access helper coverage for role-aware membership checks.
 - Added web UI auth capability helpers/tests for mutate-systems vs manage-environments role gating.
+- Enforced operator-or-admin authorization on flake mutation APIs (create/delete) with explicit forbidden-path tests.
 <!-- SECTION:NOTES:END -->

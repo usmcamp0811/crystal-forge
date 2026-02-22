@@ -2,12 +2,17 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use sqlx::PgPool;
 use tracing::error;
+use uuid::Uuid;
 
 use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem};
+use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
+use crate::models::auth_identity::AuthRole;
+use crate::queries::auth_identity::{get_session_by_token_hash, get_user_roles};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, get_flake_by_name, insert_flake,
     list_flake_registry,
@@ -33,8 +38,13 @@ pub async fn list_flakes(State(pool): State<PgPool>) -> impl IntoResponse {
 
 pub async fn create_flake(
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Json(payload): Json<CreateFlakeRequest>,
 ) -> impl IntoResponse {
+    if require_operator_or_admin(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
     if let Err(message) = validate_create_payload(&payload) {
         return (
             StatusCode::BAD_REQUEST,
@@ -110,8 +120,13 @@ pub async fn create_flake(
 
 pub async fn delete_flake(
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {
+    if require_operator_or_admin(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
     match count_systems_for_flake(&pool, flake_id).await {
         Ok(system_count) if system_count > 0 => {
             return (
@@ -167,6 +182,48 @@ pub async fn delete_flake(
     }
 }
 
+async fn require_operator_or_admin(pool: &PgPool, headers: &HeaderMap) -> Option<Uuid> {
+    let token = extract_cookie(headers, SESSION_COOKIE_NAME)?;
+    let token_hash = hash_token(&token);
+    let session = get_session_by_token_hash(pool, &token_hash).await.ok()??;
+
+    if session.is_expired() || session.is_invalidated() {
+        return None;
+    }
+
+    let roles = get_user_roles(pool, session.user_id).await.ok()?;
+    let has_operator_or_admin = has_operator_or_admin_role(
+        &roles
+            .into_iter()
+            .map(|assignment| assignment.role)
+            .collect::<Vec<_>>(),
+    );
+
+    if has_operator_or_admin {
+        Some(session.user_id)
+    } else {
+        None
+    }
+}
+
+fn forbidden() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Admin or operator privileges are required".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn has_operator_or_admin_role(roles: &[AuthRole]) -> bool {
+    roles
+        .iter()
+        .any(|role| matches!(role, AuthRole::Admin | AuthRole::Operator))
+}
+
 fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
     let name = payload.name.trim();
     let repo_url = payload.repo_url.trim();
@@ -196,6 +253,9 @@ fn looks_like_repo_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn create_payload_requires_name() {
@@ -234,5 +294,48 @@ mod tests {
             repo_url: "git@github.com:org/repo.git".to_string(),
         };
         assert!(validate_create_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn require_operator_or_admin_checks_role_membership() {
+        assert!(has_operator_or_admin_role(&[AuthRole::Operator]));
+        assert!(has_operator_or_admin_role(&[AuthRole::Admin]));
+        assert!(has_operator_or_admin_role(&[
+            AuthRole::Viewer,
+            AuthRole::Operator,
+        ]));
+        assert!(!has_operator_or_admin_role(&[AuthRole::Viewer]));
+    }
+
+    #[tokio::test]
+    async fn create_flake_requires_operator_or_admin_session() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = create_flake(
+            State(pool),
+            HeaderMap::new(),
+            Json(CreateFlakeRequest {
+                name: "prod-core".to_string(),
+                repo_url: "https://github.com/org/repo".to_string(),
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_flake_requires_operator_or_admin_session() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = delete_flake(State(pool), HeaderMap::new(), Path(1_i32))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
