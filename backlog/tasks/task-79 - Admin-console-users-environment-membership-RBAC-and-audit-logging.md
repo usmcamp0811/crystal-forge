@@ -157,4 +157,5 @@ Latest progress:
 - Added admin-role predicate unit coverage that explicitly denies operator/viewer-only role sets.
 - Added admin view helper tests covering user-row draft shaping and environment display defaults.
 - Added systems-list environment filter tests for case-insensitive membership visibility behavior.
+- Added admin users render-state helper coverage for loading/error/table view transitions.
 <!-- SECTION:NOTES:END -->

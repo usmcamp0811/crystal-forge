@@ -222,12 +222,16 @@ pub fn AdminView() -> Element {
                     }
                 }
 
-                if *users_loading.read() {
+                if users_render_state(*users_loading.read(), users_error.read().as_deref())
+                    == UsersRenderState::Loading
+                {
                     div { class: "text-sm {theme::text::SECONDARY}", "Loading users..." }
-                } else if let Some(message) = users_error.read().clone() {
+                } else if users_render_state(*users_loading.read(), users_error.read().as_deref())
+                    == UsersRenderState::Error
+                {
                     div {
                         class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
-                        "{message}"
+                        "{users_error_message(users_error.read().clone())}"
                     }
                 } else {
                     div {
@@ -704,6 +708,22 @@ fn format_environments(values: &[String]) -> String {
     }
 }
 
+fn users_render_state(users_loading: bool, users_error: Option<&str>) -> UsersRenderState {
+    if users_loading {
+        return UsersRenderState::Loading;
+    }
+
+    if users_error.is_some() {
+        return UsersRenderState::Error;
+    }
+
+    UsersRenderState::Table
+}
+
+fn users_error_message(users_error: Option<String>) -> String {
+    users_error.unwrap_or_else(|| "Failed to load users".to_string())
+}
+
 fn format_event_actor(event: &AuditEvent) -> String {
     format!(
         "{} by {}",
@@ -759,6 +779,13 @@ struct UserEditDraft {
     role: String,
     enabled: bool,
     environments: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UsersRenderState {
+    Loading,
+    Error,
+    Table,
 }
 
 impl UserEditDraft {
@@ -847,5 +874,30 @@ mod tests {
     #[test]
     fn format_environments_shows_unscoped_when_empty() {
         assert_eq!(format_environments(&[]), "All / Unscoped");
+    }
+
+    #[test]
+    fn users_render_state_prioritizes_loading_then_error_then_table() {
+        assert_eq!(
+            users_render_state(true, Some("boom")),
+            UsersRenderState::Loading
+        );
+        assert_eq!(
+            users_render_state(false, Some("boom")),
+            UsersRenderState::Error
+        );
+        assert_eq!(users_render_state(false, None), UsersRenderState::Table);
+    }
+
+    #[test]
+    fn users_error_message_has_safe_fallback() {
+        assert_eq!(
+            users_error_message(Some("custom".to_string())),
+            "custom".to_string()
+        );
+        assert_eq!(
+            users_error_message(None),
+            "Failed to load users".to_string()
+        );
     }
 }
