@@ -762,6 +762,7 @@ pub struct AdminAuditEventsParams {
 pub struct AdminCreateUserRequest {
     pub email: String,
     pub display_name: Option<String>,
+    pub password: Option<String>,
     pub role: Role,
     pub environments: Vec<String>,
 }

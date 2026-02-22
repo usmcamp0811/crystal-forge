@@ -119,3 +119,16 @@ pub async fn get_password_hash_by_user_id(pool: &PgPool, user_id: Uuid) -> Resul
         .await?;
     Ok(hash)
 }
+
+pub async fn update_password_hash_by_user_id(
+    pool: &PgPool,
+    user_id: Uuid,
+    password_hash: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE users SET password_hash = $1 WHERE id = $2")
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}

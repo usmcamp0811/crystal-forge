@@ -14,16 +14,18 @@ use crate::api::models::{
     AdminUserSummary, ApiError, AuditAction, AuditEvent, IdentitySource, OidcGroupMapping,
     PaginatedResponse, Role,
 };
+use crate::auth::password::hash_password;
 use crate::handlers::api::rbac::{extract_request_origin, require_admin as require_admin_user};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
 use crate::queries::auth_identity::{assign_role_to_user, get_user_roles};
-use crate::queries::users::insert_user;
+use crate::queries::users::{insert_user, update_password_hash_by_user_id};
 
 #[derive(Debug, Deserialize)]
 pub struct CreateAdminUserRequest {
     pub email: String,
     pub display_name: Option<String>,
+    pub password: Option<String>,
     pub role: Role,
     #[serde(default)]
     pub environments: Vec<String>,
@@ -219,6 +221,24 @@ pub async fn create_user(
         Err(_) => return internal_error("Failed to create user"),
     };
 
+    if let Some(password) = payload.password.as_deref() {
+        if password.len() < 8 {
+            return bad_request("Password must be at least 8 characters");
+        }
+
+        let password_hash = match hash_password(password) {
+            Ok(value) => value,
+            Err(_) => return internal_error("Failed to hash password"),
+        };
+
+        if update_password_hash_by_user_id(&pool, user.id, &password_hash)
+            .await
+            .is_err()
+        {
+            return internal_error("Failed to set user password");
+        }
+    }
+
     if set_user_primary_role(&pool, user.id, payload.role, admin_user_id)
         .await
         .is_err()
@@ -238,7 +258,10 @@ pub async fn create_user(
         AuditAction::UserCreated,
         format!("{} ({})", email, user.id),
         request_origin.clone(),
-        serde_json::json!({ "display_name": payload.display_name }),
+        serde_json::json!({
+            "display_name": payload.display_name,
+            "password_set": payload.password.as_deref().is_some_and(|value| !value.is_empty()),
+        }),
     )
     .await
     .is_err()
@@ -1205,6 +1228,7 @@ mod tests {
             Json(CreateAdminUserRequest {
                 email: "new-user@example.com".to_string(),
                 display_name: Some("New User".to_string()),
+                password: None,
                 role: Role::Viewer,
                 environments: vec![],
             }),

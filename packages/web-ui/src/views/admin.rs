@@ -38,6 +38,7 @@ pub fn AdminView() -> Element {
 
     let mut create_email = use_signal(String::new);
     let mut create_display_name = use_signal(String::new);
+    let mut create_password = use_signal(String::new);
     let mut create_role = use_signal(|| "Viewer".to_string());
     let mut create_environments = use_signal(String::new);
     let mut create_submitting = use_signal(|| false);
@@ -150,7 +151,7 @@ pub fn AdminView() -> Element {
                     class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
                     h3 { class: "text-sm font-semibold text-white", "Create user" }
                     div {
-                        class: "grid gap-3 sm:grid-cols-2 xl:grid-cols-4",
+                        class: "grid gap-3 sm:grid-cols-2 xl:grid-cols-5",
                         input {
                             class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
                             r#type: "email",
@@ -164,6 +165,13 @@ pub fn AdminView() -> Element {
                             placeholder: "Display name (optional)",
                             value: "{create_display_name.read()}",
                             oninput: move |evt| create_display_name.set(evt.value())
+                        }
+                        input {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            r#type: "password",
+                            placeholder: "Initial password (min 8)",
+                            value: "{create_password.read()}",
+                            oninput: move |evt| create_password.set(evt.value())
                         }
                         select {
                             class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
@@ -189,6 +197,7 @@ pub fn AdminView() -> Element {
                             onclick: move |_| {
                                 let email = create_email.read().clone();
                                 let display_name = create_display_name.read().clone();
+                                let password = create_password.read().clone();
                                 let role = role_from_string(&create_role.read());
                                 let environments = match validate_and_parse_environments(&create_environments.read()) {
                                     Ok(value) => value,
@@ -201,6 +210,7 @@ pub fn AdminView() -> Element {
                                 let request = AdminCreateUserRequest {
                                     email,
                                     display_name: optional_value(display_name),
+                                    password: optional_value(password),
                                     role,
                                     environments,
                                 };
@@ -211,6 +221,7 @@ pub fn AdminView() -> Element {
                                 let mut create_submitting = create_submitting.clone();
                                 let mut create_email = create_email.clone();
                                 let mut create_display_name = create_display_name.clone();
+                                let mut create_password = create_password.clone();
                                 let mut create_environments = create_environments.clone();
 
                                 create_submitting.set(true);
@@ -220,6 +231,7 @@ pub fn AdminView() -> Element {
                                             refresh_users(users, user_drafts, users_error).await;
                                             create_email.set(String::new());
                                             create_display_name.set(String::new());
+                                            create_password.set(String::new());
                                             create_environments.set(String::new());
                                         }
                                         Err(e) => users_error.set(Some(format!("Failed to create user: {e}"))),

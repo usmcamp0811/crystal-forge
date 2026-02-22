@@ -179,5 +179,7 @@ Latest progress:
 - Updated environment-scope access semantics so systems without an environment are admin-only.
 - Created follow-up TASK-116 for admin/audit/systems query-path performance optimization.
 - Added client-side validation for admin environment assignment inputs and explicit UX guidance that wildcard patterns are not currently supported.
+- Added initial-password support to admin user creation (UI + API) with minimum-length validation.
+- Created follow-up TASK-117 for secure password reset/recovery flow design and implementation.
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->
