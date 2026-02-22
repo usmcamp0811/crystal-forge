@@ -1,9 +1,10 @@
 ---
 id: TASK-79
 title: 'Admin console - users, environment membership, RBAC, and audit logging'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-22 02:34'
+updated_date: '2026-02-22 02:34'
 labels:
   - web-ui
   - auth
@@ -87,103 +88,34 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 ### Navigation + access control
-- [ ] Add an Admin-only navigation entry (e.g., “Admin” / “Server Management”).
-- [ ] Non-admin users cannot access admin routes (safe denial UX).
-- [ ] Role changes take effect **on next login** (documented behavior).
+- [ ] #1 Add an Admin-only navigation entry (e.g., “Admin” / “Server Management”).
+- [ ] #2 Non-admin users cannot access admin routes (safe denial UX).
+- [ ] #3 Role changes take effect **on next login** (documented behavior).
 
 ### Environment-scoped visibility and authorization (core security behavior)
-- [ ] Systems are associated with an Environment (existing or added association as part of this task).
-- [ ] A user only sees systems belonging to environments they are a member of.
-- [ ] Viewer can view system details but cannot deploy/sync/perform mutating actions.
-- [ ] Operator can deploy/sync/perform allowed system operations within their environments, but cannot create environments.
-- [ ] Admin can perform all operations, including environment management.
-- [ ] Backend enforces the above rules (UI behavior must match backend enforcement).
+- [ ] #4 Systems are associated with an Environment (existing or added association as part of this task).
+- [ ] #5 A user only sees systems belonging to environments they are a member of.
+- [ ] #6 Viewer can view system details but cannot deploy/sync/perform mutating actions.
+- [ ] #7 Operator can deploy/sync/perform allowed system operations within their environments, but cannot create environments.
+- [ ] #8 Admin can perform all operations, including environment management.
+- [ ] #9 Backend enforces the above rules (UI behavior must match backend enforcement).
 
 ### Admin UI - Users (local auth mode)
-- [ ] Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
-- [ ] Admin can create a local user with:
-  - [ ] required fields validated (client + server error display)
-  - [ ] initial role selection (single role)
-  - [ ] initial environment membership assignment (0..N)
-- [ ] Admin can update a local user:
-  - [ ] change role (single role)
-  - [ ] change environment memberships (0..N)
-  - [ ] disable/enable user (or disable at minimum)
-- [ ] Guardrails:
-  - [ ] Admin cannot disable/delete their own account OR cannot remove their own Admin role (choose exact guardrail and implement).
-  - [ ] Destructive actions require confirmation.
+- [ ] #10 Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
+- [ ] #11 Admin can create a local user with:
+- [ ] #12 Admin can update a local user:
+- [ ] #13 Guardrails:
+- [ ] #14 Provide an admin screen to manage mappings:
+- [ ] #15 On login, OIDC users have role + environment memberships derived from the mapping (persisted in CF in a conventional way).
+- [ ] #16 UI clearly communicates which user attributes are IdP-derived vs locally-managed.
+- [ ] #17 Backend records audit events for:
+- [ ] #18 Admin UI includes an audit log view with:
+- [ ] #19 Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
+- [ ] #20 Integration/UI check coverage includes at least:
 
 ### Admin UI - OIDC mapping (OIDC enabled)
-- [ ] Provide an admin screen to manage mappings:
-  - [ ] OIDC group → Crystal Forge role (Admin/Operator/Viewer)
-  - [ ] OIDC group → Crystal Forge environments (membership)
-- [ ] On login, OIDC users have role + environment memberships derived from the mapping (persisted in CF in a conventional way).
-- [ ] UI clearly communicates which user attributes are IdP-derived vs locally-managed.
 
 ### Audit logging (required)
-- [ ] Backend records audit events for:
-  - [ ] local user create/disable/role change/env membership change
-  - [ ] OIDC mapping changes
-  - [ ] environment create/update/delete (if in scope)
-- [ ] Admin UI includes an audit log view with:
-  - [ ] filters (at minimum: event type, actor, time range)
-  - [ ] empty/error/loading states
 
 ### Tests
-- [ ] Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
-- [ ] Integration/UI check coverage includes at least:
-  - [ ] authenticated Admin view screenshot(s)
-  - [ ] non-admin denial/redirect proof
-  - [ ] environment scoping proof (e.g., two envs, user sees only one)
 <!-- AC:END -->
-
-## Verification Plan
-
-Tier 0 (targeted):
-- `nix develop -c cargo fmt -- --check`
-- `nix develop -c cargo clippy -- -D warnings`
-- `nix develop -c cargo test --package web-ui admin`
-- `nix develop -c cargo test --package <backend-package> rbac` (use narrowest applicable selection)
-
-Tier 1 (feature-level manual):
-- Local auth mode:
-  - Admin creates local user, assigns envs + role, user logs in and sees only scoped systems.
-  - Viewer vs Operator behavior verified on at least one system action.
-- OIDC mode:
-  - Update group mappings, login as OIDC user in mapped groups, confirm role + env scoping.
-- Audit log:
-  - Perform admin actions, confirm audit entries appear and are filterable.
-
-Tier 2 (recommended before MR review):
-- `nix build .#checks.x86_64-linux.web-ui` (or repo-standard checks)
-- If backend checks exist: `nix build .#checks.x86_64-linux.<backend-check>`
-
-## Dependencies
-
-- A way to associate systems with an Environment (existing model or added as part of this task).
-- Backend endpoints for:
-  - users + membership management (local mode)
-  - group-to-role + group-to-environment mapping (OIDC mode)
-  - audit event retrieval
-- Auth context must expose:
-  - authenticated user identity
-  - role
-  - environment memberships (or derived scope token)
-- If sqlx applies (schema or query changes): sqlx offline metadata must be refreshed.
-
-## Impact Areas
-
-- Security model (RBAC + environment scoping)
-- Backend authz + audit
-- Web UI routing + admin views
-- API DTOs + clients
-- Data model (users, memberships, mappings, audit)
-
-## Risk Level
-
-High
-
-Rationale:
-- Security-sensitive and cross-cutting (visibility, authorization, audit).
-- OIDC mapping and environment scoping can easily be misconfigured without clear UX + backend enforcement.
-<!-- SECTION:DESCRIPTION:END -->
