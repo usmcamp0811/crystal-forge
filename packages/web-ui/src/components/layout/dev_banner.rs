@@ -19,7 +19,9 @@ pub fn DevModeBanner() -> Element {
                 // Probe the dev login endpoint to detect dev mode
                 let window = web_sys::window().expect("no global window");
                 let location = window.location();
-                let origin = location.origin().unwrap_or_else(|_| "http://localhost:3000".into());
+                let origin = location
+                    .origin()
+                    .unwrap_or_else(|_| "http://localhost:3000".into());
                 let url = format!("{}/api/auth/dev/login", origin);
 
                 // Try an OPTIONS request to see if the endpoint exists
@@ -43,7 +45,7 @@ pub fn DevModeBanner() -> Element {
 
     // Only render if dev mode is detected
     if !is_dev_mode() {
-        return rsx! { };
+        return rsx! {};
     }
 
     rsx! {

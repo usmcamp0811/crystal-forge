@@ -473,7 +473,7 @@ pub async fn oidc_callback(
     // This should be replaced with proper role mapping from OIDC claims
     use crate::models::auth_identity::AuthRole;
     use crate::queries::auth_identity::assign_role_to_user;
-    
+
     // Check if user has any roles, if not assign Viewer as default
     let existing_roles = crate::queries::auth_identity::get_user_roles(&pool, user.id)
         .await
@@ -481,9 +481,12 @@ pub async fn oidc_callback(
             tracing::error!("Failed to check user roles: {}", e);
             OidcError::DatabaseError
         })?;
-    
+
     if existing_roles.is_empty() {
-        tracing::info!("Assigning default Viewer role to new OIDC user: {}", user.id);
+        tracing::info!(
+            "Assigning default Viewer role to new OIDC user: {}",
+            user.id
+        );
         assign_role_to_user(&pool, user.id, AuthRole::Viewer, None)
             .await
             .map_err(|e| {

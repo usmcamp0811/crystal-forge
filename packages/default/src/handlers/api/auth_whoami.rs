@@ -23,10 +23,7 @@ use crate::{
 /// Returns authentication state including user info, roles, and auth mode.
 /// This endpoint is publicly accessible (no auth required) so the UI can
 /// determine whether the user is authenticated.
-pub async fn whoami(
-    State(pool): State<PgPool>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn whoami(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     let auth_mode = detect_auth_mode();
 
     // Try to extract session cookie
@@ -47,9 +44,7 @@ pub async fn whoami(
                             .into_iter()
                             .map(|r| match r.role {
                                 crate::models::auth_identity::AuthRole::Admin => Role::Admin,
-                                crate::models::auth_identity::AuthRole::Operator => {
-                                    Role::Operator
-                                }
+                                crate::models::auth_identity::AuthRole::Operator => Role::Operator,
                                 crate::models::auth_identity::AuthRole::Viewer => Role::Viewer,
                             })
                             .collect();

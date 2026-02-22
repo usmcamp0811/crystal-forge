@@ -93,13 +93,13 @@ impl JwksCache {
     pub async fn force_refresh(&self) -> Result<CoreJsonWebKeySet> {
         tracing::info!("Force refreshing JWKS (cache bypassed)");
         let jwks = self.fetch_from_provider().await?;
-        
+
         // Update cache
         {
             let mut cache = self.cache.write().await;
             *cache = Some(CachedJwks::new(jwks.clone(), self.ttl));
         }
-        
+
         Ok(jwks)
     }
 
@@ -118,26 +118,28 @@ impl JwksCache {
             .context("Failed to build HTTP client")?;
 
         let mut last_error = None;
-        
+
         for attempt in 1..=2 {
             match client.get(&self.jwks_uri).send().await {
                 Ok(response) => {
                     if !response.status().is_success() {
                         let status = response.status();
                         let body = response.text().await.unwrap_or_default();
-                        
+
                         if attempt == 1 && (status.is_server_error() || status == 429) {
                             tracing::warn!(
                                 "JWKS fetch failed (attempt {}/2): {} - retrying",
-                                attempt, status
+                                attempt,
+                                status
                             );
                             last_error = Some(anyhow::anyhow!(
                                 "JWKS fetch failed with status {}: {}",
-                                status, body
+                                status,
+                                body
                             ));
                             continue;
                         }
-                        
+
                         anyhow::bail!("JWKS fetch failed with status {}: {}", status, body);
                     }
 
@@ -155,7 +157,11 @@ impl JwksCache {
                     return Ok(jwks);
                 }
                 Err(e) if attempt == 1 => {
-                    tracing::warn!("JWKS fetch failed (attempt {}/2): {} - retrying", attempt, e);
+                    tracing::warn!(
+                        "JWKS fetch failed (attempt {}/2): {} - retrying",
+                        attempt,
+                        e
+                    );
                     last_error = Some(e.into());
                     continue;
                 }

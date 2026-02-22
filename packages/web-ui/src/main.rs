@@ -13,7 +13,7 @@ mod views;
 use dioxus::prelude::*;
 
 use routes::Route;
-use state::app_state::{provide_app_state, AuthFetchState};
+use state::app_state::{AuthFetchState, provide_app_state};
 
 fn main() {
     dioxus::launch(app);

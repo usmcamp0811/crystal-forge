@@ -104,10 +104,29 @@ pub async fn local_login(
 /// Logout (invalidates current session).
 pub async fn logout() -> Result<(), ApiClientError> {
     let url = format!("{}/logout", auth_base_url());
-    
+
     // We need to get the CSRF token from cookie and send it in header
     // For now, just send the request - the CSRF validation will happen server-side
     send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Fetch admin users view data.
+pub async fn fetch_admin_users() -> Result<Vec<AdminUserSummary>, ApiClientError> {
+    let url = format!("{}/admin/users", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch admin audit events.
+pub async fn fetch_admin_audit_events(
+    params: &AdminAuditEventsParams,
+) -> Result<PaginatedResponse<AuditEvent>, ApiClientError> {
+    let mut url = format!("{}/admin/audit-events", base_url());
+    let query = serde_urlencoded::to_string(params).unwrap_or_default();
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(&query);
+    }
+    fetch_json(&url).await
 }
 
 /// Send JSON request with CSRF token from cookie.
@@ -134,7 +153,8 @@ async fn send_json_with_csrf<T: serde::de::DeserializeOwned, B: serde::Serialize
 
     // For 204 No Content, return default value if possible
     if status == 204 {
-        return serde_json::from_str("null").map_err(|e| ApiClientError::Deserialize(e.to_string()));
+        return serde_json::from_str("null")
+            .map_err(|e| ApiClientError::Deserialize(e.to_string()));
     }
 
     serde_json::from_str(&text).map_err(|e| ApiClientError::Deserialize(e.to_string()))
@@ -159,12 +179,12 @@ async fn send_request_with_csrf(
 
     let request = web_sys::Request::new_with_str_and_init(url, &opts)
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
-    
+
     request
         .headers()
         .set("Accept", "application/json")
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
-    
+
     if body.is_some() {
         request
             .headers()
@@ -175,8 +195,11 @@ async fn send_request_with_csrf(
     // Extract CSRF token from cookie and add to header
     if let Some(document) = window.document() {
         // Use js_sys to call document.cookie
-        let document_obj = js_sys::Object::from(js_sys::Reflect::get(&document, &JsValue::from_str("document")).unwrap_or(JsValue::NULL));
-        
+        let document_obj = js_sys::Object::from(
+            js_sys::Reflect::get(&document, &JsValue::from_str("document"))
+                .unwrap_or(JsValue::NULL),
+        );
+
         // Simpler: just get the cookie string directly from the global document
         let cookie_js = js_sys::eval("document.cookie").unwrap_or(JsValue::NULL);
         if let Some(cookie_str) = cookie_js.as_string() {

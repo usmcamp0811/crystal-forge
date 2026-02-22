@@ -5,6 +5,7 @@
 use dioxus::prelude::*;
 
 use crate::components::layout::AppShell;
+use crate::views::admin::AdminView;
 use crate::views::builds::BuildsView;
 use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
@@ -50,6 +51,9 @@ pub enum Route {
     #[route("/deployment-policies")]
     PoliciesView {},
 
+    #[route("/admin")]
+    AdminView {},
+
     #[route("/style-guide")]
     StyleGuideView {},
 
@@ -80,6 +84,7 @@ impl Route {
             Route::BuildsView { .. } => "Builds".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
+            Route::AdminView { .. } => "Server Management".to_string(),
             Route::StyleGuideView { .. } => "Style Guide".to_string(),
             Route::LoginView { .. } => "Sign In".to_string(),
             Route::RegisterView { .. } => "Register".to_string(),

@@ -105,22 +105,22 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 
 ### Admin UI - Users (local auth mode)
 - [ ] #10 Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
-- [ ] #11 Admin can create a local user with:
-- [ ] #12 Admin can update a local user:
-- [ ] #13 Guardrails:
-- [ ] #14 Provide an admin screen to manage mappings:
-- [ ] #15 On login, OIDC users have role + environment memberships derived from the mapping (persisted in CF in a conventional way).
-- [ ] #16 UI clearly communicates which user attributes are IdP-derived vs locally-managed.
-- [ ] #17 Backend records audit events for:
-- [ ] #18 Admin UI includes an audit log view with:
-- [ ] #19 Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
-- [ ] #20 Integration/UI check coverage includes at least:
+- [ ] #11 Admin can create a local user with email, optional display name, initial role, and initial environment memberships; API returns validation errors for invalid email/duplicate email.
+- [ ] #12 Admin can update a local user role, enabled/disabled status, and environment memberships; role/membership changes are persisted and reflected in subsequent auth context after next login.
+- [ ] #13 Guardrails: cannot disable the last enabled admin, cannot remove the final admin role assignment, and non-admin callers receive `403` for all admin mutation endpoints.
 
 ### Admin UI - OIDC mapping (OIDC enabled)
+- [ ] #14 Provide an admin screen to manage mappings for `group -> role` and `group -> environments`, including create/edit/delete, duplicate detection, and input validation.
+- [ ] #15 On login, OIDC users have role + environment memberships derived from the mapping (persisted in CF in a conventional way).
+- [ ] #16 UI clearly communicates which user attributes are IdP-derived vs locally-managed.
 
 ### Audit logging (required)
+- [ ] #17 Backend records audit events for user create/update/disable, role changes, environment membership changes, and OIDC mapping changes, with actor, target, action, timestamp, and request origin metadata.
+- [ ] #18 Admin UI includes an audit log view with timestamp, actor, action, target, and filter controls (actor, action type, date range), plus pagination.
 
 ### Tests
+- [ ] #19 Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
+- [ ] #20 Integration/UI check coverage includes at least: non-admin route denial, admin users list render, role-based mutation denial (viewer/operator), and environment-scoped systems visibility.
 <!-- AC:END -->
 
 ## Implementation Notes

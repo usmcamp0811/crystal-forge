@@ -12,7 +12,10 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
-        api::{auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami, dashboard, flakes},
+        api::{
+            admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
+            dashboard, flakes,
+        },
         status,
         webhook::webhook_handler,
     },
@@ -104,6 +107,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
+        .route("/api/v1/admin/users", get(admin::list_users))
+        .route("/api/v1/admin/audit-events", get(admin::list_audit_events))
         // Auth context endpoint (publicly accessible)
         .route("/api/auth/whoami", get(auth_whoami::whoami))
         // Setup status endpoint (publicly accessible)

@@ -125,7 +125,15 @@ pub fn AppShell() -> Element {
                 DevModeBanner {}
                 main {
                     class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
-                    Outlet::<Route> {}
+                    if matches!(current_route, Route::AdminView { .. }) && !auth::is_admin(&auth_context) {
+                        section {
+                            class: "max-w-3xl mx-auto rounded-xl border border-amber-500/40 bg-amber-900/20 p-6 space-y-2",
+                            h2 { class: "text-xl font-semibold text-amber-100", "Access Denied" }
+                            p { class: "text-sm text-amber-200/90", "Server Management requires an administrator role." }
+                        }
+                    } else {
+                        Outlet::<Route> {}
+                    }
                 }
             }
         }

@@ -53,3 +53,43 @@ pub fn user_short_name(auth: &Option<AuthContext>) -> Option<String> {
             })
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::models::{AuthMode, AuthUser};
+
+    fn auth_context(authenticated: bool, roles: Vec<Role>) -> Option<AuthContext> {
+        Some(AuthContext {
+            is_authenticated: authenticated,
+            user: Some(AuthUser {
+                id: "user-1".to_string(),
+                email: "user@example.com".to_string(),
+                display_name: Some("Example User".to_string()),
+            }),
+            roles,
+            auth_mode: AuthMode::Local,
+        })
+    }
+
+    #[test]
+    fn is_admin_requires_authenticated_admin_role() {
+        assert!(is_admin(&auth_context(true, vec![Role::Admin])));
+        assert!(!is_admin(&auth_context(true, vec![Role::Operator])));
+        assert!(!is_admin(&auth_context(false, vec![Role::Admin])));
+        assert!(!is_admin(&None));
+    }
+
+    #[test]
+    fn is_operator_or_above_accepts_operator_and_admin() {
+        assert!(is_operator_or_above(&auth_context(
+            true,
+            vec![Role::Operator]
+        )));
+        assert!(is_operator_or_above(&auth_context(true, vec![Role::Admin])));
+        assert!(!is_operator_or_above(&auth_context(
+            true,
+            vec![Role::Viewer]
+        )));
+    }
+}

@@ -135,7 +135,10 @@ pub struct CFState {
 
 impl CFState {
     pub fn new(pool: PgPool, server_config: ServerConfig) -> Self {
-        Self { pool, server_config }
+        Self {
+            pool,
+            server_config,
+        }
     }
 
     pub fn pool(&self) -> &PgPool {

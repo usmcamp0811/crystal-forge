@@ -419,6 +419,35 @@ pub struct AuthContext {
     pub auth_mode: AuthMode,
 }
 
+/// Admin users list item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserSummary {
+    pub id: String,
+    pub identifier: String,
+    pub role: Option<Role>,
+    pub enabled: bool,
+    pub environments: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Audit event action classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAction {
+    UserRoleAssigned,
+    SessionInvalidated,
+}
+
+/// Admin audit log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub timestamp: DateTime<Utc>,
+    pub actor: Option<String>,
+    pub action: AuditAction,
+    pub target: String,
+    pub source: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────────────────

@@ -70,7 +70,7 @@ pub async fn register(
         .fetch_one(&pool)
         .await
         .map_err(|_| LocalAuthError::DatabaseError)?;
-    
+
     let is_first_user = user_count == 0;
 
     // Hash password
@@ -106,12 +106,16 @@ pub async fn register(
     if is_first_user {
         use crate::models::auth_identity::AuthRole;
         use crate::queries::auth_identity::assign_role_to_user;
-        
+
         assign_role_to_user(&pool, user.id, AuthRole::Admin, None)
             .await
             .map_err(|_| LocalAuthError::DatabaseError)?;
-        
-        tracing::info!("Registered FIRST local user as Admin: {} ({})", user.email, user.id);
+
+        tracing::info!(
+            "Registered FIRST local user as Admin: {} ({})",
+            user.email,
+            user.id
+        );
     } else {
         tracing::info!("Registered new local user: {} ({})", user.email, user.id);
     }
