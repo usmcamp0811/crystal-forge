@@ -169,5 +169,6 @@ Latest progress:
 - Added systems endpoint tests for authenticated-role requirements and filter helper behavior.
 - Added backend sync/rollback system mutation endpoints with operator-or-admin checks and environment-scope enforcement.
 - Updated system detail UI to call sync/rollback APIs and disable mutation actions for viewer-role users.
+- Refactored admin API data access into `queries/admin.rs` and removed inline SQL from `handlers/api/admin.rs` to align with query-layer conventions.
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->

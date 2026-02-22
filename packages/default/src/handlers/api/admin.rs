@@ -16,61 +16,9 @@ use crate::api::models::{
 };
 use crate::handlers::api::rbac::require_admin as require_admin_user;
 use crate::models::auth_identity::AuthRole;
+use crate::queries::admin::{self, OidcMappingRow};
 use crate::queries::auth_identity::{assign_role_to_user, get_user_roles};
 use crate::queries::users::insert_user;
-
-#[derive(Debug, sqlx::FromRow)]
-struct AdminUserRow {
-    id: Uuid,
-    username: String,
-    email: String,
-    is_active: bool,
-    has_external_identity: bool,
-    updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct AuditRoleRow {
-    created_at: DateTime<Utc>,
-    actor_email: Option<String>,
-    role: AuthRole,
-    target_email: String,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct AuditSessionRow {
-    invalidated_at: DateTime<Utc>,
-    user_email: Option<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct AdminAuditEventRow {
-    created_at: DateTime<Utc>,
-    actor_identifier: Option<String>,
-    action: String,
-    target: String,
-    request_origin: Option<String>,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct EnvironmentMembershipRow {
-    environment_name: String,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct EnvironmentLookupRow {
-    id: Uuid,
-    name: String,
-}
-
-#[derive(Debug, sqlx::FromRow)]
-struct OidcMappingRow {
-    id: Uuid,
-    group_name: String,
-    role: Option<AuthRole>,
-    environments: Vec<String>,
-    updated_at: DateTime<Utc>,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct CreateAdminUserRequest {
@@ -101,19 +49,7 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
         return forbidden();
     };
 
-    let rows = match sqlx::query_as::<_, AdminUserRow>(
-        "SELECT u.id,
-                u.username,
-                u.email,
-                u.is_active,
-                EXISTS(SELECT 1 FROM external_identities ei WHERE ei.user_id = u.id) AS has_external_identity,
-                u.updated_at
-         FROM users u
-         ORDER BY u.updated_at DESC",
-    )
-    .fetch_all(&pool)
-    .await
-    {
+    let rows = match admin::list_admin_users(&pool).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to list admin users"),
     };
@@ -159,14 +95,7 @@ pub async fn list_oidc_mappings(
         return forbidden();
     };
 
-    let rows = match sqlx::query_as::<_, OidcMappingRow>(
-        "SELECT id, group_name, role, environments, updated_at
-         FROM oidc_group_mappings
-         ORDER BY group_name ASC",
-    )
-    .fetch_all(&pool)
-    .await
-    {
+    let rows = match admin::list_oidc_mappings(&pool).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to list OIDC mappings"),
     };
@@ -194,25 +123,13 @@ pub async fn upsert_oidc_mapping(
         Err(message) => return bad_request(&message),
     };
 
-    if let Err(message) = validate_environment_names_exist(&pool, &environments).await {
+    if let Err(message) = admin::validate_environment_names_exist(&pool, &environments).await {
         return bad_request(&message);
     }
 
     let role = payload.role.map(role_to_auth_role);
 
-    let row = match sqlx::query_as::<_, OidcMappingRow>(
-        "INSERT INTO oidc_group_mappings (group_name, role, environments)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (group_name)
-         DO UPDATE SET role = EXCLUDED.role, environments = EXCLUDED.environments
-         RETURNING id, group_name, role, environments, updated_at",
-    )
-    .bind(&group_name)
-    .bind(role)
-    .bind(&environments)
-    .fetch_one(&pool)
-    .await
-    {
+    let row = match admin::upsert_oidc_mapping(&pool, &group_name, role, &environments).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to save OIDC mapping"),
     };
@@ -248,15 +165,7 @@ pub async fn delete_oidc_mapping(
         Err(_) => return bad_request("Mapping id must be a valid UUID"),
     };
 
-    let deleted = match sqlx::query_as::<_, OidcMappingRow>(
-        "DELETE FROM oidc_group_mappings
-         WHERE id = $1
-         RETURNING id, group_name, role, environments, updated_at",
-    )
-    .bind(mapping_id)
-    .fetch_optional(&pool)
-    .await
-    {
+    let deleted = match admin::delete_oidc_mapping(&pool, mapping_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to delete OIDC mapping"),
     };
@@ -297,11 +206,7 @@ pub async fn create_user(
         return bad_request("Email must be a valid address");
     }
 
-    let exists = match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE email = $1")
-        .bind(&email)
-        .fetch_one(&pool)
-        .await
-    {
+    let exists = match admin::count_users_by_email(&pool, &email).await {
         Ok(count) => count > 0,
         Err(_) => return internal_error("Failed to validate user email"),
     };
@@ -392,13 +297,7 @@ pub async fn update_user(
         Err(_) => return bad_request("User id must be a valid UUID"),
     };
 
-    let current = match sqlx::query_as::<_, AdminUserRow>(
-        "SELECT id, username, email, is_active, updated_at FROM users WHERE id = $1",
-    )
-    .bind(target_user_id)
-    .fetch_optional(&pool)
-    .await
-    {
+    let current = match admin::find_admin_user(&pool, target_user_id).await {
         Ok(Some(value)) => value,
         Ok(None) => return not_found("User not found"),
         Err(_) => return internal_error("Failed to load user"),
@@ -424,10 +323,7 @@ pub async fn update_user(
             }
         }
 
-        if sqlx::query("UPDATE users SET is_active = $1 WHERE id = $2")
-            .bind(enabled)
-            .bind(target_user_id)
-            .execute(&pool)
+        if admin::update_user_active(&pool, target_user_id, enabled)
             .await
             .is_err()
         {
@@ -553,15 +449,7 @@ pub async fn list_audit_events(
 
     let mut events: Vec<AuditEvent> = vec![];
 
-    let admin_events = match sqlx::query_as::<_, AdminAuditEventRow>(
-        "SELECT created_at, actor_identifier, action, target, request_origin
-         FROM admin_audit_events
-         ORDER BY created_at DESC
-         LIMIT 300",
-    )
-    .fetch_all(&pool)
-    .await
-    {
+    let admin_events = match admin::list_admin_audit_events(&pool).await {
         Ok(rows) => rows,
         Err(_) => return internal_error("Failed to load audit events"),
     };
@@ -581,20 +469,7 @@ pub async fn list_audit_events(
         });
     }
 
-    let role_events = match sqlx::query_as::<_, AuditRoleRow>(
-        "SELECT ura.created_at,
-                actor.email AS actor_email,
-                ura.role,
-                target.email AS target_email
-         FROM user_role_assignments ura
-         LEFT JOIN users actor ON actor.id = ura.granted_by_user_id
-         JOIN users target ON target.id = ura.user_id
-         ORDER BY ura.created_at DESC
-         LIMIT 100",
-    )
-    .fetch_all(&pool)
-    .await
-    {
+    let role_events = match admin::list_role_audit_events(&pool).await {
         Ok(rows) => rows,
         Err(_) => return internal_error("Failed to load audit events"),
     };
@@ -609,17 +484,7 @@ pub async fn list_audit_events(
         });
     }
 
-    let session_events = match sqlx::query_as::<_, AuditSessionRow>(
-        "SELECT us.invalidated_at, u.email AS user_email
-         FROM user_sessions us
-         LEFT JOIN users u ON u.id = us.user_id
-         WHERE us.invalidated_at IS NOT NULL
-         ORDER BY us.invalidated_at DESC
-         LIMIT 100",
-    )
-    .fetch_all(&pool)
-    .await
-    {
+    let session_events = match admin::list_session_audit_events(&pool).await {
         Ok(rows) => rows,
         Err(_) => return internal_error("Failed to load audit events"),
     };
@@ -807,20 +672,9 @@ fn highest_role(roles: Vec<AuthRole>) -> Option<Role> {
 }
 
 async fn fetch_admin_user_summary(pool: &PgPool, user_id: Uuid) -> Result<AdminUserSummary, ()> {
-    let row = sqlx::query_as::<_, AdminUserRow>(
-        "SELECT u.id,
-                u.username,
-                u.email,
-                u.is_active,
-                EXISTS(SELECT 1 FROM external_identities ei WHERE ei.user_id = u.id) AS has_external_identity,
-                u.updated_at
-         FROM users u
-         WHERE u.id = $1",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await
-    .map_err(|_| ())?;
+    let row = admin::find_admin_user_required(pool, user_id)
+        .await
+        .map_err(|_| ())?;
 
     let roles = get_user_roles(pool, user_id).await.map_err(|_| ())?;
     let role = highest_role(roles.into_iter().map(|r| r.role).collect());
@@ -848,30 +702,13 @@ async fn fetch_admin_user_summary(pool: &PgPool, user_id: Uuid) -> Result<AdminU
 }
 
 async fn load_user_environments(pool: &PgPool, user_id: Uuid) -> Result<Vec<String>, ()> {
-    sqlx::query_as::<_, EnvironmentMembershipRow>(
-        "SELECT e.name AS environment_name
-         FROM user_environment_memberships uem
-         JOIN environments e ON e.id = uem.environment_id
-         WHERE uem.user_id = $1
-         ORDER BY e.name ASC",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map(|rows| rows.into_iter().map(|row| row.environment_name).collect())
-    .map_err(|_| ())
+    admin::list_user_environment_names(pool, user_id)
+        .await
+        .map_err(|_| ())
 }
 
 async fn enabled_admin_count(pool: &PgPool) -> Result<i64, ()> {
-    sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(DISTINCT u.id)
-         FROM users u
-         JOIN user_role_assignments ura ON ura.user_id = u.id
-         WHERE u.is_active = TRUE AND ura.role = 'admin'",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(|_| ())
+    admin::count_enabled_admins(pool).await.map_err(|_| ())
 }
 
 async fn set_user_primary_role(
@@ -880,11 +717,7 @@ async fn set_user_primary_role(
     role: Role,
     granted_by_user_id: Uuid,
 ) -> Result<(), ()> {
-    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
-        .bind(user_id)
-        .execute(pool)
-        .await
-        .map_err(|_| ())?;
+    admin::clear_user_roles(pool, user_id).await.map_err(|_| ())?;
 
     assign_role_to_user(
         pool,
@@ -904,70 +737,13 @@ async fn sync_user_environments(
     assigned_by_user_id: Uuid,
     environments: &[String],
 ) -> Result<(), String> {
-    let normalized: Vec<String> = environments
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-
-    let mut tx = pool
-        .begin()
-        .await
-        .map_err(|_| "Failed to start membership update".to_string())?;
-
-    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| "Failed to update environment memberships".to_string())?;
-
-    if normalized.is_empty() {
-        tx.commit()
-            .await
-            .map_err(|_| "Failed to commit environment memberships".to_string())?;
-        return Ok(());
-    }
-
-    let resolved = sqlx::query_as::<_, EnvironmentLookupRow>(
-        "SELECT id, name FROM environments WHERE name = ANY($1)",
+    admin::replace_user_environment_memberships(
+        pool,
+        user_id,
+        assigned_by_user_id,
+        environments,
     )
-    .bind(&normalized)
-    .fetch_all(&mut *tx)
     .await
-    .map_err(|_| "Failed to validate environments".to_string())?;
-
-    if resolved.len() != normalized.len() {
-        let known = resolved
-            .iter()
-            .map(|row| row.name.clone())
-            .collect::<BTreeSet<_>>();
-        let missing = normalized
-            .iter()
-            .filter(|name| !known.contains((*name).as_str()))
-            .cloned()
-            .collect::<Vec<_>>();
-        return Err(format!("Unknown environment(s): {}", missing.join(", ")));
-    }
-
-    for env in resolved {
-        sqlx::query(
-            "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id)
-             VALUES ($1, $2, $3)",
-        )
-        .bind(user_id)
-        .bind(env.id)
-        .bind(assigned_by_user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|_| "Failed to insert environment membership".to_string())?;
-    }
-
-    tx.commit()
-        .await
-        .map_err(|_| "Failed to commit environment memberships".to_string())?;
-    Ok(())
 }
 
 fn normalize_oidc_group_name(value: &str) -> Result<String, String> {
@@ -1019,36 +795,6 @@ fn normalize_environment_names_with_duplicate_check(
     Ok(seen.into_iter().collect())
 }
 
-async fn validate_environment_names_exist(pool: &PgPool, names: &[String]) -> Result<(), String> {
-    if names.is_empty() {
-        return Ok(());
-    }
-
-    let resolved = sqlx::query_as::<_, EnvironmentLookupRow>(
-        "SELECT id, name FROM environments WHERE name = ANY($1)",
-    )
-    .bind(names)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| "Failed to validate environments".to_string())?;
-
-    if resolved.len() == names.len() {
-        return Ok(());
-    }
-
-    let known = resolved
-        .into_iter()
-        .map(|row| row.name)
-        .collect::<BTreeSet<_>>();
-    let missing = names
-        .iter()
-        .filter(|name| !known.contains((*name).as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    Err(format!("Unknown environment(s): {}", missing.join(", ")))
-}
-
 fn role_to_auth_role(role: Role) -> AuthRole {
     match role {
         Role::Admin => AuthRole::Admin,
@@ -1089,12 +835,7 @@ fn auth_role_to_role(role: AuthRole) -> Role {
 }
 
 async fn fetch_user_identifier(pool: &PgPool, user_id: Uuid) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
+    admin::find_user_email(pool, user_id).await.ok().flatten()
 }
 
 async fn record_admin_audit_event(
@@ -1109,17 +850,15 @@ async fn record_admin_audit_event(
         .await
         .unwrap_or_else(|| actor_user_id.to_string());
 
-    sqlx::query(
-        "INSERT INTO admin_audit_events (actor_user_id, actor_identifier, action, target, request_origin, metadata)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+    admin::insert_admin_audit_event(
+        pool,
+        actor_user_id,
+        &actor_identifier,
+        action_to_str(action),
+        &target,
+        request_origin,
+        metadata,
     )
-    .bind(actor_user_id)
-    .bind(actor_identifier)
-    .bind(action_to_str(action))
-    .bind(target)
-    .bind(request_origin)
-    .bind(metadata)
-    .execute(pool)
     .await
     .map_err(|_| ())?;
 
