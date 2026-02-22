@@ -1,7 +1,7 @@
 ---
 id: TASK-65.6
 title: Web UI auth UX and role-based guards
-status: Review
+status: Done
 assignee:
   - KimiK2.5
 created_date: ''
@@ -92,11 +92,11 @@ Requirements:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Unauthenticated users are routed to login flow
-- [ ] #2 Authenticated users see role-appropriate navigation and actions
-- [ ] #3 Unauthorized actions and views show clear 403 or permission feedback
-- [ ] #4 Dev selector mode and OIDC mode both pass through consistent UI guard logic
-- [ ] #5 UI displays current session mode indicator where applicable
+- [x] #1 Unauthenticated users are routed to login flow
+- [x] #2 Authenticated users see role-appropriate navigation and actions
+- [x] #3 Unauthorized actions and views show clear 403 or permission feedback
+- [x] #4 Dev selector mode and OIDC mode both pass through consistent UI guard logic
+- [x] #5 UI displays current session mode indicator where applicable
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -130,4 +130,9 @@ Frontend:
 - Auth context auto-loaded on init
 
 **Ready for review and manual testing.**
+
+---
+
+MR #126 merged into dev on 2026-02-21.
+Task complete. LOCK released.
 <!-- SECTION:NOTES:END -->
