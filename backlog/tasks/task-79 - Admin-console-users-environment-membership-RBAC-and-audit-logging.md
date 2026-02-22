@@ -93,7 +93,7 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 ### Navigation + access control
 - [x] #1 Add an Admin-only navigation entry (e.g., “Admin” / “Server Management”).
 - [x] #2 Non-admin users cannot access admin routes (safe denial UX).
-- [ ] #3 Role changes take effect **on next login** (documented behavior).
+- [x] #3 Role changes take effect **on next login** (documented behavior).
 
 ### Environment-scoped visibility and authorization (core security behavior)
 - [ ] #4 Systems are associated with an Environment (existing or added association as part of this task).
@@ -148,4 +148,5 @@ Latest progress:
 - Added admin UI create/edit controls for role/status/environment assignments.
 - Added guardrail predicate tests in admin handler module.
 - Added dedicated admin audit event storage and capture for user create/update, role, status, and environment membership changes.
+- Documented next-login role/environment propagation in Admin Users UI copy.
 <!-- SECTION:NOTES:END -->

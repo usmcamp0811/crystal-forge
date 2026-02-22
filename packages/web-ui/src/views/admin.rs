@@ -132,6 +132,10 @@ pub fn AdminView() -> Element {
             section {
                 class: "space-y-3",
                 h2 { class: "text-lg font-semibold text-white", "Users" }
+                p {
+                    class: "text-xs {theme::text::SECONDARY}",
+                    "Role and environment membership changes take effect after the user signs in again."
+                }
 
                 div {
                     class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
