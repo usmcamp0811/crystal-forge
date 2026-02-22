@@ -24,6 +24,15 @@ pub async fn require_operator_or_admin(pool: &PgPool, headers: &HeaderMap) -> Op
     }
 }
 
+pub async fn require_viewer_or_above(pool: &PgPool, headers: &HeaderMap) -> Option<Uuid> {
+    let (user_id, roles) = resolve_authenticated_roles(pool, headers).await?;
+    if has_viewer_or_above_role(&roles) {
+        Some(user_id)
+    } else {
+        None
+    }
+}
+
 pub fn has_admin_role(roles: &[AuthRole]) -> bool {
     roles.contains(&AuthRole::Admin)
 }
@@ -32,6 +41,15 @@ pub fn has_operator_or_admin_role(roles: &[AuthRole]) -> bool {
     roles
         .iter()
         .any(|role| matches!(role, AuthRole::Admin | AuthRole::Operator))
+}
+
+pub fn has_viewer_or_above_role(roles: &[AuthRole]) -> bool {
+    roles.iter().any(|role| {
+        matches!(
+            role,
+            AuthRole::Admin | AuthRole::Operator | AuthRole::Viewer
+        )
+    })
 }
 
 async fn resolve_authenticated_roles(
@@ -73,5 +91,10 @@ mod tests {
             AuthRole::Operator,
         ]));
         assert!(!has_operator_or_admin_role(&[AuthRole::Viewer]));
+
+        assert!(has_viewer_or_above_role(&[AuthRole::Viewer]));
+        assert!(has_viewer_or_above_role(&[AuthRole::Operator]));
+        assert!(has_viewer_or_above_role(&[AuthRole::Admin]));
+        assert!(!has_viewer_or_above_role(&[]));
     }
 }

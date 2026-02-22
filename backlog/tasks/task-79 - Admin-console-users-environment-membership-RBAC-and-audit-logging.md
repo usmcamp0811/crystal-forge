@@ -164,4 +164,5 @@ Latest progress:
 - Added web UI auth capability helpers/tests for mutate-systems vs manage-environments role gating.
 - Enforced operator-or-admin authorization on flake mutation APIs (create/delete) with explicit forbidden-path tests.
 - Added shared backend API RBAC guard module and wired admin/flake handlers to common session-role checks.
+- Enforced viewer-or-above session gating on dashboard summary and flake list read APIs with forbidden-path tests.
 <!-- SECTION:NOTES:END -->

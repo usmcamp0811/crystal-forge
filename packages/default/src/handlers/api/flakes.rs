@@ -9,13 +9,17 @@ use sqlx::PgPool;
 use tracing::error;
 
 use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem};
-use crate::handlers::api::rbac::require_operator_or_admin;
+use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, get_flake_by_name, insert_flake,
     list_flake_registry,
 };
 
-pub async fn list_flakes(State(pool): State<PgPool>) -> impl IntoResponse {
+pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
+    if require_viewer_or_above(&pool, &headers).await.is_none() {
+        return forbidden_viewer();
+    }
+
     match list_flake_registry(&pool).await {
         Ok(flakes) => (StatusCode::OK, Json(flakes)).into_response(),
         Err(e) => {
@@ -191,6 +195,18 @@ fn forbidden() -> axum::response::Response {
         .into_response()
 }
 
+fn forbidden_viewer() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Viewer, operator, or admin privileges are required".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
 fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
     let name = payload.name.trim();
     let repo_url = payload.repo_url.trim();
@@ -296,6 +312,16 @@ mod tests {
         .await
         .into_response();
 
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn list_flakes_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = list_flakes(State(pool), HeaderMap::new()).await.into_response();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
