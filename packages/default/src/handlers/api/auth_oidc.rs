@@ -24,11 +24,15 @@ use std::sync::Arc;
 use crate::auth::oidc::{
     ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore,
 };
-use crate::auth::repository::normalize_tenant_discriminator;
 use crate::config::OidcConfig;
 use crate::handlers::api::auth_session::establish_user_session;
 use crate::models::auth_identity::AuthRole;
-use crate::queries::auth_identity::AuthIdentityRepository;
+use crate::queries::auth_identity::{
+    assign_role_to_user, clear_user_environment_memberships, clear_user_role_assignments,
+    create_user_and_bind_external_identity, get_environment_ids_by_names, get_oidc_mapping_matches,
+    get_user_by_id, get_user_roles, insert_user_environment_membership, AuthIdentityRepository,
+    OidcMappingMatchRow,
+};
 
 /// Shared OIDC client state.
 #[derive(Clone)]
@@ -39,12 +43,6 @@ pub struct OidcClientState {
     pub jwt_validator: JwtValidator,
     pub jwks_cache: JwksCache,
     pub session_store: OidcSessionStore,
-}
-
-#[derive(sqlx::FromRow)]
-struct OidcMappingMatchRow {
-    role: Option<AuthRole>,
-    environments: Vec<String>,
 }
 
 impl OidcClientState {
@@ -360,15 +358,7 @@ pub async fn oidc_callback(
                 identity.user_id
             );
 
-            // Load user by ID (not email - email may have changed at provider)
-            sqlx::query_as::<_, crate::models::users::User>(
-                "SELECT id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at
-                 FROM users WHERE id = $1"
-            )
-            .bind(identity.user_id)
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| {
+            get_user_by_id(&pool, identity.user_id).await.map_err(|e| {
                 tracing::error!("Failed to load user for identity: {}", e);
                 OidcError::DatabaseError
             })?
@@ -377,95 +367,31 @@ pub async fn oidc_callback(
             // New OIDC identity - create user and bind identity atomically
             tracing::info!("New OIDC identity, creating user: email={}", email);
 
-            // Use transaction to ensure user creation + identity binding are atomic
-            // If either fails, both roll back (prevents orphaned users or identities)
-            let mut tx = pool.begin().await.map_err(|e| {
-                tracing::error!("Failed to start transaction: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Create user within transaction (inline to use tx executor)
-            let user_id = uuid::Uuid::new_v4();
-            let username = email.split('@').next().unwrap_or(email);
-            let (first_name, last_name) = match user_info.display_name.as_deref() {
-                Some(name) => {
-                    let parts: Vec<&str> = name.splitn(2, ' ').collect();
-                    (
-                        Some(parts[0].to_string()),
-                        Some(parts.get(1).copied().unwrap_or("").to_string()),
-                    )
-                }
-                // Current schema has NOT NULL first_name/last_name.
-                None => (Some(String::new()), Some(String::new())),
-            };
-
-            sqlx::query(
-                "INSERT INTO users (id, username, first_name, last_name, email)
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(user_id)
-            .bind(username)
-            .bind(&first_name)
-            .bind(&last_name)
-            .bind(email)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to create user in transaction: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Bind OIDC identity to user within same transaction
-            let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
             let claims_json = serde_json::to_value(&user_info.custom_claims)
                 .unwrap_or_else(|_| serde_json::json!({}));
-
-            sqlx::query(
-                "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (provider_key, subject, tenant_discriminator)
-                 DO UPDATE SET
-                     user_id = EXCLUDED.user_id,
-                     claims = EXCLUDED.claims,
-                     updated_at = NOW()"
+            let created = create_user_and_bind_external_identity(
+                &pool,
+                email,
+                user_info.display_name.as_deref(),
+                provider_key,
+                subject,
+                tenant_discriminator,
+                claims_json,
             )
-            .bind(user_id)
-            .bind(provider_key)
-            .bind(subject)
-            .bind(&tenant_key)
-            .bind(claims_json)
-            .execute(&mut *tx)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to create external identity binding: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Commit transaction (both user + identity created atomically)
-            tx.commit().await.map_err(|e| {
-                tracing::error!("Failed to commit user creation transaction: {}", e);
+                tracing::error!("Failed to create user/identity binding: {}", e);
                 OidcError::DatabaseError
             })?;
 
             tracing::info!(
                 "Created user + OIDC identity binding atomically: user_id={} provider={} subject={}",
-                user_id,
+                created.id,
                 provider_key,
                 subject
             );
 
-            // Load the created user
-            sqlx::query_as::<_, crate::models::users::User>(
-                "SELECT id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at
-                 FROM users WHERE id = $1"
-            )
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to load created user: {}", e);
-                OidcError::DatabaseError
-            })?
+            created
         }
     };
 
@@ -476,39 +402,23 @@ pub async fn oidc_callback(
 
     let ip_address = Some(addr.ip().to_string());
 
-    use crate::queries::auth_identity::assign_role_to_user;
-
     let groups = normalize_oidc_groups(&user_info.roles);
 
-    let mapping_rows = if groups.is_empty() {
-        vec![]
-    } else {
-        sqlx::query_as::<_, OidcMappingMatchRow>(
-            "SELECT role, environments FROM oidc_group_mappings WHERE group_name = ANY($1)",
-        )
-        .bind(&groups)
-        .fetch_all(&pool)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to load OIDC group mappings: {}", e);
-            OidcError::DatabaseError
-        })?
-    };
+    let mapping_rows = get_oidc_mapping_matches(&pool, &groups).await.map_err(|e| {
+        tracing::error!("Failed to load OIDC group mappings: {}", e);
+        OidcError::DatabaseError
+    })?;
 
     let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
     let mapped_environments = collect_mapped_environments(&mapping_rows);
 
-    let existing_roles = crate::queries::auth_identity::get_user_roles(&pool, user.id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to check user roles: {}", e);
-            OidcError::DatabaseError
-        })?;
+    let existing_roles = get_user_roles(&pool, user.id).await.map_err(|e| {
+        tracing::error!("Failed to check user roles: {}", e);
+        OidcError::DatabaseError
+    })?;
 
     if let Some(role) = mapped_role {
-        sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
-            .bind(user.id)
-            .execute(&pool)
+        clear_user_role_assignments(&pool, user.id)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to reset user role assignments: {}", e);
@@ -530,9 +440,7 @@ pub async fn oidc_callback(
             })?;
     }
 
-    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id = $1")
-        .bind(user.id)
-        .execute(&pool)
+    clear_user_environment_memberships(&pool, user.id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to reset environment memberships: {}", e);
@@ -540,29 +448,20 @@ pub async fn oidc_callback(
         })?;
 
     if !mapped_environments.is_empty() {
-        let environment_ids =
-            sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM environments WHERE name = ANY($1)")
-                .bind(&mapped_environments)
-                .fetch_all(&pool)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Failed to resolve mapped environments: {}", e);
-                    OidcError::DatabaseError
-                })?;
-
-        for environment_id in environment_ids {
-            sqlx::query(
-                "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id)
-                 VALUES ($1, $2, NULL)",
-            )
-            .bind(user.id)
-            .bind(environment_id)
-            .execute(&pool)
+        let environment_ids = get_environment_ids_by_names(&pool, &mapped_environments)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to assign mapped environment: {}", e);
+                tracing::error!("Failed to resolve mapped environments: {}", e);
                 OidcError::DatabaseError
             })?;
+
+        for environment_id in environment_ids {
+            insert_user_environment_membership(&pool, user.id, environment_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to assign mapped environment: {}", e);
+                    OidcError::DatabaseError
+                })?;
         }
     }
 

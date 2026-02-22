@@ -1,5 +1,6 @@
 use crate::auth::repository::normalize_tenant_discriminator;
 use crate::models::auth_identity::{AuthRole, ExternalIdentity, UserRoleAssignment, UserSession};
+use crate::models::users::User;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::error::Error;
@@ -291,4 +292,146 @@ pub async fn get_user_roles(
     user_id: Uuid,
 ) -> Result<Vec<UserRoleAssignment>, AuthRepositoryError> {
     find_user_roles(pool, user_id).await
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct OidcMappingMatchRow {
+    pub role: Option<AuthRole>,
+    pub environments: Vec<String>,
+}
+
+pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<User, AuthRepositoryError> {
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at
+         FROM users WHERE id = $1",
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(user)
+}
+
+pub async fn create_user_and_bind_external_identity(
+    pool: &PgPool,
+    email: &str,
+    display_name: Option<&str>,
+    provider_key: &str,
+    subject: &str,
+    tenant_discriminator: Option<&str>,
+    claims: serde_json::Value,
+) -> Result<User, AuthRepositoryError> {
+    let mut tx = pool.begin().await?;
+
+    let user_id = Uuid::new_v4();
+    let username = email.split('@').next().unwrap_or(email);
+    let (first_name, last_name) = match display_name {
+        Some(name) => {
+            let parts: Vec<&str> = name.splitn(2, ' ').collect();
+            (
+                Some(parts[0].to_string()),
+                Some(parts.get(1).copied().unwrap_or("").to_string()),
+            )
+        }
+        None => (Some(String::new()), Some(String::new())),
+    };
+
+    sqlx::query(
+        "INSERT INTO users (id, username, first_name, last_name, email)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(user_id)
+    .bind(username)
+    .bind(&first_name)
+    .bind(&last_name)
+    .bind(email)
+    .execute(&mut *tx)
+    .await?;
+
+    let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
+    sqlx::query(
+        "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (provider_key, subject, tenant_discriminator)
+         DO UPDATE SET
+             user_id = EXCLUDED.user_id,
+             claims = EXCLUDED.claims,
+             updated_at = NOW()",
+    )
+    .bind(user_id)
+    .bind(provider_key)
+    .bind(subject)
+    .bind(&tenant_key)
+    .bind(claims)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    get_user_by_id(pool, user_id).await
+}
+
+pub async fn get_oidc_mapping_matches(
+    pool: &PgPool,
+    groups: &[String],
+) -> Result<Vec<OidcMappingMatchRow>, AuthRepositoryError> {
+    if groups.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let rows = sqlx::query_as::<_, OidcMappingMatchRow>(
+        "SELECT role, environments FROM oidc_group_mappings WHERE group_name = ANY($1)",
+    )
+    .bind(groups)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn clear_user_role_assignments(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<(), AuthRepositoryError> {
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn clear_user_environment_memberships(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<(), AuthRepositoryError> {
+    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id = $1")
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_environment_ids_by_names(
+    pool: &PgPool,
+    names: &[String],
+) -> Result<Vec<Uuid>, AuthRepositoryError> {
+    let ids = sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name = ANY($1)")
+        .bind(names)
+        .fetch_all(pool)
+        .await?;
+    Ok(ids)
+}
+
+pub async fn insert_user_environment_membership(
+    pool: &PgPool,
+    user_id: Uuid,
+    environment_id: Uuid,
+) -> Result<(), AuthRepositoryError> {
+    sqlx::query(
+        "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id)
+         VALUES ($1, $2, NULL)",
+    )
+    .bind(user_id)
+    .bind(environment_id)
+    .execute(pool)
+    .await?;
+    Ok(())
 }

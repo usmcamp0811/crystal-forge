@@ -4,7 +4,6 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use std::collections::BTreeSet;
 use uuid::Uuid;
@@ -18,18 +17,10 @@ use crate::api::models::{
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::authenticated_user_roles;
 use crate::models::auth_identity::AuthRole;
-
-#[derive(Debug, sqlx::FromRow)]
-struct SystemListRow {
-    id: Uuid,
-    hostname: String,
-    environment_id: Option<Uuid>,
-    environment: Option<String>,
-    is_active: bool,
-    deployment_policy: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-}
+use crate::queries::systems::{
+    find_system_access_row, get_user_environment_membership_ids, list_system_access_rows,
+    touch_system_updated_at, update_system_desired_target, SystemAccessRow,
+};
 
 pub async fn list_systems(
     State(pool): State<PgPool>,
@@ -48,21 +39,7 @@ pub async fn list_systems(
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
 
-    let rows = match sqlx::query_as::<_, SystemListRow>(
-        "SELECT s.id,
-                s.hostname,
-                s.environment_id,
-                e.name AS environment,
-                s.is_active,
-                s.deployment_policy,
-                s.created_at,
-                s.updated_at
-         FROM systems s
-         LEFT JOIN environments e ON e.id = s.environment_id",
-    )
-    .fetch_all(&pool)
-    .await
-    {
+    let rows = match list_system_access_rows(&pool).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load systems"),
     };
@@ -119,23 +96,7 @@ pub async fn get_system(
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
 
-    let row = match sqlx::query_as::<_, SystemListRow>(
-        "SELECT s.id,
-                s.hostname,
-                s.environment_id,
-                e.name AS environment,
-                s.is_active,
-                s.deployment_policy,
-                s.created_at,
-                s.updated_at
-         FROM systems s
-         LEFT JOIN environments e ON e.id = s.environment_id
-         WHERE s.id = $1",
-    )
-    .bind(system_id)
-    .fetch_optional(&pool)
-    .await
-    {
+    let row = match find_system_access_row(&pool, system_id).await {
         Ok(Some(value)) => value,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load system"),
@@ -214,23 +175,7 @@ pub async fn sync_system(
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
 
-    let row = match sqlx::query_as::<_, SystemListRow>(
-        "SELECT s.id,
-                s.hostname,
-                s.environment_id,
-                e.name AS environment,
-                s.is_active,
-                s.deployment_policy,
-                s.created_at,
-                s.updated_at
-         FROM systems s
-         LEFT JOIN environments e ON e.id = s.environment_id
-         WHERE s.id = $1",
-    )
-    .bind(system_id)
-    .fetch_optional(&pool)
-    .await
-    {
+    let row = match find_system_access_row(&pool, system_id).await {
         Ok(Some(value)) => value,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load system"),
@@ -240,12 +185,7 @@ pub async fn sync_system(
         return not_found();
     }
 
-    if sqlx::query("UPDATE systems SET updated_at = NOW() WHERE id = $1")
-        .bind(system_id)
-        .execute(&pool)
-        .await
-        .is_err()
-    {
+    if touch_system_updated_at(&pool, system_id).await.is_err() {
         return internal_error("Failed to queue sync");
     }
 
@@ -287,23 +227,7 @@ pub async fn rollback_system(
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
 
-    let row = match sqlx::query_as::<_, SystemListRow>(
-        "SELECT s.id,
-                s.hostname,
-                s.environment_id,
-                e.name AS environment,
-                s.is_active,
-                s.deployment_policy,
-                s.created_at,
-                s.updated_at
-         FROM systems s
-         LEFT JOIN environments e ON e.id = s.environment_id
-         WHERE s.id = $1",
-    )
-    .bind(system_id)
-    .fetch_optional(&pool)
-    .await
-    {
+    let row = match find_system_access_row(&pool, system_id).await {
         Ok(Some(value)) => value,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load system"),
@@ -313,10 +237,7 @@ pub async fn rollback_system(
         return not_found();
     }
 
-    if sqlx::query("UPDATE systems SET desired_target = $1, updated_at = NOW() WHERE id = $2")
-        .bind(target_commit)
-        .bind(system_id)
-        .execute(&pool)
+    if update_system_desired_target(&pool, system_id, target_commit)
         .await
         .is_err()
     {
@@ -345,7 +266,7 @@ fn highest_role(roles: &[AuthRole]) -> Option<Role> {
     }
 }
 
-fn matches_filters(row: &SystemListRow, params: &SystemsListParams) -> bool {
+fn matches_filters(row: &SystemAccessRow, params: &SystemsListParams) -> bool {
     if let Some(search) = params.search.as_ref() {
         let needle = search.trim().to_ascii_lowercase();
         if !needle.is_empty() && !row.hostname.to_ascii_lowercase().contains(&needle) {
@@ -374,7 +295,7 @@ fn sort_items(items: &mut [SystemSummary], sort_order: Option<SortOrder>) {
     }
 }
 
-fn row_to_summary(row: SystemListRow) -> SystemSummary {
+fn row_to_summary(row: SystemAccessRow) -> SystemSummary {
     SystemSummary {
         id: row.id,
         hostname: row.hostname,
@@ -395,15 +316,7 @@ fn row_to_summary(row: SystemListRow) -> SystemSummary {
 }
 
 async fn load_membership_environment_ids(pool: &PgPool, user_id: Uuid) -> Result<BTreeSet<Uuid>, ()> {
-    let values = sqlx::query_scalar::<_, Uuid>(
-        "SELECT environment_id FROM user_environment_memberships WHERE user_id = $1",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ())?;
-
-    Ok(values.into_iter().collect())
+    get_user_environment_membership_ids(pool, user_id).await.map_err(|_| ())
 }
 
 fn forbidden() -> axum::response::Response {
@@ -470,6 +383,7 @@ fn internal_error(message: &str) -> axum::response::Response {
 mod tests {
     use super::*;
     use axum::extract::State;
+    use chrono::Utc;
     use sqlx::postgres::PgPoolOptions;
 
     #[test]
@@ -482,7 +396,7 @@ mod tests {
 
     #[test]
     fn matches_filters_checks_search_and_environment() {
-        let row = SystemListRow {
+        let row = SystemAccessRow {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid"),
             hostname: "prod-edge-01".to_string(),
             environment_id: None,

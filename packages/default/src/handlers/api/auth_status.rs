@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::config::ServerConfig;
+use crate::queries::users::count_users;
 
 /// Response for setup status check.
 #[derive(Debug, Serialize, Deserialize)]
@@ -25,10 +26,7 @@ pub async fn setup_status(
     State(pool): State<PgPool>,
     State(config): State<ServerConfig>,
 ) -> impl IntoResponse {
-    let user_count: i64 = match sqlx::query_scalar("SELECT COUNT(*) FROM users")
-        .fetch_one(&pool)
-        .await
-    {
+    let user_count: i64 = match count_users(&pool).await {
         Ok(count) => count,
         Err(e) => {
             tracing::error!("Failed to count users: {}", e);

@@ -89,3 +89,33 @@ pub async fn insert_user(pool: &PgPool, email: &str, display_name: Option<&str>)
     create_user(pool, user.clone()).await?;
     Ok(user)
 }
+
+pub async fn count_users(pool: &PgPool) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await?;
+    Ok(count)
+}
+
+pub async fn update_username_and_password_hash(
+    pool: &PgPool,
+    user_id: Uuid,
+    username: &str,
+    password_hash: &str,
+) -> Result<()> {
+    sqlx::query("UPDATE users SET username = $1, password_hash = $2 WHERE id = $3")
+        .bind(username)
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_password_hash_by_user_id(pool: &PgPool, user_id: Uuid) -> Result<Option<String>> {
+    let hash = sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(hash)
+}

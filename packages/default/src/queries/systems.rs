@@ -1,6 +1,9 @@
 use crate::models::systems::System;
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use std::collections::BTreeSet;
+use uuid::Uuid;
 
 pub async fn update_hostname(pool: &PgPool, system: &System, new_hostname: &str) -> Result<()> {
     sqlx::query("UPDATE systems SET hostname = $1, updated_at = NOW() WHERE id = $2")
@@ -92,4 +95,84 @@ pub async fn get_desired_target_by_id(pool: &PgPool, system_id: i32) -> Result<O
 
     // Handle the nested Option from fetch_optional + nullable column
     Ok(result.flatten())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+pub struct SystemAccessRow {
+    pub id: Uuid,
+    pub hostname: String,
+    pub environment_id: Option<Uuid>,
+    pub environment: Option<String>,
+    pub is_active: bool,
+    pub deployment_policy: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub async fn list_system_access_rows(pool: &PgPool) -> Result<Vec<SystemAccessRow>> {
+    let rows = sqlx::query_as::<_, SystemAccessRow>(
+        "SELECT s.id,
+                s.hostname,
+                s.environment_id,
+                e.name AS environment,
+                s.is_active,
+                s.deployment_policy,
+                s.created_at,
+                s.updated_at
+         FROM systems s
+         LEFT JOIN environments e ON e.id = s.environment_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn find_system_access_row(pool: &PgPool, system_id: Uuid) -> Result<Option<SystemAccessRow>> {
+    let row = sqlx::query_as::<_, SystemAccessRow>(
+        "SELECT s.id,
+                s.hostname,
+                s.environment_id,
+                e.name AS environment,
+                s.is_active,
+                s.deployment_policy,
+                s.created_at,
+                s.updated_at
+         FROM systems s
+         LEFT JOIN environments e ON e.id = s.environment_id
+         WHERE s.id = $1",
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+pub async fn touch_system_updated_at(pool: &PgPool, system_id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE systems SET updated_at = NOW() WHERE id = $1")
+        .bind(system_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn update_system_desired_target(pool: &PgPool, system_id: Uuid, target_commit: &str) -> Result<()> {
+    sqlx::query("UPDATE systems SET desired_target = $1, updated_at = NOW() WHERE id = $2")
+        .bind(target_commit)
+        .bind(system_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn get_user_environment_membership_ids(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<BTreeSet<Uuid>> {
+    let ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT environment_id FROM user_environment_memberships WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(ids.into_iter().collect())
 }

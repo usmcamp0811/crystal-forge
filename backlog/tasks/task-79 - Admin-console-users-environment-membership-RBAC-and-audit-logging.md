@@ -170,5 +170,6 @@ Latest progress:
 - Added backend sync/rollback system mutation endpoints with operator-or-admin checks and environment-scope enforcement.
 - Updated system detail UI to call sync/rollback APIs and disable mutation actions for viewer-role users.
 - Refactored admin API data access into `queries/admin.rs` and removed inline SQL from `handlers/api/admin.rs` to align with query-layer conventions.
+- Removed inline SQL from `handlers/api/auth_oidc.rs`, `handlers/api/systems.rs`, `handlers/api/auth_local.rs`, and `handlers/api/auth_status.rs` by moving DB calls into query modules.
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->
