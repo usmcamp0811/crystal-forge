@@ -267,3 +267,28 @@ pub async fn invalidate_session_by_token_hash(
     repo.invalidate_session_by_token_hash(session_token_hash)
         .await
 }
+
+/// Get a session by token hash (including expired/invalidated sessions).
+pub async fn get_session_by_token_hash(
+    pool: &PgPool,
+    session_token_hash: &str,
+) -> Result<Option<UserSession>, AuthRepositoryError> {
+    let session = sqlx::query_as::<_, UserSession>(
+        "SELECT id, user_id, session_token_hash, issued_at, expires_at, last_seen_at, invalidated_at, user_agent, ip_address
+         FROM user_sessions
+         WHERE session_token_hash = $1",
+    )
+    .bind(session_token_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(session)
+}
+
+/// Get all roles for a user.
+pub async fn get_user_roles(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<UserRoleAssignment>, AuthRepositoryError> {
+    find_user_roles(pool, user_id).await
+}

@@ -5,3 +5,4 @@
 //! will live here as context providers.
 
 pub mod app_state;
+pub mod auth;

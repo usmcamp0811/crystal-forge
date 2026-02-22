@@ -124,15 +124,18 @@ pub async fn authenticate_agent_request(
     authenticate_agent_request_with_lookup(headers, body, pool).await
 }
 
+use crate::config::ServerConfig;
+
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]
 pub struct CFState {
     pub pool: PgPool,
+    pub server_config: ServerConfig,
 }
 
 impl CFState {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, server_config: ServerConfig) -> Self {
+        Self { pool, server_config }
     }
 
     pub fn pool(&self) -> &PgPool {
@@ -143,6 +146,12 @@ impl CFState {
 impl FromRef<CFState> for PgPool {
     fn from_ref(state: &CFState) -> PgPool {
         state.pool.clone()
+    }
+}
+
+impl FromRef<CFState> for ServerConfig {
+    fn from_ref(state: &CFState) -> ServerConfig {
+        state.server_config.clone()
     }
 }
 

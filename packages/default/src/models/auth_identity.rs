@@ -44,3 +44,15 @@ pub struct UserSession {
     pub user_agent: Option<String>,
     pub ip_address: Option<String>,
 }
+
+impl UserSession {
+    /// Check if the session has expired.
+    pub fn is_expired(&self) -> bool {
+        Utc::now() > self.expires_at
+    }
+
+    /// Check if the session has been invalidated.
+    pub fn is_invalidated(&self) -> bool {
+        self.invalidated_at.is_some()
+    }
+}

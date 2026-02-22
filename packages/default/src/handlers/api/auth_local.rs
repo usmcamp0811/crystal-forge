@@ -39,6 +39,7 @@ pub struct RegisterResponse {
 /// Register a new local user.
 ///
 /// Creates a user with a hashed password for local authentication.
+/// If this is the first user in the system, they are automatically assigned Admin role.
 pub async fn register(
     State(pool): State<PgPool>,
     Json(payload): Json<RegisterRequest>,
@@ -63,6 +64,14 @@ pub async fn register(
     {
         return Err(LocalAuthError::EmailTaken);
     }
+
+    // Check if this is the first user (initial setup)
+    let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&pool)
+        .await
+        .map_err(|_| LocalAuthError::DatabaseError)?;
+    
+    let is_first_user = user_count == 0;
 
     // Hash password
     let password_hash =
@@ -93,7 +102,19 @@ pub async fn register(
 
     user.username = payload.username.clone();
 
-    tracing::info!("Registered new local user: {} ({})", user.email, user.id);
+    // Assign role: Admin if first user, otherwise require admin to assign roles
+    if is_first_user {
+        use crate::models::auth_identity::AuthRole;
+        use crate::queries::auth_identity::assign_role_to_user;
+        
+        assign_role_to_user(&pool, user.id, AuthRole::Admin, None)
+            .await
+            .map_err(|_| LocalAuthError::DatabaseError)?;
+        
+        tracing::info!("Registered FIRST local user as Admin: {} ({})", user.email, user.id);
+    } else {
+        tracing::info!("Registered new local user: {} ({})", user.email, user.id);
+    }
 
     Ok((
         StatusCode::CREATED,

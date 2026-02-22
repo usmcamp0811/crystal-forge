@@ -2,6 +2,20 @@
 
 use dioxus::prelude::*;
 
+use crate::api::models::AuthContext;
+
+/// State of authentication fetch operation.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum AuthFetchState {
+    /// Auth context has not been fetched yet.
+    #[default]
+    Loading,
+    /// Auth context was successfully fetched.
+    Loaded,
+    /// Auth fetch failed (network error, server error, etc.)
+    Error,
+}
+
 /// Global application configuration and shared state.
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -9,6 +23,10 @@ pub struct AppState {
     pub api_base_url: String,
     /// Polling interval for dashboard data in seconds.
     pub poll_interval_secs: u64,
+    /// Current authentication context (None if not authenticated or not yet loaded).
+    pub auth: Option<AuthContext>,
+    /// State of auth fetch operation.
+    pub auth_fetch_state: AuthFetchState,
 }
 
 impl Default for AppState {
@@ -16,6 +34,8 @@ impl Default for AppState {
         Self {
             api_base_url: "/api/v1".to_string(),
             poll_interval_secs: 30,
+            auth: None,
+            auth_fetch_state: AuthFetchState::Loading,
         }
     }
 }

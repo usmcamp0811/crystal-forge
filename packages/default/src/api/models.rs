@@ -372,14 +372,65 @@ pub enum SortOrder {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Authentication Context DTOs — GET /api/auth/whoami
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Authentication mode the server is operating under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthMode {
+    /// Development mode with local fixture users.
+    Dev,
+    /// Local username/password authentication.
+    Local,
+    /// OIDC-based authentication.
+    Oidc,
+}
+
+/// User role in the RBAC system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum Role {
+    Admin,
+    Operator,
+    Viewer,
+}
+
+/// Authenticated user information for the current session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthUser {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+}
+
+/// Authentication context exposed to the UI.
+///
+/// This is the single source of truth for auth state in the frontend.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuthContext {
+    /// Whether the user is authenticated.
+    pub is_authenticated: bool,
+    /// Authenticated user information (None if not authenticated).
+    pub user: Option<AuthUser>,
+    /// Roles assigned to the current user (empty if not authenticated).
+    pub roles: Vec<Role>,
+    /// Authentication mode the server is using.
+    pub auth_mode: AuthMode,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Error Response
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Standard error envelope for API error responses.
+/// Standard error envelope for all API error responses.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApiError {
+    /// Machine-readable error code (e.g., "not_found", "validation_error").
     pub error: String,
+    /// Human-readable error message.
     pub message: String,
+    /// Optional additional context or structured validation errors.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }

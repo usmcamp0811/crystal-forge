@@ -11,8 +11,10 @@ use crate::views::dashboard::DashboardView;
 use crate::views::dev_login::DevLoginView;
 use crate::views::environments::EnvironmentsView;
 use crate::views::flakes::FlakesView;
+use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
 use crate::views::policies::PoliciesView;
+use crate::views::register::RegisterView;
 use crate::views::style_guide::StyleGuideView;
 use crate::views::system_detail::SystemDetailView;
 use crate::views::systems::SystemsView;
@@ -51,12 +53,20 @@ pub enum Route {
     #[route("/style-guide")]
     StyleGuideView {},
 
-    #[end_layout]
-    #[route("/dev/login")]
-    DevLoginView {},
-
+    // Catch-all for 404 - inside AppShell so auth guard applies
     #[route("/:..route")]
     NotFoundView { route: Vec<String> },
+
+    #[end_layout]
+    // Auth routes - outside AppShell (no sidebar/topbar)
+    #[route("/login")]
+    LoginView {},
+
+    #[route("/register")]
+    RegisterView {},
+
+    #[route("/dev/login")]
+    DevLoginView {},
 }
 
 impl Route {
@@ -71,6 +81,8 @@ impl Route {
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::StyleGuideView { .. } => "Style Guide".to_string(),
+            Route::LoginView { .. } => "Sign In".to_string(),
+            Route::RegisterView { .. } => "Register".to_string(),
             Route::DevLoginView { .. } => "Development Login".to_string(),
             Route::NotFoundView { .. } => "Not Found".to_string(),
         }

@@ -303,7 +303,7 @@ let
       CRYSTAL_FORGE_OIDC_CLIENT_ID = oidc_client_id;
       CRYSTAL_FORGE_OIDC_CLIENT_SECRET = oidc_client_secret;
       CRYSTAL_FORGE_OIDC_REDIRECT_URI =
-        "http://127.0.0.1:${toString cf_port}/auth/callback";
+        "http://127.0.0.1:${toString cf_port}/api/auth/oidc/callback";
     };
     settings.processes.server.depends_on."oidc".condition = "process_healthy";
   };
