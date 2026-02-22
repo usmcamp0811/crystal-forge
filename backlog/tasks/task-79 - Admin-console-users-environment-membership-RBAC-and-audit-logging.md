@@ -115,7 +115,7 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 - [x] #16 UI clearly communicates which user attributes are IdP-derived vs locally-managed.
 
 ### Audit logging (required)
-- [ ] #17 Backend records audit events for user create/update/disable, role changes, environment membership changes, and OIDC mapping changes, with actor, target, action, timestamp, and request origin metadata.
+- [x] #17 Backend records audit events for user create/update/disable, role changes, environment membership changes, and OIDC mapping changes, with actor, target, action, timestamp, and request origin metadata.
 - [x] #18 Admin UI includes an audit log view with timestamp, actor, action, target, and filter controls (actor, action type, date range), plus pagination.
 
 ### Tests
@@ -152,4 +152,5 @@ Latest progress:
 - Added OIDC mapping validation for normalized group names, duplicate environment detection, and unknown environment rejection.
 - Added explicit identity source markers in Admin Users and disabled direct edits for IdP-derived users.
 - Added dedicated OIDC mapping derivation unit coverage for role precedence and environment normalization at login.
+- Added audit metadata coverage for request-origin extraction precedence and persisted admin audit action keys.
 <!-- SECTION:NOTES:END -->

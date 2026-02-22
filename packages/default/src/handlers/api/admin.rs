@@ -1417,6 +1417,53 @@ mod tests {
         assert_eq!(values, vec!["prod".to_string(), "staging".to_string()]);
     }
 
+    #[test]
+    fn extract_request_origin_prefers_forwarded_over_real_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "198.51.100.5".parse().expect("valid header"));
+        headers.insert("x-real-ip", "203.0.113.10".parse().expect("valid header"));
+
+        assert_eq!(
+            extract_request_origin(&headers),
+            Some("198.51.100.5".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_request_origin_falls_back_to_real_ip() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "203.0.113.10".parse().expect("valid header"));
+
+        assert_eq!(
+            extract_request_origin(&headers),
+            Some("203.0.113.10".to_string())
+        );
+    }
+
+    #[test]
+    fn action_to_str_covers_admin_audit_variants() {
+        assert_eq!(action_to_str(AuditAction::UserCreated), "user_created");
+        assert_eq!(action_to_str(AuditAction::UserUpdated), "user_updated");
+        assert_eq!(action_to_str(AuditAction::UserEnabled), "user_enabled");
+        assert_eq!(action_to_str(AuditAction::UserDisabled), "user_disabled");
+        assert_eq!(
+            action_to_str(AuditAction::UserRoleAssigned),
+            "user_role_assigned"
+        );
+        assert_eq!(
+            action_to_str(AuditAction::UserEnvironmentMembershipUpdated),
+            "user_environment_membership_updated"
+        );
+        assert_eq!(
+            action_to_str(AuditAction::OidcMappingChanged),
+            "oidc_mapping_changed"
+        );
+        assert_eq!(
+            action_to_str(AuditAction::SessionInvalidated),
+            "session_invalidated"
+        );
+    }
+
     fn lazy_pool() -> PgPool {
         PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
