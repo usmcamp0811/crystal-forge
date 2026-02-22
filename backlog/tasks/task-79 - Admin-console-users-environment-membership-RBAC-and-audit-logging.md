@@ -174,5 +174,9 @@ Latest progress:
 - Added audit events for system sync/rollback mutation routes and surfaced new audit action labels in Admin UI filters/table.
 - Hardened last-admin guardrails with transaction + `FOR UPDATE` locking for disable/demotion race safety.
 - Updated OIDC login membership sync to preserve existing memberships when mappings are empty or unresolved, preventing accidental lockout on mapping/claim drift.
+- Enforced disabled-user auth lockout by checking `users.is_active` in shared RBAC session resolution and local-auth login flow.
+- Tightened system rollback input validation (length + hexadecimal format) with explicit `400` responses on invalid targets.
+- Updated environment-scope access semantics so systems without an environment are admin-only.
+- Created follow-up TASK-116 for admin/audit/systems query-path performance optimization.
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->

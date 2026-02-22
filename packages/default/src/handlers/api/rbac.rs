@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
 use crate::models::auth_identity::AuthRole;
-use crate::queries::auth_identity::{get_session_by_token_hash, get_user_roles};
+use crate::queries::auth_identity::{get_session_by_token_hash, get_user_roles, is_user_active};
 
 pub async fn require_admin(pool: &PgPool, headers: &HeaderMap) -> Option<Uuid> {
     let (user_id, roles) = resolve_authenticated_roles(pool, headers).await?;
@@ -59,6 +59,27 @@ pub fn has_viewer_or_above_role(roles: &[AuthRole]) -> bool {
     })
 }
 
+pub fn extract_request_origin(headers: &HeaderMap) -> Option<String> {
+    // NOTE: Header values are request-supplied unless a trusted proxy contract is configured.
+    // Treat this as best-effort origin metadata, not a cryptographically trusted client IP.
+    let forwarded = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if forwarded.is_some() {
+        return forwarded;
+    }
+
+    headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 async fn resolve_authenticated_roles(
     pool: &PgPool,
     headers: &HeaderMap,
@@ -68,6 +89,10 @@ async fn resolve_authenticated_roles(
     let session = get_session_by_token_hash(pool, &token_hash).await.ok()??;
 
     if session.is_expired() || session.is_invalidated() {
+        return None;
+    }
+
+    if !is_user_active(pool, session.user_id).await.ok()? {
         return None;
     }
 

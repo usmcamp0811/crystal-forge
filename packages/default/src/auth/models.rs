@@ -57,7 +57,7 @@ impl Role {
 
         match system_environment_id {
             Some(environment_id) => member_environment_ids.contains(&environment_id),
-            None => member_environment_ids.is_empty(),
+            None => false,
         }
     }
 }
@@ -105,7 +105,7 @@ mod tests {
         assert!(!Role::Operator.can_access_system_environment(Some(prod_id), &staging_only));
         assert!(Role::Viewer.can_access_system_environment(Some(staging_id), &staging_only));
         assert!(!Role::Viewer.can_access_system_environment(None, &staging_only));
-
-        assert!(Role::Viewer.can_access_system_environment(None, &BTreeSet::new()));
+        assert!(!Role::Viewer.can_access_system_environment(None, &BTreeSet::new()));
+        assert!(Role::Admin.can_access_system_environment(None, &BTreeSet::new()));
     }
 }

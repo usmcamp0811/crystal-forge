@@ -164,6 +164,10 @@ pub async fn login(
 
     let user = user.ok_or(LocalAuthError::InvalidCredentials)?;
 
+    if !user.is_active {
+        return Err(LocalAuthError::InvalidCredentials);
+    }
+
     // Get password hash
     let password_hash = get_password_hash_by_user_id(&pool, user.id)
         .await

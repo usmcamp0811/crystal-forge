@@ -14,7 +14,7 @@ use crate::api::models::{
     AdminUserSummary, ApiError, AuditAction, AuditEvent, IdentitySource, OidcGroupMapping,
     PaginatedResponse, Role,
 };
-use crate::handlers::api::rbac::require_admin as require_admin_user;
+use crate::handlers::api::rbac::{extract_request_origin, require_admin as require_admin_user};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
 use crate::queries::auth_identity::{assign_role_to_user, get_user_roles};
@@ -871,25 +871,6 @@ async fn record_admin_audit_event(
     .map_err(|_| ())?;
 
     Ok(())
-}
-
-fn extract_request_origin(headers: &HeaderMap) -> Option<String> {
-    let forwarded = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-    if forwarded.is_some() {
-        return forwarded;
-    }
-
-    headers
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
 }
 
 fn should_block_last_admin_disable(

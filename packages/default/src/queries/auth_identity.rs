@@ -311,6 +311,14 @@ pub async fn get_user_by_id(pool: &PgPool, user_id: Uuid) -> Result<User, AuthRe
     Ok(user)
 }
 
+pub async fn is_user_active(pool: &PgPool, user_id: Uuid) -> Result<bool, AuthRepositoryError> {
+    let value = sqlx::query_scalar::<_, bool>("SELECT is_active FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(value.unwrap_or(false))
+}
+
 pub async fn create_user_and_bind_external_identity(
     pool: &PgPool,
     email: &str,

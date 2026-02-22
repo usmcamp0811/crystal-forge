@@ -15,7 +15,7 @@ use crate::api::models::{
     SystemsListParams,
 };
 use crate::auth::models::Role;
-use crate::handlers::api::rbac::authenticated_user_roles;
+use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::systems::{
     find_system_access_row, get_user_environment_membership_ids, list_system_access_rows,
@@ -232,8 +232,8 @@ pub async fn rollback_system(
     }
 
     let target_commit = payload.target_commit.trim();
-    if target_commit.is_empty() {
-        return bad_request("Target commit is required");
+    if let Err(message) = validate_target_commit(target_commit) {
+        return bad_request(&message);
     }
 
     let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
@@ -409,29 +409,33 @@ fn internal_error(message: &str) -> axum::response::Response {
 
 fn action_to_str(action: AuditAction) -> &'static str {
     match action {
+        AuditAction::UserCreated => "user_created",
+        AuditAction::UserUpdated => "user_updated",
+        AuditAction::UserEnabled => "user_enabled",
+        AuditAction::UserDisabled => "user_disabled",
+        AuditAction::UserRoleAssigned => "user_role_assigned",
+        AuditAction::UserEnvironmentMembershipUpdated => "user_environment_membership_updated",
+        AuditAction::OidcMappingChanged => "oidc_mapping_changed",
         AuditAction::SystemSyncRequested => "system_sync_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
-        _ => "unknown",
+        AuditAction::SessionInvalidated => "session_invalidated",
     }
 }
 
-fn extract_request_origin(headers: &HeaderMap) -> Option<String> {
-    let forwarded = headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string);
-    if forwarded.is_some() {
-        return forwarded;
+fn validate_target_commit(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("Target commit is required".to_string());
     }
 
-    headers
-        .get("x-real-ip")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+    if !(7..=64).contains(&value.len()) {
+        return Err("Target commit must be between 7 and 64 hex characters".to_string());
+    }
+
+    if !value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Err("Target commit must contain only hexadecimal characters".to_string());
+    }
+
+    Ok(())
 }
 
 async fn record_system_mutation_audit(
@@ -566,5 +570,14 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn rollback_target_commit_validation_enforces_bounds_and_format() {
+        assert!(validate_target_commit("").is_err());
+        assert!(validate_target_commit("abc").is_err());
+        assert!(validate_target_commit("zzzzzzz").is_err());
+        assert!(validate_target_commit("a1b2c3d").is_ok());
+        assert!(validate_target_commit(&"a".repeat(65)).is_err());
     }
 }
