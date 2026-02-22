@@ -695,6 +695,7 @@ pub enum AuditAction {
     UserDisabled,
     UserRoleAssigned,
     UserEnvironmentMembershipUpdated,
+    OidcMappingChanged,
     SessionInvalidated,
 }
 
@@ -706,6 +707,22 @@ pub struct AuditEvent {
     pub action: AuditAction,
     pub target: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OidcGroupMapping {
+    pub id: String,
+    pub group_name: String,
+    pub role: Option<Role>,
+    pub environments: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdminUpsertOidcMappingRequest {
+    pub group_name: String,
+    pub role: Option<Role>,
+    pub environments: Vec<String>,
 }
 
 /// Query parameters for admin audit event listing.

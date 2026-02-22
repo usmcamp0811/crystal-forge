@@ -440,6 +440,7 @@ pub enum AuditAction {
     UserDisabled,
     UserRoleAssigned,
     UserEnvironmentMembershipUpdated,
+    OidcMappingChanged,
     SessionInvalidated,
 }
 
@@ -451,6 +452,15 @@ pub struct AuditEvent {
     pub action: AuditAction,
     pub target: String,
     pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcGroupMapping {
+    pub id: String,
+    pub group_name: String,
+    pub role: Option<Role>,
+    pub environments: Vec<String>,
+    pub updated_at: DateTime<Utc>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

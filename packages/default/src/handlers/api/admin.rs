@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    AdminUserSummary, ApiError, AuditAction, AuditEvent, PaginatedResponse, Role,
+    AdminUserSummary, ApiError, AuditAction, AuditEvent, OidcGroupMapping, PaginatedResponse, Role,
 };
 use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
 use crate::models::auth_identity::AuthRole;
@@ -63,6 +63,15 @@ struct EnvironmentLookupRow {
     name: String,
 }
 
+#[derive(Debug, sqlx::FromRow)]
+struct OidcMappingRow {
+    id: Uuid,
+    group_name: String,
+    role: Option<AuthRole>,
+    environments: Vec<String>,
+    updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateAdminUserRequest {
     pub email: String,
@@ -77,6 +86,14 @@ pub struct UpdateAdminUserRequest {
     pub role: Option<Role>,
     pub enabled: Option<bool>,
     pub environments: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpsertOidcMappingRequest {
+    pub group_name: String,
+    pub role: Option<Role>,
+    #[serde(default)]
+    pub environments: Vec<String>,
 }
 
 pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
@@ -120,6 +137,137 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
     }
 
     (StatusCode::OK, Json(result)).into_response()
+}
+
+pub async fn list_oidc_mappings(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(_admin_user) = require_admin(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let rows = match sqlx::query_as::<_, OidcMappingRow>(
+        "SELECT id, group_name, role, environments, updated_at
+         FROM oidc_group_mappings
+         ORDER BY group_name ASC",
+    )
+    .fetch_all(&pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to list OIDC mappings"),
+    };
+
+    let mappings = rows.into_iter().map(to_oidc_mapping).collect::<Vec<_>>();
+    (StatusCode::OK, Json(mappings)).into_response()
+}
+
+pub async fn upsert_oidc_mapping(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<UpsertOidcMappingRequest>,
+) -> impl IntoResponse {
+    let Some(admin_user_id) = require_admin(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let group_name = payload.group_name.trim().to_string();
+    if group_name.is_empty() {
+        return bad_request("Group name is required");
+    }
+
+    let environments = payload
+        .environments
+        .into_iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let role = payload.role.map(role_to_auth_role);
+
+    let row = match sqlx::query_as::<_, OidcMappingRow>(
+        "INSERT INTO oidc_group_mappings (group_name, role, environments)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (group_name)
+         DO UPDATE SET role = EXCLUDED.role, environments = EXCLUDED.environments
+         RETURNING id, group_name, role, environments, updated_at",
+    )
+    .bind(&group_name)
+    .bind(role)
+    .bind(&environments)
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to save OIDC mapping"),
+    };
+
+    if record_admin_audit_event(
+        &pool,
+        admin_user_id,
+        AuditAction::OidcMappingChanged,
+        format!("group:{}", row.group_name),
+        extract_request_origin(&headers),
+        serde_json::json!({ "role": row.role, "environments": row.environments }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    (StatusCode::OK, Json(to_oidc_mapping(row))).into_response()
+}
+
+pub async fn delete_oidc_mapping(
+    State(pool): State<PgPool>,
+    Path(mapping_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(admin_user_id) = require_admin(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let mapping_id = match Uuid::parse_str(&mapping_id) {
+        Ok(value) => value,
+        Err(_) => return bad_request("Mapping id must be a valid UUID"),
+    };
+
+    let deleted = match sqlx::query_as::<_, OidcMappingRow>(
+        "DELETE FROM oidc_group_mappings
+         WHERE id = $1
+         RETURNING id, group_name, role, environments, updated_at",
+    )
+    .bind(mapping_id)
+    .fetch_optional(&pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to delete OIDC mapping"),
+    };
+
+    let Some(mapping) = deleted else {
+        return not_found("OIDC mapping not found");
+    };
+
+    if record_admin_audit_event(
+        &pool,
+        admin_user_id,
+        AuditAction::OidcMappingChanged,
+        format!("group:{}", mapping.group_name),
+        extract_request_origin(&headers),
+        serde_json::json!({ "deleted": true }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn create_user(
@@ -597,6 +745,7 @@ fn parse_audit_action(value: &str) -> Option<AuditAction> {
         "user_environment_membership_updated" => {
             Some(AuditAction::UserEnvironmentMembershipUpdated)
         }
+        "oidc_mapping_changed" => Some(AuditAction::OidcMappingChanged),
         "session_invalidated" => Some(AuditAction::SessionInvalidated),
         _ => None,
     }
@@ -831,7 +980,26 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::UserDisabled => "user_disabled",
         AuditAction::UserRoleAssigned => "user_role_assigned",
         AuditAction::UserEnvironmentMembershipUpdated => "user_environment_membership_updated",
+        AuditAction::OidcMappingChanged => "oidc_mapping_changed",
         AuditAction::SessionInvalidated => "session_invalidated",
+    }
+}
+
+fn to_oidc_mapping(row: OidcMappingRow) -> OidcGroupMapping {
+    OidcGroupMapping {
+        id: row.id.to_string(),
+        group_name: row.group_name,
+        role: row.role.map(auth_role_to_role),
+        environments: row.environments,
+        updated_at: row.updated_at,
+    }
+}
+
+fn auth_role_to_role(role: AuthRole) -> Role {
+    match role {
+        AuthRole::Admin => Role::Admin,
+        AuthRole::Operator => Role::Operator,
+        AuthRole::Viewer => Role::Viewer,
     }
 }
 
@@ -1165,6 +1333,10 @@ mod tests {
         assert_eq!(
             parse_audit_action("user_environment_membership_updated"),
             Some(AuditAction::UserEnvironmentMembershipUpdated)
+        );
+        assert_eq!(
+            parse_audit_action("oidc_mapping_changed"),
+            Some(AuditAction::OidcMappingChanged)
         );
         assert_eq!(parse_audit_action("unknown"), None);
     }

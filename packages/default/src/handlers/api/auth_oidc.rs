@@ -26,6 +26,7 @@ use crate::auth::oidc::{
 use crate::auth::repository::normalize_tenant_discriminator;
 use crate::config::OidcConfig;
 use crate::handlers::api::auth_session::establish_user_session;
+use crate::models::auth_identity::AuthRole;
 use crate::queries::auth_identity::AuthIdentityRepository;
 
 /// Shared OIDC client state.
@@ -468,13 +469,46 @@ pub async fn oidc_callback(
 
     let ip_address = Some(addr.ip().to_string());
 
-    // TODO: Assign roles based on OIDC groups (TASK-65.4 - role mapping)
-    // For now, assign Viewer role as default to allow login
-    // This should be replaced with proper role mapping from OIDC claims
-    use crate::models::auth_identity::AuthRole;
     use crate::queries::auth_identity::assign_role_to_user;
 
-    // Check if user has any roles, if not assign Viewer as default
+    let groups = user_info
+        .roles
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+
+    #[derive(sqlx::FromRow)]
+    struct OidcMappingMatchRow {
+        role: Option<AuthRole>,
+        environments: Vec<String>,
+    }
+
+    let mapping_rows = if groups.is_empty() {
+        vec![]
+    } else {
+        sqlx::query_as::<_, OidcMappingMatchRow>(
+            "SELECT role, environments FROM oidc_group_mappings WHERE group_name = ANY($1)",
+        )
+        .bind(&groups)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load OIDC group mappings: {}", e);
+            OidcError::DatabaseError
+        })?
+    };
+
+    let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
+    let mapped_environments = mapping_rows
+        .iter()
+        .flat_map(|row| row.environments.iter())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
     let existing_roles = crate::queries::auth_identity::get_user_roles(&pool, user.id)
         .await
         .map_err(|e| {
@@ -482,17 +516,65 @@ pub async fn oidc_callback(
             OidcError::DatabaseError
         })?;
 
-    if existing_roles.is_empty() {
-        tracing::info!(
-            "Assigning default Viewer role to new OIDC user: {}",
-            user.id
-        );
+    if let Some(role) = mapped_role {
+        sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to reset user role assignments: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+        assign_role_to_user(&pool, user.id, role, None)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to assign mapped role: {}", e);
+                OidcError::DatabaseError
+            })?;
+    } else if existing_roles.is_empty() {
         assign_role_to_user(&pool, user.id, AuthRole::Viewer, None)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to assign default role: {}", e);
                 OidcError::DatabaseError
             })?;
+    }
+
+    sqlx::query("DELETE FROM user_environment_memberships WHERE user_id = $1")
+        .bind(user.id)
+        .execute(&pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to reset environment memberships: {}", e);
+            OidcError::DatabaseError
+        })?;
+
+    if !mapped_environments.is_empty() {
+        let environment_ids =
+            sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM environments WHERE name = ANY($1)")
+                .bind(&mapped_environments)
+                .fetch_all(&pool)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to resolve mapped environments: {}", e);
+                    OidcError::DatabaseError
+                })?;
+
+        for environment_id in environment_ids {
+            sqlx::query(
+                "INSERT INTO user_environment_memberships (user_id, environment_id, assigned_by_user_id)
+                 VALUES ($1, $2, NULL)",
+            )
+            .bind(user.id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to assign mapped environment: {}", e);
+                OidcError::DatabaseError
+            })?;
+        }
     }
 
     let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
@@ -527,6 +609,26 @@ pub async fn oidc_callback(
         .append(header::SET_COOKIE, session_cookies.csrf_cookie);
 
     Ok(response)
+}
+
+fn derive_highest_role(roles: impl Iterator<Item = AuthRole>) -> Option<AuthRole> {
+    let mut has_operator = false;
+    let mut has_viewer = false;
+    for role in roles {
+        match role {
+            AuthRole::Admin => return Some(AuthRole::Admin),
+            AuthRole::Operator => has_operator = true,
+            AuthRole::Viewer => has_viewer = true,
+        }
+    }
+
+    if has_operator {
+        Some(AuthRole::Operator)
+    } else if has_viewer {
+        Some(AuthRole::Viewer)
+    } else {
+        None
+    }
 }
 
 /// Extract OIDC state from __Host-oidc-state cookie.

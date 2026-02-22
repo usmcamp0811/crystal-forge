@@ -110,6 +110,18 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))
         .route("/api/v1/admin/users/:id", patch(admin::update_user))
+        .route(
+            "/api/v1/admin/oidc-mappings",
+            get(admin::list_oidc_mappings),
+        )
+        .route(
+            "/api/v1/admin/oidc-mappings",
+            post(admin::upsert_oidc_mapping),
+        )
+        .route(
+            "/api/v1/admin/oidc-mappings/:id",
+            delete(admin::delete_oidc_mapping),
+        )
         .route("/api/v1/admin/audit-events", get(admin::list_audit_events))
         // Auth context endpoint (publicly accessible)
         .route("/api/auth/whoami", get(auth_whoami::whoami))

@@ -3,11 +3,12 @@ use dioxus::prelude::*;
 use std::collections::HashMap;
 
 use crate::api::client::{
-    create_admin_user, fetch_admin_audit_events, fetch_admin_users, update_admin_user,
+    create_admin_user, delete_admin_oidc_mapping, fetch_admin_audit_events,
+    fetch_admin_oidc_mappings, fetch_admin_users, update_admin_user, upsert_admin_oidc_mapping,
 };
 use crate::api::models::{
-    AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest, AdminUserSummary,
-    AuditEvent, Role,
+    AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
+    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, OidcGroupMapping, Role,
 };
 use crate::theme;
 
@@ -19,6 +20,7 @@ pub fn AdminView() -> Element {
     let mut user_drafts = use_signal(HashMap::<String, UserEditDraft>::new);
 
     let mut audit_events = use_signal(Vec::<AuditEvent>::new);
+    let mut oidc_mappings = use_signal(Vec::<OidcGroupMapping>::new);
     let mut audit_total = use_signal(|| 0_i64);
     let mut audit_page = use_signal(|| 1_i64);
 
@@ -26,6 +28,7 @@ pub fn AdminView() -> Element {
     let mut audit_loading = use_signal(|| true);
     let mut users_error = use_signal(|| None::<String>);
     let mut audit_error = use_signal(|| None::<String>);
+    let mut oidc_error = use_signal(|| None::<String>);
 
     let mut actor_filter = use_signal(String::new);
     let mut action_filter = use_signal(String::new);
@@ -38,6 +41,11 @@ pub fn AdminView() -> Element {
     let mut create_environments = use_signal(String::new);
     let mut create_submitting = use_signal(|| false);
 
+    let mut mapping_group = use_signal(String::new);
+    let mut mapping_role = use_signal(|| "Viewer".to_string());
+    let mut mapping_environments = use_signal(String::new);
+    let mut mapping_submitting = use_signal(|| false);
+
     {
         let mut users = users.clone();
         let mut user_drafts = user_drafts.clone();
@@ -46,6 +54,14 @@ pub fn AdminView() -> Element {
         use_effect(move || {
             spawn(async move {
                 refresh_users(users, user_drafts, users_error).await;
+
+                match fetch_admin_oidc_mappings().await {
+                    Ok(next) => {
+                        oidc_mappings.set(next);
+                        oidc_error.set(None);
+                    }
+                    Err(e) => oidc_error.set(Some(format!("Failed to load OIDC mappings: {e}"))),
+                }
 
                 users_loading.set(false);
             });
@@ -345,6 +361,151 @@ pub fn AdminView() -> Element {
 
             section {
                 class: "space-y-3",
+                h2 { class: "text-lg font-semibold text-white", "OIDC Mappings" }
+                p {
+                    class: "text-xs {theme::text::SECONDARY}",
+                    "IdP-derived role and environments are resolved from these group mappings at login."
+                }
+
+                div {
+                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
+                    div {
+                        class: "grid gap-3 sm:grid-cols-3",
+                        input {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            r#type: "text",
+                            placeholder: "OIDC group name",
+                            value: "{mapping_group.read()}",
+                            oninput: move |evt| mapping_group.set(evt.value())
+                        }
+                        select {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            value: "{mapping_role.read()}",
+                            onchange: move |evt| mapping_role.set(evt.value()),
+                            option { value: "Admin", "Admin" }
+                            option { value: "Operator", "Operator" }
+                            option { value: "Viewer", "Viewer" }
+                        }
+                        input {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            r#type: "text",
+                            placeholder: "Environments (comma-separated)",
+                            value: "{mapping_environments.read()}",
+                            oninput: move |evt| mapping_environments.set(evt.value())
+                        }
+                    }
+                    div {
+                        class: "flex justify-end",
+                        button {
+                            class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            disabled: *mapping_submitting.read(),
+                            onclick: move |_| {
+                                let request = AdminUpsertOidcMappingRequest {
+                                    group_name: mapping_group.read().clone(),
+                                    role: Some(role_from_string(&mapping_role.read())),
+                                    environments: parse_environments(&mapping_environments.read()),
+                                };
+
+                                let mut oidc_mappings = oidc_mappings.clone();
+                                let mut oidc_error = oidc_error.clone();
+                                let mut mapping_group = mapping_group.clone();
+                                let mut mapping_environments = mapping_environments.clone();
+                                let mut mapping_submitting = mapping_submitting.clone();
+                                mapping_submitting.set(true);
+
+                                spawn(async move {
+                                    match upsert_admin_oidc_mapping(&request).await {
+                                        Ok(_) => match fetch_admin_oidc_mappings().await {
+                                            Ok(next) => {
+                                                oidc_mappings.set(next);
+                                                oidc_error.set(None);
+                                                mapping_group.set(String::new());
+                                                mapping_environments.set(String::new());
+                                            }
+                                            Err(e) => {
+                                                oidc_error.set(Some(format!("Failed to reload OIDC mappings: {e}")));
+                                            }
+                                        },
+                                        Err(e) => oidc_error.set(Some(format!("Failed to save OIDC mapping: {e}"))),
+                                    }
+                                    mapping_submitting.set(false);
+                                });
+                            },
+                            if *mapping_submitting.read() { "Saving..." } else { "Save mapping" }
+                        }
+                    }
+                }
+
+                if let Some(message) = oidc_error.read().clone() {
+                    div {
+                        class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
+                        "{message}"
+                    }
+                }
+
+                div {
+                    class: "overflow-auto rounded-xl border {theme::surface::CARD_BORDER}",
+                    table {
+                        class: "min-w-full text-sm",
+                        thead {
+                            class: "{theme::surface::CARD_BG} text-left text-xs uppercase tracking-wide {theme::text::MUTED}",
+                            tr {
+                                th { class: "px-4 py-3", "Group" }
+                                th { class: "px-4 py-3", "Role" }
+                                th { class: "px-4 py-3", "Environments" }
+                                th { class: "px-4 py-3", "Updated" }
+                                th { class: "px-4 py-3", "Actions" }
+                            }
+                        }
+                        tbody {
+                            class: "divide-y {theme::surface::CARD_BORDER}",
+                            for mapping in oidc_mappings.read().iter() {
+                                tr {
+                                    class: "{theme::surface::CARD_BG}",
+                                    td { class: "px-4 py-3 text-white", "{mapping.group_name}" }
+                                    td { class: "px-4 py-3 {theme::text::SECONDARY}", "{editable_role_label(mapping.role)}" }
+                                    td { class: "px-4 py-3 text-slate-300", "{format_environments(&mapping.environments)}" }
+                                    td { class: "px-4 py-3 {theme::text::MUTED}", "{format_time(mapping.updated_at)}" }
+                                    td {
+                                        class: "px-4 py-3",
+                                        button {
+                                            class: "rounded-md border border-red-500/40 px-2 py-1 text-xs font-medium text-red-200 hover:bg-red-950/40",
+                                            onclick: {
+                                                let mapping_id = mapping.id.clone();
+                                                let mut oidc_mappings = oidc_mappings.clone();
+                                                let mut oidc_error = oidc_error.clone();
+                                                move |_| {
+                                                    let mapping_id = mapping_id.clone();
+                                                    let mut oidc_mappings = oidc_mappings.clone();
+                                                    let mut oidc_error = oidc_error.clone();
+                                                    spawn(async move {
+                                                        match delete_admin_oidc_mapping(&mapping_id).await {
+                                                            Ok(()) => match fetch_admin_oidc_mappings().await {
+                                                                Ok(next) => {
+                                                                    oidc_mappings.set(next);
+                                                                    oidc_error.set(None);
+                                                                }
+                                                                Err(e) => {
+                                                                    oidc_error.set(Some(format!("Failed to reload OIDC mappings: {e}")));
+                                                                }
+                                                            },
+                                                            Err(e) => oidc_error.set(Some(format!("Failed to delete OIDC mapping: {e}"))),
+                                                        }
+                                                    });
+                                                }
+                                            },
+                                            "Delete"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            section {
+                class: "space-y-3",
                 h2 { class: "text-lg font-semibold text-white", "Audit Log" }
                 div {
                     class: "grid gap-3 sm:grid-cols-2 xl:grid-cols-5",
@@ -372,6 +533,7 @@ pub fn AdminView() -> Element {
                         option { value: "user_disabled", "User disabled" }
                         option { value: "user_role_assigned", "Role assignment" }
                         option { value: "user_environment_membership_updated", "Environment membership" }
+                        option { value: "oidc_mapping_changed", "OIDC mapping" }
                         option { value: "session_invalidated", "Session invalidated" }
                     }
                     input {
@@ -494,7 +656,16 @@ fn format_action(event: &AuditEvent) -> &'static str {
         crate::api::models::AuditAction::UserEnvironmentMembershipUpdated => {
             "Environment membership"
         }
+        crate::api::models::AuditAction::OidcMappingChanged => "OIDC mapping change",
         crate::api::models::AuditAction::SessionInvalidated => "Session invalidated",
+    }
+}
+
+fn format_environments(values: &[String]) -> String {
+    if values.is_empty() {
+        "All / Unscoped".to_string()
+    } else {
+        values.join(", ")
     }
 }
 
