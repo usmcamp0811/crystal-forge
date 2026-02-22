@@ -366,7 +366,12 @@ pub fn AdminView() -> Element {
                             audit_page.set(1);
                         },
                         option { value: "", "All actions" }
+                        option { value: "user_created", "User created" }
+                        option { value: "user_updated", "User updated" }
+                        option { value: "user_enabled", "User enabled" }
+                        option { value: "user_disabled", "User disabled" }
                         option { value: "user_role_assigned", "Role assignment" }
+                        option { value: "user_environment_membership_updated", "Environment membership" }
                         option { value: "session_invalidated", "Session invalidated" }
                     }
                     input {
@@ -481,7 +486,14 @@ fn format_role(role: Option<crate::api::models::Role>) -> &'static str {
 
 fn format_action(event: &AuditEvent) -> &'static str {
     match event.action {
+        crate::api::models::AuditAction::UserCreated => "User created",
+        crate::api::models::AuditAction::UserUpdated => "User updated",
+        crate::api::models::AuditAction::UserEnabled => "User enabled",
+        crate::api::models::AuditAction::UserDisabled => "User disabled",
         crate::api::models::AuditAction::UserRoleAssigned => "Role assignment",
+        crate::api::models::AuditAction::UserEnvironmentMembershipUpdated => {
+            "Environment membership"
+        }
         crate::api::models::AuditAction::SessionInvalidated => "Session invalidated",
     }
 }

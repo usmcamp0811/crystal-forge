@@ -44,6 +44,15 @@ struct AuditSessionRow {
 }
 
 #[derive(Debug, sqlx::FromRow)]
+struct AdminAuditEventRow {
+    created_at: DateTime<Utc>,
+    actor_identifier: Option<String>,
+    action: String,
+    target: String,
+    request_origin: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
 struct EnvironmentMembershipRow {
     environment_name: String,
 }
@@ -121,6 +130,7 @@ pub async fn create_user(
     let Some(admin_user_id) = require_admin(&pool, &headers).await else {
         return forbidden();
     };
+    let request_origin = extract_request_origin(&headers);
 
     let email = payload.email.trim().to_ascii_lowercase();
     if !is_valid_email(&email) {
@@ -157,6 +167,49 @@ pub async fn create_user(
         return bad_request(&message);
     }
 
+    if record_admin_audit_event(
+        &pool,
+        admin_user_id,
+        AuditAction::UserCreated,
+        format!("{} ({})", email, user.id),
+        request_origin.clone(),
+        serde_json::json!({ "display_name": payload.display_name }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    if record_admin_audit_event(
+        &pool,
+        admin_user_id,
+        AuditAction::UserRoleAssigned,
+        format!("{} ({})", email, user.id),
+        request_origin.clone(),
+        serde_json::json!({ "role": payload.role }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    if !payload.environments.is_empty()
+        && record_admin_audit_event(
+            &pool,
+            admin_user_id,
+            AuditAction::UserEnvironmentMembershipUpdated,
+            format!("{} ({})", email, user.id),
+            request_origin,
+            serde_json::json!({ "environments": payload.environments }),
+        )
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
     match fetch_admin_user_summary(&pool, user.id).await {
         Ok(summary) => (StatusCode::CREATED, Json(summary)).into_response(),
         Err(_) => internal_error("Failed to load created user"),
@@ -172,6 +225,7 @@ pub async fn update_user(
     let Some(admin_user_id) = require_admin(&pool, &headers).await else {
         return forbidden();
     };
+    let request_origin = extract_request_origin(&headers);
 
     let target_user_id = match Uuid::parse_str(&user_id) {
         Ok(value) => value,
@@ -195,6 +249,11 @@ pub async fn update_user(
         Err(_) => return internal_error("Failed to load user roles"),
     };
     let had_admin = roles.iter().any(|role| role.role == AuthRole::Admin);
+    let current_role = highest_role(roles.iter().map(|role| role.role).collect());
+    let prior_environments = load_user_environments(&pool, target_user_id)
+        .await
+        .unwrap_or_default();
+    let mut audit_events: Vec<(AuditAction, serde_json::Value)> = vec![];
 
     if let Some(enabled) = payload.enabled {
         if should_block_last_admin_disable(enabled, current.is_active, had_admin) {
@@ -214,6 +273,17 @@ pub async fn update_user(
         {
             return internal_error("Failed to update user status");
         }
+
+        if enabled != current.is_active {
+            audit_events.push((
+                if enabled {
+                    AuditAction::UserEnabled
+                } else {
+                    AuditAction::UserDisabled
+                },
+                serde_json::json!({ "enabled": enabled }),
+            ));
+        }
     }
 
     if let Some(role) = payload.role {
@@ -231,6 +301,13 @@ pub async fn update_user(
         {
             return internal_error("Failed to update user role");
         }
+
+        if Some(role) != current_role {
+            audit_events.push((
+                AuditAction::UserRoleAssigned,
+                serde_json::json!({ "from": current_role, "to": role }),
+            ));
+        }
     }
 
     if let Some(environments) = payload.environments {
@@ -238,6 +315,64 @@ pub async fn update_user(
             sync_user_environments(&pool, target_user_id, admin_user_id, &environments).await
         {
             return bad_request(&message);
+        }
+
+        let mut after = environments
+            .iter()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        after.sort();
+        let mut before = prior_environments.clone();
+        before.sort();
+        if before != after {
+            audit_events.push((
+                AuditAction::UserEnvironmentMembershipUpdated,
+                serde_json::json!({ "from": prior_environments, "to": environments }),
+            ));
+        }
+    }
+
+    if !audit_events.is_empty() {
+        let actor = fetch_user_identifier(&pool, admin_user_id)
+            .await
+            .unwrap_or_else(|| admin_user_id.to_string());
+        let target = format!("{} ({})", current.email, current.id);
+
+        if record_admin_audit_event(
+            &pool,
+            admin_user_id,
+            AuditAction::UserUpdated,
+            target.clone(),
+            request_origin.clone(),
+            serde_json::json!({
+                "actor": actor,
+                "change_count": audit_events.len(),
+            }),
+        )
+        .await
+        .is_err()
+        {
+            return internal_error("Failed to write audit event");
+        }
+
+        for (action, metadata) in audit_events {
+            if record_admin_audit_event(
+                &pool,
+                admin_user_id,
+                action,
+                target.clone(),
+                request_origin.clone(),
+                serde_json::json!({
+                    "actor": actor,
+                    "changes": metadata,
+                }),
+            )
+            .await
+            .is_err()
+            {
+                return internal_error("Failed to write audit event");
+            }
         }
     }
 
@@ -257,6 +392,34 @@ pub async fn list_audit_events(
     };
 
     let mut events: Vec<AuditEvent> = vec![];
+
+    let admin_events = match sqlx::query_as::<_, AdminAuditEventRow>(
+        "SELECT created_at, actor_identifier, action, target, request_origin
+         FROM admin_audit_events
+         ORDER BY created_at DESC
+         LIMIT 300",
+    )
+    .fetch_all(&pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return internal_error("Failed to load audit events"),
+    };
+
+    for row in admin_events {
+        let Some(action) = parse_audit_action(&row.action) else {
+            continue;
+        };
+        events.push(AuditEvent {
+            timestamp: row.created_at,
+            actor: row.actor_identifier,
+            action,
+            target: row.target,
+            source: row
+                .request_origin
+                .unwrap_or_else(|| "admin_audit_events".to_string()),
+        });
+    }
 
     let role_events = match sqlx::query_as::<_, AuditRoleRow>(
         "SELECT ura.created_at,
@@ -414,14 +577,28 @@ fn apply_audit_filters(
 }
 
 fn parse_action_filter(value: &str) -> Result<Option<AuditAction>, String> {
-    let normalized = value.to_ascii_lowercase();
-    match normalized.as_str() {
-        "" => Ok(None),
-        "user_role_assigned" => Ok(Some(AuditAction::UserRoleAssigned)),
-        "session_invalidated" => Ok(Some(AuditAction::SessionInvalidated)),
-        _ => Err(format!(
-            "invalid action `{value}`; expected user_role_assigned or session_invalidated"
-        )),
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Ok(None);
+    }
+
+    parse_audit_action(&normalized)
+        .map(Some)
+        .ok_or_else(|| format!("invalid action `{value}`"))
+}
+
+fn parse_audit_action(value: &str) -> Option<AuditAction> {
+    match value {
+        "user_created" => Some(AuditAction::UserCreated),
+        "user_updated" => Some(AuditAction::UserUpdated),
+        "user_enabled" => Some(AuditAction::UserEnabled),
+        "user_disabled" => Some(AuditAction::UserDisabled),
+        "user_role_assigned" => Some(AuditAction::UserRoleAssigned),
+        "user_environment_membership_updated" => {
+            Some(AuditAction::UserEnvironmentMembershipUpdated)
+        }
+        "session_invalidated" => Some(AuditAction::SessionInvalidated),
+        _ => None,
     }
 }
 
@@ -646,7 +823,80 @@ fn role_to_auth_role(role: Role) -> AuthRole {
     }
 }
 
-fn should_block_last_admin_disable(enabled: bool, is_currently_active: bool, had_admin: bool) -> bool {
+fn action_to_str(action: AuditAction) -> &'static str {
+    match action {
+        AuditAction::UserCreated => "user_created",
+        AuditAction::UserUpdated => "user_updated",
+        AuditAction::UserEnabled => "user_enabled",
+        AuditAction::UserDisabled => "user_disabled",
+        AuditAction::UserRoleAssigned => "user_role_assigned",
+        AuditAction::UserEnvironmentMembershipUpdated => "user_environment_membership_updated",
+        AuditAction::SessionInvalidated => "session_invalidated",
+    }
+}
+
+async fn fetch_user_identifier(pool: &PgPool, user_id: Uuid) -> Option<String> {
+    sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn record_admin_audit_event(
+    pool: &PgPool,
+    actor_user_id: Uuid,
+    action: AuditAction,
+    target: String,
+    request_origin: Option<String>,
+    metadata: serde_json::Value,
+) -> Result<(), ()> {
+    let actor_identifier = fetch_user_identifier(pool, actor_user_id)
+        .await
+        .unwrap_or_else(|| actor_user_id.to_string());
+
+    sqlx::query(
+        "INSERT INTO admin_audit_events (actor_user_id, actor_identifier, action, target, request_origin, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(actor_user_id)
+    .bind(actor_identifier)
+    .bind(action_to_str(action))
+    .bind(target)
+    .bind(request_origin)
+    .bind(metadata)
+    .execute(pool)
+    .await
+    .map_err(|_| ())?;
+
+    Ok(())
+}
+
+fn extract_request_origin(headers: &HeaderMap) -> Option<String> {
+    let forwarded = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if forwarded.is_some() {
+        return forwarded;
+    }
+
+    headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn should_block_last_admin_disable(
+    enabled: bool,
+    is_currently_active: bool,
+    had_admin: bool,
+) -> bool {
     !enabled && is_currently_active && had_admin
 }
 
@@ -732,8 +982,8 @@ fn not_found(message: &str) -> axum::response::Response {
 mod tests {
     use super::*;
     use axum::extract::State;
-    use sqlx::postgres::PgPoolOptions;
     use chrono::TimeZone;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn highest_role_prefers_admin_then_operator_then_viewer() {
@@ -900,5 +1150,22 @@ mod tests {
         .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn parses_extended_audit_actions() {
+        assert_eq!(
+            parse_audit_action("user_created"),
+            Some(AuditAction::UserCreated)
+        );
+        assert_eq!(
+            parse_audit_action("user_updated"),
+            Some(AuditAction::UserUpdated)
+        );
+        assert_eq!(
+            parse_audit_action("user_environment_membership_updated"),
+            Some(AuditAction::UserEnvironmentMembershipUpdated)
+        );
+        assert_eq!(parse_audit_action("unknown"), None);
     }
 }

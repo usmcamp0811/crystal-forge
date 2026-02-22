@@ -689,7 +689,12 @@ pub struct AdminUserSummary {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuditAction {
+    UserCreated,
+    UserUpdated,
+    UserEnabled,
+    UserDisabled,
     UserRoleAssigned,
+    UserEnvironmentMembershipUpdated,
     SessionInvalidated,
 }
 

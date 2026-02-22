@@ -138,7 +138,7 @@ Progress update:
 Remaining major scope:
 - Environment membership persistence/enforcement across systems visibility/actions.
 - OIDC mapping CRUD and IdP-derived/local attribute UX distinctions.
-- Expanded audit event capture for required admin mutation actions.
+- Expanded audit event capture for required admin mutation actions (OIDC mapping events still pending).
 - Integration/UI coverage for AC #20 scenarios.
 
 Latest progress:
@@ -147,4 +147,5 @@ Latest progress:
 - Added user environment memberships persistence table and API wiring.
 - Added admin UI create/edit controls for role/status/environment assignments.
 - Added guardrail predicate tests in admin handler module.
+- Added dedicated admin audit event storage and capture for user create/update, role, status, and environment membership changes.
 <!-- SECTION:NOTES:END -->
