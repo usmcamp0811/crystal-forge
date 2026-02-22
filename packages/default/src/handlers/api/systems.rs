@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, CveSummary, DeploymentStatus, PaginatedResponse, PipelineStage, SortOrder,
+    ApiError, AuditAction, CveSummary, DeploymentStatus, PaginatedResponse, PipelineStage, SortOrder,
     SystemMutationResponse, SystemRollbackRequest,
     SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, SystemSummary,
     SystemsListParams,
@@ -189,6 +189,20 @@ pub async fn sync_system(
         return internal_error("Failed to queue sync");
     }
 
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::SystemSyncRequested,
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "sync" }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
     (
         StatusCode::ACCEPTED,
         Json(SystemMutationResponse {
@@ -242,6 +256,20 @@ pub async fn rollback_system(
         .is_err()
     {
         return internal_error("Failed to request rollback");
+    }
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::SystemRollbackRequested,
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "rollback", "target_commit": target_commit }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
     }
 
     (
@@ -377,6 +405,59 @@ fn internal_error(message: &str) -> axum::response::Response {
         }),
     )
         .into_response()
+}
+
+fn action_to_str(action: AuditAction) -> &'static str {
+    match action {
+        AuditAction::SystemSyncRequested => "system_sync_requested",
+        AuditAction::SystemRollbackRequested => "system_rollback_requested",
+        _ => "unknown",
+    }
+}
+
+fn extract_request_origin(headers: &HeaderMap) -> Option<String> {
+    let forwarded = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    if forwarded.is_some() {
+        return forwarded;
+    }
+
+    headers
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+async fn record_system_mutation_audit(
+    pool: &PgPool,
+    actor_user_id: Uuid,
+    action: AuditAction,
+    target: String,
+    request_origin: Option<String>,
+    metadata: serde_json::Value,
+) -> Result<(), ()> {
+    let actor_identifier = crate::queries::admin::find_user_email(pool, actor_user_id)
+        .await
+        .map_err(|_| ())?
+        .unwrap_or_else(|| actor_user_id.to_string());
+
+    crate::queries::admin::insert_admin_audit_event(
+        pool,
+        actor_user_id,
+        &actor_identifier,
+        action_to_str(action),
+        &target,
+        request_origin,
+        metadata,
+    )
+    .await
+    .map_err(|_| ())
 }
 
 #[cfg(test)]

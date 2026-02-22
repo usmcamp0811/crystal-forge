@@ -16,7 +16,7 @@ use crate::api::models::{
 };
 use crate::handlers::api::rbac::require_admin as require_admin_user;
 use crate::models::auth_identity::AuthRole;
-use crate::queries::admin::{self, OidcMappingRow};
+use crate::queries::admin::{self, GuardedMutationOutcome, OidcMappingRow};
 use crate::queries::auth_identity::{assign_role_to_user, get_user_roles};
 use crate::queries::users::insert_user;
 
@@ -316,14 +316,14 @@ pub async fn update_user(
 
     if let Some(enabled) = payload.enabled {
         if should_block_last_admin_disable(enabled, current.is_active, had_admin) {
-            match enabled_admin_count(&pool).await {
-                Ok(1) => return conflict("Cannot disable the last enabled admin"),
-                Ok(_) => {}
+            match admin::disable_user_with_admin_guard(&pool, target_user_id).await {
+                Ok(GuardedMutationOutcome::Applied) => {}
+                Ok(GuardedMutationOutcome::GuardrailViolation) => {
+                    return conflict("Cannot disable the last enabled admin")
+                }
                 Err(_) => return internal_error("Failed to validate admin guardrail"),
             }
-        }
-
-        if admin::update_user_active(&pool, target_user_id, enabled)
+        } else if admin::update_user_active(&pool, target_user_id, enabled)
             .await
             .is_err()
         {
@@ -344,14 +344,22 @@ pub async fn update_user(
 
     if let Some(role) = payload.role {
         if should_block_final_admin_role_removal(role, had_admin, current.is_active) {
-            match enabled_admin_count(&pool).await {
-                Ok(1) => return conflict("Cannot remove the final admin role assignment"),
-                Ok(_) => {}
+            match admin::replace_user_primary_role_with_admin_guard(
+                &pool,
+                target_user_id,
+                role_to_auth_role(role),
+                admin_user_id,
+                true,
+            )
+            .await
+            {
+                Ok(GuardedMutationOutcome::Applied) => {}
+                Ok(GuardedMutationOutcome::GuardrailViolation) => {
+                    return conflict("Cannot remove the final admin role assignment")
+                }
                 Err(_) => return internal_error("Failed to validate admin guardrail"),
             }
-        }
-
-        if set_user_primary_role(&pool, target_user_id, role, admin_user_id)
+        } else if set_user_primary_role(&pool, target_user_id, role, admin_user_id)
             .await
             .is_err()
         {
@@ -623,6 +631,8 @@ fn parse_audit_action(value: &str) -> Option<AuditAction> {
             Some(AuditAction::UserEnvironmentMembershipUpdated)
         }
         "oidc_mapping_changed" => Some(AuditAction::OidcMappingChanged),
+        "system_sync_requested" => Some(AuditAction::SystemSyncRequested),
+        "system_rollback_requested" => Some(AuditAction::SystemRollbackRequested),
         "session_invalidated" => Some(AuditAction::SessionInvalidated),
         _ => None,
     }
@@ -705,10 +715,6 @@ async fn load_user_environments(pool: &PgPool, user_id: Uuid) -> Result<Vec<Stri
     admin::list_user_environment_names(pool, user_id)
         .await
         .map_err(|_| ())
-}
-
-async fn enabled_admin_count(pool: &PgPool) -> Result<i64, ()> {
-    admin::count_enabled_admins(pool).await.map_err(|_| ())
 }
 
 async fn set_user_primary_role(
@@ -812,6 +818,8 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::UserRoleAssigned => "user_role_assigned",
         AuditAction::UserEnvironmentMembershipUpdated => "user_environment_membership_updated",
         AuditAction::OidcMappingChanged => "oidc_mapping_changed",
+        AuditAction::SystemSyncRequested => "system_sync_requested",
+        AuditAction::SystemRollbackRequested => "system_rollback_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
 }
@@ -1189,6 +1197,14 @@ mod tests {
             "oidc_mapping_changed"
         );
         assert_eq!(
+            action_to_str(AuditAction::SystemSyncRequested),
+            "system_sync_requested"
+        );
+        assert_eq!(
+            action_to_str(AuditAction::SystemRollbackRequested),
+            "system_rollback_requested"
+        );
+        assert_eq!(
             action_to_str(AuditAction::SessionInvalidated),
             "session_invalidated"
         );
@@ -1253,6 +1269,14 @@ mod tests {
         assert_eq!(
             parse_audit_action("oidc_mapping_changed"),
             Some(AuditAction::OidcMappingChanged)
+        );
+        assert_eq!(
+            parse_audit_action("system_sync_requested"),
+            Some(AuditAction::SystemSyncRequested)
+        );
+        assert_eq!(
+            parse_audit_action("system_rollback_requested"),
+            Some(AuditAction::SystemRollbackRequested)
         );
         assert_eq!(parse_audit_action("unknown"), None);
     }

@@ -54,6 +54,12 @@ pub struct EnvironmentLookupRow {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardedMutationOutcome {
+    Applied,
+    GuardrailViolation,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct EnvironmentMembershipRow {
     environment_name: String,
@@ -245,6 +251,81 @@ pub async fn clear_user_roles(pool: &PgPool, user_id: Uuid) -> Result<()> {
         .execute(pool)
         .await?;
     Ok(())
+}
+
+pub async fn disable_user_with_admin_guard(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<GuardedMutationOutcome> {
+    let mut tx = pool.begin().await?;
+
+    let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT DISTINCT u.id
+         FROM users u
+         JOIN user_role_assignments ura ON ura.user_id = u.id
+         WHERE u.is_active = TRUE AND ura.role = 'admin'
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if active_admin_ids.len() <= 1 {
+        tx.rollback().await?;
+        return Ok(GuardedMutationOutcome::GuardrailViolation);
+    }
+
+    sqlx::query("UPDATE users SET is_active = FALSE WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(GuardedMutationOutcome::Applied)
+}
+
+pub async fn replace_user_primary_role_with_admin_guard(
+    pool: &PgPool,
+    user_id: Uuid,
+    role: AuthRole,
+    granted_by_user_id: Uuid,
+    enforce_last_admin_guard: bool,
+) -> Result<GuardedMutationOutcome> {
+    let mut tx = pool.begin().await?;
+
+    if enforce_last_admin_guard {
+        let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT u.id
+             FROM users u
+             JOIN user_role_assignments ura ON ura.user_id = u.id
+             WHERE u.is_active = TRUE AND ura.role = 'admin'
+             FOR UPDATE",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        if active_admin_ids.len() <= 1 {
+            tx.rollback().await?;
+            return Ok(GuardedMutationOutcome::GuardrailViolation);
+        }
+    }
+
+    sqlx::query("DELETE FROM user_role_assignments WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO user_role_assignments (user_id, role, granted_by_user_id)
+         VALUES ($1, $2, $3)",
+    )
+    .bind(user_id)
+    .bind(role)
+    .bind(granted_by_user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(GuardedMutationOutcome::Applied)
 }
 
 pub async fn find_user_email(pool: &PgPool, user_id: Uuid) -> Result<Option<String>> {

@@ -462,6 +462,8 @@ pub enum AuditAction {
     UserRoleAssigned,
     UserEnvironmentMembershipUpdated,
     OidcMappingChanged,
+    SystemSyncRequested,
+    SystemRollbackRequested,
     SessionInvalidated,
 }
 

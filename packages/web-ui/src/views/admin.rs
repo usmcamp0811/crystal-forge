@@ -573,6 +573,8 @@ pub fn AdminView() -> Element {
                         option { value: "user_role_assigned", "Role assignment" }
                         option { value: "user_environment_membership_updated", "Environment membership" }
                         option { value: "oidc_mapping_changed", "OIDC mapping" }
+                        option { value: "system_sync_requested", "System sync requested" }
+                        option { value: "system_rollback_requested", "System rollback requested" }
                         option { value: "session_invalidated", "Session invalidated" }
                     }
                     input {
@@ -696,6 +698,8 @@ fn format_action(event: &AuditEvent) -> &'static str {
             "Environment membership"
         }
         crate::api::models::AuditAction::OidcMappingChanged => "OIDC mapping change",
+        crate::api::models::AuditAction::SystemSyncRequested => "System sync requested",
+        crate::api::models::AuditAction::SystemRollbackRequested => "System rollback requested",
         crate::api::models::AuditAction::SessionInvalidated => "Session invalidated",
     }
 }
