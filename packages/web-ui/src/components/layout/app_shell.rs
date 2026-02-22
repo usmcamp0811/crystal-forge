@@ -40,6 +40,10 @@ fn ui_check_mock_auth_context() -> AuthContext {
     }
 }
 
+fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -> bool {
+    matches!(route, Route::AdminView { .. }) && !auth::is_admin(auth_context)
+}
+
 /// Top-level application layout wrapping all views.
 ///
 /// Provides the sidebar navigation and main content area.
@@ -125,7 +129,7 @@ pub fn AppShell() -> Element {
                 DevModeBanner {}
                 main {
                     class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
-                    if matches!(current_route, Route::AdminView { .. }) && !auth::is_admin(&auth_context) {
+                    if should_show_admin_denied(&current_route, &auth_context) {
                         section {
                             class: "max-w-3xl mx-auto rounded-xl border border-amber-500/40 bg-amber-900/20 p-6 space-y-2",
                             h2 { class: "text-xl font-semibold text-amber-100", "Access Denied" }
@@ -137,5 +141,56 @@ pub fn AppShell() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn auth_context(authenticated: bool, roles: Vec<Role>) -> Option<AuthContext> {
+        Some(AuthContext {
+            is_authenticated: authenticated,
+            user: Some(AuthUser {
+                id: "user-1".to_string(),
+                email: "user@example.com".to_string(),
+                display_name: Some("Example User".to_string()),
+            }),
+            roles,
+            auth_mode: AuthMode::Local,
+        })
+    }
+
+    #[test]
+    fn admin_route_denied_for_non_admin() {
+        let route = Route::AdminView {};
+        assert!(should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Operator])
+        ));
+        assert!(should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Viewer])
+        ));
+        assert!(should_show_admin_denied(&route, &None));
+    }
+
+    #[test]
+    fn admin_route_allowed_for_admin() {
+        let route = Route::AdminView {};
+        assert!(!should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Admin])
+        ));
+    }
+
+    #[test]
+    fn non_admin_route_never_shows_denial_banner() {
+        let route = Route::DashboardView {};
+        assert!(!should_show_admin_denied(
+            &route,
+            &auth_context(true, vec![Role::Viewer])
+        ));
+        assert!(!should_show_admin_denied(&route, &None));
     }
 }

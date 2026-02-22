@@ -153,4 +153,5 @@ Latest progress:
 - Added explicit identity source markers in Admin Users and disabled direct edits for IdP-derived users.
 - Added dedicated OIDC mapping derivation unit coverage for role precedence and environment normalization at login.
 - Added audit metadata coverage for request-origin extraction precedence and persisted admin audit action keys.
+- Added AppShell route-guard unit coverage for non-admin denial behavior on the admin route.
 <!-- SECTION:NOTES:END -->
