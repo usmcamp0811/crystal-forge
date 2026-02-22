@@ -17,6 +17,7 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -38,6 +39,12 @@ pub struct OidcClientState {
     pub jwt_validator: JwtValidator,
     pub jwks_cache: JwksCache,
     pub session_store: OidcSessionStore,
+}
+
+#[derive(sqlx::FromRow)]
+struct OidcMappingMatchRow {
+    role: Option<AuthRole>,
+    environments: Vec<String>,
 }
 
 impl OidcClientState {
@@ -471,18 +478,7 @@ pub async fn oidc_callback(
 
     use crate::queries::auth_identity::assign_role_to_user;
 
-    let groups = user_info
-        .roles
-        .iter()
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect::<Vec<_>>();
-
-    #[derive(sqlx::FromRow)]
-    struct OidcMappingMatchRow {
-        role: Option<AuthRole>,
-        environments: Vec<String>,
-    }
+    let groups = normalize_oidc_groups(&user_info.roles);
 
     let mapping_rows = if groups.is_empty() {
         vec![]
@@ -500,14 +496,7 @@ pub async fn oidc_callback(
     };
 
     let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
-    let mapped_environments = mapping_rows
-        .iter()
-        .flat_map(|row| row.environments.iter())
-        .map(|value| value.trim().to_ascii_lowercase())
-        .filter(|value| !value.is_empty())
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>();
+    let mapped_environments = collect_mapped_environments(&mapping_rows);
 
     let existing_roles = crate::queries::auth_identity::get_user_roles(&pool, user.id)
         .await
@@ -631,6 +620,24 @@ fn derive_highest_role(roles: impl Iterator<Item = AuthRole>) -> Option<AuthRole
     }
 }
 
+fn normalize_oidc_groups(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn collect_mapped_environments(rows: &[OidcMappingMatchRow]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|row| row.environments.iter())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
 /// Extract OIDC state from __Host-oidc-state cookie.
 fn extract_oidc_state_cookie(headers: &HeaderMap) -> Option<String> {
     headers
@@ -732,5 +739,57 @@ impl IntoResponse for OidcError {
         };
 
         (status, message).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_highest_role_prefers_admin_then_operator_then_viewer() {
+        assert_eq!(
+            derive_highest_role(vec![AuthRole::Viewer, AuthRole::Operator].into_iter()),
+            Some(AuthRole::Operator)
+        );
+        assert_eq!(
+            derive_highest_role(vec![AuthRole::Viewer, AuthRole::Admin].into_iter()),
+            Some(AuthRole::Admin)
+        );
+        assert_eq!(derive_highest_role(vec![].into_iter()), None);
+    }
+
+    #[test]
+    fn normalize_oidc_groups_trims_and_lowercases() {
+        let groups = normalize_oidc_groups(&[
+            " Team-Admins ".to_string(),
+            "".to_string(),
+            "Platform/Ops".to_string(),
+        ]);
+
+        assert_eq!(
+            groups,
+            vec!["team-admins".to_string(), "platform/ops".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_mapped_environments_deduplicates_normalized_values() {
+        let rows = vec![
+            OidcMappingMatchRow {
+                role: Some(AuthRole::Viewer),
+                environments: vec!["Prod".to_string(), " staging ".to_string()],
+            },
+            OidcMappingMatchRow {
+                role: None,
+                environments: vec!["prod".to_string(), "".to_string()],
+            },
+        ];
+
+        let environments = collect_mapped_environments(&rows);
+        assert_eq!(
+            environments,
+            vec!["prod".to_string(), "staging".to_string()]
+        );
     }
 }
