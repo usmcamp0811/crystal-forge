@@ -1,10 +1,10 @@
 ---
 id: TASK-118
 title: Clean up server management UI for consistency
-status: Done
+status: In Progress
 assignee: []
 created_date: '2026-02-22 23:40'
-updated_date: '2026-02-22 23:44'
+updated_date: '2026-02-22 23:55'
 labels: []
 dependencies: []
 ---
@@ -14,6 +14,18 @@ dependencies: []
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Make systems_list.rs and system_detail.rs more consistent with builds.rs and flakes_list.rs in terms of density, layout, spacing, and visual hierarchy
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+User reported additional UI issues with admin user list view:
+- Buttons have white outline with no fill (incorrect styling)
+- Button padding is missing (text touching borders)
+- Need password reset functionality via modal
+- Table should be sortable like flakes view
+- Search/filter should not be full-width
+- Table background cuts off after actions column
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
