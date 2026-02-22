@@ -1,4 +1,5 @@
 use crate::models::auth_identity::AuthRole;
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -43,6 +44,21 @@ impl Role {
     pub fn can_manage_admin_console(self) -> bool {
         matches!(self, Role::Admin)
     }
+
+    pub fn can_access_system_environment(
+        self,
+        system_environment_id: Option<i32>,
+        member_environment_ids: &BTreeSet<i32>,
+    ) -> bool {
+        if matches!(self, Role::Admin) {
+            return true;
+        }
+
+        match system_environment_id {
+            Some(environment_id) => member_environment_ids.contains(&environment_id),
+            None => member_environment_ids.is_empty(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -72,5 +88,20 @@ mod tests {
         assert!(Role::Admin.can_mutate_systems());
         assert!(Role::Admin.can_manage_environments());
         assert!(Role::Admin.can_manage_admin_console());
+    }
+
+    #[test]
+    fn environment_scope_access_requires_membership_for_non_admins() {
+        let mut staging_only = BTreeSet::new();
+        staging_only.insert(10);
+
+        assert!(Role::Admin.can_access_system_environment(Some(99), &BTreeSet::new()));
+
+        assert!(Role::Operator.can_access_system_environment(Some(10), &staging_only));
+        assert!(!Role::Operator.can_access_system_environment(Some(11), &staging_only));
+        assert!(Role::Viewer.can_access_system_environment(Some(10), &staging_only));
+        assert!(!Role::Viewer.can_access_system_environment(None, &staging_only));
+
+        assert!(Role::Viewer.can_access_system_environment(None, &BTreeSet::new()));
     }
 }
