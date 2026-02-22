@@ -110,7 +110,10 @@ fn security_token_validation_rejects_non_rsa_algorithm() {
     let jwks: CoreJsonWebKeySet = serde_json::from_value(json!({"keys": []})).unwrap();
 
     let err = validator.validate_id_token(&token, &jwks).unwrap_err();
-    assert!(err.to_string().contains("not allowed"));
+    assert!(
+        err.to_string()
+            .contains("Only RS256, RS384, RS512 are permitted")
+    );
 }
 
 #[tokio::test]

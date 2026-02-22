@@ -2,6 +2,10 @@
 
 ## Validation Matrix
 
+`rolesClaim` means "claim path interpreted as authorization roles" in Crystal Forge.
+Some providers expose these as `groups` while others expose them as `roles`; both map
+to the same internal role extraction path.
+
 | Provider | Claim shape exercised | Test coverage |
 | --- | --- | --- |
 | Authentik | `groups` array | `auth::integration_matrix::provider_matrix_authentik_groups_claim` |

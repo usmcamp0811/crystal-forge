@@ -4,17 +4,19 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 fn extract_roles_for_provider(roles_claim: &str, roles_value: Value) -> Vec<String> {
-    let mut claims = HashMap::new();
+    let mut claims: HashMap<String, Value> = HashMap::new();
+    let segments: Vec<&str> = roles_claim.split('.').collect();
 
-    if roles_claim.contains('.') {
-        let mut nested = serde_json::Map::new();
-        let segments: Vec<&str> = roles_claim.split('.').collect();
-        if segments.len() == 2 {
-            nested.insert(segments[1].to_string(), roles_value);
-            claims.insert(segments[0].to_string(), Value::Object(nested));
-        }
-    } else {
+    if segments.len() == 1 {
         claims.insert(roles_claim.to_string(), roles_value);
+    } else {
+        let mut nested = roles_value;
+        for segment in segments.iter().skip(1).rev() {
+            let mut map = serde_json::Map::new();
+            map.insert((*segment).to_string(), nested);
+            nested = Value::Object(map);
+        }
+        claims.insert(segments[0].to_string(), nested);
     }
 
     let config = ClaimMappingConfig {
@@ -48,6 +50,12 @@ fn provider_matrix_authentik_groups_claim() {
 fn provider_matrix_keycloak_realm_access_roles_claim() {
     let roles = extract_roles_for_provider("realm_access.roles", json!(["admin", "viewer"]));
     assert_eq!(roles, vec!["admin", "viewer"]);
+}
+
+#[test]
+fn provider_matrix_deeply_nested_claim_path() {
+    let roles = extract_roles_for_provider("a.b.c", json!(["admin", "auditor"]));
+    assert_eq!(roles, vec!["admin", "auditor"]);
 }
 
 #[test]
