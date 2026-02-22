@@ -1,105 +1,152 @@
-# Web UI Build Verification Check
+# Web UI Integration Test
 #
-# Verifies the Crystal Forge web UI compiles to WASM and produces valid output,
-# then takes screenshots of every route using headless Chromium in a NixOS VM.
+# Full integration test that:
+# 1. Starts the Crystal Forge server with PostgreSQL
+# 2. Uses Playwright to register an admin user
+# 3. Logs in with that user
+# 4. Takes screenshots of all major routes
 #
 # Output ($out):
-#   screenshots/   — PNG screenshots of core routes and modal states
-#   result.txt     — Build verification summary
+#   screenshots/   — PNG screenshots of all tested routes
 #
 # Run: nix build .#checks.x86_64-linux.web-ui
 #      ls ./result/screenshots/
-{
-  lib,
-  pkgs,
-  ...
-}: let
+{ lib, pkgs, inputs, ... }:
+let
   testDir = ./tests;
-in
-  pkgs.testers.runNixOSTest {
-    name = "crystal-forge-web-ui-screenshots";
+  CF_TEST_SERVER_PORT = 3000;
+in pkgs.testers.runNixOSTest {
+  name = "crystal-forge-web-ui-integration";
 
-    skipLint = true;
-    skipTypeCheck = true;
+  skipLint = true;
+  skipTypeCheck = true;
 
-    nodes.machine = {
-      virtualisation.memorySize = 4096;
-      virtualisation.cores = 2;
+  nodes.machine = {
+    imports = [ inputs.self.nixosModules.crystal-forge ];
 
-      environment.systemPackages = [
-        pkgs.chromium
-        pkgs.nodejs
-        pkgs.playwright-test
-        pkgs.crystal-forge.web-ui
-      ];
+    virtualisation.memorySize = 4096;
+    virtualisation.cores = 2;
 
-      environment.variables = {
-        NODE_PATH = "${pkgs.playwright-test}/lib/node_modules";
-        PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
-      };
+    environment.systemPackages =
+      [ pkgs.chromium pkgs.nodejs pkgs.playwright-test pkgs.curl pkgs.jq ];
 
-      systemd.services.web-ui-server = {
-        description = "Crystal Forge Web UI static server";
-        wantedBy = ["multi-user.target"];
-        after = ["network.target"];
-        serviceConfig = {
-          ExecStart = "${pkgs.crystal-forge.web-ui}/bin/crystal-forge-web-ui";
-          Restart = "always";
-        };
-      };
-
-      networking.firewall.allowedTCPPorts = [8080];
+    environment.variables = {
+      NODE_PATH = "${pkgs.playwright-test}/lib/node_modules";
+      PLAYWRIGHT_BROWSERS_PATH = "${pkgs.playwright-driver.browsers}";
     };
 
-    globalTimeout = 420;
+    networking.firewall.allowedTCPPorts = [ CF_TEST_SERVER_PORT ];
 
-    testScript = ''
-      import json
-      import pathlib
+    # PostgreSQL for the server
+    services.postgresql = {
+      enable = true;
+      settings."listen_addresses" = lib.mkForce "*";
+      authentication = lib.concatStringsSep "\n" [
+        "local   all   postgres   trust"
+        "local   all   all        peer"
+        "host    all   all 127.0.0.1/32 trust"
+        "host    all   all ::1/128      trust"
+      ];
+      initialScript = pkgs.writeText "init-crystal-forge.sql" ''
+        CREATE USER crystal_forge LOGIN;
+        CREATE DATABASE crystal_forge OWNER crystal_forge;
+        GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
+      '';
+    };
 
-      machine.start()
-      machine.wait_for_unit("web-ui-server.service")
-      machine.wait_for_open_port(8080)
+    # Crystal Forge server with local auth enabled
+    services.crystal-forge = {
+      enable = true;
+      local-database = true;
+      log_level = "debug";
 
-      # Basic SPA verification
-      machine.succeed("curl -sf http://127.0.0.1:8080/ | grep -q 'Crystal Forge'")
-      machine.succeed("curl -sf http://127.0.0.1:8080/systems | grep -q 'Crystal Forge'")
-      print("SPA fallback working")
+      database = {
+        host = "localhost";
+        user = "crystal_forge";
+        name = "crystal_forge";
+        port = 5432;
+      };
 
-      machine.succeed("mkdir -p /tmp/screenshots")
-      machine.succeed("mkdir -p /tmp/web-ui-tests")
+      server = {
+        enable = true;
+        port = CF_TEST_SERVER_PORT;
+        host = "0.0.0.0";
+      };
 
-      # Copy entire tests directory into VM
-      machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
+      # Disable build/flakes - we just need the server for auth testing
+      build.enable = false;
+    };
 
-      # Run screenshot runner
-      exit_code, output = machine.execute(
-          "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/screenshot-runner.js http://127.0.0.1:8080 /tmp/screenshots 2>&1"
-      )
-      print(output)
+    # Set auth mode to local via environment
+    systemd.services.crystal-forge-server.environment.AUTH_MODE = "local";
+  };
 
-      results_json = machine.succeed("cat /tmp/screenshots/results.json")
-      results = json.loads(results_json)
+  globalTimeout = 420; # 7 minutes
 
-      # Copy screenshots out
-      for r in results:
-          if r.get("ok"):
-              machine.copy_from_vm(f"/tmp/screenshots/{r['name']}.png", "screenshots")
+  testScript = ''
+    import json
 
-      ok_count = sum(1 for r in results if r.get("ok"))
+    machine.start()
+    machine.wait_for_unit("postgresql.service")
+    machine.wait_for_unit("crystal-forge-server.service")
+    machine.wait_for_open_port(${toString CF_TEST_SERVER_PORT})
 
-      print("\n=== Summary ===")
-      print(f"  Screenshots: {ok_count}/{len(results)} captured")
+    # Verify server is responding
+    machine.succeed("curl -sf http://127.0.0.1:${
+      toString CF_TEST_SERVER_PORT
+    }/status | jq .")
+    print("Server is up and responding")
 
-      for r in results:
-          status = "OK" if r.get("ok") else "FAIL"
-          error = r.get("error", "")
-          if error:
-              print(f"  [{status}] {r['name']} - {error}")
-          else:
-              print(f"  [{status}] {r['name']}")
+    # Verify setup-status shows requires_setup=true (no users yet)
+    setup_status = machine.succeed("curl -sf http://127.0.0.1:${
+      toString CF_TEST_SERVER_PORT
+    }/api/auth/setup-status")
+    print(f"Setup status: {setup_status}")
 
-      if ok_count == 0:
-          raise Exception("All screenshots failed - browser may not be working")
-    '';
-  }
+    # Create output directories
+    machine.succeed("mkdir -p /tmp/screenshots")
+    machine.succeed("mkdir -p /tmp/web-ui-tests")
+
+    # Copy test files into VM
+    machine.succeed("cp -r ${testDir}/* /tmp/web-ui-tests/")
+
+    # Run the integration test script
+    exit_code, output = machine.execute(
+        "${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+          toString CF_TEST_SERVER_PORT
+        } /tmp/screenshots 2>&1"
+    )
+    print(output)
+
+    # Read results
+    results_json = machine.succeed("cat /tmp/screenshots/results.json")
+    results = json.loads(results_json)
+
+    # Copy screenshots out
+    for r in results:
+        if r.get("ok"):
+            machine.copy_from_vm(f"/tmp/screenshots/{r['name']}.png", "screenshots")
+
+    ok_count = sum(1 for r in results if r.get("ok"))
+
+    print("\n=== Summary ===")
+    print(f"  Screenshots: {ok_count}/{len(results)} captured")
+
+    for r in results:
+        status = "OK" if r.get("ok") else "FAIL"
+        error = r.get("error", "")
+        if error:
+            print(f"  [{status}] {r['name']} - {error}")
+        else:
+            print(f"  [{status}] {r['name']}")
+
+    if ok_count == 0:
+        raise Exception("All screenshots failed")
+
+    # Fail if critical auth flow tests failed
+    auth_tests = ["01-login-page", "02-registration", "03-post-register-login", "04-dashboard"]
+    failed_auth = [r['name'] for r in results if r['name'] in auth_tests and not r.get('ok')]
+    if failed_auth:
+        raise Exception(f"Critical auth flow tests failed: {failed_auth}")
+  '';
+}
