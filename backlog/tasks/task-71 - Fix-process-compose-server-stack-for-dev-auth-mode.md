@@ -1,9 +1,10 @@
 ---
 id: TASK-71
 title: Fix process-compose server-stack for dev auth mode
-status: Backlog
+status: Done
 assignee: []
 created_date: '2026-02-20 14:27'
+updated_date: '2026-02-22 04:42'
 labels:
   - devex
   - infra
