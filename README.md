@@ -48,7 +48,7 @@ services.crystal-forge.server = {
 services.crystal-forge.server.auth_mode = "local";
 
 # Option 3: Dev mode (local development only - NEVER use in production!)
-services.crystal-forge.server.auth_mode = "local";  # Use local, not dev!
+services.crystal-forge.server.auth_mode = "dev";  # Use local, not dev!
 ```
 
 ![Login with OIDC](./docs/screenshots/04-post-register-login.png)
