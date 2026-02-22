@@ -4,7 +4,7 @@ title: 'Admin console - users, environment membership, RBAC, and audit logging'
 status: To Do
 assignee: []
 created_date: '2026-02-22 02:34'
-updated_date: '2026-02-22 02:34'
+updated_date: '2026-02-22 02:35'
 labels:
   - web-ui
   - auth
@@ -12,10 +12,12 @@ labels:
   - security
   - rbac
 dependencies: []
+priority: medium
 ---
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem Statement
 
@@ -84,6 +86,7 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 - DTOs mirror server models; keep API models separate from UI view state.
 - No unwrap in production paths; explicit errors + safe UX.
 - Authorization is enforced server-side; UI reflects backend auth context.
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
