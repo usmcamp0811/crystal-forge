@@ -52,9 +52,23 @@ pub fn RegisterView() -> Element {
     let mut is_first_run = use_signal(|| false);
     let mut status_checked = use_signal(|| false);
 
+    // Check if UI screenshot test mode is enabled
+    let ui_check_mode = web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .map(|q| q.contains("ui_check_auth=1"))
+        .unwrap_or(false);
+
     // Check if registration is allowed on mount
     use_effect(move || {
         spawn(async move {
+            // In UI check mode, simulate first-run setup
+            if ui_check_mode {
+                is_first_run.set(true);
+                registration_allowed.set(true);
+                status_checked.set(true);
+                return;
+            }
+
             use wasm_bindgen::JsCast;
             use wasm_bindgen_futures::JsFuture;
 

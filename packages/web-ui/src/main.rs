@@ -19,6 +19,14 @@ fn main() {
     dioxus::launch(app);
 }
 
+/// Check if UI check mock auth mode is enabled via query param.
+fn ui_check_mock_auth_enabled() -> bool {
+    web_sys::window()
+        .and_then(|w| w.location().search().ok())
+        .map(|q| q.contains("ui_check_auth=1"))
+        .unwrap_or(false)
+}
+
 /// Root application component.
 #[component]
 fn app() -> Element {
@@ -26,9 +34,13 @@ fn app() -> Element {
 
     // Fetch auth context on app initialization
     let mut app_state = use_context::<Signal<state::app_state::AppState>>();
-    
+
     use_effect(move || {
         spawn(async move {
+            // Skip API call if mock auth is enabled (for screenshot tests)
+            if ui_check_mock_auth_enabled() {
+                return;
+            }
             if let Ok(auth_context) = api::client::fetch_whoami().await {
                 app_state.write().auth = Some(auth_context);
             }

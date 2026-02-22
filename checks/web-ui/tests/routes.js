@@ -22,6 +22,7 @@ module.exports = [
   {
     name: "registration",
     path: "/register",
+    auth: true, // Use mock to bypass setup-status check
     mustShow: ["text=First-Time Setup"],
   },
   {
