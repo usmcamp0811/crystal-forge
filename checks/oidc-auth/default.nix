@@ -179,7 +179,7 @@ in
         services.crystal-forge = {
           enable = true;
           local-database = true;
-          log_level = "debug";
+          log_level = "warn";
 
           database = {
             host = "localhost";
