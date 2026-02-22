@@ -4,7 +4,7 @@ title: Add OIDC provider to VM integration tests
 status: In Progress
 assignee: []
 created_date: '2026-02-20 14:28'
-updated_date: '2026-02-21 04:04'
+updated_date: '2026-02-22 03:29'
 labels:
   - testing
   - infra
@@ -64,8 +64,8 @@ Risk Level:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: claude-opus-4-5 on gray in /home/mcamp/code/crystal-forge/TASK-73-add-oidc-vm-tests
+LOCK: OpenCode-gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-73-add-oidc-vm-tests
 
-### 2026-02-21: Picking up task
-Taking over from previous agent. Will explore existing VM test infrastructure and determine OIDC provider approach.
+### 2026-02-21: OIDC module wiring
+Continuing TASK-73 to add NixOS module OIDC options and wire them into crystal-forge-server systemd environment for VM auth tests.
 <!-- SECTION:NOTES:END -->
