@@ -117,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))
         .route("/api/v1/admin/users/:id", patch(admin::update_user))
+        .route("/api/v1/admin/users/:id", delete(admin::delete_user))
         .route(
             "/api/v1/admin/oidc-mappings",
             get(admin::list_oidc_mappings),

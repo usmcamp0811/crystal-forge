@@ -161,6 +161,13 @@ pub async fn update_admin_user(
     send_json_with_csrf("PATCH", &url, Some(request)).await
 }
 
+/// Delete a local user from the admin console.
+pub async fn delete_admin_user(user_id: &str) -> Result<(), ApiClientError> {
+    let url = format!("{}/admin/users/{user_id}", base_url());
+    let _deleted: serde_json::Value = send_json_with_csrf("DELETE", &url, None::<&()>).await?;
+    Ok(())
+}
+
 /// Fetch OIDC group mappings managed by admins.
 pub async fn fetch_admin_oidc_mappings() -> Result<Vec<OidcGroupMapping>, ApiClientError> {
     let url = format!("{}/admin/oidc-mappings", base_url());

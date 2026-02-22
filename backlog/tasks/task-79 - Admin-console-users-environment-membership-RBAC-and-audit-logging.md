@@ -181,5 +181,7 @@ Latest progress:
 - Added client-side validation for admin environment assignment inputs and explicit UX guidance that wildcard patterns are not currently supported.
 - Added initial-password support to admin user creation (UI + API) with minimum-length validation.
 - Created follow-up TASK-117 for secure password reset/recovery flow design and implementation.
+- Added admin user deletion endpoint + UI action with final-admin guardrail protection and audit event capture.
+- Added users-list filtering controls (search + enabled/disabled status) in Server Management.
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->

@@ -344,6 +344,7 @@ pub async fn update_user(
                 Ok(GuardedMutationOutcome::GuardrailViolation) => {
                     return conflict("Cannot disable the last enabled admin")
                 }
+                Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
                 Err(_) => return internal_error("Failed to validate admin guardrail"),
             }
         } else if admin::update_user_active(&pool, target_user_id, enabled)
@@ -380,6 +381,7 @@ pub async fn update_user(
                 Ok(GuardedMutationOutcome::GuardrailViolation) => {
                     return conflict("Cannot remove the final admin role assignment")
                 }
+                Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
                 Err(_) => return internal_error("Failed to validate admin guardrail"),
             }
         } else if set_user_primary_role(&pool, target_user_id, role, admin_user_id)
@@ -467,6 +469,52 @@ pub async fn update_user(
         Ok(summary) => (StatusCode::OK, Json(summary)).into_response(),
         Err(_) => internal_error("Failed to load updated user"),
     }
+}
+
+pub async fn delete_user(
+    State(pool): State<PgPool>,
+    Path(user_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(admin_user_id) = require_admin_user(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let target_user_id = match Uuid::parse_str(&user_id) {
+        Ok(value) => value,
+        Err(_) => return bad_request("User id must be a valid UUID"),
+    };
+
+    let current = match admin::find_admin_user(&pool, target_user_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found("User not found"),
+        Err(_) => return internal_error("Failed to load user"),
+    };
+
+    match admin::delete_user_with_admin_guard(&pool, target_user_id).await {
+        Ok(GuardedMutationOutcome::Applied) => {}
+        Ok(GuardedMutationOutcome::GuardrailViolation) => {
+            return conflict("Cannot delete the final enabled admin")
+        }
+        Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
+        Err(_) => return internal_error("Failed to delete user"),
+    }
+
+    if record_admin_audit_event(
+        &pool,
+        admin_user_id,
+        AuditAction::UserDeleted,
+        format!("{} ({})", current.email, current.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "deleted_user_id": target_user_id }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn list_audit_events(
@@ -647,6 +695,7 @@ fn parse_audit_action(value: &str) -> Option<AuditAction> {
     match value {
         "user_created" => Some(AuditAction::UserCreated),
         "user_updated" => Some(AuditAction::UserUpdated),
+        "user_deleted" => Some(AuditAction::UserDeleted),
         "user_enabled" => Some(AuditAction::UserEnabled),
         "user_disabled" => Some(AuditAction::UserDisabled),
         "user_role_assigned" => Some(AuditAction::UserRoleAssigned),
@@ -836,6 +885,7 @@ fn action_to_str(action: AuditAction) -> &'static str {
     match action {
         AuditAction::UserCreated => "user_created",
         AuditAction::UserUpdated => "user_updated",
+        AuditAction::UserDeleted => "user_deleted",
         AuditAction::UserEnabled => "user_enabled",
         AuditAction::UserDisabled => "user_disabled",
         AuditAction::UserRoleAssigned => "user_role_assigned",
@@ -1186,6 +1236,7 @@ mod tests {
     fn action_to_str_covers_admin_audit_variants() {
         assert_eq!(action_to_str(AuditAction::UserCreated), "user_created");
         assert_eq!(action_to_str(AuditAction::UserUpdated), "user_updated");
+        assert_eq!(action_to_str(AuditAction::UserDeleted), "user_deleted");
         assert_eq!(action_to_str(AuditAction::UserEnabled), "user_enabled");
         assert_eq!(action_to_str(AuditAction::UserDisabled), "user_disabled");
         assert_eq!(
@@ -1257,6 +1308,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
+    #[tokio::test]
+    async fn delete_user_requires_admin_session() {
+        let response = delete_user(
+            State(lazy_pool()),
+            Path(Uuid::new_v4().to_string()),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
     #[test]
     fn parses_extended_audit_actions() {
         assert_eq!(
@@ -1266,6 +1330,10 @@ mod tests {
         assert_eq!(
             parse_audit_action("user_updated"),
             Some(AuditAction::UserUpdated)
+        );
+        assert_eq!(
+            parse_audit_action("user_deleted"),
+            Some(AuditAction::UserDeleted)
         );
         assert_eq!(
             parse_audit_action("user_environment_membership_updated"),

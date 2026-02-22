@@ -58,6 +58,13 @@ pub struct EnvironmentLookupRow {
 pub enum GuardedMutationOutcome {
     Applied,
     GuardrailViolation,
+    NotFound,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct UserDeleteGuardRow {
+    is_active: bool,
+    has_admin_role: bool,
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -323,6 +330,74 @@ pub async fn replace_user_primary_role_with_admin_guard(
     .bind(granted_by_user_id)
     .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
+    Ok(GuardedMutationOutcome::Applied)
+}
+
+pub async fn delete_user_with_admin_guard(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<GuardedMutationOutcome> {
+    let mut tx = pool.begin().await?;
+
+    let active_admin_ids = sqlx::query_scalar::<_, Uuid>(
+        "SELECT DISTINCT u.id
+         FROM users u
+         JOIN user_role_assignments ura ON ura.user_id = u.id
+         WHERE u.is_active = TRUE AND ura.role = 'admin'
+         FOR UPDATE",
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    let guard_row = sqlx::query_as::<_, UserDeleteGuardRow>(
+        "SELECT u.is_active,
+                EXISTS(
+                    SELECT 1 FROM user_role_assignments ura
+                    WHERE ura.user_id = u.id AND ura.role = 'admin'
+                ) AS has_admin_role
+         FROM users u
+         WHERE u.id = $1
+         FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(guard_row) = guard_row else {
+        tx.rollback().await?;
+        return Ok(GuardedMutationOutcome::NotFound);
+    };
+
+    if guard_row.is_active && guard_row.has_admin_role && active_admin_ids.len() <= 1 {
+        tx.rollback().await?;
+        return Ok(GuardedMutationOutcome::GuardrailViolation);
+    }
+
+    sqlx::query("UPDATE admin_audit_events SET actor_user_id = NULL WHERE actor_user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query(
+        "UPDATE user_role_assignments SET granted_by_user_id = NULL WHERE granted_by_user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "UPDATE user_environment_memberships SET assigned_by_user_id = NULL WHERE assigned_by_user_id = $1",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
 
     tx.commit().await?;
     Ok(GuardedMutationOutcome::Applied)

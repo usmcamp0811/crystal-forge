@@ -411,6 +411,7 @@ fn action_to_str(action: AuditAction) -> &'static str {
     match action {
         AuditAction::UserCreated => "user_created",
         AuditAction::UserUpdated => "user_updated",
+        AuditAction::UserDeleted => "user_deleted",
         AuditAction::UserEnabled => "user_enabled",
         AuditAction::UserDisabled => "user_disabled",
         AuditAction::UserRoleAssigned => "user_role_assigned",

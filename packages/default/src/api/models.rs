@@ -457,6 +457,7 @@ pub enum IdentitySource {
 pub enum AuditAction {
     UserCreated,
     UserUpdated,
+    UserDeleted,
     UserEnabled,
     UserDisabled,
     UserRoleAssigned,

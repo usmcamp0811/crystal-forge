@@ -3,7 +3,7 @@ use dioxus::prelude::*;
 use std::collections::HashMap;
 
 use crate::api::client::{
-    create_admin_user, delete_admin_oidc_mapping, fetch_admin_audit_events,
+    create_admin_user, delete_admin_oidc_mapping, delete_admin_user, fetch_admin_audit_events,
     fetch_admin_oidc_mappings, fetch_admin_users, update_admin_user, upsert_admin_oidc_mapping,
 };
 use crate::api::models::{
@@ -30,6 +30,9 @@ pub fn AdminView() -> Element {
     let mut users_error = use_signal(|| None::<String>);
     let mut audit_error = use_signal(|| None::<String>);
     let mut oidc_error = use_signal(|| None::<String>);
+
+    let mut user_search = use_signal(String::new);
+    let mut user_status_filter = use_signal(|| "all".to_string());
 
     let mut actor_filter = use_signal(String::new);
     let mut action_filter = use_signal(String::new);
@@ -244,6 +247,25 @@ pub fn AdminView() -> Element {
                     }
                 }
 
+                div {
+                    class: "grid gap-3 sm:grid-cols-2",
+                    input {
+                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                        r#type: "text",
+                        placeholder: "Filter users by email/name",
+                        value: "{user_search.read()}",
+                        oninput: move |evt| user_search.set(evt.value())
+                    }
+                    select {
+                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                        value: "{user_status_filter.read()}",
+                        onchange: move |evt| user_status_filter.set(evt.value()),
+                        option { value: "all", "All statuses" }
+                        option { value: "enabled", "Enabled only" }
+                        option { value: "disabled", "Disabled only" }
+                    }
+                }
+
                 if users_render_state_with_data(
                     *users_loading.read(),
                     users_error.read().as_deref(),
@@ -288,14 +310,18 @@ pub fn AdminView() -> Element {
                             }
                             tbody {
                                 class: "divide-y {theme::surface::CARD_BORDER}",
-                                for user in users.read().iter() {
+                                for user in filtered_admin_users(
+                                    &users.read(),
+                                    &user_search.read(),
+                                    &user_status_filter.read(),
+                                ) {
                                     {
                                         let user_id = user.id.clone();
                                         let draft = user_drafts
                                             .read()
                                             .get(&user_id)
                                             .cloned()
-                                            .unwrap_or_else(|| UserEditDraft::from_user(user));
+                                            .unwrap_or_else(|| UserEditDraft::from_user(&user));
 
                                         rsx! {
                                             tr {
@@ -382,53 +408,84 @@ pub fn AdminView() -> Element {
                                                 td { class: "px-4 py-3 {theme::text::MUTED}", {format_time(user.updated_at)} }
                                                 td {
                                                     class: "px-4 py-3",
-                                                    button {
-                                                        class: "rounded-md border {theme::surface::CARD_BORDER} px-2 py-1 text-xs font-medium text-white {theme::interactive::GHOST_BTN}",
-                                                        disabled: user.identity_source == IdentitySource::OidcDerived,
-                                                        onclick: {
-                                                            let user_id = user_id.clone();
-                                                            let mut users = users.clone();
-                                                            let mut user_drafts = user_drafts.clone();
-                                                            let mut users_error = users_error.clone();
-                                                            move |_| {
-                                                                let draft = user_drafts
-                                                                    .read()
-                                                                    .get(&user_id)
-                                                                    .cloned();
-                                                                let Some(draft) = draft else {
-                                                                    return;
-                                                                };
-
-                                                                let environments = match validate_and_parse_environments(&draft.environments) {
-                                                                    Ok(value) => value,
-                                                                    Err(message) => {
-                                                                        users_error.set(Some(message));
-                                                                        return;
-                                                                    }
-                                                                };
-
-                                                                let request = AdminUpdateUserRequest {
-                                                                    role: Some(role_from_string(&draft.role)),
-                                                                    enabled: Some(draft.enabled),
-                                                                    environments: Some(environments),
-                                                                };
-
+                                                    div {
+                                                        class: "flex items-center gap-2",
+                                                        button {
+                                                            class: "rounded-md border {theme::surface::CARD_BORDER} px-2 py-1 text-xs font-medium text-white {theme::interactive::GHOST_BTN}",
+                                                            disabled: user.identity_source == IdentitySource::OidcDerived,
+                                                            onclick: {
                                                                 let user_id = user_id.clone();
                                                                 let mut users = users.clone();
                                                                 let mut user_drafts = user_drafts.clone();
                                                                 let mut users_error = users_error.clone();
-                                                                spawn(async move {
-                                                                    match update_admin_user(&user_id, &request).await {
-                                                                        Ok(_) => refresh_users(users, user_drafts, users_error).await,
-                                                                        Err(e) => users_error.set(Some(format!("Failed to update user: {e}"))),
-                                                                    }
-                                                                });
+                                                                move |_| {
+                                                                    let draft = user_drafts
+                                                                        .read()
+                                                                        .get(&user_id)
+                                                                        .cloned();
+                                                                    let Some(draft) = draft else {
+                                                                        return;
+                                                                    };
+
+                                                                    let environments = match validate_and_parse_environments(&draft.environments) {
+                                                                        Ok(value) => value,
+                                                                        Err(message) => {
+                                                                            users_error.set(Some(message));
+                                                                            return;
+                                                                        }
+                                                                    };
+
+                                                                    let request = AdminUpdateUserRequest {
+                                                                        role: Some(role_from_string(&draft.role)),
+                                                                        enabled: Some(draft.enabled),
+                                                                        environments: Some(environments),
+                                                                    };
+
+                                                                    let user_id = user_id.clone();
+                                                                    let mut users = users.clone();
+                                                                    let mut user_drafts = user_drafts.clone();
+                                                                    let mut users_error = users_error.clone();
+                                                                    spawn(async move {
+                                                                        match update_admin_user(&user_id, &request).await {
+                                                                            Ok(_) => refresh_users(users, user_drafts, users_error).await,
+                                                                            Err(e) => users_error.set(Some(format!("Failed to update user: {e}"))),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            },
+                                                            if user.identity_source == IdentitySource::OidcDerived {
+                                                                "IdP managed"
+                                                            } else {
+                                                                "Save"
                                                             }
-                                                        },
-                                                        if user.identity_source == IdentitySource::OidcDerived {
-                                                            "IdP managed"
-                                                        } else {
-                                                            "Save"
+                                                        }
+                                                        button {
+                                                            class: "rounded-md border border-red-500/40 px-2 py-1 text-xs font-medium text-red-200 hover:bg-red-950/40",
+                                                            disabled: user.identity_source == IdentitySource::OidcDerived,
+                                                            onclick: {
+                                                                let user_id = user_id.clone();
+                                                                let identifier = user.identifier.clone();
+                                                                let mut users = users.clone();
+                                                                let mut user_drafts = user_drafts.clone();
+                                                                let mut users_error = users_error.clone();
+                                                                move |_| {
+                                                                    if !confirm_user_delete(&identifier) {
+                                                                        return;
+                                                                    }
+
+                                                                    let user_id = user_id.clone();
+                                                                    let mut users = users.clone();
+                                                                    let mut user_drafts = user_drafts.clone();
+                                                                    let mut users_error = users_error.clone();
+                                                                    spawn(async move {
+                                                                        match delete_admin_user(&user_id).await {
+                                                                            Ok(_) => refresh_users(users, user_drafts, users_error).await,
+                                                                            Err(e) => users_error.set(Some(format!("Failed to delete user: {e}"))),
+                                                                        }
+                                                                    });
+                                                                }
+                                                            },
+                                                            "Delete"
                                                         }
                                                     }
                                                 }
@@ -620,6 +677,7 @@ pub fn AdminView() -> Element {
                         option { value: "", "All actions" }
                         option { value: "user_created", "User created" }
                         option { value: "user_updated", "User updated" }
+                        option { value: "user_deleted", "User deleted" }
                         option { value: "user_enabled", "User enabled" }
                         option { value: "user_disabled", "User disabled" }
                         option { value: "user_role_assigned", "Role assignment" }
@@ -743,6 +801,7 @@ fn format_action(event: &AuditEvent) -> &'static str {
     match event.action {
         crate::api::models::AuditAction::UserCreated => "User created",
         crate::api::models::AuditAction::UserUpdated => "User updated",
+        crate::api::models::AuditAction::UserDeleted => "User deleted",
         crate::api::models::AuditAction::UserEnabled => "User enabled",
         crate::api::models::AuditAction::UserDisabled => "User disabled",
         crate::api::models::AuditAction::UserRoleAssigned => "Role assignment",
@@ -786,6 +845,49 @@ fn users_render_state_with_data(
 
 fn users_error_message(users_error: Option<String>) -> String {
     users_error.unwrap_or_else(|| "Failed to load users".to_string())
+}
+
+fn filtered_admin_users(
+    users: &[AdminUserSummary],
+    search: &str,
+    status_filter: &str,
+) -> Vec<AdminUserSummary> {
+    users
+        .iter()
+        .filter(|user| user_matches_filters(user, search, status_filter))
+        .cloned()
+        .collect()
+}
+
+fn user_matches_filters(user: &AdminUserSummary, search: &str, status_filter: &str) -> bool {
+    let search = search.trim().to_ascii_lowercase();
+    if !search.is_empty() && !user.identifier.to_ascii_lowercase().contains(&search) {
+        return false;
+    }
+
+    match status_filter {
+        "enabled" => user.enabled,
+        "disabled" => !user.enabled,
+        _ => true,
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+fn confirm_user_delete(identifier: &str) -> bool {
+    web_sys::window()
+        .and_then(|window| {
+            window
+                .confirm_with_message(&format!(
+                    "Delete user {identifier}? This cannot be undone."
+                ))
+                .ok()
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn confirm_user_delete(_identifier: &str) -> bool {
+    true
 }
 
 fn format_event_actor(event: &AuditEvent) -> String {
@@ -1011,5 +1113,17 @@ mod tests {
             users_error_message(None),
             "Failed to load users".to_string()
         );
+    }
+
+    #[test]
+    fn user_matches_filters_respects_search_and_status() {
+        let mut user = sample_user(Some(Role::Viewer), vec![]);
+        user.identifier = "alice@example.com".to_string();
+        user.enabled = false;
+
+        assert!(user_matches_filters(&user, "alice", "all"));
+        assert!(!user_matches_filters(&user, "bob", "all"));
+        assert!(user_matches_filters(&user, "", "disabled"));
+        assert!(!user_matches_filters(&user, "", "enabled"));
     }
 }
