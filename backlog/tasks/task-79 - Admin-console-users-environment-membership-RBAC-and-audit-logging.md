@@ -173,5 +173,6 @@ Latest progress:
 - Removed inline SQL from `handlers/api/auth_oidc.rs`, `handlers/api/systems.rs`, `handlers/api/auth_local.rs`, and `handlers/api/auth_status.rs` by moving DB calls into query modules.
 - Added audit events for system sync/rollback mutation routes and surfaced new audit action labels in Admin UI filters/table.
 - Hardened last-admin guardrails with transaction + `FOR UPDATE` locking for disable/demotion race safety.
+- Updated OIDC login membership sync to preserve existing memberships when mappings are empty or unresolved, preventing accidental lockout on mapping/claim drift.
 - MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->
