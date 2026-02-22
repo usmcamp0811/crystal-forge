@@ -232,11 +232,19 @@ pub fn AdminView() -> Element {
                     }
                 }
 
-                if users_render_state(*users_loading.read(), users_error.read().as_deref())
+                if users_render_state_with_data(
+                    *users_loading.read(),
+                    users_error.read().as_deref(),
+                    !users.read().is_empty(),
+                )
                     == UsersRenderState::Loading
                 {
                     div { class: "text-sm {theme::text::SECONDARY}", "Loading users..." }
-                } else if users_render_state(*users_loading.read(), users_error.read().as_deref())
+                } else if users_render_state_with_data(
+                    *users_loading.read(),
+                    users_error.read().as_deref(),
+                    !users.read().is_empty(),
+                )
                     == UsersRenderState::Error
                 {
                     div {
@@ -244,6 +252,12 @@ pub fn AdminView() -> Element {
                         "{users_error_message(users_error.read().clone())}"
                     }
                 } else {
+                    if let Some(message) = users_error.read().clone() {
+                        div {
+                            class: "mb-3 rounded-lg border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-200",
+                            "{message}"
+                        }
+                    }
                     div {
                         class: "overflow-auto rounded-xl border {theme::surface::CARD_BORDER}",
                         table {
@@ -739,11 +753,19 @@ fn format_environments(values: &[String]) -> String {
 }
 
 fn users_render_state(users_loading: bool, users_error: Option<&str>) -> UsersRenderState {
+    users_render_state_with_data(users_loading, users_error, false)
+}
+
+fn users_render_state_with_data(
+    users_loading: bool,
+    users_error: Option<&str>,
+    has_loaded_users: bool,
+) -> UsersRenderState {
     if users_loading {
         return UsersRenderState::Loading;
     }
 
-    if users_error.is_some() {
+    if users_error.is_some() && !has_loaded_users {
         return UsersRenderState::Error;
     }
 
@@ -953,12 +975,16 @@ mod tests {
     #[test]
     fn users_render_state_prioritizes_loading_then_error_then_table() {
         assert_eq!(
-            users_render_state(true, Some("boom")),
+            users_render_state_with_data(true, Some("boom"), true),
             UsersRenderState::Loading
         );
         assert_eq!(
-            users_render_state(false, Some("boom")),
+            users_render_state_with_data(false, Some("boom"), false),
             UsersRenderState::Error
+        );
+        assert_eq!(
+            users_render_state_with_data(false, Some("boom"), true),
+            UsersRenderState::Table
         );
         assert_eq!(users_render_state(false, None), UsersRenderState::Table);
     }
