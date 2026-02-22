@@ -166,4 +166,5 @@ Latest progress:
 - Added shared backend API RBAC guard module and wired admin/flake handlers to common session-role checks.
 - Enforced viewer-or-above session gating on dashboard summary and flake list read APIs with forbidden-path tests.
 - Added backend systems list/detail APIs with membership-scoped visibility filtering and viewer-or-above authentication gating.
+- Added systems endpoint tests for authenticated-role requirements and filter helper behavior.
 <!-- SECTION:NOTES:END -->

@@ -297,6 +297,8 @@ fn internal_error(message: &str) -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::extract::State;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn highest_role_prefers_admin_then_operator_then_viewer() {
@@ -325,5 +327,39 @@ mod tests {
 
         params.environment = Some("staging".to_string());
         assert!(!matches_filters(&row, &params));
+    }
+
+    #[tokio::test]
+    async fn list_systems_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = list_systems(
+            State(pool),
+            HeaderMap::new(),
+            Query(SystemsListParams::default()),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn get_system_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = get_system(
+            State(pool),
+            HeaderMap::new(),
+            Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
