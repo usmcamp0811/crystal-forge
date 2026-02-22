@@ -14,7 +14,7 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            dashboard, flakes,
+            dashboard, flakes, systems,
         },
         status,
         webhook::webhook_handler,
@@ -104,6 +104,8 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
         )
+        .route("/api/v1/systems", get(systems::list_systems))
+        .route("/api/v1/systems/:id", get(systems::get_system))
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))

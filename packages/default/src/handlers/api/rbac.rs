@@ -33,6 +33,13 @@ pub async fn require_viewer_or_above(pool: &PgPool, headers: &HeaderMap) -> Opti
     }
 }
 
+pub async fn authenticated_user_roles(
+    pool: &PgPool,
+    headers: &HeaderMap,
+) -> Option<(Uuid, Vec<AuthRole>)> {
+    resolve_authenticated_roles(pool, headers).await
+}
+
 pub fn has_admin_role(roles: &[AuthRole]) -> bool {
     roles.contains(&AuthRole::Admin)
 }

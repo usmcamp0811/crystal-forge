@@ -96,8 +96,8 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 - [x] #3 Role changes take effect **on next login** (documented behavior).
 
 ### Environment-scoped visibility and authorization (core security behavior)
-- [ ] #4 Systems are associated with an Environment (existing or added association as part of this task).
-- [ ] #5 A user only sees systems belonging to environments they are a member of.
+- [x] #4 Systems are associated with an Environment (existing or added association as part of this task).
+- [x] #5 A user only sees systems belonging to environments they are a member of.
 - [ ] #6 Viewer can view system details but cannot deploy/sync/perform mutating actions.
 - [ ] #7 Operator can deploy/sync/perform allowed system operations within their environments, but cannot create environments.
 - [ ] #8 Admin can perform all operations, including environment management.
@@ -165,4 +165,5 @@ Latest progress:
 - Enforced operator-or-admin authorization on flake mutation APIs (create/delete) with explicit forbidden-path tests.
 - Added shared backend API RBAC guard module and wired admin/flake handlers to common session-role checks.
 - Enforced viewer-or-above session gating on dashboard summary and flake list read APIs with forbidden-path tests.
+- Added backend systems list/detail APIs with membership-scoped visibility filtering and viewer-or-above authentication gating.
 <!-- SECTION:NOTES:END -->
