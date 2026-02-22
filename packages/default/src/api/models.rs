@@ -424,10 +424,18 @@ pub struct AuthContext {
 pub struct AdminUserSummary {
     pub id: String,
     pub identifier: String,
+    pub identity_source: IdentitySource,
     pub role: Option<Role>,
     pub enabled: bool,
     pub environments: Vec<String>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentitySource {
+    LocalManaged,
+    OidcDerived,
 }
 
 /// Audit event action classification.

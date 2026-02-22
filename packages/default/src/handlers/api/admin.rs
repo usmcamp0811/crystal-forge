@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    AdminUserSummary, ApiError, AuditAction, AuditEvent, OidcGroupMapping, PaginatedResponse, Role,
+    AdminUserSummary, ApiError, AuditAction, AuditEvent, IdentitySource, OidcGroupMapping,
+    PaginatedResponse, Role,
 };
 use crate::auth::session::{SESSION_COOKIE_NAME, extract_cookie, hash_token};
 use crate::models::auth_identity::AuthRole;
@@ -26,6 +27,7 @@ struct AdminUserRow {
     username: String,
     email: String,
     is_active: bool,
+    has_external_identity: bool,
     updated_at: DateTime<Utc>,
 }
 
@@ -102,7 +104,14 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
     };
 
     let rows = match sqlx::query_as::<_, AdminUserRow>(
-        "SELECT id, username, email, is_active, updated_at FROM users ORDER BY updated_at DESC",
+        "SELECT u.id,
+                u.username,
+                u.email,
+                u.is_active,
+                EXISTS(SELECT 1 FROM external_identities ei WHERE ei.user_id = u.id) AS has_external_identity,
+                u.updated_at
+         FROM users u
+         ORDER BY u.updated_at DESC",
     )
     .fetch_all(&pool)
     .await
@@ -128,6 +137,11 @@ pub async fn list_users(State(pool): State<PgPool>, headers: HeaderMap) -> impl 
                 row.email
             } else {
                 format!("{} ({})", row.username, row.email)
+            },
+            identity_source: if row.has_external_identity {
+                IdentitySource::OidcDerived
+            } else {
+                IdentitySource::LocalManaged
             },
             role,
             enabled: row.is_active,
@@ -814,7 +828,14 @@ fn highest_role(roles: Vec<AuthRole>) -> Option<Role> {
 
 async fn fetch_admin_user_summary(pool: &PgPool, user_id: Uuid) -> Result<AdminUserSummary, ()> {
     let row = sqlx::query_as::<_, AdminUserRow>(
-        "SELECT id, username, email, is_active, updated_at FROM users WHERE id = $1",
+        "SELECT u.id,
+                u.username,
+                u.email,
+                u.is_active,
+                EXISTS(SELECT 1 FROM external_identities ei WHERE ei.user_id = u.id) AS has_external_identity,
+                u.updated_at
+         FROM users u
+         WHERE u.id = $1",
     )
     .bind(user_id)
     .fetch_one(pool)
@@ -833,6 +854,11 @@ async fn fetch_admin_user_summary(pool: &PgPool, user_id: Uuid) -> Result<AdminU
             row.email
         } else {
             format!("{} ({})", row.username, row.email)
+        },
+        identity_source: if row.has_external_identity {
+            IdentitySource::OidcDerived
+        } else {
+            IdentitySource::LocalManaged
         },
         role,
         enabled: row.is_active,

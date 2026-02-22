@@ -112,7 +112,7 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 ### Admin UI - OIDC mapping (OIDC enabled)
 - [x] #14 Provide an admin screen to manage mappings for `group -> role` and `group -> environments`, including create/edit/delete, duplicate detection, and input validation.
 - [ ] #15 On login, OIDC users have role + environment memberships derived from the mapping (persisted in CF in a conventional way).
-- [ ] #16 UI clearly communicates which user attributes are IdP-derived vs locally-managed.
+- [x] #16 UI clearly communicates which user attributes are IdP-derived vs locally-managed.
 
 ### Audit logging (required)
 - [ ] #17 Backend records audit events for user create/update/disable, role changes, environment membership changes, and OIDC mapping changes, with actor, target, action, timestamp, and request origin metadata.
@@ -150,4 +150,5 @@ Latest progress:
 - Added dedicated admin audit event storage and capture for user create/update, role, status, and environment membership changes.
 - Documented next-login role/environment propagation in Admin Users UI copy.
 - Added OIDC mapping validation for normalized group names, duplicate environment detection, and unknown environment rejection.
+- Added explicit identity source markers in Admin Users and disabled direct edits for IdP-derived users.
 <!-- SECTION:NOTES:END -->

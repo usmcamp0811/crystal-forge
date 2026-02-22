@@ -8,7 +8,8 @@ use crate::api::client::{
 };
 use crate::api::models::{
     AdminAuditEventsParams, AdminCreateUserRequest, AdminUpdateUserRequest,
-    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, OidcGroupMapping, Role,
+    AdminUpsertOidcMappingRequest, AdminUserSummary, AuditEvent, IdentitySource, OidcGroupMapping,
+    Role,
 };
 use crate::theme;
 
@@ -136,6 +137,10 @@ pub fn AdminView() -> Element {
                     class: "text-xs {theme::text::SECONDARY}",
                     "Role and environment membership changes take effect after the user signs in again."
                 }
+                p {
+                    class: "text-xs {theme::text::SECONDARY}",
+                    "Users sourced from OIDC are IdP-derived and their role/memberships are managed through OIDC group mappings."
+                }
 
                 div {
                     class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
@@ -233,6 +238,7 @@ pub fn AdminView() -> Element {
                                 class: "{theme::surface::CARD_BG} text-left text-xs uppercase tracking-wide {theme::text::MUTED}",
                                 tr {
                                     th { class: "px-4 py-3", "Identifier" }
+                                    th { class: "px-4 py-3", "Source" }
                                     th { class: "px-4 py-3", "Role" }
                                     th { class: "px-4 py-3", "Status" }
                                     th { class: "px-4 py-3", "Environments" }
@@ -257,9 +263,20 @@ pub fn AdminView() -> Element {
                                                 td { class: "px-4 py-3 text-white", {user.identifier.clone()} }
                                                 td {
                                                     class: "px-4 py-3",
+                                                    span {
+                                                        class: "inline-flex rounded-full px-2 py-1 text-xs font-medium {identity_source_badge_class(user.identity_source)}",
+                                                        "{identity_source_label(user.identity_source)}"
+                                                    }
+                                                }
+                                                td {
+                                                    class: "px-4 py-3",
+                                                    {
+                                                        let is_oidc_derived = user.identity_source == IdentitySource::OidcDerived;
+                                                        rsx! {
                                                     select {
                                                         class: "rounded-md border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2 py-1 text-xs text-white",
                                                         value: "{draft.role}",
+                                                        disabled: is_oidc_derived,
                                                         onchange: {
                                                             let mut user_drafts = user_drafts.clone();
                                                             let user_id = user_id.clone();
@@ -274,13 +291,19 @@ pub fn AdminView() -> Element {
                                                         option { value: "Operator", "Operator" }
                                                         option { value: "Viewer", "Viewer" }
                                                     }
+                                                        }
+                                                    }
                                                 }
                                                 td {
                                                     class: "px-4 py-3",
+                                                    {
+                                                        let is_oidc_derived = user.identity_source == IdentitySource::OidcDerived;
+                                                        rsx! {
                                                     label { class: "inline-flex items-center gap-2 text-xs {theme::text::SECONDARY}",
                                                         input {
                                                             r#type: "checkbox",
                                                             checked: draft.enabled,
+                                                            disabled: is_oidc_derived,
                                                             onchange: {
                                                                 let mut user_drafts = user_drafts.clone();
                                                                 let user_id = user_id.clone();
@@ -294,6 +317,8 @@ pub fn AdminView() -> Element {
                                                         }
                                                         if draft.enabled { "Enabled" } else { "Disabled" }
                                                     }
+                                                        }
+                                                    }
                                                 }
                                                 td {
                                                     class: "px-4 py-3",
@@ -301,6 +326,7 @@ pub fn AdminView() -> Element {
                                                         class: "w-full rounded-md border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-2 py-1 text-xs text-white",
                                                         r#type: "text",
                                                         value: "{draft.environments}",
+                                                        disabled: user.identity_source == IdentitySource::OidcDerived,
                                                         oninput: {
                                                             let mut user_drafts = user_drafts.clone();
                                                             let user_id = user_id.clone();
@@ -318,6 +344,7 @@ pub fn AdminView() -> Element {
                                                     class: "px-4 py-3",
                                                     button {
                                                         class: "rounded-md border {theme::surface::CARD_BORDER} px-2 py-1 text-xs font-medium text-white {theme::interactive::GHOST_BTN}",
+                                                        disabled: user.identity_source == IdentitySource::OidcDerived,
                                                         onclick: {
                                                             let user_id = user_id.clone();
                                                             let mut users = users.clone();
@@ -350,7 +377,11 @@ pub fn AdminView() -> Element {
                                                                 });
                                                             }
                                                         },
-                                                        "Save"
+                                                        if user.identity_source == IdentitySource::OidcDerived {
+                                                            "IdP managed"
+                                                        } else {
+                                                            "Save"
+                                                        }
                                                     }
                                                 }
                                             }
@@ -745,6 +776,20 @@ fn editable_role_label(role: Option<Role>) -> &'static str {
         Some(Role::Admin) => "Admin",
         Some(Role::Operator) => "Operator",
         Some(Role::Viewer) | None => "Viewer",
+    }
+}
+
+fn identity_source_label(source: IdentitySource) -> &'static str {
+    match source {
+        IdentitySource::LocalManaged => "Local",
+        IdentitySource::OidcDerived => "OIDC",
+    }
+}
+
+fn identity_source_badge_class(source: IdentitySource) -> &'static str {
+    match source {
+        IdentitySource::LocalManaged => "border border-cyan-500/40 bg-cyan-950/40 text-cyan-200",
+        IdentitySource::OidcDerived => "border border-amber-500/40 bg-amber-950/40 text-amber-200",
     }
 }
 
