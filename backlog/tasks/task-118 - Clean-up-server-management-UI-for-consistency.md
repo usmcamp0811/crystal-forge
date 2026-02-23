@@ -1,10 +1,10 @@
 ---
 id: TASK-118
 title: Clean up server management UI for consistency
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-02-22 23:40'
-updated_date: '2026-02-22 23:55'
+updated_date: '2026-02-23 00:01'
 labels: []
 dependencies: []
 ---
@@ -36,4 +36,12 @@ Improved UI consistency between server management views and builds/flakes views 
 - Consolidating action buttons
 - Flattening header layouts
 - Improving density and spacing throughout
+
+Fixed all admin user list UI issues:
+- Button styling now has proper gray backgrounds and padding
+- Added password reset modal with strength indicator
+- Table structure matches flakes view pattern
+- Search/filter layout is 4-column on large screens
+- Table rows have hover states
+- Delete button has proper red background styling
 <!-- SECTION:FINAL_SUMMARY:END -->
