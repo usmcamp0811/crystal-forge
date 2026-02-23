@@ -104,6 +104,16 @@ fn default_preferred_username_claim() -> String {
 }
 
 impl OidcConfig {
+    /// Determine if the application is running in a secure (HTTPS) context.
+    ///
+    /// This is used to decide whether to use `__Host-` prefixed cookies
+    /// and the `Secure` flag. In development with HTTP, we use regular cookies.
+    ///
+    /// Returns true if redirect_uri starts with "https://".
+    pub fn is_secure_context(&self) -> bool {
+        self.redirect_uri.starts_with("https://")
+    }
+
     /// Load OIDC configuration from environment variables.
     ///
     /// Required environment variables:
@@ -176,5 +186,28 @@ mod tests {
         assert_eq!(claims.email_claim, "email");
         assert_eq!(claims.name_claim, "name");
         assert_eq!(claims.roles_claim, "groups");
+    }
+
+    #[test]
+    fn is_secure_context_detects_https() {
+        let https_config = OidcConfig {
+            issuer_url: "https://auth.example.com".to_string(),
+            client_id: "test".to_string(),
+            client_secret: "secret".to_string(),
+            redirect_uri: "https://app.example.com/callback".to_string(),
+            scopes: default_scopes(),
+            claims: ClaimMappingConfig::default(),
+        };
+        assert!(https_config.is_secure_context());
+
+        let http_config = OidcConfig {
+            issuer_url: "http://localhost:8080".to_string(),
+            client_id: "test".to_string(),
+            client_secret: "secret".to_string(),
+            redirect_uri: "http://localhost:3445/callback".to_string(),
+            scopes: default_scopes(),
+            claims: ClaimMappingConfig::default(),
+        };
+        assert!(!http_config.is_secure_context());
     }
 }

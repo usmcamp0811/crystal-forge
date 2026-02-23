@@ -204,7 +204,11 @@ async fn main() -> anyhow::Result<()> {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([ACCEPT, CONTENT_TYPE, HeaderName::from_static("x-csrf-token")])
+        .allow_headers([
+            ACCEPT,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-csrf-token"),
+        ])
         .allow_credentials(true);
 
     let app = app.layer(cors).with_state(state);
