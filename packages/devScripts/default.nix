@@ -1,13 +1,7 @@
-{
-  mkShell,
-  system,
-  inputs,
-  pkgs,
-  lib,
-  ...
-}:
+{ mkShell, system, inputs, pkgs, lib, ... }:
 with lib;
-with lib.crystal-forge; let
+with lib.crystal-forge;
+let
   namespace = "crystal-forge";
   db_port = 3042;
   db_password = "password";
@@ -20,7 +14,7 @@ with lib.crystal-forge; let
   pgweb_port = 12084;
   oidc_issuer = "http://127.0.0.1:${toString oidc_port}/realms/${oidc_realm}";
   oidc_realm_import = ./oidc/realm-crystal-forge.json;
-  tomlFormat = pkgs.formats.toml {};
+  tomlFormat = pkgs.formats.toml { };
 
   agent-sim = pkgs.writeShellApplication {
     name = "agent-sim";
@@ -31,7 +25,7 @@ with lib.crystal-forge; let
 
   generateConfig = pkgs.writeShellApplication {
     name = "generate-config";
-    runtimeInputs = with pkgs; [hostname coreutils];
+    runtimeInputs = with pkgs; [ hostname coreutils ];
     text = ''
       set -euo pipefail
 
@@ -77,41 +71,36 @@ with lib.crystal-forge; let
       server_port = cf_port;
       private_key = "$CF_KEY_DIR/agent.key";
     };
-    environments = [
-      {
-        name = "mockenv";
-        description = "An environment full of agents created from shell scripts for testing purposes";
-        is_active = true;
-        risk_profile = "LOW";
-        compliance_level = "NONE";
-      }
-    ];
-    systems = [
-      {
-        hostname = "test.gray";
-        public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
-        environment = "mockenv";
-        flake_name = "dotfiles";
-      }
-    ];
+    environments = [{
+      name = "mockenv";
+      description =
+        "An environment full of agents created from shell scripts for testing purposes";
+      is_active = true;
+      risk_profile = "LOW";
+      compliance_level = "NONE";
+    }];
+    systems = [{
+      hostname = "test.gray";
+      public_key = pkgs.crystal-forge.testAgents.test-gray.publicKey;
+      environment = "mockenv";
+      flake_name = "dotfiles";
+    }];
     flakes = {
       flake_polling_interval = "10m";
       commit_evaluation_interval = "10m";
       build_processing_interval = "10m";
-      watched = [
-        {
-          name = "dotfiles";
-          repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
-          auto_poll = false;
-          initial_commit_depth = 10;
-        }
-      ];
+      watched = [{
+        name = "dotfiles";
+        repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
+        auto_poll = false;
+        initial_commit_depth = 10;
+      }];
     };
   };
 
   simulatePush = pkgs.writeShellApplication {
     name = "simulate-push";
-    runtimeInputs = with pkgs; [git curl jq];
+    runtimeInputs = with pkgs; [ git curl jq ];
     text = ''
       set -euo pipefail
 
@@ -146,7 +135,7 @@ with lib.crystal-forge; let
 
   runAgent = pkgs.writeShellApplication {
     name = "run-agent";
-    runtimeInputs = [pkgs.nix];
+    runtimeInputs = [ pkgs.nix ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -160,7 +149,7 @@ with lib.crystal-forge; let
 
   runServer = pkgs.writeShellApplication {
     name = "run-server";
-    runtimeInputs = [pkgs.nix pkgs.git pkgs.vulnix];
+    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
@@ -176,12 +165,13 @@ with lib.crystal-forge; let
     settings.processes.pgweb = {
       inherit namespace;
       command = "${pkgs.pgweb}/bin/pgweb --listen=${
-        toString pgweb_port
-      } --bind=0.0.0.0";
+          toString pgweb_port
+        } --bind=0.0.0.0";
       depends_on."db".condition = "process_healthy";
-      environment.PGWEB_DATABASE_URL = "postgres://crystal_forge:${db_password}@127.0.0.1:${
-        toString db_port
-      }/crystal_forge";
+      environment.PGWEB_DATABASE_URL =
+        "postgres://crystal_forge:${db_password}@127.0.0.1:${
+          toString db_port
+        }/crystal_forge";
     };
     services.postgres."db" = {
       inherit namespace;
@@ -198,7 +188,7 @@ with lib.crystal-forge; let
         CREATE DATABASE grafana_db OWNER grafana;
         GRANT ALL PRIVILEGES ON DATABASE grafana_db TO grafana;
       '';
-      initialDatabases = [];
+      initialDatabases = [ ];
     };
     settings.processes.postgres-jobs = {
       inherit namespace;
@@ -218,30 +208,26 @@ with lib.crystal-forge; let
       enable = true;
       http_port = grafana_port;
       domain = "localhost";
-      datasources = [
-        {
-          name = "Crystal Forge PostgreSQL";
-          uid = "crystal-forge-postgres";
-          type = "postgres";
-          access = "proxy";
-          url = "localhost:${toString db_port}";
-          database = "crystal_forge";
-          user = "crystal_forge";
-          secureJsonData = {password = db_password;};
-          jsonData = {sslmode = "disable";};
-          isDefault = false;
-          editable = true;
-        }
-      ];
-      providers = [
-        {
-          name = "Crystal Forge";
-          type = "file";
-          disableDeletion = true;
-          updateIntervalSeconds = 60;
-          options = {path = "${pkgs.crystal-forge.dashboards}/dashboards";};
-        }
-      ];
+      datasources = [{
+        name = "Crystal Forge PostgreSQL";
+        uid = "crystal-forge-postgres";
+        type = "postgres";
+        access = "proxy";
+        url = "localhost:${toString db_port}";
+        database = "crystal_forge";
+        user = "crystal_forge";
+        secureJsonData = { password = db_password; };
+        jsonData = { sslmode = "disable"; };
+        isDefault = false;
+        editable = true;
+      }];
+      providers = [{
+        name = "Crystal Forge";
+        type = "file";
+        disableDeletion = true;
+        updateIntervalSeconds = 60;
+        options = { path = "${pkgs.crystal-forge.dashboards}/dashboards"; };
+      }];
     };
     settings.processes."grafana".depends_on."db".condition = "process_healthy";
   };
@@ -257,7 +243,7 @@ with lib.crystal-forge; let
         CREATE DATABASE crystal_forge OWNER crystal_forge;
         GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
       '';
-      initialDatabases = [];
+      initialDatabases = [ ];
     };
   };
 
@@ -277,8 +263,8 @@ with lib.crystal-forge; let
       depends_on."db".condition = "process_healthy";
       readiness_probe = {
         exec.command = "${pkgs.postgresql}/bin/pg_isready -h 127.0.0.1 -p ${
-          toString db_port
-        } -U crystal_forge -d crystal_forge";
+            toString db_port
+          } -U crystal_forge -d crystal_forge";
         initial_delay_seconds = 2;
         period_seconds = 5;
         timeout_seconds = 3;
@@ -299,7 +285,8 @@ with lib.crystal-forge; let
         }:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin -v ${oidc_realm_import}:/opt/keycloak/data/import/realm-crystal-forge.json:ro quay.io/keycloak/keycloak:26.0 start-dev --import-realm --http-port=8080 --hostname-strict=false
       '';
       readiness_probe = {
-        exec.command = "${pkgs.curl}/bin/curl -fsS ${oidc_issuer}/.well-known/openid-configuration >/dev/null";
+        exec.command =
+          "${pkgs.curl}/bin/curl -fsS ${oidc_issuer}/.well-known/openid-configuration >/dev/null";
         initial_delay_seconds = 5;
         period_seconds = 5;
         timeout_seconds = 3;
@@ -315,7 +302,9 @@ with lib.crystal-forge; let
       CRYSTAL_FORGE_OIDC_ISSUER_URL = oidc_issuer;
       CRYSTAL_FORGE_OIDC_CLIENT_ID = oidc_client_id;
       CRYSTAL_FORGE_OIDC_CLIENT_SECRET = oidc_client_secret;
-      CRYSTAL_FORGE_OIDC_REDIRECT_URI = "http://127.0.0.1:${toString cf_port}/api/auth/oidc/callback";
+      CRYSTAL_FORGE_OIDC_REDIRECT_URI =
+        "http://127.0.0.1:${toString cf_port}/api/auth/oidc/callback";
+      CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP = "admin";
     };
     settings.processes.server.depends_on."oidc".condition = "process_healthy";
   };
@@ -338,7 +327,7 @@ with lib.crystal-forge; let
   };
 
   dbOnly = pkgs.process-compose-flake.evalModules {
-    modules = [inputs.services-flake.processComposeModules.default db-module];
+    modules = [ inputs.services-flake.processComposeModules.default db-module ];
   };
 
   oidc-stack = pkgs.process-compose-flake.evalModules {
@@ -350,11 +339,9 @@ with lib.crystal-forge; let
       server-oidc-module
     ];
   };
-in
-  full-stack.config.outputs.package
-  // {
-    inherit runServer runAgent simulatePush envExports;
-    db-only = dbOnly.config.outputs.package;
-    server-only = server-only.config.outputs.package;
-    oidc-stack = oidc-stack.config.outputs.package;
-  }
+in full-stack.config.outputs.package // {
+  inherit runServer runAgent simulatePush envExports;
+  db-only = dbOnly.config.outputs.package;
+  server-only = server-only.config.outputs.package;
+  oidc-stack = oidc-stack.config.outputs.package;
+}

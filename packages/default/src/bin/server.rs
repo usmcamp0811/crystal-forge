@@ -10,7 +10,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
-    auth::dev_mode::ensure_dev_users,
+    auth::dev_mode::{ensure_bootstrap_oidc_admin_mapping, ensure_dev_users},
     config::CrystalForgeConfig,
     flake::commits::initialize_flake_commits,
     handlers::{
@@ -156,6 +156,11 @@ async fn main() -> anyhow::Result<()> {
         info!("Registering OIDC auth endpoints at /api/auth/oidc/*");
         match crystal_forge::config::OidcConfig::from_env() {
             Ok(oidc_config) => {
+                // Bootstrap OIDC admin group mapping if configured
+                ensure_bootstrap_oidc_admin_mapping(&pool)
+                    .await
+                    .context("Failed to bootstrap OIDC admin mapping")?;
+
                 let oidc_state = Arc::new(auth_oidc::OidcClientState::new(oidc_config).await?);
 
                 let oidc_router = Router::new()

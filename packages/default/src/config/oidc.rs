@@ -114,6 +114,25 @@ impl OidcConfig {
         self.redirect_uri.starts_with("https://")
     }
 
+    /// Get bootstrap admin group mapping if configured.
+    ///
+    /// This allows initial admin access setup via environment variable.
+    /// Set CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP to the OIDC group name
+    /// that should be granted admin access on first startup.
+    ///
+    /// Example:
+    /// ```bash
+    /// CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP=admin
+    /// CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP=platform-admins
+    /// ```
+    ///
+    /// This is idempotent - if the mapping already exists, it won't be recreated.
+    /// This allows you to bootstrap the first admin user, who can then configure
+    /// additional mappings via the admin UI.
+    pub fn bootstrap_admin_group() -> Option<String> {
+        std::env::var("CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP").ok()
+    }
+
     /// Load OIDC configuration from environment variables.
     ///
     /// Required environment variables:
@@ -127,6 +146,7 @@ impl OidcConfig {
     /// - CRYSTAL_FORGE_OIDC_EMAIL_CLAIM (default: "email")
     /// - CRYSTAL_FORGE_OIDC_NAME_CLAIM (default: "name")
     /// - CRYSTAL_FORGE_OIDC_ROLES_CLAIM (default: "groups")
+    /// - CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP (optional initial admin group mapping)
     pub fn from_env() -> anyhow::Result<Self> {
         let issuer_url = std::env::var("CRYSTAL_FORGE_OIDC_ISSUER_URL")
             .map_err(|_| anyhow::anyhow!("CRYSTAL_FORGE_OIDC_ISSUER_URL not set"))?;

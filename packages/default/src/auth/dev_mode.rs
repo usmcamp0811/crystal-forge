@@ -86,6 +86,77 @@ pub fn is_valid_dev_user_email(email: &str) -> bool {
     )
 }
 
+/// Bootstrap OIDC group mapping for initial admin access.
+///
+/// If CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP is set, this creates a mapping
+/// from that OIDC group to the Admin role. This allows you to grant initial admin
+/// access when first deploying with OIDC authentication.
+///
+/// The bootstrap mapping is created only if:
+/// 1. The environment variable is set
+/// 2. No mapping for that group name already exists
+///
+/// This is idempotent and safe to call on every startup. After the first admin
+/// logs in, they can configure additional mappings via the admin UI.
+///
+/// Example usage:
+/// ```bash
+/// # For production with Entra ID:
+/// CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP=platform-admins
+///
+/// # For development with Keycloak:
+/// CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP=admin
+/// ```
+pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
+    use crate::config::OidcConfig;
+
+    let Some(admin_group) = OidcConfig::bootstrap_admin_group() else {
+        // No bootstrap group configured, skip
+        return Ok(());
+    };
+
+    tracing::info!("Checking for OIDC bootstrap admin mapping: {}", admin_group);
+
+    // Check if mapping already exists
+    let existing = sqlx::query!(
+        "SELECT id FROM oidc_group_mappings WHERE group_name = $1",
+        admin_group
+    )
+    .fetch_optional(pool)
+    .await
+    .context("Failed to check existing OIDC group mapping")?;
+
+    if existing.is_some() {
+        tracing::debug!("Bootstrap admin mapping already exists for: {}", admin_group);
+        return Ok(());
+    }
+
+    // Create the bootstrap admin mapping
+    sqlx::query!(
+        "INSERT INTO oidc_group_mappings (group_name, role, environments)
+         VALUES ($1, $2, ARRAY[]::text[])",
+        admin_group,
+        AuthRole::Admin as AuthRole
+    )
+    .execute(pool)
+    .await
+    .context(format!(
+        "Failed to create bootstrap OIDC admin mapping for {}",
+        admin_group
+    ))?;
+
+    tracing::info!(
+        "✅ Created bootstrap OIDC admin mapping: {} → Admin",
+        admin_group
+    );
+    tracing::info!(
+        "   Users in the '{}' OIDC group will now have Admin access",
+        admin_group
+    );
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
