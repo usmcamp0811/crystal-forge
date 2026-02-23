@@ -1,10 +1,10 @@
 ---
 id: TASK-122
 title: Builds View - Backend Integration
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 22:36'
+updated_date: '2026-02-23 22:52'
 labels:
   - backend
   - api
@@ -178,4 +178,6 @@ Medium
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-sonnet-4-6 on gray in ~/code/crystal-forge/TASK-122-builds-backend-integration
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/134
 <!-- SECTION:NOTES:END -->
