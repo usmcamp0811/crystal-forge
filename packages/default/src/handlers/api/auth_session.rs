@@ -65,7 +65,7 @@ pub async fn logout(
     // This makes logout idempotent - clients can call it even when already logged out
     if extract_cookie(&headers, SESSION_COOKIE_NAME).is_some() {
         validate_csrf(&headers)?;
-        
+
         let session_token = extract_cookie(&headers, SESSION_COOKIE_NAME).unwrap();
         let session_hash = hash_token(&session_token);
         invalidate_session_by_token_hash(&pool, &session_hash)

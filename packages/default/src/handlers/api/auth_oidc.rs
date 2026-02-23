@@ -28,10 +28,10 @@ use crate::config::OidcConfig;
 use crate::handlers::api::auth_session::establish_user_session;
 use crate::models::auth_identity::AuthRole;
 use crate::queries::auth_identity::{
-    assign_role_to_user, clear_user_environment_memberships, clear_user_role_assignments,
+    AuthIdentityRepository, OidcMappingMatchRow, assign_role_to_user,
+    clear_user_environment_memberships, clear_user_role_assignments,
     create_user_and_bind_external_identity, get_environment_ids_by_names, get_oidc_mapping_matches,
-    get_user_by_id, get_user_roles, insert_user_environment_membership, AuthIdentityRepository,
-    OidcMappingMatchRow,
+    get_user_by_id, get_user_roles, insert_user_environment_membership,
 };
 
 /// Shared OIDC client state.
@@ -404,10 +404,12 @@ pub async fn oidc_callback(
 
     let groups = normalize_oidc_groups(&user_info.roles);
 
-    let mapping_rows = get_oidc_mapping_matches(&pool, &groups).await.map_err(|e| {
-        tracing::error!("Failed to load OIDC group mappings: {}", e);
-        OidcError::DatabaseError
-    })?;
+    let mapping_rows = get_oidc_mapping_matches(&pool, &groups)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to load OIDC group mappings: {}", e);
+            OidcError::DatabaseError
+        })?;
 
     let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
     let mapped_environments = collect_mapped_environments(&mapping_rows);
@@ -460,7 +462,8 @@ pub async fn oidc_callback(
                 apply_environment_mappings = true;
                 resolved_environment_ids = environment_ids;
             }
-            EnvironmentMappingApply::SkipNoMappings | EnvironmentMappingApply::SkipNoMappedEnvironments => {}
+            EnvironmentMappingApply::SkipNoMappings
+            | EnvironmentMappingApply::SkipNoMappedEnvironments => {}
             EnvironmentMappingApply::SkipUnknownMappedEnvironments => {
                 tracing::warn!(
                     "OIDC mapped environments include unknown names; preserving existing memberships for user_id={}",

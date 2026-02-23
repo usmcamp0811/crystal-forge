@@ -1,6 +1,6 @@
 use crate::auth::oidc::ClaimExtractor;
 use crate::config::ClaimMappingConfig;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 
 fn extract_roles_for_provider(roles_claim: &str, roles_value: Value) -> Vec<String> {

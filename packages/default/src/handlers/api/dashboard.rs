@@ -16,8 +16,8 @@ use chrono::Utc;
 use sqlx::PgPool;
 use tracing::error;
 
-use crate::api::models::{BuildQueueSummary, DashboardSummary};
 use crate::api::models::ApiError;
+use crate::api::models::{BuildQueueSummary, DashboardSummary};
 use crate::handlers::api::rbac::require_viewer_or_above;
 use crate::queries::dashboard::{
     fetch_active_builds, fetch_cve_summary, fetch_deployment_status, fetch_fleet_health,
@@ -28,7 +28,10 @@ use crate::queries::dashboard::{
 ///
 /// Returns a [`DashboardSummary`] containing fleet health, deployment status,
 /// CVE counts, active builds, and recent deployments.
-pub async fn dashboard_summary(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
+pub async fn dashboard_summary(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
         return forbidden();
     }

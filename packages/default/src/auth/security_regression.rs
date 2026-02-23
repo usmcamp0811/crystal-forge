@@ -1,8 +1,6 @@
 use crate::auth::oidc::{ClaimExtractor, IdTokenClaims, JwtValidator};
 use crate::config::ClaimMappingConfig;
-use crate::handlers::agent_request::{
-    SystemLookup, authenticate_agent_request_with_lookup,
-};
+use crate::handlers::agent_request::{SystemLookup, authenticate_agent_request_with_lookup};
 use crate::handlers::api::auth_oidc::OidcError;
 use crate::models::public_key::PublicKey;
 use crate::models::systems::System;
@@ -74,7 +72,16 @@ fn security_role_mapping_failure_uses_empty_roles() {
 
     let extractor = ClaimExtractor::new(config);
     let user_info = extractor
-        .extract_user_info(None, None, None, None, None, None, &claims, "subject-2".to_string())
+        .extract_user_info(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            &claims,
+            "subject-2".to_string(),
+        )
         .unwrap();
 
     assert!(user_info.roles.is_empty());
@@ -82,7 +89,10 @@ fn security_role_mapping_failure_uses_empty_roles() {
 
 #[test]
 fn security_token_validation_rejects_non_rsa_algorithm() {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     let claims = IdTokenClaims {
         iss: "https://issuer.example.com".to_string(),
         sub: "user-1".to_string(),
@@ -102,7 +112,8 @@ fn security_token_validation_rejects_non_rsa_algorithm() {
     let mut header = Header::new(Algorithm::HS256);
     header.kid = Some("test-kid".to_string());
 
-    let token = jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(b"secret")).unwrap();
+    let token =
+        jsonwebtoken::encode(&header, &claims, &EncodingKey::from_secret(b"secret")).unwrap();
     let validator = JwtValidator::new(
         "https://issuer.example.com".to_string(),
         "cf-client".to_string(),
@@ -127,7 +138,10 @@ async fn security_agent_key_auth_path_accepts_valid_signature() {
     let signature = signing_key.sign(&body);
 
     let mut headers = HeaderMap::new();
-    headers.insert(HeaderName::from_static("x-key-id"), hostname.parse().unwrap());
+    headers.insert(
+        HeaderName::from_static("x-key-id"),
+        hostname.parse().unwrap(),
+    );
     headers.insert(
         HeaderName::from_static("x-signature"),
         general_purpose::STANDARD
@@ -156,7 +170,10 @@ async fn security_agent_key_auth_path_rejects_tampered_body() {
     let signature = signing_key.sign(original_body);
 
     let mut headers = HeaderMap::new();
-    headers.insert(HeaderName::from_static("x-key-id"), hostname.parse().unwrap());
+    headers.insert(
+        HeaderName::from_static("x-key-id"),
+        hostname.parse().unwrap(),
+    );
     headers.insert(
         HeaderName::from_static("x-signature"),
         general_purpose::STANDARD

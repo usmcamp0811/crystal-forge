@@ -113,10 +113,11 @@ pub async fn update_username_and_password_hash(
 }
 
 pub async fn get_password_hash_by_user_id(pool: &PgPool, user_id: Uuid) -> Result<Option<String>> {
-    let hash = sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_one(pool)
-        .await?;
+    let hash =
+        sqlx::query_scalar::<_, Option<String>>("SELECT password_hash FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
     Ok(hash)
 }
 

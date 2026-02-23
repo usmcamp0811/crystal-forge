@@ -9,17 +9,16 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CveSummary, DeploymentStatus, PaginatedResponse, PipelineStage, SortOrder,
-    SystemMutationResponse, SystemRollbackRequest,
-    SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, SystemSummary,
-    SystemsListParams,
+    ApiError, AuditAction, CveSummary, DeploymentStatus, PaginatedResponse, PipelineStage,
+    SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo,
+    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemsListParams,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::systems::{
-    find_system_access_row, get_user_environment_membership_ids, list_system_access_rows,
-    touch_system_updated_at, update_system_desired_target, SystemAccessRow,
+    SystemAccessRow, find_system_access_row, get_user_environment_membership_ids,
+    list_system_access_rows, touch_system_updated_at, update_system_desired_target,
 };
 
 pub async fn list_systems(
@@ -46,7 +45,9 @@ pub async fn list_systems(
 
     let mut items = rows
         .into_iter()
-        .filter(|row| caller_role.can_access_system_environment(row.environment_id, &environment_memberships))
+        .filter(|row| {
+            caller_role.can_access_system_environment(row.environment_id, &environment_memberships)
+        })
         .filter(|row| matches_filters(row, &params))
         .map(row_to_summary)
         .collect::<Vec<_>>();
@@ -305,7 +306,11 @@ fn matches_filters(row: &SystemAccessRow, params: &SystemsListParams) -> bool {
     if let Some(environment) = params.environment.as_ref() {
         let needle = environment.trim().to_ascii_lowercase();
         if !needle.is_empty() {
-            let env_name = row.environment.clone().unwrap_or_default().to_ascii_lowercase();
+            let env_name = row
+                .environment
+                .clone()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
             if env_name != needle {
                 return false;
             }
@@ -343,8 +348,13 @@ fn row_to_summary(row: SystemAccessRow) -> SystemSummary {
     }
 }
 
-async fn load_membership_environment_ids(pool: &PgPool, user_id: Uuid) -> Result<BTreeSet<Uuid>, ()> {
-    get_user_environment_membership_ids(pool, user_id).await.map_err(|_| ())
+async fn load_membership_environment_ids(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<BTreeSet<Uuid>, ()> {
+    get_user_environment_membership_ids(pool, user_id)
+        .await
+        .map_err(|_| ())
 }
 
 fn forbidden() -> axum::response::Response {

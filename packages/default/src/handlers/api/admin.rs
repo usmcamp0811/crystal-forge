@@ -120,7 +120,8 @@ pub async fn upsert_oidc_mapping(
         Err(message) => return bad_request(&message),
     };
 
-    let environments = match normalize_environment_names_with_duplicate_check(&payload.environments) {
+    let environments = match normalize_environment_names_with_duplicate_check(&payload.environments)
+    {
         Ok(value) => value,
         Err(message) => return bad_request(&message),
     };
@@ -342,7 +343,7 @@ pub async fn update_user(
             match admin::disable_user_with_admin_guard(&pool, target_user_id).await {
                 Ok(GuardedMutationOutcome::Applied) => {}
                 Ok(GuardedMutationOutcome::GuardrailViolation) => {
-                    return conflict("Cannot disable the last enabled admin")
+                    return conflict("Cannot disable the last enabled admin");
                 }
                 Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
                 Err(_) => return internal_error("Failed to validate admin guardrail"),
@@ -379,7 +380,7 @@ pub async fn update_user(
             {
                 Ok(GuardedMutationOutcome::Applied) => {}
                 Ok(GuardedMutationOutcome::GuardrailViolation) => {
-                    return conflict("Cannot remove the final admin role assignment")
+                    return conflict("Cannot remove the final admin role assignment");
                 }
                 Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
                 Err(_) => return internal_error("Failed to validate admin guardrail"),
@@ -494,7 +495,7 @@ pub async fn delete_user(
     match admin::delete_user_with_admin_guard(&pool, target_user_id).await {
         Ok(GuardedMutationOutcome::Applied) => {}
         Ok(GuardedMutationOutcome::GuardrailViolation) => {
-            return conflict("Cannot delete the final enabled admin")
+            return conflict("Cannot delete the final enabled admin");
         }
         Ok(GuardedMutationOutcome::NotFound) => return not_found("User not found"),
         Err(_) => return internal_error("Failed to delete user"),
@@ -795,7 +796,9 @@ async fn set_user_primary_role(
     role: Role,
     granted_by_user_id: Uuid,
 ) -> Result<(), ()> {
-    admin::clear_user_roles(pool, user_id).await.map_err(|_| ())?;
+    admin::clear_user_roles(pool, user_id)
+        .await
+        .map_err(|_| ())?;
 
     assign_role_to_user(
         pool,
@@ -815,13 +818,8 @@ async fn sync_user_environments(
     assigned_by_user_id: Uuid,
     environments: &[String],
 ) -> Result<(), String> {
-    admin::replace_user_environment_memberships(
-        pool,
-        user_id,
-        assigned_by_user_id,
-        environments,
-    )
-    .await
+    admin::replace_user_environment_memberships(pool, user_id, assigned_by_user_id, environments)
+        .await
 }
 
 fn normalize_oidc_group_name(value: &str) -> Result<String, String> {
@@ -1055,9 +1053,15 @@ mod tests {
 
     #[test]
     fn has_admin_role_only_accepts_admin_role() {
-        assert!(crate::handlers::api::rbac::has_admin_role(&[AuthRole::Admin]));
-        assert!(!crate::handlers::api::rbac::has_admin_role(&[AuthRole::Operator]));
-        assert!(!crate::handlers::api::rbac::has_admin_role(&[AuthRole::Viewer]));
+        assert!(crate::handlers::api::rbac::has_admin_role(&[
+            AuthRole::Admin
+        ]));
+        assert!(!crate::handlers::api::rbac::has_admin_role(&[
+            AuthRole::Operator
+        ]));
+        assert!(!crate::handlers::api::rbac::has_admin_role(&[
+            AuthRole::Viewer
+        ]));
         assert!(!crate::handlers::api::rbac::has_admin_role(&[
             AuthRole::Viewer,
             AuthRole::Operator,
@@ -1212,7 +1216,10 @@ mod tests {
     #[test]
     fn extract_request_origin_prefers_forwarded_over_real_ip() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "198.51.100.5".parse().expect("valid header"));
+        headers.insert(
+            "x-forwarded-for",
+            "198.51.100.5".parse().expect("valid header"),
+        );
         headers.insert("x-real-ip", "203.0.113.10".parse().expect("valid header"));
 
         assert_eq!(

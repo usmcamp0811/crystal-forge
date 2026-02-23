@@ -127,7 +127,10 @@ pub async fn list_system_access_rows(pool: &PgPool) -> Result<Vec<SystemAccessRo
     Ok(rows)
 }
 
-pub async fn find_system_access_row(pool: &PgPool, system_id: Uuid) -> Result<Option<SystemAccessRow>> {
+pub async fn find_system_access_row(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Option<SystemAccessRow>> {
     let row = sqlx::query_as::<_, SystemAccessRow>(
         "SELECT s.id,
                 s.hostname,
@@ -155,7 +158,11 @@ pub async fn touch_system_updated_at(pool: &PgPool, system_id: Uuid) -> Result<(
     Ok(())
 }
 
-pub async fn update_system_desired_target(pool: &PgPool, system_id: Uuid, target_commit: &str) -> Result<()> {
+pub async fn update_system_desired_target(
+    pool: &PgPool,
+    system_id: Uuid,
+    target_commit: &str,
+) -> Result<()> {
     sqlx::query("UPDATE systems SET desired_target = $1, updated_at = NOW() WHERE id = $2")
         .bind(target_commit)
         .bind(system_id)

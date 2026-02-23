@@ -171,7 +171,10 @@ pub async fn upsert_oidc_mapping(
     Ok(row)
 }
 
-pub async fn delete_oidc_mapping(pool: &PgPool, mapping_id: Uuid) -> Result<Option<OidcMappingRow>> {
+pub async fn delete_oidc_mapping(
+    pool: &PgPool,
+    mapping_id: Uuid,
+) -> Result<Option<OidcMappingRow>> {
     let row = sqlx::query_as::<_, OidcMappingRow>(
         "DELETE FROM oidc_group_mappings
          WHERE id = $1
@@ -435,7 +438,10 @@ pub async fn insert_admin_audit_event(
     Ok(())
 }
 
-pub async fn validate_environment_names_exist(pool: &PgPool, names: &[String]) -> Result<(), String> {
+pub async fn validate_environment_names_exist(
+    pool: &PgPool,
+    names: &[String],
+) -> Result<(), String> {
     if names.is_empty() {
         return Ok(());
     }

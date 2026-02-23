@@ -1,5 +1,5 @@
-pub mod agent_heartbeat;
 pub mod admin;
+pub mod agent_heartbeat;
 pub mod auth_identity;
 pub mod build_reservations;
 pub mod cache_push;

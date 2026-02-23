@@ -245,9 +245,9 @@ fn looks_like_repo_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::auth_identity::AuthRole;
     use axum::extract::State;
     use axum::response::IntoResponse;
-    use crate::models::auth_identity::AuthRole;
     use sqlx::postgres::PgPoolOptions;
 
     #[test]
@@ -294,7 +294,9 @@ mod tests {
         assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
             AuthRole::Operator,
         ]));
-        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[AuthRole::Admin]));
+        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
+            AuthRole::Admin
+        ]));
         assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
             AuthRole::Viewer,
             AuthRole::Operator,
