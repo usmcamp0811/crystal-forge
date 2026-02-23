@@ -83,6 +83,14 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("Failed to initialize dev auth fixtures")?;
     }
+
+    // Bootstrap OIDC admin group mapping if configured (for oidc mode)
+    if auth_mode == "oidc" {
+        ensure_bootstrap_oidc_admin_mapping(&pool)
+            .await
+            .context("Failed to bootstrap OIDC admin mapping")?;
+    }
+
     let background_pool = pool.clone();
     let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
@@ -156,11 +164,6 @@ async fn main() -> anyhow::Result<()> {
         info!("Registering OIDC auth endpoints at /api/auth/oidc/*");
         match crystal_forge::config::OidcConfig::from_env() {
             Ok(oidc_config) => {
-                // Bootstrap OIDC admin group mapping if configured
-                ensure_bootstrap_oidc_admin_mapping(&pool)
-                    .await
-                    .context("Failed to bootstrap OIDC admin mapping")?;
-
                 let oidc_state = Arc::new(auth_oidc::OidcClientState::new(oidc_config).await?);
 
                 let oidc_router = Router::new()

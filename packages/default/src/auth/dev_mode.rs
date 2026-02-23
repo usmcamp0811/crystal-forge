@@ -118,26 +118,26 @@ pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
     tracing::info!("Checking for OIDC bootstrap admin mapping: {}", admin_group);
 
     // Check if mapping already exists
-    let existing = sqlx::query!(
-        "SELECT id FROM oidc_group_mappings WHERE group_name = $1",
-        admin_group
+    let existing = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM oidc_group_mappings WHERE group_name = $1"
     )
-    .fetch_optional(pool)
+    .bind(&admin_group)
+    .fetch_one(pool)
     .await
     .context("Failed to check existing OIDC group mapping")?;
 
-    if existing.is_some() {
+    if existing > 0 {
         tracing::debug!("Bootstrap admin mapping already exists for: {}", admin_group);
         return Ok(());
     }
 
     // Create the bootstrap admin mapping
-    sqlx::query!(
+    sqlx::query(
         "INSERT INTO oidc_group_mappings (group_name, role, environments)
-         VALUES ($1, $2, ARRAY[]::text[])",
-        admin_group,
-        AuthRole::Admin as AuthRole
+         VALUES ($1, $2, ARRAY[]::text[])"
     )
+    .bind(&admin_group)
+    .bind(AuthRole::Admin)
     .execute(pool)
     .await
     .context(format!(
