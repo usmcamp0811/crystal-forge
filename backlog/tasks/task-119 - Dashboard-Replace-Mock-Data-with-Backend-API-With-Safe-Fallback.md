@@ -1,10 +1,10 @@
 ---
 id: TASK-119
 title: 'Dashboard: Replace Mock Data with Backend API (With Safe Fallback)'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-23 03:35'
-updated_date: '2026-02-23 03:37'
+updated_date: '2026-02-23 04:01'
 labels: []
 dependencies: []
 priority: medium
@@ -156,4 +156,8 @@ Touches core UI path and API integration, but isolated behind adapter.
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode on gray in /home/mcamp/code/crystal-forge/TASK-119-dashboard-api-fallback
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/131
+
+Verification: nix develop -c cargo test dashboard (packages/web-ui) passed; nix build .#checks.x86_64-linux.web-ui passed.
 <!-- SECTION:NOTES:END -->
