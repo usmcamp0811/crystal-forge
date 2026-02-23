@@ -2,19 +2,23 @@
 
 use dioxus::prelude::*;
 
+use crate::builds::adapter::{fallback_workers, load_builds_with_fallback, owned_to_build_item};
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
-    WorkerStatus, WorkerStrip, apply_action, mock_builds, mock_workers, selected_build_data,
+    WorkerStrip, apply_action, selected_build_data,
 };
+use crate::routes::Route;
 use crate::theme;
 
 /// Builds control center page.
 #[component]
 pub fn BuildsView() -> Element {
-    let mut workers = use_signal(mock_workers);
-    let mut builds = use_signal(mock_builds);
-    let mut selected_build = use_signal(|| Some(1_i32));
+    // Workers are not yet exposed by the API — always use fallback.
+    let mut workers = use_signal(fallback_workers);
+    // Build queue seeds from the API on mount; fallback to deterministic mock on error.
+    let mut builds = use_signal(Vec::<BuildItem>::new);
+    let mut selected_build = use_signal(|| None::<i32>);
     let mut active_tab = use_signal(|| DetailTab::Logs);
 
     let follow_logs = use_signal(|| true);
@@ -24,6 +28,42 @@ pub fn BuildsView() -> Element {
 
     let mut pending_action = use_signal(|| None::<PendingAction>);
     let mut last_action_note = use_signal(|| None::<String>);
+    let mut api_notice = use_signal(|| None::<String>);
+    let mut loading = use_signal(|| true);
+    let mut redirect_to_login = use_signal(|| false);
+
+    let nav = use_navigator();
+
+    // Fetch initial build queue state from the backend on mount.
+    use_effect(move || {
+        spawn(async move {
+            let result = load_builds_with_fallback().await;
+
+            if result.redirect_to_login {
+                redirect_to_login.set(true);
+                return;
+            }
+
+            let items: Vec<BuildItem> = result
+                .builds
+                .into_iter()
+                .map(owned_to_build_item)
+                .collect();
+
+            // Auto-select the first build if there is one.
+            if let Some(first) = items.first() {
+                selected_build.set(Some(first.id));
+            }
+
+            builds.set(items);
+            api_notice.set(result.notice);
+            loading.set(false);
+        });
+    });
+
+    if *redirect_to_login.read() {
+        nav.push(Route::LoginView {});
+    }
 
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
@@ -32,6 +72,16 @@ pub fn BuildsView() -> Element {
     rsx! {
         div {
             class: "space-y-6",
+
+            // API fallback notice banner
+            if let Some(notice) = api_notice.read().clone() {
+                div {
+                    class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm",
+                    style: "background-color: #3B2F00; border-color: #7A6000;",
+                    span { class: "shrink-0", "⚠" }
+                    span { "{notice}" }
+                }
+            }
 
             header {
                 class: "flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between",
@@ -65,60 +115,77 @@ pub fn BuildsView() -> Element {
                 }
             }
 
-            MetricsRow {
-                workers: worker_data.clone(),
-                builds: queue_data.clone(),
-            }
-
-            WorkerStrip {
-                workers: worker_data.clone(),
-                on_action: move |(worker_id, action)| {
-                    pending_action.set(Some(PendingAction::Worker { worker_id, action }))
-                },
-            }
-
-            if let Some(note) = last_action_note.read().clone() {
-                p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
-                    "{note}"
-                }
-            }
-
-            div {
-                class: "cf-builds-split",
+            if *loading.read() {
                 div {
-                    BuildQueuePane {
-                        builds: queue_data.clone(),
-                        selected_id: selected_build,
-                        on_build_action: move |(build_id, action)| {
-                            pending_action.set(Some(PendingAction::Build { build_id, action }))
-                        },
-                    }
-                }
-
-                div {
-                    BuildDetailPane {
-                        selected: selected,
-                        tab: active_tab,
-                        on_tab_change: move |tab| active_tab.set(tab),
-                        follow_logs: follow_logs,
-                        pause_logs: pause_logs,
-                        wrap_logs: wrap_logs,
-                        log_query: log_query,
-                    }
-                }
-            }
-
-            if let Some(action) = pending_action.read().clone() {
-                ConfirmActionModal {
-                    action: action.clone(),
-                    on_cancel: move |_| pending_action.set(None),
-                    on_confirm: move |_| {
-                        if let Some(next_action) = pending_action.read().clone() {
-                            apply_action(next_action, &mut workers, &mut builds, &mut selected_build, &mut last_action_note);
+                    class: "flex justify-center py-12",
+                    div {
+                        class: "flex flex-col items-center gap-3",
+                        div {
+                            class: "animate-spin rounded-full h-10 w-10 border-b-2",
+                            style: "border-color: #82699B;",
                         }
-                        pending_action.set(None);
+                        p {
+                            class: "text-sm {theme::text::SECONDARY}",
+                            "Loading build queue…"
+                        }
+                    }
+                }
+            } else {
+                MetricsRow {
+                    workers: worker_data.clone(),
+                    builds: queue_data.clone(),
+                }
+
+                WorkerStrip {
+                    workers: worker_data.clone(),
+                    on_action: move |(worker_id, action)| {
+                        pending_action.set(Some(PendingAction::Worker { worker_id, action }))
+                    },
+                }
+
+                if let Some(note) = last_action_note.read().clone() {
+                    p {
+                        class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
+                        style: "background-color: #23354B; border-color: #406084;",
+                        "{note}"
+                    }
+                }
+
+                div {
+                    class: "cf-builds-split",
+                    div {
+                        BuildQueuePane {
+                            builds: queue_data.clone(),
+                            selected_id: selected_build,
+                            on_build_action: move |(build_id, action)| {
+                                pending_action.set(Some(PendingAction::Build { build_id, action }))
+                            },
+                        }
+                    }
+
+                    div {
+                        BuildDetailPane {
+                            selected: selected,
+                            tab: active_tab,
+                            on_tab_change: move |tab| active_tab.set(tab),
+                            follow_logs: follow_logs,
+                            pause_logs: pause_logs,
+                            wrap_logs: wrap_logs,
+                            log_query: log_query,
+                        }
+                    }
+                }
+
+                if let Some(action) = pending_action.read().clone() {
+                    ConfirmActionModal {
+                        action: action.clone(),
+                        on_cancel: move |_| pending_action.set(None),
+                        on_confirm: move |_| {
+                            if let Some(next_action) = pending_action.read().clone() {
+                                apply_action(next_action, &mut workers, &mut builds, &mut selected_build, &mut last_action_note);
+                            }
+                            pending_action.set(None);
+                        }
                     }
                 }
             }

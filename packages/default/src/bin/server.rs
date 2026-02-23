@@ -18,7 +18,7 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            dashboard, environments, flakes, systems,
+            builds, dashboard, environments, flakes, systems,
         },
         status,
         webhook::webhook_handler,
@@ -155,6 +155,8 @@ async fn main() -> anyhow::Result<()> {
                 .patch(environments::update_environment_policies_handler),
         )
         .route("/api/v1/policies", get(environments::list_policies_handler))
+        .route("/api/v1/builds", get(builds::list_builds))
+        .route("/api/v1/builds/:id", get(builds::get_build))
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/sync", post(flakes::sync_all_flakes_handler))

@@ -188,6 +188,12 @@ pub async fn fetch_policies() -> Result<Vec<DeploymentPolicySummary>, ApiClientE
     fetch_json(&url).await
 }
 
+/// Fetch the current build queue summary.
+pub async fn fetch_builds() -> Result<BuildQueueSummary, ApiClientError> {
+    let url = format!("{}/builds", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());
