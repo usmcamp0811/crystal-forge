@@ -10,7 +10,7 @@ variables:
   NIX_SYSTEM: "x86_64-linux"
 
 # ============================================================================
-# Dynamic Flake Checks
+# Dynamic Flake Checks (child pipeline)
 # ============================================================================
 
 discover-checks:
@@ -28,6 +28,7 @@ discover-checks:
 
       SYSTEM="${NIX_SYSTEM}"
 
+      # Generate the child pipeline skeleton
       cat > checks-pipeline.yml <<'EOF'
       stages:
         - check
@@ -42,9 +43,10 @@ discover-checks:
           - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
           - chmod 600 ~/.netrc
         script:
-          - nix build .#checks.x86_64-linux.$CHECK_NAME -L --show-trace
+          - nix build .#checks.x86_64-linux.${CHECK_NAME} -L --show-trace
       EOF
 
+      # Append one job per flake check
       nix eval --json ".#checks.${SYSTEM}" --apply builtins.attrNames \
         | nix run nixpkgs#jq -- -r '.[]' \
         | sort -u \
@@ -77,6 +79,9 @@ run-discovered-checks:
       - artifact: checks-pipeline.yml
         job: discover-checks
     strategy: depend
+  needs:
+    - job: discover-checks
+      artifacts: true
   rules:
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
