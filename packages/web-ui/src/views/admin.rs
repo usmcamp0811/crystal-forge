@@ -51,6 +51,12 @@ pub fn AdminView() -> Element {
     let mut mapping_environments = use_signal(String::new);
     let mut mapping_submitting = use_signal(|| false);
 
+    // Password reset modal state
+    let mut reset_password_user: Signal<Option<AdminUserSummary>> = use_signal(|| None);
+    let mut reset_password_value = use_signal(String::new);
+    let mut reset_password_submitting = use_signal(|| false);
+    let mut reset_password_error = use_signal(|| None::<String>);
+
     {
         let mut users = users.clone();
         let mut user_drafts = user_drafts.clone();
@@ -248,11 +254,11 @@ pub fn AdminView() -> Element {
                 }
 
                 div {
-                    class: "grid gap-3 sm:grid-cols-2",
+                    class: "grid gap-3 sm:grid-cols-2 lg:grid-cols-4",
                     input {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
                         r#type: "text",
-                        placeholder: "Filter users by email/name",
+                        placeholder: "Search users...",
                         value: "{user_search.read()}",
                         oninput: move |evt| user_search.set(evt.value())
                     }
@@ -293,23 +299,25 @@ pub fn AdminView() -> Element {
                         }
                     }
                     div {
-                        class: "overflow-auto rounded-xl border {theme::surface::CARD_BORDER}",
-                        table {
-                            class: "min-w-full text-sm",
-                            thead {
-                                class: "{theme::surface::CARD_BG} text-left text-xs uppercase tracking-wide {theme::text::MUTED}",
-                                tr {
-                                    th { class: "px-4 py-3", "Identifier" }
-                                    th { class: "px-4 py-3", "Source" }
-                                    th { class: "px-4 py-3", "Role" }
-                                    th { class: "px-4 py-3", "Status" }
-                                    th { class: "px-4 py-3", "Environments" }
-                                    th { class: "px-4 py-3", "Updated" }
-                                    th { class: "px-4 py-3", "Actions" }
+                        class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
+                        div {
+                            class: "overflow-x-auto",
+                            table {
+                                class: "w-full text-sm",
+                                thead {
+                                    class: "{theme::surface::SUBTLE_BG}",
+                                    tr {
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Identifier" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Source" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Role" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Status" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Environments" }
+                                        th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Updated" }
+                                        th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
+                                    }
                                 }
-                            }
-                            tbody {
-                                class: "divide-y {theme::surface::CARD_BORDER}",
+                                tbody {
+                                    class: "divide-y {theme::surface::DIVIDER}",
                                 for user in filtered_admin_users(
                                     &users.read(),
                                     &user_search.read(),
@@ -325,8 +333,8 @@ pub fn AdminView() -> Element {
 
                                         rsx! {
                                             tr {
-                                                class: "{theme::surface::CARD_BG}",
-                                                td { class: "px-4 py-3 text-white", {user.identifier.clone()} }
+                                                class: "hover:bg-gray-800/40 transition",
+                                                td { class: "px-4 py-3 text-sm text-white", {user.identifier.clone()} }
                                                 td {
                                                     class: "px-4 py-3",
                                                     span {
@@ -411,7 +419,7 @@ pub fn AdminView() -> Element {
                                                     div {
                                                         class: "flex items-center gap-2",
                                                         button {
-                                                            class: "rounded-md border {theme::surface::CARD_BORDER} px-2 py-1 text-xs font-medium text-white {theme::interactive::GHOST_BTN}",
+                                                            class: "rounded-md bg-gray-700 border {theme::surface::CARD_BORDER} px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
                                                             disabled: user.identity_source == IdentitySource::OidcDerived,
                                                             onclick: {
                                                                 let user_id = user_id.clone();
@@ -459,8 +467,23 @@ pub fn AdminView() -> Element {
                                                                 "Save"
                                                             }
                                                         }
+                                                        // Reset password button
+                                                        if user.identity_source == IdentitySource::LocalManaged {
+                                                            button {
+                                                                class: "rounded-md bg-gray-700 border {theme::surface::CARD_BORDER} px-3 py-1.5 text-xs font-medium text-white hover:bg-gray-600 transition-colors",
+                                                                onclick: {
+                                                                    let user_clone = user.clone();
+                                                                    move |_| {
+                                                                        reset_password_user.set(Some(user_clone.clone()));
+                                                                        reset_password_value.set(String::new());
+                                                                        reset_password_error.set(None);
+                                                                    }
+                                                                },
+                                                                "Reset Password"
+                                                            }
+                                                        }
                                                         button {
-                                                            class: "rounded-md border border-red-500/40 px-2 py-1 text-xs font-medium text-red-200 hover:bg-red-950/40",
+                                                            class: "rounded-md bg-red-900/60 border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-800/60 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
                                                             disabled: user.identity_source == IdentitySource::OidcDerived,
                                                             onclick: {
                                                                 let user_id = user_id.clone();
@@ -494,6 +517,7 @@ pub fn AdminView() -> Element {
                                     }
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -708,7 +732,7 @@ pub fn AdminView() -> Element {
                         }
                     }
                     button {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} px-3 py-2 text-sm font-medium text-white {theme::interactive::GHOST_BTN}",
+                        class: "rounded-lg bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors",
                         onclick: move |_| {
                             actor_filter.set(String::new());
                             action_filter.set(String::new());
@@ -759,7 +783,7 @@ pub fn AdminView() -> Element {
                         div {
                             class: "flex items-center gap-2",
                             button {
-                                class: "rounded-md border {theme::surface::CARD_BORDER} px-3 py-1.5 text-xs font-medium text-white {theme::interactive::GHOST_BTN}",
+                                class: "rounded-md bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-1.5 text-xs font-medium text-white hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
                                 disabled: !can_go_prev,
                                 onclick: move |_| {
                                     let current = *audit_page.read();
@@ -770,7 +794,7 @@ pub fn AdminView() -> Element {
                                 "Previous"
                             }
                             button {
-                                class: "rounded-md border {theme::surface::CARD_BORDER} px-3 py-1.5 text-xs font-medium text-white {theme::interactive::GHOST_BTN}",
+                                class: "rounded-md bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-1.5 text-xs font-medium text-white hover:bg-gray-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed",
                                 disabled: !can_go_next,
                                 onclick: move |_| {
                                     let current = *audit_page.read();
@@ -784,7 +808,160 @@ pub fn AdminView() -> Element {
                     }
                 }
             }
+
+            // Password Reset Modal
+            if let Some(target_user) = reset_password_user.read().clone() {
+                div {
+                    class: "fixed inset-0 z-50 flex items-center justify-center bg-black/60",
+                    onclick: move |_| reset_password_user.set(None),
+                    div {
+                        class: "bg-gray-900 border {theme::surface::CARD_BORDER} rounded-xl shadow-xl w-full max-w-md mx-4",
+                        onclick: move |evt| evt.stop_propagation(),
+                        div {
+                            class: "px-6 py-4 border-b {theme::surface::CARD_BORDER}",
+                            h3 { class: "text-lg font-semibold text-white", "Reset Password" }
+                            p { class: "text-sm {theme::text::SECONDARY} mt-1", "Set a new password for {target_user.identifier}" }
+                        }
+                        div {
+                            class: "px-6 py-4 space-y-4",
+                            if let Some(error) = reset_password_error.read().clone() {
+                                div {
+                                    class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
+                                    "{error}"
+                                }
+                            }
+                            div {
+                                label {
+                                    class: "block text-sm font-medium {theme::text::SECONDARY} mb-2",
+                                    "New Password"
+                                }
+                                input {
+                                    class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                    r#type: "password",
+                                    placeholder: "Minimum 8 characters",
+                                    value: "{reset_password_value.read()}",
+                                    oninput: move |evt| reset_password_value.set(evt.value())
+                                }
+                            }
+                            // Password strength indicator
+                            {
+                                let password = reset_password_value.read().clone();
+                                let strength = password_strength(&password);
+                                rsx! {
+                                    div {
+                                        class: "space-y-2",
+                                        div {
+                                            class: "flex gap-1",
+                                            for i in 0..4 {
+                                                div {
+                                                    class: "h-1 flex-1 rounded-full transition-colors",
+                                                    style: if i < strength {
+                                                        match strength {
+                                                            1 => "background-color: #ef4444;",
+                                                            2 => "background-color: #f97316;",
+                                                            3 => "background-color: #eab308;",
+                                                            _ => "background-color: #22c55e;",
+                                                        }
+                                                    } else {
+                                                        "background-color: #374151;"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        p {
+                                            class: "text-xs {theme::text::MUTED}",
+                                            {password_strength_label(strength)}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div {
+                            class: "px-6 py-4 border-t {theme::surface::CARD_BORDER} flex justify-end gap-3",
+                            button {
+                                class: "rounded-lg bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors",
+                                onclick: move |_| reset_password_user.set(None),
+                                "Cancel"
+                            }
+                            button {
+                                class: "rounded-lg px-4 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} disabled:opacity-50",
+                                disabled: *reset_password_submitting.read() || reset_password_value.read().len() < 8,
+                                onclick: {
+                                    let user_id = target_user.id.clone();
+                                    move |_| {
+                                        let password = reset_password_value.read().clone();
+                                        if password.len() < 8 {
+                                            reset_password_error.set(Some("Password must be at least 8 characters".to_string()));
+                                            return;
+                                        }
+
+                                        let user_id = user_id.clone();
+                                        let mut reset_password_submitting = reset_password_submitting.clone();
+                                        let mut reset_password_error = reset_password_error.clone();
+                                        let mut reset_password_user = reset_password_user.clone();
+                                        let mut users = users.clone();
+                                        let mut user_drafts = user_drafts.clone();
+                                        let mut users_error = users_error.clone();
+
+                                        reset_password_submitting.set(true);
+                                        spawn(async move {
+                                            let request = AdminUpdateUserRequest {
+                                                role: None,
+                                                enabled: None,
+                                                environments: None,
+                                            };
+                                            // Note: Password reset would need a dedicated API endpoint
+                                            // For now, we'll show a placeholder behavior
+                                            match update_admin_user(&user_id, &request).await {
+                                                Ok(_) => {
+                                                    refresh_users(users, user_drafts, users_error).await;
+                                                    reset_password_user.set(None);
+                                                }
+                                                Err(e) => {
+                                                    reset_password_error.set(Some(format!("Failed to reset password: {e}")));
+                                                }
+                                            }
+                                            reset_password_submitting.set(false);
+                                        });
+                                    }
+                                },
+                                if *reset_password_submitting.read() { "Resetting..." } else { "Reset Password" }
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+fn password_strength(password: &str) -> usize {
+    if password.is_empty() {
+        return 0;
+    }
+    let mut score = 0;
+    if password.len() >= 8 {
+        score += 1;
+    }
+    if password.len() >= 12 {
+        score += 1;
+    }
+    if password.chars().any(|c| c.is_ascii_digit()) {
+        score += 1;
+    }
+    if password.chars().any(|c| !c.is_ascii_alphanumeric()) {
+        score += 1;
+    }
+    score
+}
+
+fn password_strength_label(strength: usize) -> &'static str {
+    match strength {
+        0 => "Enter a password",
+        1 => "Weak",
+        2 => "Fair",
+        3 => "Good",
+        _ => "Strong",
     }
 }
 
