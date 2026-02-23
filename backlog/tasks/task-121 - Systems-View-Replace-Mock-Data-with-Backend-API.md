@@ -4,7 +4,7 @@ title: Systems View - Replace Mock Data with Backend API
 status: To Do
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 21:15'
+updated_date: '2026-02-23 21:17'
 labels:
   - backend
   - api
@@ -14,6 +14,103 @@ milestone: m-7
 dependencies: []
 priority: high
 ---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Problem
+
+The Systems view currently renders mock/static data. There is no real API backing for:
+
+Listing systems
+
+Filtering by environment
+
+RBAC-scoped visibility
+
+System status
+
+This prevents meaningful operational use and correct environment scoping.
+
+Goal
+
+Implement backend API endpoint(s) for Systems.
+
+Implement DTOs and handlers.
+
+Connect web-ui Systems view to backend.
+
+Maintain deterministic mock fallback if backend is unavailable.
+
+Backend Scope
+Endpoints
+GET /api/systems
+GET /api/systems/:id
+
+Optional query parameters:
+
+?environment=prod
+?status=healthy
+Requirements
+
+Server-side RBAC enforcement.
+
+Server-side environment scoping.
+
+No policy logic in UI.
+
+Clean DTO layer.
+
+Example Response
+{
+  "systems": [
+    {
+      "id": "sys-1",
+      "name": "billing-api",
+      "environment": "prod",
+      "status": "healthy",
+      "last_deploy": "2026-02-20T18:22:00Z"
+    }
+  ]
+}
+Frontend Scope
+
+Introduce systems/api.rs
+
+Introduce systems/models.rs
+
+Introduce systems/adapter.rs
+
+Update systems/view.rs
+
+Adapter pattern:
+
+Attempt API fetch
+
+On 500/network → fallback to mock
+
+On 401/403 → redirect to login
+
+On empty list → render empty state
+
+Acceptance Criteria
+
+Systems view renders real data when DB present.
+
+Environment scoping enforced server-side.
+
+Fallback mock data works when backend unavailable.
+
+No business logic in view layer.
+
+Works in both auth modes.
+
+Verification
+nix build .#checks.x86_64-linux.default
+nix build .#checks.x86_64-linux.web-ui
+nix develop -c cargo test --package web-ui systems
+Risk Level
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Problem Statement
 
