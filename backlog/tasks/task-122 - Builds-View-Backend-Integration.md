@@ -1,10 +1,10 @@
 ---
 id: TASK-122
 title: Builds View - Backend Integration
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 21:18'
+updated_date: '2026-02-23 22:36'
 labels:
   - backend
   - api
