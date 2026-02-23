@@ -1,0 +1,118 @@
+---
+id: TASK-121
+title: Systems View - Replace Mock Data with Backend API
+status: To Do
+assignee: []
+created_date: '2026-02-23'
+updated_date: '2026-02-23 21:15'
+labels:
+  - backend
+  - api
+  - web-ui
+  - systems
+milestone: m-7
+dependencies: []
+priority: high
+---
+
+## Problem Statement
+
+The Systems view currently renders mock/static data. There is no real API backing for:
+- Listing systems
+- Filtering by environment
+- RBAC-scoped visibility
+- System status
+
+This prevents meaningful operational use and correct environment scoping.
+
+---
+
+## Goal
+
+1. Implement backend API endpoint(s) for Systems.
+2. Implement DTOs and handlers.
+3. Connect web-ui Systems view to backend.
+4. Maintain deterministic mock fallback if backend is unavailable.
+
+---
+
+## Non-Goals
+
+- Implementing write operations (create/update/delete systems)
+- Changing the UI layout significantly
+- Adding new system features beyond listing
+
+---
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 #1 Backend GET /api/systems endpoint implemented with environment filtering
+- [ ] #2 #2 Backend GET /api/systems/:id endpoint implemented
+- [ ] #3 #3 Server-side RBAC enforcement applied
+- [ ] #4 #4 Server-side environment scoping enforced
+- [ ] #5 #5 Frontend systems/api.rs created
+- [ ] #6 #6 Frontend systems/models.rs created
+- [ ] #7 #7 Frontend systems/adapter.rs created with fallback logic
+- [ ] #8 #8 Frontend systems/view.rs updated to use adapter
+- [ ] #9 #9 401/403 redirects to login
+- [ ] #10 #10 500/network errors fallback to mock data
+- [ ] #11 #11 Empty state renders when no data
+- [ ] #12 #12 Verification commands pass
+
+---
+
+## Architectural Constraints
+
+- No business logic in UI views
+- All DTOs defined in frontend models.rs
+- All HTTP calls isolated in api.rs
+- All fallback logic isolated in adapter.rs
+- No network calls directly inside view components
+- Server enforces RBAC - no client-side filtering for authorization
+
+---
+
+## Verification Plan
+
+Automated:
+
+```
+nix build .#checks.x86_64-linux.default
+nix build .#checks.x86_64-linux.web-ui
+nix develop -c cargo test --package web-ui systems
+```
+
+Manual:
+- Navigate to Systems view and verify real data loads
+- Test environment filtering
+- Test fallback to mock data when backend unavailable
+- Verify RBAC scoping by logging in as different users
+
+---
+
+## Impact Areas
+
+- Backend API
+- Web UI
+- RBAC enforcement
+
+---
+
+## Risk Level
+
+Medium
+
+---
+
+## Dependencies
+
+- Backend API foundation (auth middleware, DTO patterns)
+
+---
+
+## Follow-Up Tasks (if discovered during grooming)
+
+- Add unit tests for systems adapter
+- Implement write operations for systems
+- Add system detail view with full information
+<!-- AC:END -->
