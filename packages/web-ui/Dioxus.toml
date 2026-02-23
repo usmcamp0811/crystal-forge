@@ -15,7 +15,6 @@ style = []
 [web.resource.dev]
 style = []
 
-[web.proxy]
-# Proxy API requests to the backend server during development
-# This allows `dx serve` to forward /api/* requests to the Crystal Forge server
-backend = "http://localhost:3000"
+# Note: Proxy configuration is not supported in Dioxus 0.7.3
+# Instead, the API client (src/api/client.rs) detects dev server ports
+# and automatically redirects to http://localhost:3000 for the backend

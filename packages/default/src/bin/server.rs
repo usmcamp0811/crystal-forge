@@ -28,6 +28,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -181,7 +182,15 @@ async fn main() -> anyhow::Result<()> {
         app = app.fallback(get(ui::serve_ui));
     }
 
-    let app = app.with_state(state);
+    // Add CORS layer for development (allows frontend dev server to talk to backend)
+    // In production, the UI is served from the same origin, so this is permissive for dev
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any)
+        .allow_credentials(true);
+
+    let app = app.layer(cors).with_state(state);
 
     let listener = TcpListener::bind(("0.0.0.0", server_cfg.port)).await?;
     axum::serve(

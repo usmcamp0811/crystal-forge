@@ -50,6 +50,7 @@ bytes = "1.10.1"
 humantime-serde = "1.1.1"
 include_dir = { version = "0.7.4", optional = true }
 mime_guess = { version = "2.0.5", optional = true }
+tower-http = { version = "0.6", features = ["cors"] }
 
 [lib]
 path = "src/lib.rs"
