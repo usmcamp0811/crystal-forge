@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: To Do
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 21:16'
+updated_date: '2026-02-23 21:18'
 labels:
   - backend
   - api
@@ -14,6 +14,68 @@ milestone: m-13
 dependencies: []
 priority: high
 ---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Deployment Policies View: Backend Integration
+Problem
+
+Policies are currently static in UI.
+
+Goal
+
+Expose deployment policies from backend and render dynamically.
+
+Backend Scope
+Endpoints
+GET /api/deployment-policies
+GET /api/deployment-policies/:id
+
+Future-compatible for:
+
+POST /api/deployment-policies
+PUT /api/deployment-policies/:id
+Example Response
+{
+  "policies": [
+    {
+      "id": "policy-1",
+      "name": "prod-approval",
+      "environment": "prod",
+      "requires_approval": true,
+      "min_approvers": 2
+    }
+  ]
+}
+Requirements
+
+RBAC enforcement server-side.
+
+Only Admin/Operator see modify actions.
+
+Viewer is read-only.
+
+Frontend Scope
+
+Policy DTOs.
+
+Role-aware action visibility driven by auth context.
+
+Fallback to mock data.
+
+Acceptance Criteria
+
+Policies render dynamically.
+
+Role-based UI behavior correct.
+
+Fallback logic intact.
+
+Risk Level
+
+Medium
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Problem Statement
 
