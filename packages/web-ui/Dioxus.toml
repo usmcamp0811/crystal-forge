@@ -14,3 +14,8 @@ style = []
 
 [web.resource.dev]
 style = []
+
+[web.proxy]
+# Proxy API requests to the backend server during development
+# This allows `dx serve` to forward /api/* requests to the Crystal Forge server
+backend = "http://localhost:3000"

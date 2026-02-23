@@ -8,13 +8,20 @@ use super::models::*;
 /// Base URL for the API. In production this is the same origin;
 /// during development it may point to a different port.
 fn base_url() -> String {
-    // In production, the UI is served from the same origin as the API.
-    // During development with `dx serve`, we proxy or use the server URL directly.
+    // In development with `dx serve`, the frontend runs on port 8080 (or similar)
+    // but needs to talk to the backend on port 3000. Detect this scenario.
     let window = web_sys::window().expect("no global window");
     let location = window.location();
     let origin = location
         .origin()
         .unwrap_or_else(|_| "http://localhost:3000".into());
+
+    // If we're running on a typical dev server port (8080, 8000, etc.)
+    // but not on the backend port (3000), redirect to backend
+    if origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081") {
+        return "http://localhost:3000/api/v1".to_string();
+    }
+
     format!("{origin}/api/v1")
 }
 
@@ -25,6 +32,12 @@ fn auth_base_url() -> String {
     let origin = location
         .origin()
         .unwrap_or_else(|_| "http://localhost:3000".into());
+
+    // Same dev server detection as base_url()
+    if origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081") {
+        return "http://localhost:3000/api/auth".to_string();
+    }
+
     format!("{origin}/api/auth")
 }
 
