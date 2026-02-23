@@ -109,6 +109,7 @@ pub fn is_valid_dev_user_email(email: &str) -> bool {
 /// ```
 pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
     use crate::config::OidcConfig;
+    use crate::queries::auth_identity::{count_oidc_group_mappings, create_oidc_group_mapping};
 
     let Some(admin_group) = OidcConfig::bootstrap_admin_group() else {
         // No bootstrap group configured, skip
@@ -118,32 +119,22 @@ pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
     tracing::info!("Checking for OIDC bootstrap admin mapping: {}", admin_group);
 
     // Check if mapping already exists
-    let existing = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM oidc_group_mappings WHERE group_name = $1"
-    )
-    .bind(&admin_group)
-    .fetch_one(pool)
-    .await
-    .context("Failed to check existing OIDC group mapping")?;
+    let existing = count_oidc_group_mappings(pool, &admin_group)
+        .await
+        .context("Failed to check existing OIDC group mapping")?;
 
     if existing > 0 {
         tracing::debug!("Bootstrap admin mapping already exists for: {}", admin_group);
         return Ok(());
     }
 
-    // Create the bootstrap admin mapping
-    sqlx::query(
-        "INSERT INTO oidc_group_mappings (group_name, role, environments)
-         VALUES ($1, $2, ARRAY[]::text[])"
-    )
-    .bind(&admin_group)
-    .bind(AuthRole::Admin)
-    .execute(pool)
-    .await
-    .context(format!(
-        "Failed to create bootstrap OIDC admin mapping for {}",
-        admin_group
-    ))?;
+    // Create the bootstrap admin mapping (with no environment restrictions)
+    create_oidc_group_mapping(pool, &admin_group, AuthRole::Admin, &[])
+        .await
+        .context(format!(
+            "Failed to create bootstrap OIDC admin mapping for {}",
+            admin_group
+        ))?;
 
     tracing::info!(
         "✅ Created bootstrap OIDC admin mapping: {} → Admin",
