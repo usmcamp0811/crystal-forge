@@ -9,6 +9,7 @@ mod dashboard;
 mod environments;
 mod routes;
 mod state;
+mod systems;
 pub mod theme;
 mod views;
 
