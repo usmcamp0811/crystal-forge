@@ -11,7 +11,6 @@ variables:
 
 # ============================================================================
 # Dynamic Flake Checks
-# Discovers all checks from nix flake and runs them as separate jobs
 # ============================================================================
 
 discover-checks:
@@ -29,23 +28,22 @@ discover-checks:
 
       SYSTEM="${NIX_SYSTEM}"
 
-      # IMPORTANT: no indentation before YAML keys
       cat > checks-pipeline.yml <<'EOF'
-stages:
-  - check
+      stages:
+        - check
 
-.check-template:
-  stage: check
-  tags:
-    - nix
-  before_script:
-    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
-    - echo "login gitlab-ci-token" >> ~/.netrc
-    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
-    - chmod 600 ~/.netrc
-  script:
-    - nix build .#checks.x86_64-linux.$CHECK_NAME -L --show-trace
-EOF
+      .check-template:
+        stage: check
+        tags:
+          - nix
+        before_script:
+          - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+          - echo "login gitlab-ci-token" >> ~/.netrc
+          - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+          - chmod 600 ~/.netrc
+        script:
+          - nix build .#checks.x86_64-linux.$CHECK_NAME -L --show-trace
+      EOF
 
       nix eval --json ".#checks.${SYSTEM}" --apply builtins.attrNames \
         | nix run nixpkgs#jq -- -r '.[]' \
