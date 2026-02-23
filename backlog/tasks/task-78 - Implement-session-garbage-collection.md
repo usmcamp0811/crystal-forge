@@ -10,7 +10,7 @@ labels:
 dependencies:
   - TASK-65.3
 priority: medium
-ordinal: 6000
+ordinal: 8000
 ---
 
 ## Description
