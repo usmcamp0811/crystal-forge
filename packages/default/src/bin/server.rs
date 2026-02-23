@@ -135,6 +135,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/deactivate",
             post(systems::deactivate_system_handler),
+        .route("/api/v1/environments", get(environments::list_environments))
+        .route(
+            "/api/v1/environments/:id",
+            get(environments::get_environment),
         )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
