@@ -1,12 +1,11 @@
 //! Dashboard view — fleet-wide overview with health, deployment, and CVE summaries.
 
-use chrono::{Duration, Utc};
+use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
 use crate::api::models::{
-    BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary, DeploymentStatus,
-    DeploymentStatusSummary, FlakeCommit, FlakeTimeline, FleetHealthSummary, RecentDeployment,
+    BuildStatus, FlakeCommit, FlakeTimeline,
 };
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
@@ -16,6 +15,11 @@ use crate::components::flake::FlakeTimelineWidget;
 use crate::components::layout::Card;
 use crate::components::stat_card::StatCard;
 use crate::components::widget_grid::{GridWidget, WidgetGrid};
+use crate::dashboard::adapter::{
+    deterministic_mock_timestamp, fallback_build_queue_summary, fallback_dashboard_summary,
+    load_dashboard_with_fallback,
+};
+use crate::routes::Route;
 use crate::theme;
 
 /// Global filter state for the dashboard - shared across all widgets.
@@ -119,13 +123,55 @@ fn default_widget_positions() -> Vec<WidgetPosition> {
 /// The main dashboard page.
 #[component]
 pub fn DashboardView() -> Element {
-    // TODO: Replace with real API call using use_resource + fetch_dashboard()
-    let dashboard = mock_dashboard_summary();
+    let nav = navigator();
+
+    let dashboard = use_signal(fallback_dashboard_summary);
+    let dashboard_notice = use_signal(|| None::<String>);
+    let loading_dashboard = use_signal(|| true);
+    let redirect_to_login = use_signal(|| false);
+
+    {
+        let mut dashboard = dashboard.clone();
+        let mut dashboard_notice = dashboard_notice.clone();
+        let mut loading_dashboard = loading_dashboard.clone();
+        let mut redirect_to_login = redirect_to_login.clone();
+
+        use_effect(move || {
+            spawn(async move {
+                let load_result = load_dashboard_with_fallback().await;
+
+                if load_result.redirect_to_login {
+                    redirect_to_login.set(true);
+                    loading_dashboard.set(false);
+                    return;
+                }
+
+                dashboard.set(load_result.summary);
+                dashboard_notice.set(load_result.notice);
+                loading_dashboard.set(false);
+            });
+        });
+    }
+
+    if *redirect_to_login.read() {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "min-h-screen flex items-center justify-center {theme::surface::PAGE_BG}",
+                p {
+                    class: "{theme::text::SECONDARY}",
+                    "Redirecting to login..."
+                }
+            }
+        };
+    }
+
+    let dashboard = dashboard.read().clone();
     let flake_timelines = mock_flake_timelines();
     let build_queue = dashboard
         .build_queue
         .clone()
-        .unwrap_or_else(|| mock_build_queue_summary(dashboard.timestamp));
+        .unwrap_or_else(|| fallback_build_queue_summary(dashboard.timestamp));
 
     // Global filter state - shared across all widgets (multi-select)
     let mut dashboard_filter = use_signal(DashboardFilter::default);
@@ -338,6 +384,22 @@ pub fn DashboardView() -> Element {
             "data-testid": "dashboard",
 
             // Top stats row
+            if *loading_dashboard.read() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
+                    style: "background-color: #23354B; border-color: #406084;",
+                    "Loading dashboard data..."
+                }
+            }
+
+            if let Some(message) = dashboard_notice.read().clone() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
+                    style: "background-color: #493E26; border-color: #8C7041;",
+                    "{message}"
+                }
+            }
+
             div {
                 class: "grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4",
                 StatCard {
@@ -434,139 +496,9 @@ pub fn DashboardView() -> Element {
 // Mock Data Functions (for development)
 // =============================================================================
 
-/// Generate mock build queue data for development.
-fn mock_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> BuildQueueSummary {
-    let items = vec![
-        BuildQueueItem {
-            hostname: "atlas-02".to_string(),
-            flake_name: "infrastructure".to_string(),
-            commit_hash: "a1b2c3d".to_string(),
-            commit_message: Some("feat: add monitoring stack".to_string()),
-            status: BuildStatus::Building,
-            queued_at: now - Duration::minutes(14),
-            started_at: Some(now - Duration::minutes(9)),
-            elapsed_secs: Some(9 * 60),
-        },
-        BuildQueueItem {
-            hostname: "ws-009".to_string(),
-            flake_name: "workstations".to_string(),
-            commit_hash: "a2b3c4d".to_string(),
-            commit_message: Some("fix: bluetooth audio".to_string()),
-            status: BuildStatus::Queued,
-            queued_at: now - Duration::minutes(6),
-            started_at: None,
-            elapsed_secs: None,
-        },
-        BuildQueueItem {
-            hostname: "edge-us-west".to_string(),
-            flake_name: "edge-nodes".to_string(),
-            commit_hash: "1234567".to_string(),
-            commit_message: Some("fix: wireguard tunnel".to_string()),
-            status: BuildStatus::Queued,
-            queued_at: now - Duration::minutes(22),
-            started_at: None,
-            elapsed_secs: None,
-        },
-        BuildQueueItem {
-            hostname: "luna-01".to_string(),
-            flake_name: "infrastructure".to_string(),
-            commit_hash: "b2c3d4e".to_string(),
-            commit_message: Some("fix: nginx config reload".to_string()),
-            status: BuildStatus::Queued,
-            queued_at: now - Duration::minutes(3),
-            started_at: None,
-            elapsed_secs: None,
-        },
-    ];
-
-    let building_count = items
-        .iter()
-        .filter(|item| item.status == BuildStatus::Building)
-        .count() as i64;
-    let queued_count = items
-        .iter()
-        .filter(|item| item.status == BuildStatus::Queued)
-        .count() as i64;
-
-    BuildQueueSummary {
-        building_count,
-        queued_count,
-        items,
-        timestamp: now,
-    }
-}
-
-/// Generate mock dashboard data for development.
-fn mock_dashboard_summary() -> DashboardSummary {
-    let now = Utc::now();
-    let build_queue = mock_build_queue_summary(now);
-
-    DashboardSummary {
-        fleet_health: FleetHealthSummary {
-            healthy: 17,
-            warning: 2,
-            critical: 0,
-            offline: 2,
-        },
-        deployment_status: DeploymentStatusSummary {
-            up_to_date: 7,
-            behind: 0,
-            never_deployed: 12,
-            unknown: 2,
-        },
-        cve_summary: CveSummary {
-            critical: 5,
-            high: 23,
-            medium: 67,
-            low: 142,
-        },
-        total_systems: 21,
-        active_builds: build_queue.building_count,
-        build_queue: Some(build_queue),
-        recent_deployments: vec![
-            RecentDeployment {
-                hostname: "atlas-01".to_string(),
-                commit_hash: "a1b2c3d4e5f6789".to_string(),
-                commit_message: Some("fix: update nginx config for TLS 1.3".to_string()),
-                deployed_at: now - Duration::minutes(15),
-                status: DeploymentStatus::UpToDate,
-            },
-            RecentDeployment {
-                hostname: "nova-05".to_string(),
-                commit_hash: "f9e8d7c6b5a4321".to_string(),
-                commit_message: Some("feat: add prometheus metrics endpoint".to_string()),
-                deployed_at: now - Duration::hours(2),
-                status: DeploymentStatus::UpToDate,
-            },
-            RecentDeployment {
-                hostname: "luna-02".to_string(),
-                commit_hash: "1234567890abcdef".to_string(),
-                commit_message: Some("chore: bump nixpkgs to 24.11".to_string()),
-                deployed_at: now - Duration::hours(5),
-                status: DeploymentStatus::Behind,
-            },
-            RecentDeployment {
-                hostname: "orion-03".to_string(),
-                commit_hash: "deadbeefcafe1234".to_string(),
-                commit_message: Some("refactor: migrate to systemd hardening options".to_string()),
-                deployed_at: now - Duration::days(1),
-                status: DeploymentStatus::UpToDate,
-            },
-            RecentDeployment {
-                hostname: "vega-04".to_string(),
-                commit_hash: "cafe1234deadbeef".to_string(),
-                commit_message: Some("fix: resolve CVE-2024-1234 in openssl".to_string()),
-                deployed_at: now - Duration::days(2),
-                status: DeploymentStatus::Behind,
-            },
-        ],
-        timestamp: now,
-    }
-}
-
 /// Generate mock flake timeline data for development.
 pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
-    let now = Utc::now();
+    let now = deterministic_mock_timestamp();
 
     vec![
         FlakeTimeline {

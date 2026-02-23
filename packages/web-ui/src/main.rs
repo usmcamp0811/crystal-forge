@@ -5,6 +5,7 @@
 
 mod api;
 mod components;
+mod dashboard;
 mod routes;
 mod state;
 pub mod theme;
