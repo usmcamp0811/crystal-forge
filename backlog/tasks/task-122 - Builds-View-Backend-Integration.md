@@ -4,7 +4,7 @@ title: Builds View - Backend Integration
 status: To Do
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 21:15'
+updated_date: '2026-02-23 21:18'
 labels:
   - backend
   - api
@@ -14,6 +14,69 @@ milestone: m-11
 dependencies: []
 priority: high
 ---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Builds View: Backend Integration
+Problem
+
+Builds view currently uses static/mock build history.
+
+Goal
+
+Implement full backend integration for build history and status.
+
+Backend Scope
+Endpoints
+GET /api/builds
+GET /api/builds/:id
+
+Optional:
+
+?system_id=sys-1
+?status=failed
+Example Response
+{
+  "builds": [
+    {
+      "id": "build-42",
+      "system_id": "sys-1",
+      "status": "success",
+      "started_at": "2026-02-20T18:00:00Z",
+      "duration_seconds": 124
+    }
+  ]
+}
+Requirements
+
+Scoped to environments user has access to.
+
+No UI-based filtering logic for authorization.
+
+Frontend Scope
+builds/
+  api.rs
+  models.rs
+  adapter.rs
+  view.rs
+
+Adapter fallback identical to Systems view.
+
+Acceptance Criteria
+
+Real build history renders.
+
+Filtering by system works.
+
+Fallback mock data preserved.
+
+Proper loading and error states.
+
+Risk Level
+
+Medium
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Problem Statement
 
