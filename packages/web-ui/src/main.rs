@@ -8,6 +8,7 @@ mod components;
 mod dashboard;
 mod routes;
 mod state;
+mod systems;
 pub mod theme;
 mod views;
 

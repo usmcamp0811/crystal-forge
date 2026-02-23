@@ -30,9 +30,10 @@ use crate::components::system::{
     AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
     SecurityCard, StatusBadge, SystemInfoCard, environment_style,
 };
+use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
+use crate::systems::adapter::{fallback_system_detail, load_system_detail_with_fallback};
 use crate::theme;
-use crate::views::systems_mock::mock_system_detail_by_id;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen_futures::JsFuture;
 #[cfg(target_arch = "wasm32")]
@@ -107,7 +108,9 @@ impl Tab {
 /// The system detail page, reached via `/systems/:id`.
 #[component]
 pub fn SystemDetailView(id: String) -> Element {
+    let nav = navigator();
     let app_state = use_context::<Signal<AppState>>();
+
     // Current tab state
     let mut active_tab = use_signal(|| Tab::Overview);
 
@@ -122,8 +125,70 @@ pub fn SystemDetailView(id: String) -> Element {
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
 
-    // TODO: Replace with real API call using use_resource + fetch_system()
-    let system = mock_system_detail_by_id(&id).unwrap_or_else(|| fallback_system_detail());
+    // System data state — initialise with fallback; use_effect replaces with real data.
+    let mut system_signal = use_signal(fallback_system_detail);
+    let mut api_notice: Signal<Option<String>> = use_signal(|| None);
+    let mut redirect_to_login = use_signal(|| false);
+    let mut not_found = use_signal(|| false);
+
+    {
+        let id = id.clone();
+        let mut system_signal = system_signal.clone();
+        let mut api_notice = api_notice.clone();
+        let mut redirect_to_login = redirect_to_login.clone();
+        let mut not_found = not_found.clone();
+        use_effect(move || {
+            let id = id.clone();
+            spawn(async move {
+                let result = load_system_detail_with_fallback(&id).await;
+                if result.redirect_to_login {
+                    redirect_to_login.set(true);
+                    return;
+                }
+                match result.system {
+                    Some(detail) => {
+                        system_signal.set(detail);
+                        api_notice.set(result.notice);
+                    }
+                    None => {
+                        not_found.set(true);
+                    }
+                }
+            });
+        });
+    }
+
+    // Redirect to login (early return matching dashboard pattern).
+    if *redirect_to_login.read() {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "flex items-center justify-center py-12",
+                p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
+            }
+        };
+    }
+
+    // Not found state.
+    if *not_found.read() {
+        return rsx! {
+            div {
+                class: "space-y-4",
+                Link {
+                    to: crate::routes::Route::SystemsView {},
+                    class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
+                    "← Back to Systems"
+                }
+                div {
+                    class: "rounded-lg border border-red-500/30 bg-red-500/10 px-6 py-8 text-center",
+                    p { class: "text-red-300 font-medium", "System not found" }
+                    p { class: "text-sm {theme::text::MUTED} mt-1", "No system exists with this ID." }
+                }
+            }
+        };
+    }
+
+    let system = system_signal.read().clone();
     let commit_history = mock_commit_history_for_system(&system);
     let vulnerabilities = mock_vulnerabilities();
     let deployment_logs = mock_deployment_logs();
@@ -159,6 +224,14 @@ pub fn SystemDetailView(id: String) -> Element {
         div {
             class: "space-y-6",
             "data-testid": "system-detail",
+
+            // API fallback notice banner (shown when using mock data)
+            if let Some(ref notice) = *api_notice.read() {
+                div {
+                    class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
+                    "{notice}"
+                }
+            }
 
             // Back link
             Link {
@@ -1938,51 +2011,4 @@ fn mock_deployment_logs() -> Vec<DeploymentLogEntry> {
     ]
 }
 
-fn fallback_system_detail() -> SystemDetail {
-    crate::views::systems_mock::mock_system_details()
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| SystemDetail {
-            id: uuid::Uuid::new_v4(),
-            hostname: "unknown".to_string(),
-            environment: None,
-            is_active: false,
-            deployment_policy: "Unknown".to_string(),
-            health_status: crate::api::models::HealthStatus::Offline,
-            deployment_status: crate::api::models::DeploymentStatus::Unknown,
-            pipeline_stage: None,
-            nixos_version: None,
-            kernel: None,
-            agent_version: None,
-            current_store_path: None,
-            hardware: SystemHardwareInfo {
-                cpu_brand: None,
-                cpu_cores: None,
-                memory_gb: None,
-                uptime_secs: None,
-                board_serial: None,
-                bios_version: None,
-            },
-            network: SystemNetworkInfo {
-                primary_ip: None,
-                primary_mac: None,
-                gateway_ip: None,
-            },
-            security: SystemSecurityInfo {
-                tpm_present: None,
-                secure_boot_enabled: None,
-                fips_mode: None,
-                selinux_status: None,
-            },
-            cve_counts: CveSummary {
-                critical: 0,
-                high: 0,
-                medium: 0,
-                low: 0,
-            },
-            flake: None,
-            last_seen: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        })
-}
+// fallback_system_detail() has been moved to crate::systems::adapter
