@@ -1,11 +1,11 @@
 ---
 id: TASK-52
 title: 'Refactor: Extract policy components from views/policies.rs'
-status: Review
+status: Done
 assignee:
   - Claude Opus 4.5
 created_date: '2026-02-18 02:46'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-02-23 03:15'
 labels:
   - refactoring
   - web-ui
@@ -13,7 +13,7 @@ labels:
 milestone: m-13
 dependencies: []
 priority: low
-ordinal: 2000
+ordinal: 62000
 ---
 
 ## Description
