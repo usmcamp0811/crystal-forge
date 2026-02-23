@@ -1,10 +1,10 @@
 ---
 id: TASK-120
 title: Restore dashboard SQL views dropped by migration cascade
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-23 04:10'
-updated_date: '2026-02-23 04:12'
+updated_date: '2026-02-23 04:22'
 labels: []
 dependencies: []
 ---
@@ -30,4 +30,8 @@ Suggested acceptance checks:
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode on gray in /home/mcamp/code/crystal-forge/TASK-120-restore-dashboard-views
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/132
+
+Verification: migration 0076 applied via cargo sqlx migrate run; dashboard views now exist and dashboard aggregate queries succeed; cargo test dashboard_summary passed.
 <!-- SECTION:NOTES:END -->
