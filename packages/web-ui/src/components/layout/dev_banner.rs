@@ -1,11 +1,20 @@
 //! Development mode warning banner.
 
 use dioxus::prelude::*;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::JsCast;
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SetupStatus {
+    requires_setup: bool,
+    allow_registration: bool,
+    user_count: i64,
+    auth_mode: String,
+}
 
 /// Banner warning that dev authentication mode is active.
 ///
-/// This banner detects dev mode at runtime by checking if the dev login endpoint exists.
+/// This banner detects dev mode at runtime by checking the auth_mode from setup-status.
 /// It only renders when AUTH_MODE=dev is enabled on the server.
 #[component]
 pub fn DevModeBanner() -> Element {
@@ -16,25 +25,37 @@ pub fn DevModeBanner() -> Element {
     use_effect(move || {
         if !checked() {
             spawn(async move {
-                // Probe the dev login endpoint to detect dev mode
+                // Fetch setup status to check auth_mode
                 let window = web_sys::window().expect("no global window");
                 let location = window.location();
                 let origin = location
                     .origin()
                     .unwrap_or_else(|_| "http://localhost:3000".into());
-                let url = format!("{}/api/auth/dev/login", origin);
+                let url = format!("{}/api/auth/setup-status", origin);
 
-                // Try an OPTIONS request to see if the endpoint exists
                 let mut opts = web_sys::RequestInit::new();
-                opts.method("OPTIONS");
+                opts.method("GET");
 
                 if let Ok(request) = web_sys::Request::new_with_str_and_init(&url, &opts) {
                     let response_promise = window.fetch_with_request(&request);
                     let future = wasm_bindgen_futures::JsFuture::from(response_promise);
                     if let Ok(response) = future.await {
                         if let Ok(response) = response.dyn_into::<web_sys::Response>() {
-                            // If we get any response (not 404), dev mode is active
-                            is_dev_mode.set(response.status() != 404);
+                            if response.status() == 200 {
+                                let text_promise = response.text();
+                                if let Ok(text_future) = text_promise {
+                                    let text_js = wasm_bindgen_futures::JsFuture::from(text_future);
+                                    if let Ok(text) = text_js.await {
+                                        if let Some(text_str) = text.as_string() {
+                                            if let Ok(status) =
+                                                serde_json::from_str::<SetupStatus>(&text_str)
+                                            {
+                                                is_dev_mode.set(status.auth_mode == "dev");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

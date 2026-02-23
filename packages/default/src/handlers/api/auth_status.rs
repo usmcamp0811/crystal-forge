@@ -16,6 +16,8 @@ pub struct SetupStatusResponse {
     pub allow_registration: bool,
     /// Number of users in the system.
     pub user_count: i64,
+    /// Current authentication mode (dev, local, or oidc).
+    pub auth_mode: String,
 }
 
 /// Check if initial system setup is required.
@@ -36,6 +38,7 @@ pub async fn setup_status(
                     requires_setup: false,
                     allow_registration: false,
                     user_count: 0,
+                    auth_mode: config.auth_mode.clone(),
                 }),
             );
         }
@@ -47,6 +50,7 @@ pub async fn setup_status(
             requires_setup: user_count == 0,
             allow_registration: config.allow_registration,
             user_count,
+            auth_mode: config.auth_mode,
         }),
     )
 }
