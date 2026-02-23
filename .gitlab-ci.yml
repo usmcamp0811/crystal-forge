@@ -6,7 +6,7 @@ stages:
   - bump
 
 variables:
-  GITLAB_API_URL: "${CI_API_V4_URL}"
+  GITLAB_API_URL: "$CI_API_V4_URL"
   NIX_SYSTEM: "x86_64-linux"
 
 # ============================================================================
@@ -27,7 +27,7 @@ discover-checks:
     - |
       set -euo pipefail
 
-      SYSTEM="x86_64-linux"
+      SYSTEM="${NIX_SYSTEM}"
 
       # IMPORTANT: no indentation before YAML keys
       cat > checks-pipeline.yml <<'EOF'
@@ -72,46 +72,20 @@ EOF
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH == "main"'
 
+run-discovered-checks:
+  stage: check
+  trigger:
+    include:
+      - artifact: checks-pipeline.yml
+        job: discover-checks
+    strategy: depend
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
 # ============================================================================
 # Coverage
 # ============================================================================
-
-.coverage-mr-comment:
-  stage: coverage
-  tags:
-    - nix
-  image: alpine:latest
-  before_script:
-    - apk add --no-cache curl jq
-  script:
-    - |
-      SUMMARY=$(cat coverage-report/summary.md)
-      SUMMARY_ESCAPED=$(echo "$SUMMARY" | jq -Rs '.')
-
-      if [ -n "${CI_MERGE_REQUEST_IID}" ]; then
-        EXISTING_COMMENTS=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes")
-
-        COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Code Coverage Report")) | .id')
-
-        if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
-          curl -s -X PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data "{\"body\": $SUMMARY_ESCAPED}" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/$COMMENT_ID"
-          echo "Updated existing MR comment"
-        else
-          curl -s -X POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data "{\"body\": $SUMMARY_ESCAPED}" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
-          echo "Posted new MR comment"
-        fi
-      fi
-  dependencies:
-    - coverage-check
-  only:
-    - merge_requests
 
 coverage-check:
   stage: coverage
@@ -132,16 +106,12 @@ coverage-check:
     expose_as: "Code Coverage Report"
     reports:
       junit: coverage-report/junit-report.xml
-  only:
-    - merge_requests
-    - main
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
 
-# ============================================================================
-# Code Metrics
-# ============================================================================
-
-.complexity-mr-comment:
-  stage: metrics
+coverage-mr-comment:
+  stage: coverage
   tags:
     - nix
   image: alpine:latest
@@ -149,14 +119,14 @@ coverage-check:
     - apk add --no-cache curl jq
   script:
     - |
-      SUMMARY=$(cat complexity-report/summary.md)
+      SUMMARY=$(cat coverage-report/summary.md)
       SUMMARY_ESCAPED=$(echo "$SUMMARY" | jq -Rs '.')
 
-      if [ -n "${CI_MERGE_REQUEST_IID}" ]; then
+      if [ -n "${CI_MERGE_REQUEST_IID:-}" ]; then
         EXISTING_COMMENTS=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
           "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes")
 
-        COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Code Complexity Report")) | .id')
+        COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Code Coverage Report")) | .id' | head -n1)
 
         if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
           curl -s -X PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
@@ -173,9 +143,13 @@ coverage-check:
         fi
       fi
   dependencies:
-    - complexity-check
-  only:
-    - merge_requests
+    - coverage-check
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+# ============================================================================
+# Code Metrics
+# ============================================================================
 
 complexity-check:
   stage: metrics
@@ -196,9 +170,46 @@ complexity-check:
     expose_as: "Code Complexity Report"
     reports:
       junit: complexity-report/junit-report.xml
-  only:
-    - merge_requests
-    - main
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+complexity-mr-comment:
+  stage: metrics
+  tags:
+    - nix
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl jq
+  script:
+    - |
+      SUMMARY=$(cat complexity-report/summary.md)
+      SUMMARY_ESCAPED=$(echo "$SUMMARY" | jq -Rs '.')
+
+      if [ -n "${CI_MERGE_REQUEST_IID:-}" ]; then
+        EXISTING_COMMENTS=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes")
+
+        COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Code Complexity Report")) | .id' | head -n1)
+
+        if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
+          curl -s -X PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "{\"body\": $SUMMARY_ESCAPED}" \
+            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/$COMMENT_ID"
+          echo "Updated existing MR comment"
+        else
+          curl -s -X POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "{\"body\": $SUMMARY_ESCAPED}" \
+            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
+          echo "Posted new MR comment"
+        fi
+      fi
+  dependencies:
+    - complexity-check
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
 
 # ============================================================================
 # Version Bumping
@@ -213,9 +224,9 @@ auto-bump-patch:
   script:
     - nix run .#ci.bump-patch
     - nix run .#ci.cleanup-patch-tags -- 5
-  only:
-    - main
-  when: on_success
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: on_success
 
 manual-version-bump:
   stage: bump
@@ -224,9 +235,9 @@ manual-version-bump:
   before_script:
     - git remote set-url origin "https://oauth2:${GITLAB_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
   script:
-    - nix run .#ci.bump-version -- $NEW_VERSION
-  only:
-    - main
-  when: manual
+    - nix run .#ci.bump-version -- "$NEW_VERSION"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
   variables:
     NEW_VERSION: ""
