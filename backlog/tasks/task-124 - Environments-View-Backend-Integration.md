@@ -1,10 +1,10 @@
 ---
 id: TASK-124
 title: Environments View - Backend Integration
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 22:54'
+updated_date: '2026-02-23 23:08'
 labels:
   - backend
   - api
@@ -174,4 +174,6 @@ Low-Medium
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-sonnet-4-6 on gray in ~/code/crystal-forge/TASK-124-environments-backend-integration
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/135
 <!-- SECTION:NOTES:END -->
