@@ -91,7 +91,7 @@ let
       build_processing_interval = "10m";
       watched = [{
         name = "dotfiles";
-        repo_url = "git+https://gitlab.com/usmcamp0811/dotfiles";
+        repo_url = "https://gitlab.com/usmcamp0811/dotfiles";
         auto_poll = false;
         initial_commit_depth = 10;
       }];
@@ -304,6 +304,7 @@ let
       CRYSTAL_FORGE_OIDC_CLIENT_SECRET = oidc_client_secret;
       CRYSTAL_FORGE_OIDC_REDIRECT_URI =
         "http://127.0.0.1:${toString cf_port}/api/auth/oidc/callback";
+      CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP = "admin";
     };
     settings.processes.server.depends_on."oidc".condition = "process_healthy";
   };

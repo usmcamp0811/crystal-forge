@@ -10,7 +10,7 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
-    auth::dev_mode::ensure_dev_users,
+    auth::dev_mode::{ensure_bootstrap_oidc_admin_mapping, ensure_dev_users},
     config::CrystalForgeConfig,
     flake::commits::initialize_flake_commits,
     handlers::{
@@ -83,6 +83,14 @@ async fn main() -> anyhow::Result<()> {
             .await
             .context("Failed to initialize dev auth fixtures")?;
     }
+
+    // Bootstrap OIDC admin group mapping if configured (for oidc mode)
+    if auth_mode == "oidc" {
+        ensure_bootstrap_oidc_admin_mapping(&pool)
+            .await
+            .context("Failed to bootstrap OIDC admin mapping")?;
+    }
+
     let background_pool = pool.clone();
     let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
@@ -204,7 +212,11 @@ async fn main() -> anyhow::Result<()> {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([ACCEPT, CONTENT_TYPE, HeaderName::from_static("x-csrf-token")])
+        .allow_headers([
+            ACCEPT,
+            CONTENT_TYPE,
+            HeaderName::from_static("x-csrf-token"),
+        ])
         .allow_credentials(true);
 
     let app = app.layer(cors).with_state(state);
