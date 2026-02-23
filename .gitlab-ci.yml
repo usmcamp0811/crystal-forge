@@ -71,8 +71,6 @@ discover-checks:
 # Trigger the dynamic checks pipeline
 flake-checks:
   stage: check
-  tags:
-    - nix
   needs:
     - discover-checks
   trigger:
