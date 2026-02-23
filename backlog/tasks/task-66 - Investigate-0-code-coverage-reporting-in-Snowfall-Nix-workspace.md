@@ -1,10 +1,10 @@
 ---
 id: TASK-66
 title: Investigate 0% code coverage reporting in Snowfall/Nix workspace
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-20 01:56'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-02-23 03:15'
 labels:
   - coverage
   - ci
@@ -13,7 +13,7 @@ labels:
   - nix
 dependencies: []
 priority: high
-ordinal: 5000
+ordinal: 65000
 ---
 
 ## Description
