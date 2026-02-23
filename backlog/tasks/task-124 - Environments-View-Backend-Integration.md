@@ -4,7 +4,7 @@ title: Environments View - Backend Integration
 status: To Do
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 21:16'
+updated_date: '2026-02-23 21:18'
 labels:
   - backend
   - api
@@ -14,6 +14,66 @@ milestone: m-9
 dependencies: []
 priority: high
 ---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+Environments View: Backend Integration
+Problem
+
+Environments are currently mocked in UI.
+
+Goal
+
+Expose environments dynamically from backend with correct scoping.
+
+Backend Scope
+Endpoints
+GET /api/environments
+GET /api/environments/:id
+Example Response
+{
+  "environments": [
+    {
+      "id": "env-prod",
+      "name": "prod",
+      "system_count": 6
+    }
+  ]
+}
+Requirements
+
+User only sees environments they belong to.
+
+Server enforces membership.
+
+No client-side filtering for security.
+
+Frontend Scope
+environments/
+  api.rs
+  models.rs
+  adapter.rs
+  view.rs
+
+Same adapter fallback pattern.
+
+Environment list drives filtering in other views.
+
+Acceptance Criteria
+
+Real environments render.
+
+Scoping enforced.
+
+Fallback mock data works.
+
+No duplication of policy logic in UI.
+
+Risk Level
+
+Low-Medium
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Problem Statement
 
