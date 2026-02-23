@@ -1,13 +1,14 @@
 ---
 id: TASK-119
 title: 'Dashboard: Replace Mock Data with Backend API (With Safe Fallback)'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-23 03:35'
-updated_date: '2026-02-23 04:01'
+updated_date: '2026-02-23 21:16'
 labels: []
 dependencies: []
 priority: medium
+ordinal: 74000
 ---
 
 ## Description
