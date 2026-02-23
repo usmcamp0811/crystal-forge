@@ -447,6 +447,7 @@ pub fn AdminView() -> Element {
                                                                         role: Some(role_from_string(&draft.role)),
                                                                         enabled: Some(draft.enabled),
                                                                         environments: Some(environments),
+                                                                        password: None,
                                                                     };
 
                                                                     let user_id = user_id.clone();
@@ -948,9 +949,8 @@ pub fn AdminView() -> Element {
                                                 role: None,
                                                 enabled: None,
                                                 environments: None,
+                                                password: Some(password),
                                             };
-                                            // Note: Password reset would need a dedicated API endpoint
-                                            // For now, we'll show a placeholder behavior
                                             match update_admin_user(&user_id, &request).await {
                                                 Ok(_) => {
                                                     refresh_users(users, user_drafts, users_error).await;

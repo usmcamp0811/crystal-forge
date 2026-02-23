@@ -774,6 +774,7 @@ pub struct AdminUpdateUserRequest {
     pub role: Option<Role>,
     pub enabled: Option<bool>,
     pub environments: Option<Vec<String>>,
+    pub password: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
