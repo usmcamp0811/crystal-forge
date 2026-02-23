@@ -5,21 +5,38 @@
 
 use super::models::*;
 
+fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
+    if !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081")) {
+        return None;
+    }
+
+    if let Ok(Some(storage)) = window.local_storage() {
+        if let Ok(Some(custom_origin)) = storage.get_item("cf_backend_origin") {
+            let trimmed = custom_origin.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    let host = window
+        .location()
+        .hostname()
+        .unwrap_or_else(|_| "localhost".to_string());
+    Some(format!("http://{host}:3445"))
+}
+
 /// Base URL for the API. In production this is the same origin;
 /// during development it may point to a different port.
 fn base_url() -> String {
-    // In development with `dx serve`, the frontend runs on port 8080 (or similar)
-    // but needs to talk to the backend on port 3000. Detect this scenario.
     let window = web_sys::window().expect("no global window");
     let location = window.location();
     let origin = location
         .origin()
-        .unwrap_or_else(|_| "http://localhost:3000".into());
+        .unwrap_or_else(|_| "http://localhost:3445".into());
 
-    // If we're running on a typical dev server port (8080, 8000, etc.)
-    // but not on the backend port (3000), redirect to backend
-    if origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081") {
-        return "http://localhost:3000/api/v1".to_string();
+    if let Some(dev_origin) = backend_origin_for_dev(&window, &origin) {
+        return format!("{dev_origin}/api/v1");
     }
 
     format!("{origin}/api/v1")
@@ -31,11 +48,10 @@ fn auth_base_url() -> String {
     let location = window.location();
     let origin = location
         .origin()
-        .unwrap_or_else(|_| "http://localhost:3000".into());
+        .unwrap_or_else(|_| "http://localhost:3445".into());
 
-    // Same dev server detection as base_url()
-    if origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081") {
-        return "http://localhost:3000/api/auth".to_string();
+    if let Some(dev_origin) = backend_origin_for_dev(&window, &origin) {
+        return format!("{dev_origin}/api/auth");
     }
 
     format!("{origin}/api/auth")

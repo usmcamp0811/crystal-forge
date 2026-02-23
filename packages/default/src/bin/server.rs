@@ -1,6 +1,9 @@
 use anyhow::Context;
 use axum::Extension;
-use axum::http::HeaderValue;
+use axum::http::{
+    HeaderValue, Method,
+    header::{ACCEPT, CONTENT_TYPE, HeaderName},
+};
 use axum::{
     Router,
     routing::{delete, get, patch, post},
@@ -194,8 +197,14 @@ async fn main() -> anyhow::Result<()> {
             HeaderValue::from_static("http://localhost:8000"),
             HeaderValue::from_static("http://127.0.0.1:8000"),
         ])
-        .allow_methods(Any)
-        .allow_headers(Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([ACCEPT, CONTENT_TYPE, HeaderName::from_static("x-csrf-token")])
         .allow_credentials(true);
 
     let app = app.layer(cors).with_state(state);
