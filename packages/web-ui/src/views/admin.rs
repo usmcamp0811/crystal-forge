@@ -708,79 +708,85 @@ pub fn AdminView() -> Element {
                 class: "space-y-3",
                 h2 { class: "text-lg font-semibold text-white", "Audit Log" }
                 div {
-                    class: "grid gap-3 sm:grid-cols-2 xl:grid-cols-5",
-                    input {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                        r#type: "text",
-                        placeholder: "Filter by actor...",
-                        value: "{actor_filter.read()}",
-                        oninput: move |evt| {
-                            actor_filter.set(evt.value());
-                            audit_page.set(1);
-                        }
-                    }
-                    select {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                        value: "{action_filter.read()}",
-                        onchange: move |evt| {
-                            action_filter.set(evt.value());
-                            audit_page.set(1);
-                        },
-                        option { value: "", "All actions" }
-                        option { value: "user_created", "User created" }
-                        option { value: "user_updated", "User updated" }
-                        option { value: "user_deleted", "User deleted" }
-                        option { value: "user_enabled", "User enabled" }
-                        option { value: "user_disabled", "User disabled" }
-                        option { value: "user_role_assigned", "Role assignment" }
-                        option { value: "user_environment_membership_updated", "Environment membership" }
-                        option { value: "oidc_mapping_changed", "OIDC mapping" }
-                        option { value: "system_sync_requested", "System sync requested" }
-                        option { value: "system_rollback_requested", "System rollback requested" }
-                        option { value: "session_invalidated", "Session invalidated" }
-                    }
+                    class: "flex flex-col gap-3",
                     div {
-                        class: "flex flex-col gap-1",
-                        label {
-                            class: "text-xs {theme::text::MUTED}",
-                            "Start date"
-                        }
+                        class: "grid gap-3 sm:grid-cols-2",
                         input {
                             class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                            r#type: "datetime-local",
-                            value: "{from_filter.read()}",
+                            r#type: "text",
+                            placeholder: "Filter by actor...",
+                            value: "{actor_filter.read()}",
                             oninput: move |evt| {
-                                from_filter.set(evt.value());
+                                actor_filter.set(evt.value());
                                 audit_page.set(1);
                             }
                         }
+                        select {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                            value: "{action_filter.read()}",
+                            onchange: move |evt| {
+                                action_filter.set(evt.value());
+                                audit_page.set(1);
+                            },
+                            option { value: "", "All actions" }
+                            option { value: "user_created", "User created" }
+                            option { value: "user_updated", "User updated" }
+                            option { value: "user_deleted", "User deleted" }
+                            option { value: "user_enabled", "User enabled" }
+                            option { value: "user_disabled", "User disabled" }
+                            option { value: "user_role_assigned", "Role assignment" }
+                            option { value: "user_environment_membership_updated", "Environment membership" }
+                            option { value: "oidc_mapping_changed", "OIDC mapping" }
+                            option { value: "system_sync_requested", "System sync requested" }
+                            option { value: "system_rollback_requested", "System rollback requested" }
+                            option { value: "session_invalidated", "Session invalidated" }
+                        }
                     }
                     div {
-                        class: "flex flex-col gap-1",
-                        label {
-                            class: "text-xs {theme::text::MUTED}",
-                            "End date"
-                        }
-                        input {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                            r#type: "datetime-local",
-                            value: "{to_filter.read()}",
-                            oninput: move |evt| {
-                                to_filter.set(evt.value());
-                                audit_page.set(1);
+                        class: "flex flex-wrap gap-3 items-end",
+                        div {
+                            class: "flex flex-col gap-1 flex-1 min-w-[200px]",
+                            label {
+                                class: "text-xs {theme::text::MUTED}",
+                                "Start date"
+                            }
+                            input {
+                                class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "datetime-local",
+                                value: "{from_filter.read()}",
+                                oninput: move |evt| {
+                                    from_filter.set(evt.value());
+                                    audit_page.set(1);
+                                }
                             }
                         }
-                    }
-                    button {
-                        class: "rounded-lg bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors self-end",
-                        onclick: move |_| {
-                            actor_filter.set(String::new());
-                            action_filter.set(String::new());
-                            from_filter.set(String::new());
-                            to_filter.set(String::new());
-                            audit_page.set(1);
-                        },
-                        "Clear filters"
+                        div {
+                            class: "flex flex-col gap-1 flex-1 min-w-[200px]",
+                            label {
+                                class: "text-xs {theme::text::MUTED}",
+                                "End date"
+                            }
+                            input {
+                                class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "datetime-local",
+                                value: "{to_filter.read()}",
+                                oninput: move |evt| {
+                                    to_filter.set(evt.value());
+                                    audit_page.set(1);
+                                }
+                            }
+                        }
+                        button {
+                            class: "rounded-lg bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors",
+                            onclick: move |_| {
+                                actor_filter.set(String::new());
+                                action_filter.set(String::new());
+                                from_filter.set(String::new());
+                                to_filter.set(String::new());
+                                audit_page.set(1);
+                            },
+                            "Clear filters"
+                        }
                     }
                 }
 
@@ -848,124 +854,124 @@ pub fn AdminView() -> Element {
                     }
                 }
             }
+        }
 
-            // Password Reset Modal
-            if let Some(target_user) = reset_password_user.read().clone() {
+        // Password Reset Modal (outside page container for proper z-index layering)
+        if let Some(target_user) = reset_password_user.read().clone() {
+            div {
+                class: "fixed inset-0 z-50 flex items-center justify-center bg-black/60",
+                onclick: move |_| reset_password_user.set(None),
                 div {
-                    class: "fixed inset-0 z-50 flex items-center justify-center bg-black/60",
-                    onclick: move |_| reset_password_user.set(None),
+                    class: "bg-gray-900 border {theme::surface::CARD_BORDER} rounded-xl shadow-xl w-full max-w-md mx-4",
+                    onclick: move |evt| evt.stop_propagation(),
                     div {
-                        class: "bg-gray-900 border {theme::surface::CARD_BORDER} rounded-xl shadow-xl w-full max-w-md mx-4",
-                        onclick: move |evt| evt.stop_propagation(),
-                        div {
-                            class: "px-6 py-4 border-b {theme::surface::CARD_BORDER}",
-                            h3 { class: "text-lg font-semibold text-white", "Reset Password" }
-                            p { class: "text-sm {theme::text::SECONDARY} mt-1", "Set a new password for {target_user.identifier}" }
-                        }
-                        div {
-                            class: "px-6 py-4 space-y-4",
-                            if let Some(error) = reset_password_error.read().clone() {
-                                div {
-                                    class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
-                                    "{error}"
-                                }
-                            }
+                        class: "px-6 py-4 border-b {theme::surface::CARD_BORDER}",
+                        h3 { class: "text-lg font-semibold text-white", "Reset Password" }
+                        p { class: "text-sm {theme::text::SECONDARY} mt-1", "Set a new password for {target_user.identifier}" }
+                    }
+                    div {
+                        class: "px-6 py-4 space-y-4",
+                        if let Some(error) = reset_password_error.read().clone() {
                             div {
-                                label {
-                                    class: "block text-sm font-medium {theme::text::SECONDARY} mb-2",
-                                    "New Password"
-                                }
-                                input {
-                                    class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
-                                    r#type: "password",
-                                    placeholder: "Minimum 8 characters",
-                                    value: "{reset_password_value.read()}",
-                                    oninput: move |evt| reset_password_value.set(evt.value())
-                                }
+                                class: "rounded-lg border border-red-500/40 bg-red-950/30 px-4 py-3 text-sm text-red-200",
+                                "{error}"
                             }
-                            // Password strength indicator
-                            {
-                                let password = reset_password_value.read().clone();
-                                let strength = password_strength(&password);
-                                rsx! {
+                        }
+                        div {
+                            label {
+                                class: "block text-sm font-medium {theme::text::SECONDARY} mb-2",
+                                "New Password"
+                            }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "password",
+                                placeholder: "Minimum 8 characters",
+                                value: "{reset_password_value.read()}",
+                                oninput: move |evt| reset_password_value.set(evt.value())
+                            }
+                        }
+                        // Password strength indicator
+                        {
+                            let password = reset_password_value.read().clone();
+                            let strength = password_strength(&password);
+                            rsx! {
+                                div {
+                                    class: "space-y-2",
                                     div {
-                                        class: "space-y-2",
-                                        div {
-                                            class: "flex gap-1",
-                                            for i in 0..4 {
-                                                div {
-                                                    class: "h-1 flex-1 rounded-full transition-colors",
-                                                    style: if i < strength {
-                                                        match strength {
-                                                            1 => "background-color: #ef4444;",
-                                                            2 => "background-color: #f97316;",
-                                                            3 => "background-color: #eab308;",
-                                                            _ => "background-color: #22c55e;",
-                                                        }
-                                                    } else {
-                                                        "background-color: #374151;"
+                                        class: "flex gap-1",
+                                        for i in 0..4 {
+                                            div {
+                                                class: "h-1 flex-1 rounded-full transition-colors",
+                                                style: if i < strength {
+                                                    match strength {
+                                                        1 => "background-color: #ef4444;",
+                                                        2 => "background-color: #f97316;",
+                                                        3 => "background-color: #eab308;",
+                                                        _ => "background-color: #22c55e;",
                                                     }
+                                                } else {
+                                                    "background-color: #374151;"
                                                 }
                                             }
                                         }
-                                        p {
-                                            class: "text-xs {theme::text::MUTED}",
-                                            {password_strength_label(strength)}
-                                        }
+                                    }
+                                    p {
+                                        class: "text-xs {theme::text::MUTED}",
+                                        {password_strength_label(strength)}
                                     }
                                 }
                             }
                         }
-                        div {
-                            class: "px-6 py-4 border-t {theme::surface::CARD_BORDER} flex justify-end gap-3",
-                            button {
-                                class: "rounded-lg bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors",
-                                onclick: move |_| reset_password_user.set(None),
-                                "Cancel"
-                            }
-                            button {
-                                class: "rounded-lg px-4 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} disabled:opacity-50",
-                                disabled: *reset_password_submitting.read() || reset_password_value.read().len() < 8,
-                                onclick: {
-                                    let user_id = target_user.id.clone();
-                                    move |_| {
-                                        let password = reset_password_value.read().clone();
-                                        if password.len() < 8 {
-                                            reset_password_error.set(Some("Password must be at least 8 characters".to_string()));
-                                            return;
-                                        }
-
-                                        let user_id = user_id.clone();
-                                        let mut reset_password_submitting = reset_password_submitting.clone();
-                                        let mut reset_password_error = reset_password_error.clone();
-                                        let mut reset_password_user = reset_password_user.clone();
-                                        let mut users = users.clone();
-                                        let mut user_drafts = user_drafts.clone();
-                                        let mut users_error = users_error.clone();
-
-                                        reset_password_submitting.set(true);
-                                        spawn(async move {
-                                            let request = AdminUpdateUserRequest {
-                                                role: None,
-                                                enabled: None,
-                                                environments: None,
-                                                password: Some(password),
-                                            };
-                                            match update_admin_user(&user_id, &request).await {
-                                                Ok(_) => {
-                                                    refresh_users(users, user_drafts, users_error).await;
-                                                    reset_password_user.set(None);
-                                                }
-                                                Err(e) => {
-                                                    reset_password_error.set(Some(format!("Failed to reset password: {e}")));
-                                                }
-                                            }
-                                            reset_password_submitting.set(false);
-                                        });
+                    }
+                    div {
+                        class: "px-6 py-4 border-t {theme::surface::CARD_BORDER} flex justify-end gap-3",
+                        button {
+                            class: "rounded-lg bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors",
+                            onclick: move |_| reset_password_user.set(None),
+                            "Cancel"
+                        }
+                        button {
+                            class: "rounded-lg px-4 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} disabled:opacity-50",
+                            disabled: *reset_password_submitting.read() || reset_password_value.read().len() < 8,
+                            onclick: {
+                                let user_id = target_user.id.clone();
+                                move |_| {
+                                    let password = reset_password_value.read().clone();
+                                    if password.len() < 8 {
+                                        reset_password_error.set(Some("Password must be at least 8 characters".to_string()));
+                                        return;
                                     }
-                                },
-                                if *reset_password_submitting.read() { "Resetting..." } else { "Reset Password" }
-                            }
+
+                                    let user_id = user_id.clone();
+                                    let mut reset_password_submitting = reset_password_submitting.clone();
+                                    let mut reset_password_error = reset_password_error.clone();
+                                    let mut reset_password_user = reset_password_user.clone();
+                                    let mut users = users.clone();
+                                    let mut user_drafts = user_drafts.clone();
+                                    let mut users_error = users_error.clone();
+
+                                    reset_password_submitting.set(true);
+                                    spawn(async move {
+                                        let request = AdminUpdateUserRequest {
+                                            role: None,
+                                            enabled: None,
+                                            environments: None,
+                                            password: Some(password),
+                                        };
+                                        match update_admin_user(&user_id, &request).await {
+                                            Ok(_) => {
+                                                refresh_users(users, user_drafts, users_error).await;
+                                                reset_password_user.set(None);
+                                            }
+                                            Err(e) => {
+                                                reset_password_error.set(Some(format!("Failed to reset password: {e}")));
+                                            }
+                                        }
+                                        reset_password_submitting.set(false);
+                                    });
+                                }
+                            },
+                            if *reset_password_submitting.read() { "Resetting..." } else { "Reset Password" }
                         }
                     }
                 }
