@@ -173,3 +173,9 @@ Medium
 - Implement build trigger operations
 - Add build log viewer
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-sonnet-4-6 on gray in ~/code/crystal-forge/TASK-122-builds-backend-integration
+<!-- SECTION:NOTES:END -->
