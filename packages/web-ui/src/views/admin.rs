@@ -97,8 +97,8 @@ pub fn AdminView() -> Element {
                 let params = AdminAuditEventsParams {
                     actor: optional_value(actor),
                     action: optional_value(action),
-                    from: optional_value(from),
-                    to: optional_value(to),
+                    from: datetime_local_to_rfc3339(&from),
+                    to: datetime_local_to_rfc3339(&to),
                     page: Some(page),
                     per_page: Some(AUDIT_PER_PAGE),
                 };
@@ -524,45 +524,69 @@ pub fn AdminView() -> Element {
             }
 
             section {
-                class: "space-y-3",
-                h2 { class: "text-lg font-semibold text-white", "OIDC Mappings" }
-                p {
-                    class: "text-xs {theme::text::SECONDARY}",
-                    "IdP-derived role and environments are resolved from these group mappings at login."
+                class: "space-y-4",
+                div {
+                    h2 { class: "text-lg font-semibold text-white", "OIDC Group Mappings" }
+                    p {
+                        class: "text-sm {theme::text::SECONDARY} mt-1",
+                        "Map OIDC identity provider groups to Crystal Forge roles and environment access. When users authenticate via OIDC, their group memberships determine their permissions."
+                    }
                 }
 
                 div {
-                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
+                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-4",
+                    h3 { class: "text-sm font-semibold text-white", "Add new mapping" }
                     div {
-                        class: "grid gap-3 sm:grid-cols-3",
-                        input {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                            r#type: "text",
-                            placeholder: "OIDC group name",
-                            value: "{mapping_group.read()}",
-                            oninput: move |evt| mapping_group.set(evt.value())
+                        class: "grid gap-4 sm:grid-cols-3",
+                        div {
+                            class: "space-y-1",
+                            label {
+                                class: "text-xs font-medium {theme::text::MUTED}",
+                                "IdP Group Name"
+                            }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "text",
+                                placeholder: "e.g. admins, devops-team",
+                                value: "{mapping_group.read()}",
+                                oninput: move |evt| mapping_group.set(evt.value())
+                            }
                         }
-                        select {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                            value: "{mapping_role.read()}",
-                            onchange: move |evt| mapping_role.set(evt.value()),
-                            option { value: "Admin", "Admin" }
-                            option { value: "Operator", "Operator" }
-                            option { value: "Viewer", "Viewer" }
+                        div {
+                            class: "space-y-1",
+                            label {
+                                class: "text-xs font-medium {theme::text::MUTED}",
+                                "Assigned Role"
+                            }
+                            select {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                                value: "{mapping_role.read()}",
+                                onchange: move |evt| mapping_role.set(evt.value()),
+                                option { value: "Admin", "Admin" }
+                                option { value: "Operator", "Operator" }
+                                option { value: "Viewer", "Viewer" }
+                            }
                         }
-                        input {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                            r#type: "text",
-                            placeholder: "Environments (exact names, comma-separated)",
-                            value: "{mapping_environments.read()}",
-                            oninput: move |evt| mapping_environments.set(evt.value())
+                        div {
+                            class: "space-y-1",
+                            label {
+                                class: "text-xs font-medium {theme::text::MUTED}",
+                                "Environment Access"
+                            }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "text",
+                                placeholder: "Leave empty for all, or: prod, staging",
+                                value: "{mapping_environments.read()}",
+                                oninput: move |evt| mapping_environments.set(evt.value())
+                            }
                         }
                     }
                     div {
-                        class: "flex justify-end",
+                        class: "flex justify-end pt-2",
                         button {
-                            class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                            disabled: *mapping_submitting.read(),
+                            class: "rounded-lg px-4 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
+                            disabled: *mapping_submitting.read() || mapping_group.read().trim().is_empty(),
                             onclick: move |_| {
                                 let environments = match validate_and_parse_environments(&mapping_environments.read()) {
                                     Ok(value) => value,
@@ -1111,6 +1135,18 @@ fn optional_value(value: String) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+/// Convert datetime-local input value to RFC3339 format.
+/// datetime-local format: "2026-02-15T18:19"
+/// RFC3339 format: "2026-02-15T18:19:00Z"
+fn datetime_local_to_rfc3339(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // datetime-local gives us "YYYY-MM-DDTHH:MM", we need to add seconds and timezone
+    Some(format!("{trimmed}:00Z"))
 }
 
 fn role_from_string(value: &str) -> Role {
