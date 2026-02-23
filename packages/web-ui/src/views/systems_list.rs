@@ -207,8 +207,7 @@ pub fn SystemsListView() -> Element {
 
             // Filters Bar
             div {
-                class: "relative z-[2000] grid grid-cols-1 lg:grid-cols-4 gap-4",
-                style: "position: sticky; top: 0;",
+                class: "grid grid-cols-1 lg:grid-cols-4 gap-4",
                 input {
                     class: "rounded-lg px-4 py-2 text-sm {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
                     r#type: "search",
@@ -244,17 +243,9 @@ pub fn SystemsListView() -> Element {
                     class: "grid grid-cols-1 xl:grid-cols-2 gap-6",
                     "data-testid": "systems-cards",
                     for system in filtered_systems.clone() {
-                        div {
-                            class: "space-y-2",
-                            SystemCard { system: system.clone() }
-                            div {
-                                class: "px-1 flex justify-end",
-                                button {
-                                    class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                    onclick: move |_| remove_system_by_id(systems, pending_remove, system.id),
-                                    "Remove"
-                                }
-                            }
+                        SystemCard {
+                            system: system.clone(),
+                            on_remove: move |_| remove_system_by_id(systems, pending_remove, system.id),
                         }
                     }
                 }
@@ -451,4 +442,56 @@ fn mock_systems() -> Vec<SystemSummary> {
             deployment_policy: "manual".to_string(),
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn sample_system(environment: Option<&str>) -> SystemSummary {
+        SystemSummary {
+            id: Uuid::parse_str("00000000-0000-0000-0000-0000000000aa").expect("valid uuid"),
+            hostname: "sample-host".to_string(),
+            environment: environment.map(ToString::to_string),
+            primary_ip: None,
+            health_status: HealthStatus::Healthy,
+            deployment_status: DeploymentStatus::UpToDate,
+            pipeline_stage: Some(PipelineStage::BuildComplete),
+            cve_counts: CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 0,
+                low: 0,
+            },
+            nixos_version: Some("24.11".to_string()),
+            last_seen: Some(Utc::now()),
+            deployment_policy: "manual".to_string(),
+        }
+    }
+
+    #[test]
+    fn matches_environment_allows_when_filters_empty() {
+        let system = sample_system(Some("production"));
+        assert!(matches_environment(&system, &[]));
+    }
+
+    #[test]
+    fn matches_environment_is_case_insensitive() {
+        let system = sample_system(Some("Production"));
+        assert!(matches_environment(&system, &["production".to_string()]));
+        assert!(matches_environment(&system, &["PRODUCTION".to_string()]));
+    }
+
+    #[test]
+    fn matches_environment_rejects_non_member_environment() {
+        let system = sample_system(Some("staging"));
+        assert!(!matches_environment(&system, &["production".to_string()]));
+    }
+
+    #[test]
+    fn matches_environment_rejects_unscoped_system_when_filtering() {
+        let system = sample_system(None);
+        assert!(!matches_environment(&system, &["production".to_string()]));
+    }
 }

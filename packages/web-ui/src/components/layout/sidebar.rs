@@ -3,11 +3,17 @@
 use dioxus::prelude::*;
 
 use crate::routes::Route;
+use crate::state::app_state::AppState;
+use crate::state::auth;
 use crate::theme;
 
 /// Sidebar navigation for primary routes.
 #[component]
 pub fn SidebarNav() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let auth_context = app_state.read().auth.clone();
+    let show_admin = auth::is_admin(&auth_context);
+
     rsx! {
         nav {
             class: "hidden lg:flex w-64 {theme::surface::SIDEBAR_BG} border-r {theme::surface::CARD_BORDER} flex-col",
@@ -141,6 +147,23 @@ pub fn SidebarNav() -> Element {
                             path { d: "M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" }
                         }
                     )
+                }
+                if show_admin {
+                    NavLink {
+                        to: Route::AdminView {},
+                        label: "Server Management",
+                        icon: rsx!(
+                            svg {
+                                class: "w-4 h-4",
+                                fill: "none",
+                                stroke: "currentColor",
+                                stroke_width: "1.75",
+                                view_box: "0 0 24 24",
+                                path { d: "M12 3l8 4v5c0 5-3 8-8 9-5-1-8-4-8-9V7l8-4z" }
+                                path { d: "M9 12l2 2 4-4" }
+                            }
+                        )
+                    }
                 }
                 NavLink {
                     to: Route::StyleGuideView {},

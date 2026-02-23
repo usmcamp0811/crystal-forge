@@ -4,7 +4,7 @@ title: 'Admin console - users, environment membership, RBAC, and audit logging'
 status: In Progress
 assignee: []
 created_date: '2026-02-22 02:34'
-updated_date: '2026-02-22 04:54'
+updated_date: '2026-02-22 17:17'
 labels:
   - web-ui
   - auth
@@ -91,40 +91,97 @@ Deliver an **Admin Server Management** area (separate from fleet management) tha
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 ### Navigation + access control
-- [ ] #1 Add an Admin-only navigation entry (e.g., “Admin” / “Server Management”).
-- [ ] #2 Non-admin users cannot access admin routes (safe denial UX).
-- [ ] #3 Role changes take effect **on next login** (documented behavior).
+- [x] #1 Add an Admin-only navigation entry (e.g., “Admin” / “Server Management”).
+- [x] #2 Non-admin users cannot access admin routes (safe denial UX).
+- [x] #3 Role changes take effect **on next login** (documented behavior).
 
 ### Environment-scoped visibility and authorization (core security behavior)
-- [ ] #4 Systems are associated with an Environment (existing or added association as part of this task).
-- [ ] #5 A user only sees systems belonging to environments they are a member of.
-- [ ] #6 Viewer can view system details but cannot deploy/sync/perform mutating actions.
-- [ ] #7 Operator can deploy/sync/perform allowed system operations within their environments, but cannot create environments.
-- [ ] #8 Admin can perform all operations, including environment management.
-- [ ] #9 Backend enforces the above rules (UI behavior must match backend enforcement).
+- [x] #4 Systems are associated with an Environment (existing or added association as part of this task).
+- [x] #5 A user only sees systems belonging to environments they are a member of.
+- [x] #6 Viewer can view system details but cannot deploy/sync/perform mutating actions.
+- [x] #7 Operator can deploy/sync/perform allowed system operations within their environments, but cannot create environments.
+- [x] #8 Admin can perform all operations, including environment management.
+- [x] #9 Backend enforces the above rules (UI behavior must match backend enforcement).
 
 ### Admin UI - Users (local auth mode)
-- [ ] #10 Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
-- [ ] #11 Admin can create a local user with:
-- [ ] #12 Admin can update a local user:
-- [ ] #13 Guardrails:
-- [ ] #14 Provide an admin screen to manage mappings:
-- [ ] #15 On login, OIDC users have role + environment memberships derived from the mapping (persisted in CF in a conventional way).
-- [ ] #16 UI clearly communicates which user attributes are IdP-derived vs locally-managed.
-- [ ] #17 Backend records audit events for:
-- [ ] #18 Admin UI includes an audit log view with:
-- [ ] #19 Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
-- [ ] #20 Integration/UI check coverage includes at least:
+- [x] #10 Admin Users list view shows: identifier (username/email), role, status (enabled/disabled), environments, and updated timestamp (if available).
+- [x] #11 Admin can create a local user with email, optional display name, initial role, and initial environment memberships; API returns validation errors for invalid email/duplicate email.
+- [x] #12 Admin can update a local user role, enabled/disabled status, and environment memberships; role/membership changes are persisted and reflected in subsequent auth context after next login.
+- [x] #13 Guardrails: cannot disable the last enabled admin, cannot remove the final admin role assignment, and non-admin callers receive `403` for all admin mutation endpoints.
 
 ### Admin UI - OIDC mapping (OIDC enabled)
+- [x] #14 Provide an admin screen to manage mappings for `group -> role` and `group -> environments`, including create/edit/delete, duplicate detection, and input validation.
+- [x] #15 On login, OIDC users have role + environment memberships derived from the mapping (persisted in CF in a conventional way).
+- [x] #16 UI clearly communicates which user attributes are IdP-derived vs locally-managed.
 
 ### Audit logging (required)
+- [x] #17 Backend records audit events for user create/update/disable, role changes, environment membership changes, and OIDC mapping changes, with actor, target, action, timestamp, and request origin metadata.
+- [x] #18 Admin UI includes an audit log view with timestamp, actor, action, target, and filter controls (actor, action type, date range), plus pagination.
 
 ### Tests
+- [x] #19 Unit tests exist for RBAC/environment gating logic (backend and/or UI state logic as appropriate).
+- [x] #20 Integration/UI check coverage includes at least: non-admin route denial, admin users list render, role-based mutation denial (viewer/operator), and environment-scoped systems visibility.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode-gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-79-admin-console-rbac-audit
+
+Progress update:
+- Added admin navigation and route denial UX in web UI (admin-only sidebar entry, guarded admin route rendering).
+- Added admin users list API + UI wiring with role/status/environments/updated columns.
+- Added admin audit log API + UI with actor/action/date filters and pagination.
+- Added backend tests for audit filter/pagination helpers and role precedence.
+- Added web UI auth helper unit tests for admin/operator role gating.
+
+Remaining major scope:
+- Environment membership persistence/enforcement across systems visibility/actions.
+- OIDC mapping CRUD and IdP-derived/local attribute UX distinctions.
+- Expanded audit event capture for required admin mutation actions (OIDC mapping events still pending).
+- Integration/UI coverage for AC #20 scenarios.
+
+Latest progress:
+- Implemented admin mutation endpoints: create user and update user.
+- Added guardrails preventing disabling/removing the final enabled admin.
+- Added user environment memberships persistence table and API wiring.
+- Added admin UI create/edit controls for role/status/environment assignments.
+- Added guardrail predicate tests in admin handler module.
+- Added dedicated admin audit event storage and capture for user create/update, role, status, and environment membership changes.
+- Documented next-login role/environment propagation in Admin Users UI copy.
+- Added OIDC mapping validation for normalized group names, duplicate environment detection, and unknown environment rejection.
+- Added explicit identity source markers in Admin Users and disabled direct edits for IdP-derived users.
+- Added dedicated OIDC mapping derivation unit coverage for role precedence and environment normalization at login.
+- Added audit metadata coverage for request-origin extraction precedence and persisted admin audit action keys.
+- Added AppShell route-guard unit coverage for non-admin denial behavior on the admin route.
+- Added admin-role predicate unit coverage that explicitly denies operator/viewer-only role sets.
+- Added admin view helper tests covering user-row draft shaping and environment display defaults.
+- Added systems-list environment filter tests for case-insensitive membership visibility behavior.
+- Added admin users render-state helper coverage for loading/error/table view transitions.
+- Completed AC #20 minimum coverage set across AppShell/admin/systems/admin-guard test paths.
+- Added shared role-capability policy helpers with unit coverage for viewer/operator/admin permission matrix.
+- Added environment-scope access helper coverage for role-aware membership checks.
+- Added web UI auth capability helpers/tests for mutate-systems vs manage-environments role gating.
+- Enforced operator-or-admin authorization on flake mutation APIs (create/delete) with explicit forbidden-path tests.
+- Added shared backend API RBAC guard module and wired admin/flake handlers to common session-role checks.
+- Enforced viewer-or-above session gating on dashboard summary and flake list read APIs with forbidden-path tests.
+- Added backend systems list/detail APIs with membership-scoped visibility filtering and viewer-or-above authentication gating.
+- Added systems endpoint tests for authenticated-role requirements and filter helper behavior.
+- Added backend sync/rollback system mutation endpoints with operator-or-admin checks and environment-scope enforcement.
+- Updated system detail UI to call sync/rollback APIs and disable mutation actions for viewer-role users.
+- Refactored admin API data access into `queries/admin.rs` and removed inline SQL from `handlers/api/admin.rs` to align with query-layer conventions.
+- Removed inline SQL from `handlers/api/auth_oidc.rs`, `handlers/api/systems.rs`, `handlers/api/auth_local.rs`, and `handlers/api/auth_status.rs` by moving DB calls into query modules.
+- Added audit events for system sync/rollback mutation routes and surfaced new audit action labels in Admin UI filters/table.
+- Hardened last-admin guardrails with transaction + `FOR UPDATE` locking for disable/demotion race safety.
+- Updated OIDC login membership sync to preserve existing memberships when mappings are empty or unresolved, preventing accidental lockout on mapping/claim drift.
+- Enforced disabled-user auth lockout by checking `users.is_active` in shared RBAC session resolution and local-auth login flow.
+- Tightened system rollback input validation (length + hexadecimal format) with explicit `400` responses on invalid targets.
+- Updated environment-scope access semantics so systems without an environment are admin-only.
+- Created follow-up TASK-116 for admin/audit/systems query-path performance optimization.
+- Added client-side validation for admin environment assignment inputs and explicit UX guidance that wildcard patterns are not currently supported.
+- Added initial-password support to admin user creation (UI + API) with minimum-length validation.
+- Created follow-up TASK-117 for secure password reset/recovery flow design and implementation.
+- Added admin user deletion endpoint + UI action with final-admin guardrail protection and audit event capture.
+- Added users-list filtering controls (search + enabled/disabled status) in Server Management.
+- MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/129
 <!-- SECTION:NOTES:END -->

@@ -2,18 +2,25 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use sqlx::PgPool;
 use tracing::error;
 
 use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem};
+use crate::auth::extractors::{RequireAdmin, RequireOperator};
+use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, get_flake_by_name, insert_flake,
     list_flake_registry,
 };
 
-pub async fn list_flakes(State(pool): State<PgPool>) -> impl IntoResponse {
+pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
+    if require_viewer_or_above(&pool, &headers).await.is_none() {
+        return forbidden_viewer();
+    }
+
     match list_flake_registry(&pool).await {
         Ok(flakes) => (StatusCode::OK, Json(flakes)).into_response(),
         Err(e) => {
@@ -31,10 +38,19 @@ pub async fn list_flakes(State(pool): State<PgPool>) -> impl IntoResponse {
     }
 }
 
+/// Create a new flake in the registry.
+///
+/// **Authorization**: Requires Operator or Admin role (write operation).
 pub async fn create_flake(
+    RequireOperator(_user): RequireOperator,
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Json(payload): Json<CreateFlakeRequest>,
 ) -> impl IntoResponse {
+    if require_operator_or_admin(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
     if let Err(message) = validate_create_payload(&payload) {
         return (
             StatusCode::BAD_REQUEST,
@@ -108,10 +124,19 @@ pub async fn create_flake(
     }
 }
 
+/// Delete a flake from the registry.
+///
+/// **Authorization**: Requires Admin role (destructive operation).
 pub async fn delete_flake(
+    RequireAdmin(_user): RequireAdmin,
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {
+    if require_operator_or_admin(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
     match count_systems_for_flake(&pool, flake_id).await {
         Ok(system_count) if system_count > 0 => {
             return (
@@ -167,6 +192,30 @@ pub async fn delete_flake(
     }
 }
 
+fn forbidden() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Admin or operator privileges are required".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn forbidden_viewer() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Viewer, operator, or admin privileges are required".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
 fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
     let name = payload.name.trim();
     let repo_url = payload.repo_url.trim();
@@ -196,6 +245,10 @@ fn looks_like_repo_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::auth_identity::AuthRole;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn create_payload_requires_name() {
@@ -235,4 +288,26 @@ mod tests {
         };
         assert!(validate_create_payload(&payload).is_ok());
     }
+
+    #[test]
+    fn require_operator_or_admin_checks_role_membership() {
+        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
+            AuthRole::Operator,
+        ]));
+        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
+            AuthRole::Admin
+        ]));
+        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
+            AuthRole::Viewer,
+            AuthRole::Operator,
+        ]));
+        assert!(!crate::handlers::api::rbac::has_operator_or_admin_role(&[
+            AuthRole::Viewer,
+        ]));
+    }
+
+    // NOTE: Authorization tests for create_flake, delete_flake moved to extractor-level tests
+    // in auth/extractors.rs. These handlers now use RequireOperator and RequireAdmin extractors
+    // which enforce authorization before the handler is called, so unit tests at this level
+    // cannot test authorization behavior. Integration tests should test the full request path.
 }

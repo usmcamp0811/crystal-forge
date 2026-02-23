@@ -1,10 +1,7 @@
 //! OIDC provider discovery and metadata.
 
 use anyhow::{Context, Result};
-use openidconnect::{
-    core::CoreProviderMetadata,
-    IssuerUrl, ResponseTypes,
-};
+use openidconnect::{IssuerUrl, ResponseTypes, core::CoreProviderMetadata};
 use serde::{Deserialize, Serialize};
 
 /// OIDC provider metadata fetched from discovery endpoint.
@@ -33,15 +30,12 @@ impl OidcProviderMetadata {
     /// # }
     /// ```
     pub async fn discover(issuer_url: &str) -> Result<Self> {
-        let issuer = IssuerUrl::new(issuer_url.to_string())
-            .context("Invalid issuer URL")?;
+        let issuer = IssuerUrl::new(issuer_url.to_string()).context("Invalid issuer URL")?;
 
-        let metadata = CoreProviderMetadata::discover_async(
-            issuer,
-            openidconnect::reqwest::async_http_client,
-        )
-        .await
-        .context("Failed to discover OIDC provider metadata")?;
+        let metadata =
+            CoreProviderMetadata::discover_async(issuer, openidconnect::reqwest::async_http_client)
+                .await
+                .context("Failed to discover OIDC provider metadata")?;
 
         Ok(Self { metadata })
     }

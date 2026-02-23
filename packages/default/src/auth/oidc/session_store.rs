@@ -47,7 +47,7 @@ impl OidcSession {
 /// - Encrypted cookies for single-server deployments
 /// - Database-backed sessions for persistence
 ///
-/// **DoS Protection**: 
+/// **DoS Protection**:
 /// - Hard cap at 10,000 sessions (prevents unbounded memory growth)
 /// - Opportunistic cleanup on insert/retrieve (evicts expired sessions)
 /// - LRU eviction when at capacity (oldest sessions removed first)
@@ -69,31 +69,31 @@ impl OidcSessionStore {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             ttl: ttl.unwrap_or(Duration::from_secs(600)), // 10 minutes
-            max_sessions: 10_000, // Hard cap to prevent DoS
+            max_sessions: 10_000,                         // Hard cap to prevent DoS
         }
     }
 
     /// Store OIDC session data keyed by state token.
     ///
-    /// **DoS Protection**: 
+    /// **DoS Protection**:
     /// - Opportunistically cleans expired sessions before insert
     /// - Enforces max capacity (10,000 sessions)
     /// - Evicts oldest session if at capacity (LRU)
     pub async fn store(&self, state: String, session: OidcSession) {
         let mut sessions = self.sessions.write().await;
-        
+
         // Opportunistic cleanup: remove expired sessions before inserting
         let before_cleanup = sessions.len();
         sessions.retain(|_, s| !s.is_expired(self.ttl));
         let after_cleanup = sessions.len();
-        
+
         if before_cleanup != after_cleanup {
             tracing::debug!(
                 "Opportunistic cleanup: removed {} expired sessions",
                 before_cleanup - after_cleanup
             );
         }
-        
+
         // Enforce max capacity (DoS protection)
         if sessions.len() >= self.max_sessions {
             // LRU eviction: find and remove oldest session
@@ -109,7 +109,7 @@ impl OidcSessionStore {
                 );
             }
         }
-        
+
         sessions.insert(state, session);
     }
 
@@ -124,19 +124,19 @@ impl OidcSessionStore {
     /// **DoS Protection**: Opportunistically cleans expired sessions during retrieval.
     pub async fn retrieve(&self, state: &str) -> Option<OidcSession> {
         let mut sessions = self.sessions.write().await;
-        
+
         // Opportunistic cleanup: remove expired sessions during retrieval
         let before_cleanup = sessions.len();
         sessions.retain(|k, s| k == state || !s.is_expired(self.ttl));
         let after_cleanup = sessions.len();
-        
+
         if before_cleanup != after_cleanup {
             tracing::debug!(
                 "Opportunistic cleanup on retrieve: removed {} expired sessions",
                 before_cleanup - after_cleanup
             );
         }
-        
+
         if let Some(session) = sessions.remove(state) {
             if session.is_expired(self.ttl) {
                 // Should not happen after cleanup above, but double-check
@@ -145,7 +145,7 @@ impl OidcSessionStore {
             }
             return Some(session);
         }
-        
+
         None
     }
 
@@ -153,9 +153,9 @@ impl OidcSessionStore {
     pub async fn cleanup_expired(&self) {
         let mut sessions = self.sessions.write().await;
         let initial_count = sessions.len();
-        
+
         sessions.retain(|_, session| !session.is_expired(self.ttl));
-        
+
         let removed = initial_count - sessions.len();
         if removed > 0 {
             tracing::info!("Cleaned up {} expired OIDC sessions", removed);
@@ -183,7 +183,7 @@ mod tests {
         );
 
         store.store("state-123".to_string(), session).await;
-        
+
         let retrieved = store.retrieve("state-123").await;
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().csrf_token.secret(), "csrf-token");
@@ -199,10 +199,10 @@ mod tests {
         );
 
         store.store("state-123".to_string(), session).await;
-        
+
         // First retrieval succeeds
         assert!(store.retrieve("state-123").await.is_some());
-        
+
         // Second retrieval fails (session was removed)
         assert!(store.retrieve("state-123").await.is_none());
     }
@@ -217,10 +217,10 @@ mod tests {
         );
 
         store.store("state-123".to_string(), session).await;
-        
+
         // Wait for expiration
         sleep(Duration::from_millis(150)).await;
-        
+
         // Session should not be retrieved (expired)
         assert!(store.retrieve("state-123").await.is_none());
     }
@@ -228,7 +228,7 @@ mod tests {
     #[tokio::test]
     async fn cleanup_removes_expired() {
         let store = OidcSessionStore::new(Some(Duration::from_millis(100)));
-        
+
         for i in 0..5 {
             let session = OidcSession::new(
                 CsrfToken::new(format!("csrf-{}", i)),
@@ -239,13 +239,13 @@ mod tests {
         }
 
         assert_eq!(store.count().await, 5);
-        
+
         // Wait for expiration
         sleep(Duration::from_millis(150)).await;
-        
+
         // Cleanup
         store.cleanup_expired().await;
-        
+
         assert_eq!(store.count().await, 0);
     }
 }

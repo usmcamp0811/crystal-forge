@@ -38,7 +38,7 @@ pub fn TopBar(title: String) -> Element {
             }
             div {
                 class: "flex items-center gap-4",
-                
+
                 // Search (hidden on small screens)
                 div {
                     class: "hidden md:block",
@@ -57,7 +57,7 @@ pub fn TopBar(title: String) -> Element {
                             "data-testid": "user-menu-button",
                             class: "flex items-center gap-2 px-3 py-2 rounded-lg {theme::interactive::HOVER_BG} transition-colors",
                             onclick: move |_| show_user_menu.set(!show_user_menu()),
-                            
+
                             // User avatar circle
                             div {
                                 class: "w-8 h-8 rounded-full bg-violet-600 flex items-center justify-center text-sm font-semibold text-white",
@@ -87,7 +87,7 @@ pub fn TopBar(title: String) -> Element {
                             div {
                                 "data-testid": "user-menu-dropdown",
                                 class: "absolute right-0 mt-2 w-56 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
-                                
+
                                 // User info section
                                 div {
                                     class: "px-4 py-3 border-b {theme::surface::CARD_BORDER}",
@@ -122,7 +122,7 @@ pub fn TopBar(title: String) -> Element {
                                 // Menu items
                                 div {
                                     class: "py-2",
-                                    
+
                                     button {
                                         class: "w-full text-left px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors",
                                         onclick: handle_logout,

@@ -6,12 +6,19 @@
 //! All SQL lives in [`crate::queries::dashboard`]; this module is
 //! responsible only for HTTP concerns (extraction, response formatting).
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::IntoResponse,
+};
 use chrono::Utc;
 use sqlx::PgPool;
 use tracing::error;
 
+use crate::api::models::ApiError;
 use crate::api::models::{BuildQueueSummary, DashboardSummary};
+use crate::handlers::api::rbac::require_viewer_or_above;
 use crate::queries::dashboard::{
     fetch_active_builds, fetch_cve_summary, fetch_deployment_status, fetch_fleet_health,
     fetch_recent_deployments, fetch_total_systems,
@@ -21,7 +28,14 @@ use crate::queries::dashboard::{
 ///
 /// Returns a [`DashboardSummary`] containing fleet health, deployment status,
 /// CVE counts, active builds, and recent deployments.
-pub async fn dashboard_summary(State(pool): State<PgPool>) -> impl IntoResponse {
+pub async fn dashboard_summary(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
     let result = build_dashboard_summary(&pool).await;
 
     match result {
@@ -38,6 +52,18 @@ pub async fn dashboard_summary(State(pool): State<PgPool>) -> impl IntoResponse 
                 .into_response()
         }
     }
+}
+
+fn forbidden() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Viewer, operator, or admin privileges are required".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
 }
 
 /// Build the full dashboard summary by running parallel queries.
@@ -74,4 +100,23 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         recent_deployments,
         timestamp: Utc::now(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+
+    #[tokio::test]
+    async fn dashboard_summary_requires_authenticated_role() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+
+        let response = dashboard_summary(State(pool), HeaderMap::new())
+            .await
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
 }

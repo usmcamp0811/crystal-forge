@@ -17,16 +17,22 @@ use openidconnect::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::auth::oidc::{
     ClaimExtractor, JwksCache, JwtValidator, OidcProviderMetadata, OidcSession, OidcSessionStore,
 };
-use crate::auth::repository::normalize_tenant_discriminator;
 use crate::config::OidcConfig;
 use crate::handlers::api::auth_session::establish_user_session;
-use crate::queries::auth_identity::AuthIdentityRepository;
+use crate::models::auth_identity::AuthRole;
+use crate::queries::auth_identity::{
+    AuthIdentityRepository, OidcMappingMatchRow, assign_role_to_user,
+    clear_user_environment_memberships, clear_user_role_assignments,
+    create_user_and_bind_external_identity, get_environment_ids_by_names, get_oidc_mapping_matches,
+    get_user_by_id, get_user_roles, insert_user_environment_membership,
+};
 
 /// Shared OIDC client state.
 #[derive(Clone)]
@@ -352,15 +358,7 @@ pub async fn oidc_callback(
                 identity.user_id
             );
 
-            // Load user by ID (not email - email may have changed at provider)
-            sqlx::query_as::<_, crate::models::users::User>(
-                "SELECT id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at
-                 FROM users WHERE id = $1"
-            )
-            .bind(identity.user_id)
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| {
+            get_user_by_id(&pool, identity.user_id).await.map_err(|e| {
                 tracing::error!("Failed to load user for identity: {}", e);
                 OidcError::DatabaseError
             })?
@@ -369,95 +367,31 @@ pub async fn oidc_callback(
             // New OIDC identity - create user and bind identity atomically
             tracing::info!("New OIDC identity, creating user: email={}", email);
 
-            // Use transaction to ensure user creation + identity binding are atomic
-            // If either fails, both roll back (prevents orphaned users or identities)
-            let mut tx = pool.begin().await.map_err(|e| {
-                tracing::error!("Failed to start transaction: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Create user within transaction (inline to use tx executor)
-            let user_id = uuid::Uuid::new_v4();
-            let username = email.split('@').next().unwrap_or(email);
-            let (first_name, last_name) = match user_info.display_name.as_deref() {
-                Some(name) => {
-                    let parts: Vec<&str> = name.splitn(2, ' ').collect();
-                    (
-                        Some(parts[0].to_string()),
-                        Some(parts.get(1).copied().unwrap_or("").to_string()),
-                    )
-                }
-                // Current schema has NOT NULL first_name/last_name.
-                None => (Some(String::new()), Some(String::new())),
-            };
-
-            sqlx::query(
-                "INSERT INTO users (id, username, first_name, last_name, email)
-                 VALUES ($1, $2, $3, $4, $5)",
-            )
-            .bind(user_id)
-            .bind(username)
-            .bind(&first_name)
-            .bind(&last_name)
-            .bind(email)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to create user in transaction: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Bind OIDC identity to user within same transaction
-            let tenant_key = normalize_tenant_discriminator(tenant_discriminator);
             let claims_json = serde_json::to_value(&user_info.custom_claims)
                 .unwrap_or_else(|_| serde_json::json!({}));
-
-            sqlx::query(
-                "INSERT INTO external_identities (user_id, provider_key, subject, tenant_discriminator, claims)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (provider_key, subject, tenant_discriminator)
-                 DO UPDATE SET
-                     user_id = EXCLUDED.user_id,
-                     claims = EXCLUDED.claims,
-                     updated_at = NOW()"
+            let created = create_user_and_bind_external_identity(
+                &pool,
+                email,
+                user_info.display_name.as_deref(),
+                provider_key,
+                subject,
+                tenant_discriminator,
+                claims_json,
             )
-            .bind(user_id)
-            .bind(provider_key)
-            .bind(subject)
-            .bind(&tenant_key)
-            .bind(claims_json)
-            .execute(&mut *tx)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to create external identity binding: {}", e);
-                OidcError::DatabaseError
-            })?;
-
-            // Commit transaction (both user + identity created atomically)
-            tx.commit().await.map_err(|e| {
-                tracing::error!("Failed to commit user creation transaction: {}", e);
+                tracing::error!("Failed to create user/identity binding: {}", e);
                 OidcError::DatabaseError
             })?;
 
             tracing::info!(
                 "Created user + OIDC identity binding atomically: user_id={} provider={} subject={}",
-                user_id,
+                created.id,
                 provider_key,
                 subject
             );
 
-            // Load the created user
-            sqlx::query_as::<_, crate::models::users::User>(
-                "SELECT id, username, email, first_name, last_name, user_type, is_active, created_at, updated_at
-                 FROM users WHERE id = $1"
-            )
-            .bind(user_id)
-            .fetch_one(&pool)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to load created user: {}", e);
-                OidcError::DatabaseError
-            })?
+            created
         }
     };
 
@@ -468,28 +402,103 @@ pub async fn oidc_callback(
 
     let ip_address = Some(addr.ip().to_string());
 
-    // TODO: Assign roles based on OIDC groups (TASK-65.4 - role mapping)
-    // For now, assign Viewer role as default to allow login
-    // This should be replaced with proper role mapping from OIDC claims
-    use crate::models::auth_identity::AuthRole;
-    use crate::queries::auth_identity::assign_role_to_user;
-    
-    // Check if user has any roles, if not assign Viewer as default
-    let existing_roles = crate::queries::auth_identity::get_user_roles(&pool, user.id)
+    let groups = normalize_oidc_groups(&user_info.roles);
+
+    let mapping_rows = get_oidc_mapping_matches(&pool, &groups)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to check user roles: {}", e);
+            tracing::error!("Failed to load OIDC group mappings: {}", e);
             OidcError::DatabaseError
         })?;
-    
-    if existing_roles.is_empty() {
-        tracing::info!("Assigning default Viewer role to new OIDC user: {}", user.id);
+
+    let mapped_role = derive_highest_role(mapping_rows.iter().filter_map(|row| row.role));
+    let mapped_environments = collect_mapped_environments(&mapping_rows);
+
+    let existing_roles = get_user_roles(&pool, user.id).await.map_err(|e| {
+        tracing::error!("Failed to check user roles: {}", e);
+        OidcError::DatabaseError
+    })?;
+
+    if let Some(role) = mapped_role {
+        clear_user_role_assignments(&pool, user.id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to reset user role assignments: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+        assign_role_to_user(&pool, user.id, role, None)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to assign mapped role: {}", e);
+                OidcError::DatabaseError
+            })?;
+    } else if existing_roles.is_empty() {
         assign_role_to_user(&pool, user.id, AuthRole::Viewer, None)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to assign default role: {}", e);
                 OidcError::DatabaseError
             })?;
+    }
+
+    let mut apply_environment_mappings = false;
+    let mut resolved_environment_ids = Vec::new();
+
+    if !mapping_rows.is_empty() && !mapped_environments.is_empty() {
+        let environment_ids = get_environment_ids_by_names(&pool, &mapped_environments)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to resolve mapped environments: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+        match evaluate_environment_mapping_apply(
+            mapping_rows.len(),
+            mapped_environments.len(),
+            environment_ids.len(),
+        ) {
+            EnvironmentMappingApply::Apply => {
+                apply_environment_mappings = true;
+                resolved_environment_ids = environment_ids;
+            }
+            EnvironmentMappingApply::SkipNoMappings
+            | EnvironmentMappingApply::SkipNoMappedEnvironments => {}
+            EnvironmentMappingApply::SkipUnknownMappedEnvironments => {
+                tracing::warn!(
+                    "OIDC mapped environments include unknown names; preserving existing memberships for user_id={}",
+                    user.id
+                );
+            }
+        }
+    }
+
+    if apply_environment_mappings {
+        clear_user_environment_memberships(&pool, user.id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to reset environment memberships: {}", e);
+                OidcError::DatabaseError
+            })?;
+
+        for environment_id in resolved_environment_ids {
+            insert_user_environment_membership(&pool, user.id, environment_id)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Failed to assign mapped environment: {}", e);
+                    OidcError::DatabaseError
+                })?;
+        }
+    } else if mapping_rows.is_empty() {
+        tracing::debug!(
+            "No OIDC mappings matched groups; preserving existing environment memberships for user_id={}",
+            user.id
+        );
+    } else if mapped_environments.is_empty() {
+        tracing::warn!(
+            "OIDC mappings resolved without environments; preserving existing memberships for user_id={}",
+            user.id
+        );
     }
 
     let session_cookies = establish_user_session(&pool, user.id, user_agent, ip_address)
@@ -526,6 +535,72 @@ pub async fn oidc_callback(
     Ok(response)
 }
 
+fn derive_highest_role(roles: impl Iterator<Item = AuthRole>) -> Option<AuthRole> {
+    let mut has_operator = false;
+    let mut has_viewer = false;
+    for role in roles {
+        match role {
+            AuthRole::Admin => return Some(AuthRole::Admin),
+            AuthRole::Operator => has_operator = true,
+            AuthRole::Viewer => has_viewer = true,
+        }
+    }
+
+    if has_operator {
+        Some(AuthRole::Operator)
+    } else if has_viewer {
+        Some(AuthRole::Viewer)
+    } else {
+        None
+    }
+}
+
+fn normalize_oidc_groups(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+fn collect_mapped_environments(rows: &[OidcMappingMatchRow]) -> Vec<String> {
+    rows.iter()
+        .flat_map(|row| row.environments.iter())
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvironmentMappingApply {
+    Apply,
+    SkipNoMappings,
+    SkipNoMappedEnvironments,
+    SkipUnknownMappedEnvironments,
+}
+
+fn evaluate_environment_mapping_apply(
+    mapping_row_count: usize,
+    mapped_environment_count: usize,
+    resolved_environment_count: usize,
+) -> EnvironmentMappingApply {
+    if mapping_row_count == 0 {
+        return EnvironmentMappingApply::SkipNoMappings;
+    }
+
+    if mapped_environment_count == 0 {
+        return EnvironmentMappingApply::SkipNoMappedEnvironments;
+    }
+
+    if resolved_environment_count != mapped_environment_count {
+        return EnvironmentMappingApply::SkipUnknownMappedEnvironments;
+    }
+
+    EnvironmentMappingApply::Apply
+}
+
 /// Extract OIDC state from __Host-oidc-state cookie.
 fn extract_oidc_state_cookie(headers: &HeaderMap) -> Option<String> {
     headers
@@ -557,6 +632,7 @@ pub enum OidcError {
     ClaimExtractionFailed,
     MissingEmail,
     UnverifiedEmail,
+    RoleAssignmentFailed,
     SessionCreationFailed,
     DatabaseError,
 }
@@ -616,6 +692,10 @@ impl IntoResponse for OidcError {
                 StatusCode::FORBIDDEN,
                 "Email not verified by OIDC provider - cannot create/link account".to_string(),
             ),
+            OidcError::RoleAssignmentFailed => (
+                StatusCode::FORBIDDEN,
+                "No valid OIDC role mapping found for user".to_string(),
+            ),
             OidcError::SessionCreationFailed => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Authenticated but failed to create session".to_string(),
@@ -627,5 +707,77 @@ impl IntoResponse for OidcError {
         };
 
         (status, message).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derive_highest_role_prefers_admin_then_operator_then_viewer() {
+        assert_eq!(
+            derive_highest_role(vec![AuthRole::Viewer, AuthRole::Operator].into_iter()),
+            Some(AuthRole::Operator)
+        );
+        assert_eq!(
+            derive_highest_role(vec![AuthRole::Viewer, AuthRole::Admin].into_iter()),
+            Some(AuthRole::Admin)
+        );
+        assert_eq!(derive_highest_role(vec![].into_iter()), None);
+    }
+
+    #[test]
+    fn normalize_oidc_groups_trims_and_lowercases() {
+        let groups = normalize_oidc_groups(&[
+            " Team-Admins ".to_string(),
+            "".to_string(),
+            "Platform/Ops".to_string(),
+        ]);
+
+        assert_eq!(
+            groups,
+            vec!["team-admins".to_string(), "platform/ops".to_string()]
+        );
+    }
+
+    #[test]
+    fn collect_mapped_environments_deduplicates_normalized_values() {
+        let rows = vec![
+            OidcMappingMatchRow {
+                role: Some(AuthRole::Viewer),
+                environments: vec!["Prod".to_string(), " staging ".to_string()],
+            },
+            OidcMappingMatchRow {
+                role: None,
+                environments: vec!["prod".to_string(), "".to_string()],
+            },
+        ];
+
+        let environments = collect_mapped_environments(&rows);
+        assert_eq!(
+            environments,
+            vec!["prod".to_string(), "staging".to_string()]
+        );
+    }
+
+    #[test]
+    fn environment_mapping_apply_requires_actionable_and_resolved_mappings() {
+        assert_eq!(
+            evaluate_environment_mapping_apply(0, 2, 2),
+            EnvironmentMappingApply::SkipNoMappings
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 0, 0),
+            EnvironmentMappingApply::SkipNoMappedEnvironments
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 2, 1),
+            EnvironmentMappingApply::SkipUnknownMappedEnvironments
+        );
+        assert_eq!(
+            evaluate_environment_mapping_apply(2, 2, 2),
+            EnvironmentMappingApply::Apply
+        );
     }
 }

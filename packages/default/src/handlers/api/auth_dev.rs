@@ -69,20 +69,21 @@ pub async fn dev_login(
             let ip_address = Some(addr.ip().to_string());
 
             // Establish session cookies
-            let session_cookies = match establish_user_session(&pool, user.id, user_agent, ip_address).await {
-                Ok(cookies) => cookies,
-                Err(_) => {
-                    error!("Failed to establish session for dev user {}", user.email);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ApiError {
-                            error: "session_error".to_string(),
-                            message: "Failed to create session".to_string(),
-                        }),
-                    )
-                        .into_response();
-                }
-            };
+            let session_cookies =
+                match establish_user_session(&pool, user.id, user_agent, ip_address).await {
+                    Ok(cookies) => cookies,
+                    Err(_) => {
+                        error!("Failed to establish session for dev user {}", user.email);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiError {
+                                error: "session_error".to_string(),
+                                message: "Failed to create session".to_string(),
+                            }),
+                        )
+                            .into_response();
+                    }
+                };
 
             let mut response = Json(DevLoginResponse {
                 user_id: user.id.to_string(),

@@ -61,9 +61,12 @@ pub async fn logout(
     State(pool): State<PgPool>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, SessionError> {
-    validate_csrf(&headers)?;
+    // Only validate CSRF if a session cookie exists
+    // This makes logout idempotent - clients can call it even when already logged out
+    if extract_cookie(&headers, SESSION_COOKIE_NAME).is_some() {
+        validate_csrf(&headers)?;
 
-    if let Some(session_token) = extract_cookie(&headers, SESSION_COOKIE_NAME) {
+        let session_token = extract_cookie(&headers, SESSION_COOKIE_NAME).unwrap();
         let session_hash = hash_token(&session_token);
         invalidate_session_by_token_hash(&pool, &session_hash)
             .await
@@ -129,7 +132,7 @@ pub fn validate_csrf(headers: &HeaderMap) -> Result<(), SessionError> {
         extract_cookie(headers, CSRF_COOKIE_NAME).ok_or(SessionError::MissingCsrfCookie)?;
 
     let csrf_header = headers
-        .get(CSRF_HEADER_NAME)
+        .get(&CSRF_HEADER_NAME)
         .and_then(|v| v.to_str().ok())
         .ok_or(SessionError::MissingCsrfHeader)?;
 
@@ -189,7 +192,7 @@ mod tests {
                 .parse()
                 .unwrap(),
         );
-        headers.insert(CSRF_HEADER_NAME, "csrf123".parse().unwrap());
+        headers.insert(CSRF_HEADER_NAME.clone(), "csrf123".parse().unwrap());
 
         assert!(validate_csrf(&headers).is_ok());
     }
@@ -198,7 +201,7 @@ mod tests {
     fn csrf_validation_fails_on_mismatch() {
         let mut headers = HeaderMap::new();
         headers.insert(header::COOKIE, "__Host-cf-csrf=csrf123".parse().unwrap());
-        headers.insert(CSRF_HEADER_NAME, "csrf456".parse().unwrap());
+        headers.insert(CSRF_HEADER_NAME.clone(), "csrf456".parse().unwrap());
 
         assert!(matches!(
             validate_csrf(&headers),

@@ -1,8 +1,12 @@
 use anyhow::Context;
 use axum::Extension;
+use axum::http::{
+    HeaderValue, Method,
+    header::{ACCEPT, CONTENT_TYPE, HeaderName},
+};
 use axum::{
     Router,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
@@ -12,7 +16,10 @@ use crystal_forge::{
     handlers::{
         agent::{heartbeat, state},
         agent_request::CFState,
-        api::{auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami, dashboard, flakes},
+        api::{
+            admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
+            dashboard, flakes, systems,
+        },
         status,
         webhook::webhook_handler,
     },
@@ -25,6 +32,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tower_http::cors::{Any, CorsLayer};
 
 use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -101,9 +109,33 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
         )
+        .route("/api/v1/systems", get(systems::list_systems))
+        .route("/api/v1/systems/:id", get(systems::get_system))
+        .route("/api/v1/systems/:id/sync", post(systems::sync_system))
+        .route(
+            "/api/v1/systems/:id/rollback",
+            post(systems::rollback_system),
+        )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
+        .route("/api/v1/admin/users", get(admin::list_users))
+        .route("/api/v1/admin/users", post(admin::create_user))
+        .route("/api/v1/admin/users/:id", patch(admin::update_user))
+        .route("/api/v1/admin/users/:id", delete(admin::delete_user))
+        .route(
+            "/api/v1/admin/oidc-mappings",
+            get(admin::list_oidc_mappings),
+        )
+        .route(
+            "/api/v1/admin/oidc-mappings",
+            post(admin::upsert_oidc_mapping),
+        )
+        .route(
+            "/api/v1/admin/oidc-mappings/:id",
+            delete(admin::delete_oidc_mapping),
+        )
+        .route("/api/v1/admin/audit-events", get(admin::list_audit_events))
         // Auth context endpoint (publicly accessible)
         .route("/api/auth/whoami", get(auth_whoami::whoami))
         // Setup status endpoint (publicly accessible)
@@ -154,7 +186,28 @@ async fn main() -> anyhow::Result<()> {
         app = app.fallback(get(ui::serve_ui));
     }
 
-    let app = app.with_state(state);
+    // Add CORS layer for development (allows frontend dev server to talk to backend)
+    // In production, the UI is served from the same origin, so this is permissive for dev
+    let cors = CorsLayer::new()
+        .allow_origin([
+            HeaderValue::from_static("http://localhost:8080"),
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+            HeaderValue::from_static("http://localhost:8081"),
+            HeaderValue::from_static("http://127.0.0.1:8081"),
+            HeaderValue::from_static("http://localhost:8000"),
+            HeaderValue::from_static("http://127.0.0.1:8000"),
+        ])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([ACCEPT, CONTENT_TYPE, HeaderName::from_static("x-csrf-token")])
+        .allow_credentials(true);
+
+    let app = app.layer(cors).with_state(state);
 
     let listener = TcpListener::bind(("0.0.0.0", server_cfg.port)).await?;
     axum::serve(

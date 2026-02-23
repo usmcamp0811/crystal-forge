@@ -88,16 +88,19 @@ pub fn RegisterView() -> Element {
                             if let Ok(text_promise) = resp.text() {
                                 if let Ok(text_value) = JsFuture::from(text_promise).await {
                                     if let Some(text) = text_value.as_string() {
-                                        if let Ok(status) = serde_json::from_str::<SetupStatus>(&text)
+                                        if let Ok(status) =
+                                            serde_json::from_str::<SetupStatus>(&text)
                                         {
                                             is_first_run.set(status.requires_setup);
                                             // Allow registration if first-run OR explicitly enabled
-                                            registration_allowed
-                                                .set(status.requires_setup || status.allow_registration);
+                                            registration_allowed.set(
+                                                status.requires_setup || status.allow_registration,
+                                            );
                                             status_checked.set(true);
 
                                             // If registration not allowed, redirect to login
-                                            if !status.requires_setup && !status.allow_registration {
+                                            if !status.requires_setup && !status.allow_registration
+                                            {
                                                 nav.push("/login");
                                             }
                                             return;

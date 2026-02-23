@@ -363,6 +363,19 @@ pub struct SystemsListParams {
     pub sort_order: Option<SortOrder>,
 }
 
+/// Request payload for rolling a system back to a specific commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemRollbackRequest {
+    pub target_commit: String,
+}
+
+/// Generic response for accepted system mutation actions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemMutationResponse {
+    pub status: String,
+    pub message: String,
+}
+
 /// Sort direction for list queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -417,6 +430,61 @@ pub struct AuthContext {
     pub roles: Vec<Role>,
     /// Authentication mode the server is using.
     pub auth_mode: AuthMode,
+}
+
+/// Admin users list item.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminUserSummary {
+    pub id: String,
+    pub identifier: String,
+    pub identity_source: IdentitySource,
+    pub role: Option<Role>,
+    pub enabled: bool,
+    pub environments: Vec<String>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentitySource {
+    LocalManaged,
+    OidcDerived,
+}
+
+/// Audit event action classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAction {
+    UserCreated,
+    UserUpdated,
+    UserDeleted,
+    UserEnabled,
+    UserDisabled,
+    UserRoleAssigned,
+    UserEnvironmentMembershipUpdated,
+    OidcMappingChanged,
+    SystemSyncRequested,
+    SystemRollbackRequested,
+    SessionInvalidated,
+}
+
+/// Admin audit log entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AuditEvent {
+    pub timestamp: DateTime<Utc>,
+    pub actor: Option<String>,
+    pub action: AuditAction,
+    pub target: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OidcGroupMapping {
+    pub id: String,
+    pub group_name: String,
+    pub role: Option<Role>,
+    pub environments: Vec<String>,
+    pub updated_at: DateTime<Utc>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

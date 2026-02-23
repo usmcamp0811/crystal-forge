@@ -5,16 +5,40 @@
 
 use super::models::*;
 
+fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
+    if !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081")) {
+        return None;
+    }
+
+    if let Ok(Some(storage)) = window.local_storage() {
+        if let Ok(Some(custom_origin)) = storage.get_item("cf_backend_origin") {
+            let trimmed = custom_origin.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    let host = window
+        .location()
+        .hostname()
+        .unwrap_or_else(|_| "localhost".to_string());
+    Some(format!("http://{host}:3445"))
+}
+
 /// Base URL for the API. In production this is the same origin;
 /// during development it may point to a different port.
 fn base_url() -> String {
-    // In production, the UI is served from the same origin as the API.
-    // During development with `dx serve`, we proxy or use the server URL directly.
     let window = web_sys::window().expect("no global window");
     let location = window.location();
     let origin = location
         .origin()
-        .unwrap_or_else(|_| "http://localhost:3000".into());
+        .unwrap_or_else(|_| "http://localhost:3445".into());
+
+    if let Some(dev_origin) = backend_origin_for_dev(&window, &origin) {
+        return format!("{dev_origin}/api/v1");
+    }
+
     format!("{origin}/api/v1")
 }
 
@@ -24,7 +48,12 @@ fn auth_base_url() -> String {
     let location = window.location();
     let origin = location
         .origin()
-        .unwrap_or_else(|_| "http://localhost:3000".into());
+        .unwrap_or_else(|_| "http://localhost:3445".into());
+
+    if let Some(dev_origin) = backend_origin_for_dev(&window, &origin) {
+        return format!("{dev_origin}/api/auth");
+    }
+
     format!("{origin}/api/auth")
 }
 
@@ -51,6 +80,21 @@ pub async fn fetch_systems(
 pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientError> {
     let url = format!("{}/systems/{}", base_url(), id);
     fetch_json(&url).await
+}
+
+pub async fn request_system_sync(
+    id: &uuid::Uuid,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/sync", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+pub async fn request_system_rollback(
+    id: &uuid::Uuid,
+    request: &SystemRollbackRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/rollback", base_url(), id);
+    send_json_with_csrf("POST", &url, Some(request)).await
 }
 
 /// Fetch all flakes from registry.
@@ -104,10 +148,74 @@ pub async fn local_login(
 /// Logout (invalidates current session).
 pub async fn logout() -> Result<(), ApiClientError> {
     let url = format!("{}/logout", auth_base_url());
-    
+
     // We need to get the CSRF token from cookie and send it in header
     // For now, just send the request - the CSRF validation will happen server-side
     send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Fetch admin users view data.
+pub async fn fetch_admin_users() -> Result<Vec<AdminUserSummary>, ApiClientError> {
+    let url = format!("{}/admin/users", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch admin audit events.
+pub async fn fetch_admin_audit_events(
+    params: &AdminAuditEventsParams,
+) -> Result<PaginatedResponse<AuditEvent>, ApiClientError> {
+    let mut url = format!("{}/admin/audit-events", base_url());
+    let query = serde_urlencoded::to_string(params).unwrap_or_default();
+    if !query.is_empty() {
+        url.push('?');
+        url.push_str(&query);
+    }
+    fetch_json(&url).await
+}
+
+/// Create a local user from the admin console.
+pub async fn create_admin_user(
+    request: &AdminCreateUserRequest,
+) -> Result<AdminUserSummary, ApiClientError> {
+    let url = format!("{}/admin/users", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Update a local user from the admin console.
+pub async fn update_admin_user(
+    user_id: &str,
+    request: &AdminUpdateUserRequest,
+) -> Result<AdminUserSummary, ApiClientError> {
+    let url = format!("{}/admin/users/{user_id}", base_url());
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
+/// Delete a local user from the admin console.
+pub async fn delete_admin_user(user_id: &str) -> Result<(), ApiClientError> {
+    let url = format!("{}/admin/users/{user_id}", base_url());
+    let _deleted: serde_json::Value = send_json_with_csrf("DELETE", &url, None::<&()>).await?;
+    Ok(())
+}
+
+/// Fetch OIDC group mappings managed by admins.
+pub async fn fetch_admin_oidc_mappings() -> Result<Vec<OidcGroupMapping>, ApiClientError> {
+    let url = format!("{}/admin/oidc-mappings", base_url());
+    fetch_json(&url).await
+}
+
+/// Create or update an OIDC group mapping.
+pub async fn upsert_admin_oidc_mapping(
+    request: &AdminUpsertOidcMappingRequest,
+) -> Result<OidcGroupMapping, ApiClientError> {
+    let url = format!("{}/admin/oidc-mappings", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Delete an OIDC group mapping by id.
+pub async fn delete_admin_oidc_mapping(mapping_id: &str) -> Result<(), ApiClientError> {
+    let url = format!("{}/admin/oidc-mappings/{mapping_id}", base_url());
+    let _deleted: serde_json::Value = send_json_with_csrf("DELETE", &url, None::<&()>).await?;
+    Ok(())
 }
 
 /// Send JSON request with CSRF token from cookie.
@@ -134,7 +242,8 @@ async fn send_json_with_csrf<T: serde::de::DeserializeOwned, B: serde::Serialize
 
     // For 204 No Content, return default value if possible
     if status == 204 {
-        return serde_json::from_str("null").map_err(|e| ApiClientError::Deserialize(e.to_string()));
+        return serde_json::from_str("null")
+            .map_err(|e| ApiClientError::Deserialize(e.to_string()));
     }
 
     serde_json::from_str(&text).map_err(|e| ApiClientError::Deserialize(e.to_string()))
@@ -153,18 +262,23 @@ async fn send_request_with_csrf(
 
     let mut opts = web_sys::RequestInit::new();
     opts.set_method(method);
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
     if let Some(payload) = body {
         opts.set_body(&JsValue::from_str(payload));
     }
 
     let request = web_sys::Request::new_with_str_and_init(url, &opts)
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
-    
+
     request
         .headers()
         .set("Accept", "application/json")
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
-    
+
     if body.is_some() {
         request
             .headers()
@@ -175,8 +289,11 @@ async fn send_request_with_csrf(
     // Extract CSRF token from cookie and add to header
     if let Some(document) = window.document() {
         // Use js_sys to call document.cookie
-        let document_obj = js_sys::Object::from(js_sys::Reflect::get(&document, &JsValue::from_str("document")).unwrap_or(JsValue::NULL));
-        
+        let document_obj = js_sys::Object::from(
+            js_sys::Reflect::get(&document, &JsValue::from_str("document"))
+                .unwrap_or(JsValue::NULL),
+        );
+
         // Simpler: just get the cookie string directly from the global document
         let cookie_js = js_sys::eval("document.cookie").unwrap_or(JsValue::NULL);
         if let Some(cookie_str) = cookie_js.as_string() {
@@ -289,6 +406,11 @@ async fn send_request(
 
     let mut opts = web_sys::RequestInit::new();
     opts.set_method(method);
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
     if let Some(payload) = body {
         opts.set_body(&JsValue::from_str(payload));
     }

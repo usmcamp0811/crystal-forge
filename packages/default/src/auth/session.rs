@@ -1,11 +1,13 @@
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, header};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 
 pub const SESSION_COOKIE_NAME: &str = "__Host-cf-session";
 pub const CSRF_COOKIE_NAME: &str = "__Host-cf-csrf";
-pub const CSRF_HEADER_NAME: &str = "x-csrf-token";
+
+// Use HeaderName for type safety and case-insensitive comparison
+pub static CSRF_HEADER_NAME: HeaderName = HeaderName::from_static("x-csrf-token");
 
 const SESSION_COOKIE_ATTRIBUTES: &str = "Path=/; Secure; HttpOnly; SameSite=Lax";
 const CSRF_COOKIE_ATTRIBUTES: &str = "Path=/; Secure; SameSite=Strict";

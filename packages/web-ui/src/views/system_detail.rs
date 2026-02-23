@@ -15,10 +15,11 @@ use uuid::Uuid;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::{JsCast, JsValue};
 
+use crate::api::client::{request_system_rollback, request_system_sync};
 use crate::api::models::{
     BuildStatus, CveSeverity, CveSummary, DeploymentLogEntry, DeploymentStatus, LogLevel,
     PipelineStage, SystemCommitHistory, SystemDetail, SystemHardwareInfo, SystemNetworkInfo,
-    SystemSecurityInfo, SystemVulnerability,
+    SystemRollbackRequest, SystemSecurityInfo, SystemVulnerability,
 };
 use crate::components::cve::CvesTab;
 use crate::components::diff::DiffViewer;
@@ -29,6 +30,7 @@ use crate::components::system::{
     AgentCard, BooleanRow, HardwareCard, InfoRow, InfoRowMono, LogLine, LogsTab, NetworkCard,
     SecurityCard, StatusBadge, SystemInfoCard, environment_style,
 };
+use crate::state::{app_state::AppState, auth};
 use crate::theme;
 use crate::views::systems_mock::mock_system_detail_by_id;
 #[cfg(target_arch = "wasm32")]
@@ -105,6 +107,7 @@ impl Tab {
 /// The system detail page, reached via `/systems/:id`.
 #[component]
 pub fn SystemDetailView(id: String) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
     // Current tab state
     let mut active_tab = use_signal(|| Tab::Overview);
 
@@ -119,14 +122,14 @@ pub fn SystemDetailView(id: String) -> Element {
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
 
-    // Counter for alternating success/failure
-    let mut sync_attempt_count = use_signal(|| 0u32);
-
     // TODO: Replace with real API call using use_resource + fetch_system()
     let system = mock_system_detail_by_id(&id).unwrap_or_else(|| fallback_system_detail());
     let commit_history = mock_commit_history_for_system(&system);
     let vulnerabilities = mock_vulnerabilities();
     let deployment_logs = mock_deployment_logs();
+
+    let auth_context = app_state.read().auth.clone();
+    let can_mutate = auth::can_mutate_systems(&auth_context);
 
     let environment = system
         .environment
@@ -158,92 +161,65 @@ pub fn SystemDetailView(id: String) -> Element {
             "data-testid": "system-detail",
 
             // Back link
-            div {
-                Link {
-                    to: crate::routes::Route::SystemsView {},
-                    class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
-                    svg {
-                        class: "w-4 h-4",
-                        fill: "none",
-                        stroke: "currentColor",
-                        view_box: "0 0 24 24",
-                        path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
-                    }
-                    "Back to Systems"
+            Link {
+                to: crate::routes::Route::SystemsView {},
+                class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
+                svg {
+                    class: "w-4 h-4",
+                    fill: "none",
+                    stroke: "currentColor",
+                    view_box: "0 0 24 24",
+                    path { stroke_linecap: "round", stroke_linejoin: "round", stroke_width: "2", d: "M15 19l-7-7 7-7" }
                 }
+                "Back to Systems"
             }
 
             // Page header
             header {
-                class: "flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between",
-
-                // Left side: hostname, env, status, last seen
+                class: "flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between",
                 div {
-                    class: "space-y-2",
-                    div {
-                        class: "flex items-center gap-3",
-                        div {
-                            class: "flex flex-col",
-                            h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
-                            span {
-                                class: "text-xs {theme::text::MUTED}",
-                                "{system.id}"
-                            }
-                        }
-                        span {
-                            class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
-                            "{environment}"
-                        }
+                    class: "flex items-center gap-3 flex-wrap",
+                    h1 { class: "{theme::typography::PAGE_TITLE}", "{system.hostname}" }
+                    span {
+                        class: "inline-flex items-center px-3 py-1 rounded-md text-xs font-semibold uppercase tracking-wide {env_style.chip_bg} {env_style.chip_text}",
+                        "{environment}"
                     }
-
-                    // Status row
-                    div {
-                        class: "flex flex-wrap items-center gap-3",
-                        StatusBadge {
-                            label: system.health_status.label(),
-                            color_class: system.health_status.color_class(),
-                            bg_class: system.health_status.bg_class()
-                        }
-                        StatusBadge {
-                            label: system.deployment_status.label(),
-                            color_class: system.deployment_status.color_class(),
-                            bg_class: system.deployment_status.bg_class()
-                        }
-
-                        // Last seen
-                        span {
-                            class: "text-sm {theme::text::MUTED}",
-                            "Last seen: {last_seen_text}"
-                        }
-
-                        // Current commit hash
-                        if let Some(ref store_path) = system.current_store_path {
-                            {
-                                // Extract hash from store path
-                                let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
-                                rsx! {
-                                    if !hash.is_empty() {
-                                        span {
-                                            class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
-                                            "{hash}"
-                                        }
+                    StatusBadge {
+                        label: system.health_status.label(),
+                        color_class: system.health_status.color_class(),
+                        bg_class: system.health_status.bg_class()
+                    }
+                    StatusBadge {
+                        label: system.deployment_status.label(),
+                        color_class: system.deployment_status.color_class(),
+                        bg_class: system.deployment_status.bg_class()
+                    }
+                    span {
+                        class: "text-sm {theme::text::MUTED}",
+                        "Last seen: {last_seen_text}"
+                    }
+                    if let Some(ref store_path) = system.current_store_path {
+                        {
+                            let hash = store_path.split('-').next().unwrap_or("").chars().skip(11).take(7).collect::<String>();
+                            rsx! {
+                                if !hash.is_empty() {
+                                    span {
+                                        class: "font-mono text-xs px-2 py-0.5 rounded bg-gray-800 text-gray-400",
+                                        "{hash}"
                                     }
                                 }
                             }
                         }
                     }
                 }
-
-                // Right side: Sync Now button
                 div {
                     class: "flex items-center gap-2",
                     button {
                         class: "inline-flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all text-white border border-purple-400/40 bg-purple-600/60 hover:bg-purple-600/80 hover:border-purple-300/60 shadow-sm shadow-purple-900/30",
-                        disabled: *sync_in_progress.read(),
+                        disabled: *sync_in_progress.read() || !can_mutate,
                         onclick: move |_| show_sync_dialog.set(true),
 
                         if *sync_in_progress.read() {
-                            // Spinner
                             svg {
                                 class: "w-4 h-4 animate-spin",
                                 fill: "none",
@@ -263,6 +239,8 @@ pub fn SystemDetailView(id: String) -> Element {
                                 }
                             }
                             "Syncing..."
+                        } else if !can_mutate {
+                            "Sync (Operator/Admin required)"
                         } else {
                             svg {
                                 class: "w-4 h-4",
@@ -286,14 +264,14 @@ pub fn SystemDetailView(id: String) -> Element {
             div {
                 class: "border-b {theme::surface::CARD_BORDER}",
                 nav {
-                    class: "flex gap-1",
+                    class: "flex gap-1 -mb-px",
                     for tab in [Tab::Overview, Tab::History, Tab::Policy, Tab::Cves, Tab::Logs] {
                         {
                             let is_active = *active_tab.read() == tab;
                             let tab_class = if is_active {
-                                "px-4 py-2 text-sm font-medium text-white border-b-2 border-blue-500 -mb-px"
+                                "px-4 py-2 text-sm font-medium text-white border-b-2 border-blue-500"
                             } else {
-                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white transition-colors"
+                                "px-4 py-2 text-sm font-medium {theme::text::SECONDARY} hover:text-white transition-colors border-b-2 border-transparent"
                             };
                             rsx! {
                                 button {
@@ -301,8 +279,6 @@ pub fn SystemDetailView(id: String) -> Element {
                                     class: "{tab_class}",
                                     onclick: move |_| active_tab.set(tab),
                                     "{tab.label()}"
-
-                                    // Badge for CVE count
                                     if tab == Tab::Cves && system.cve_counts.total() > 0 {
                                         span {
                                             class: "ml-2 px-1.5 py-0.5 text-xs rounded-full bg-red-500/20 text-red-400",
@@ -327,6 +303,7 @@ pub fn SystemDetailView(id: String) -> Element {
                         HistoryTab {
                             commits: commit_history.clone(),
                             deployment_policy: system.deployment_policy.clone(),
+                            allow_mutations: can_mutate,
                             on_rollback: move |commit| {
                                 rollback_target.set(Some(commit));
                                 show_rollback_dialog.set(true);
@@ -364,35 +341,30 @@ pub fn SystemDetailView(id: String) -> Element {
                 hostname: system.hostname.clone(),
                 on_confirm: {
                     let hostname = system.hostname.clone();
-                    move |_| {
-                        show_sync_dialog.set(false);
-                        sync_in_progress.set(true);
+                        move |_| {
+                            show_sync_dialog.set(false);
+                            sync_in_progress.set(true);
 
-                        // Increment attempt counter for alternating success/failure
-                        let attempt = *sync_attempt_count.read();
-                        sync_attempt_count.set(attempt + 1);
-                        let will_succeed = attempt % 2 == 0;
+                            let hostname = hostname.clone();
+                            let system_id = system.id;
+                            let mut toast_message = toast_message.clone();
+                            spawn(async move {
+                                sync_in_progress.set(false);
 
-                        // Simulate async deployment with spawn
-                        let hostname = hostname.clone();
-                        let mut toast_message = toast_message.clone();
-                        spawn(async move {
-                            // Simulate 2-4 second build/deploy time
-                            #[cfg(target_arch = "wasm32")]
-                            {
-                                use gloo_timers::future::TimeoutFuture;
-                                TimeoutFuture::new(2500).await;
-                            }
-
-                            sync_in_progress.set(false);
-
-                            let show_toast = if will_succeed {
-                                let message = format!("Successfully synced {}", hostname);
-                                dispatch_sync_notification(message, true, toast_message.clone()).await
-                            } else {
-                                let message = format!("Failed to sync {}: Build timeout", hostname);
-                                dispatch_sync_notification(message, false, toast_message.clone()).await
-                            };
+                                let show_toast = match request_system_sync(&system_id).await {
+                                    Ok(response) => {
+                                        let message = if response.message.trim().is_empty() {
+                                            format!("Successfully synced {}", hostname)
+                                        } else {
+                                            response.message
+                                        };
+                                        dispatch_sync_notification(message, true, toast_message.clone()).await
+                                    }
+                                    Err(error) => {
+                                        let message = format!("Failed to sync {}: {}", hostname, error);
+                                        dispatch_sync_notification(message, false, toast_message.clone()).await
+                                    }
+                                };
 
                             // Auto-dismiss toast after 5 seconds (only when used)
                             if show_toast {
@@ -425,17 +397,30 @@ pub fn SystemDetailView(id: String) -> Element {
                     on_confirm: {
                         let hostname = system.hostname.clone();
                         let commit = commit.clone();
+                        let system_id = system.id;
                         let toast_message = toast_message.clone();
                         move |_| {
                             show_rollback_dialog.set(false);
-                            // TODO: Implement policy override (temporary disable or switch to manual).
-                            let message = format!(
-                                "Requested rollback of {} to {}",
-                                hostname,
-                                commit.hash.chars().take(7).collect::<String>()
-                            );
+                            let hostname = hostname.clone();
+                            let commit = commit.clone();
+                            let target_commit = commit.hash.clone();
                             spawn(async move {
-                                let _ = dispatch_sync_notification(message, true, toast_message).await;
+                                let message = match request_system_rollback(
+                                    &system_id,
+                                    &SystemRollbackRequest { target_commit },
+                                )
+                                .await
+                                {
+                                    Ok(response) if !response.message.trim().is_empty() => response.message,
+                                    Ok(_) => format!(
+                                        "Requested rollback of {} to {}",
+                                        hostname,
+                                        commit.hash.chars().take(7).collect::<String>()
+                                    ),
+                                    Err(error) => format!("Rollback request failed for {}: {}", hostname, error),
+                                };
+                                let success = !message.to_ascii_lowercase().contains("failed");
+                                let _ = dispatch_sync_notification(message, success, toast_message).await;
                             });
                         }
                     },
@@ -514,6 +499,7 @@ fn OverviewTab(system: SystemDetail) -> Element {
 fn HistoryTab(
     commits: Vec<SystemCommitHistory>,
     deployment_policy: String,
+    allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
     rsx! {
@@ -576,6 +562,7 @@ fn HistoryTab(
                             is_first: idx == 0,
                             is_last: idx == commits.len() - 1,
                             deployment_policy: deployment_policy.clone(),
+                            allow_mutations,
                             on_rollback: on_rollback.clone()
                         }
                     }
@@ -592,6 +579,7 @@ fn CommitTimelineNode(
     #[allow(unused)] is_first: bool,
     #[allow(unused)] is_last: bool,
     deployment_policy: String,
+    allow_mutations: bool,
     on_rollback: EventHandler<SystemCommitHistory>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
@@ -758,7 +746,7 @@ fn CommitTimelineNode(
                             }
 
                             // Rollback action (icon-only, hover)
-                            if !commit.is_current {
+                            if allow_mutations && !commit.is_current {
                                 button {
                                     class: "shrink-0 p-1 rounded text-gray-400 hover:text-white hover:bg-gray-800 transition-colors opacity-40 group-hover:opacity-100",
                                     title: "Deploy this commit (rollback)",
