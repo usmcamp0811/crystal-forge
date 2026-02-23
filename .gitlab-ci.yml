@@ -47,7 +47,7 @@ discover-checks:
       EOF
 
       # Get list of checks from flake and add a job for each
-      nix flake show --json 2>/dev/null | jq -r '.checks["x86_64-linux"] | keys[]' | sort -u | while read check_name; do
+      nix flake show --json 2>/dev/null | nix run nixpkgs#jq -- -r '.checks["x86_64-linux"] | keys[]' | sort -u | while read check_name; do
         # Sanitize check name for job name (replace special chars with dash)
         job_name=$(echo "$check_name" | sed 's/[^a-zA-Z0-9_-]/-/g')
 
