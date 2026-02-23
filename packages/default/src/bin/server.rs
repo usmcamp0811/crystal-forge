@@ -18,7 +18,7 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            dashboard, flakes, systems,
+            dashboard, environments, flakes, systems,
         },
         status,
         webhook::webhook_handler,
@@ -123,6 +123,11 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/rollback",
             post(systems::rollback_system),
+        )
+        .route("/api/v1/environments", get(environments::list_environments))
+        .route(
+            "/api/v1/environments/:id",
+            get(environments::get_environment),
         )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))

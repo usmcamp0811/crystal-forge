@@ -365,6 +365,21 @@ pub struct CreateFlakeRequest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Environment DTOs — GET /api/v1/environments, GET /api/v1/environments/:id
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lightweight environment summary returned by the environments API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_active: bool,
+    /// Number of systems assigned to this environment.
+    pub system_count: i64,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Flake Commit Timeline DTOs
 // ─────────────────────────────────────────────────────────────────────────────
 

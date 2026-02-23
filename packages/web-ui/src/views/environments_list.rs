@@ -9,9 +9,10 @@ use crate::components::environments::{
     AddEnvironmentForm, EditEnvironmentDraft, EditEnvironmentModal, EditRequirementsModal,
     EnvironmentCard, EnvironmentItem, NewEnvironmentDraft, PolicyOption, PolicyPickerModal,
     RemoveEnvironmentDialog, environment_name_for_id, normalize_color_hex, normalize_optional,
-    required_agent_policy_id, required_policy_names,
+    policy_library, required_agent_policy_id, validate_environment, validate_environment_edit,
 };
-use crate::components::layout::Card;
+use crate::environments::adapter::load_environments_with_fallback;
+use crate::routes::Route;
 use crate::theme;
 
 const ENV_COLOR_STORAGE_KEY: &str = "crystal_forge.environments.colors";
@@ -21,7 +22,46 @@ pub fn EnvironmentsListView() -> Element {
     let policy_library = policy_library();
     let default_required_policy = required_agent_policy_id(&policy_library);
 
-    let mut environments = use_signal(|| initial_environments(default_required_policy));
+    // Seed initial state from the backend API; fall back to deterministic mock
+    // on error. The rest of the component's local-state CRUD (add/edit/remove)
+    // continues to operate on the signal after initial load.
+    let mut environments = use_signal(Vec::<EnvironmentItem>::new);
+    let mut api_notice = use_signal(|| None::<String>);
+    let mut loading = use_signal(|| true);
+    let mut redirect_to_login = use_signal(|| false);
+
+    let nav = use_navigator();
+
+    use_effect(move || {
+        spawn(async move {
+            let result = load_environments_with_fallback(default_required_policy).await;
+
+            if result.redirect_to_login {
+                redirect_to_login.set(true);
+                return;
+            }
+
+            // Apply persisted color overrides from localStorage.
+            let stored_colors = load_environment_colors();
+            let mut items = result.environments;
+            for env in &mut items {
+                if let Some(color) = stored_colors.get(&env.name.to_lowercase()) {
+                    env.color_hex = normalize_color_hex(color);
+                }
+            }
+            items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            persist_environment_colors(&items);
+
+            environments.set(items);
+            api_notice.set(result.notice);
+            loading.set(false);
+        });
+    });
+
+    if *redirect_to_login.read() {
+        nav.push(Route::LoginView {});
+    }
+
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(|| NewEnvironmentDraft {
@@ -45,6 +85,17 @@ pub fn EnvironmentsListView() -> Element {
     rsx! {
         div {
             class: "space-y-6",
+
+            // API fallback notice banner
+            if let Some(notice) = api_notice.read().clone() {
+                div {
+                    class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm",
+                    style: "background-color: #3B2F00; border-color: #7A6000;",
+                    span { class: "shrink-0", "⚠" }
+                    span { "{notice}" }
+                }
+            }
+
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {
@@ -62,7 +113,24 @@ pub fn EnvironmentsListView() -> Element {
                 }
             }
 
-            if *show_add_form.read() {
+            if *loading.read() {
+                div {
+                    class: "flex justify-center py-12",
+                    div {
+                        class: "flex flex-col items-center gap-3",
+                        div {
+                            class: "animate-spin rounded-full h-10 w-10 border-b-2",
+                            style: "border-color: #82699B;",
+                        }
+                        p {
+                            class: "text-sm {theme::text::SECONDARY}",
+                            "Loading environments…"
+                        }
+                    }
+                }
+            }
+
+            if !*loading.read() && *show_add_form.read() {
                 AddEnvironmentForm {
                     draft: draft.clone(),
                     error: add_error.clone(),
@@ -109,7 +177,7 @@ pub fn EnvironmentsListView() -> Element {
                 }
             }
 
-            if *show_add_policy_modal.read() {
+            if !*loading.read() && *show_add_policy_modal.read() {
                 PolicyPickerModal {
                     title: "Choose Required Policies".to_string(),
                     current_ids: draft.read().required_policy_ids.clone(),
@@ -124,7 +192,8 @@ pub fn EnvironmentsListView() -> Element {
                 }
             }
 
-            div {
+            if !*loading.read() {
+              div {
                 class: "space-y-3",
                 for env in items {
                     EnvironmentCard {
@@ -149,6 +218,7 @@ pub fn EnvironmentsListView() -> Element {
                         },
                     }
                 }
+              }
             }
 
             if let Some(env_id) = editing_environment.read().clone() {
@@ -227,64 +297,6 @@ pub fn EnvironmentsListView() -> Element {
     }
 }
 
-fn validate_environment(
-    draft: &NewEnvironmentDraft,
-    existing: &[EnvironmentItem],
-    policy_library: &[PolicyOption],
-) -> Result<(), String> {
-    let name = draft.name.trim();
-    if name.is_empty() {
-        return Err("Environment name is required.".to_string());
-    }
-    if existing
-        .iter()
-        .any(|item| item.name.eq_ignore_ascii_case(name))
-    {
-        return Err("Environment already exists.".to_string());
-    }
-    if draft.required_policy_ids.is_empty() {
-        return Err("At least one required policy must be selected.".to_string());
-    }
-    if !draft
-        .required_policy_ids
-        .iter()
-        .all(|id| policy_library.iter().any(|policy| policy.id == *id))
-    {
-        return Err("Required policies must come from the policy library.".to_string());
-    }
-    if !looks_like_hex_color(&draft.color_hex) {
-        return Err("Environment color must be a valid hex value.".to_string());
-    }
-    Ok(())
-}
-
-fn validate_environment_edit(
-    draft: &EditEnvironmentDraft,
-    existing: &[EnvironmentItem],
-) -> Result<(), String> {
-    let name = draft.name.trim();
-    if name.is_empty() {
-        return Err("Environment name is required.".to_string());
-    }
-    if existing
-        .iter()
-        .any(|item| item.id != draft.id && item.name.eq_ignore_ascii_case(name))
-    {
-        return Err("Environment name already exists.".to_string());
-    }
-    if !looks_like_hex_color(&draft.color_hex) {
-        return Err("Environment color must be a valid hex value.".to_string());
-    }
-    Ok(())
-}
-
-fn looks_like_hex_color(value: &str) -> bool {
-    if value.len() != 7 || !value.starts_with('#') {
-        return false;
-    }
-    value[1..].chars().all(|ch| ch.is_ascii_hexdigit())
-}
-
 fn environment_color_map(items: &[EnvironmentItem]) -> HashMap<String, String> {
     items
         .iter()
@@ -301,71 +313,4 @@ fn load_environment_colors() -> HashMap<String, String> {
     LocalStorage::get::<HashMap<String, String>>(ENV_COLOR_STORAGE_KEY).unwrap_or_default()
 }
 
-fn initial_environments(default_required_policy: Uuid) -> Vec<EnvironmentItem> {
-    let mut items = seed_environments(default_required_policy);
-    let stored = load_environment_colors();
-    for env in &mut items {
-        if let Some(color) = stored.get(&env.name.to_lowercase()) {
-            env.color_hex = normalize_color_hex(color);
-        }
-    }
-    persist_environment_colors(&items);
-    items
-}
 
-fn policy_library() -> Vec<PolicyOption> {
-    vec![
-        PolicyOption {
-            id: Uuid::from_u128(1),
-            name: "Require Crystal Forge Agent".to_string(),
-            description: "Ensure Crystal Forge services are enabled on the target.".to_string(),
-        },
-        PolicyOption {
-            id: Uuid::from_u128(2),
-            name: "Require Packages".to_string(),
-            description: "Guarantee required package set is installed.".to_string(),
-        },
-        PolicyOption {
-            id: Uuid::from_u128(3),
-            name: "Custom Check".to_string(),
-            description: "Evaluate environment-specific Nix policy expression.".to_string(),
-        },
-    ]
-}
-
-fn seed_environments(default_required_policy: Uuid) -> Vec<EnvironmentItem> {
-    vec![
-        EnvironmentItem {
-            id: Uuid::from_u128(101),
-            name: "production".to_string(),
-            description: Some("Live fleet systems".to_string()),
-            color_hex: "#0F766E".to_string(),
-            system_count: 12,
-            required_policy_ids: vec![default_required_policy, Uuid::from_u128(3)],
-        },
-        EnvironmentItem {
-            id: Uuid::from_u128(102),
-            name: "staging".to_string(),
-            description: Some("Pre-production validation".to_string()),
-            color_hex: "#B45309".to_string(),
-            system_count: 2,
-            required_policy_ids: vec![default_required_policy],
-        },
-        EnvironmentItem {
-            id: Uuid::from_u128(103),
-            name: "development".to_string(),
-            description: Some("Workstations and local testing".to_string()),
-            color_hex: "#2563EB".to_string(),
-            system_count: 8,
-            required_policy_ids: vec![default_required_policy],
-        },
-        EnvironmentItem {
-            id: Uuid::from_u128(104),
-            name: "remote".to_string(),
-            description: Some("Remote unmanaged network".to_string()),
-            color_hex: "#6B7280".to_string(),
-            system_count: 0,
-            required_policy_ids: vec![default_required_policy],
-        },
-    ]
-}

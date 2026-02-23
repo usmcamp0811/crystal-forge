@@ -97,6 +97,18 @@ pub async fn request_system_rollback(
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
+/// Fetch the list of environments visible to the authenticated user.
+pub async fn fetch_environments() -> Result<Vec<EnvironmentSummary>, ApiClientError> {
+    let url = format!("{}/environments", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch a single environment by ID.
+pub async fn fetch_environment(id: &uuid::Uuid) -> Result<EnvironmentSummary, ApiClientError> {
+    let url = format!("{}/environments/{}", base_url(), id);
+    fetch_json(&url).await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());
