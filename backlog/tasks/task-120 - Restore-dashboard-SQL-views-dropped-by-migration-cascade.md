@@ -1,7 +1,7 @@
 ---
 id: TASK-120
 title: Restore dashboard SQL views dropped by migration cascade
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-23 04:10'
 updated_date: '2026-02-23 04:12'
@@ -25,3 +25,9 @@ Suggested acceptance checks:
 - SELECT against dashboard view set succeeds.
 - GET /api/v1/dashboard/summary does not fail due to missing relations.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode on gray in /home/mcamp/code/crystal-forge/TASK-120-restore-dashboard-views
+<!-- SECTION:NOTES:END -->
