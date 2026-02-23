@@ -1,10 +1,10 @@
 ---
 id: TASK-73
 title: Add OIDC provider to VM integration tests
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-20 14:28'
-updated_date: '2026-02-22 04:36'
+updated_date: '2026-02-23 03:15'
 labels:
   - testing
   - infra
@@ -15,7 +15,7 @@ dependencies:
   - TASK-65.2
   - TASK-72
 priority: medium
-ordinal: 7000
+ordinal: 67000
 ---
 
 ## Description
