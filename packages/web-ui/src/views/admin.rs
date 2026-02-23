@@ -157,49 +157,84 @@ pub fn AdminView() -> Element {
                 }
 
                 div {
-                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-3",
+                    class: "rounded-xl border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} p-4 space-y-4",
                     h3 { class: "text-sm font-semibold text-white", "Create user" }
                     div {
-                        class: "grid gap-3 sm:grid-cols-2 xl:grid-cols-5",
-                        input {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                            r#type: "email",
-                            placeholder: "Email",
-                            value: "{create_email.read()}",
-                            oninput: move |evt| create_email.set(evt.value())
+                        class: "grid gap-4 sm:grid-cols-2 xl:grid-cols-5",
+                        div {
+                            class: "space-y-1",
+                            label {
+                                class: "text-xs font-medium {theme::text::MUTED}",
+                                "Email"
+                            }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "email",
+                                placeholder: "user@example.com",
+                                value: "{create_email.read()}",
+                                oninput: move |evt| create_email.set(evt.value())
+                            }
                         }
-                        input {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                            r#type: "text",
-                            placeholder: "Display name (optional)",
-                            value: "{create_display_name.read()}",
-                            oninput: move |evt| create_display_name.set(evt.value())
+                        div {
+                            class: "space-y-1",
+                            label {
+                                class: "text-xs font-medium {theme::text::MUTED}",
+                                "Display Name"
+                            }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "text",
+                                placeholder: "Optional",
+                                value: "{create_display_name.read()}",
+                                oninput: move |evt| create_display_name.set(evt.value())
+                            }
                         }
-                        input {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                            r#type: "password",
-                            placeholder: "Initial password (min 8)",
-                            value: "{create_password.read()}",
-                            oninput: move |evt| create_password.set(evt.value())
+                        div {
+                            class: "space-y-1",
+                            label {
+                                class: "text-xs font-medium {theme::text::MUTED}",
+                                "Initial Password"
+                            }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "password",
+                                placeholder: "Min 8 characters",
+                                value: "{create_password.read()}",
+                                oninput: move |evt| create_password.set(evt.value())
+                            }
                         }
-                        select {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                            value: "{create_role.read()}",
-                            onchange: move |evt| create_role.set(evt.value()),
-                            option { value: "Admin", "Admin" }
-                            option { value: "Operator", "Operator" }
-                            option { value: "Viewer", "Viewer" }
+                        div {
+                            class: "space-y-1",
+                            label {
+                                class: "text-xs font-medium {theme::text::MUTED}",
+                                "Role"
+                            }
+                            select {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                                value: "{create_role.read()}",
+                                onchange: move |evt| create_role.set(evt.value()),
+                                option { value: "Admin", "Admin" }
+                                option { value: "Operator", "Operator" }
+                                option { value: "Viewer", "Viewer" }
+                            }
                         }
-                        input {
-                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                            r#type: "text",
-                            placeholder: "Environments (exact names, comma-separated)",
-                            value: "{create_environments.read()}",
-                            oninput: move |evt| create_environments.set(evt.value())
+                        div {
+                            class: "space-y-1",
+                            label {
+                                class: "text-xs font-medium {theme::text::MUTED}",
+                                "Environments"
+                            }
+                            input {
+                                class: "w-full rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                                r#type: "text",
+                                placeholder: "prod, staging (comma-separated)",
+                                value: "{create_environments.read()}",
+                                oninput: move |evt| create_environments.set(evt.value())
+                            }
                         }
                     }
                     div {
-                        class: "flex justify-end",
+                        class: "flex justify-end pt-2",
                         button {
                             class: "rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
                             disabled: *create_submitting.read(),
@@ -805,15 +840,16 @@ pub fn AdminView() -> Element {
                             class: "space-y-2",
                             for event in audit_events.read().iter() {
                                 div {
-                                    class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-4 py-3",
+                                    class: "rounded-xl border {theme::surface::CARD_BORDER} bg-gray-900/60 shadow-sm px-4 py-3 hover:bg-gray-900/80 transition-colors",
                                     div {
                                         class: "flex items-start justify-between gap-4",
                                         div {
-                                            p { class: "text-sm text-white", "{event.target}" }
+                                            class: "space-y-1",
+                                            p { class: "text-sm font-medium text-white", "{event.target}" }
                                             p { class: "text-xs {theme::text::SECONDARY}", "{format_event_actor(event)}" }
                                             p { class: "text-xs {theme::text::MUTED}", "Source: {event.source}" }
                                         }
-                                        span { class: "text-xs {theme::text::MUTED}", "{format_time(event.timestamp)}" }
+                                        span { class: "text-xs {theme::text::MUTED} whitespace-nowrap", "{format_time(event.timestamp)}" }
                                     }
                                 }
                             }
