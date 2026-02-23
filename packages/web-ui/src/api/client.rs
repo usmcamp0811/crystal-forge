@@ -246,6 +246,11 @@ async fn send_request_with_csrf(
 
     let mut opts = web_sys::RequestInit::new();
     opts.set_method(method);
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
     if let Some(payload) = body {
         opts.set_body(&JsValue::from_str(payload));
     }
@@ -385,6 +390,11 @@ async fn send_request(
 
     let mut opts = web_sys::RequestInit::new();
     opts.set_method(method);
+    let _ = js_sys::Reflect::set(
+        opts.as_ref(),
+        &JsValue::from_str("credentials"),
+        &JsValue::from_str("include"),
+    );
     if let Some(payload) = body {
         opts.set_body(&JsValue::from_str(payload));
     }

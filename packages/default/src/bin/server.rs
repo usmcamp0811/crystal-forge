@@ -1,5 +1,6 @@
 use anyhow::Context;
 use axum::Extension;
+use axum::http::HeaderValue;
 use axum::{
     Router,
     routing::{delete, get, patch, post},
@@ -185,7 +186,14 @@ async fn main() -> anyhow::Result<()> {
     // Add CORS layer for development (allows frontend dev server to talk to backend)
     // In production, the UI is served from the same origin, so this is permissive for dev
     let cors = CorsLayer::new()
-        .allow_origin(Any)
+        .allow_origin([
+            HeaderValue::from_static("http://localhost:8080"),
+            HeaderValue::from_static("http://127.0.0.1:8080"),
+            HeaderValue::from_static("http://localhost:8081"),
+            HeaderValue::from_static("http://127.0.0.1:8081"),
+            HeaderValue::from_static("http://localhost:8000"),
+            HeaderValue::from_static("http://127.0.0.1:8000"),
+        ])
         .allow_methods(Any)
         .allow_headers(Any)
         .allow_credentials(true);
