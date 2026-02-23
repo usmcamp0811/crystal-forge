@@ -1,16 +1,16 @@
 ---
 id: TASK-78
 title: Implement session garbage collection
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-02-21 04:19'
-updated_date: '2026-02-23 03:21'
+updated_date: '2026-02-23 03:22'
 labels:
   - sessions
 dependencies:
   - TASK-65.3
 priority: medium
-ordinal: 8000
+ordinal: 73000
 ---
 
 ## Description
