@@ -338,7 +338,7 @@ pub fn AdminView() -> Element {
                                                 td {
                                                     class: "px-4 py-3",
                                                     span {
-                                                        class: "inline-flex rounded-full px-2 py-1 text-xs font-medium {identity_source_badge_class(user.identity_source)}",
+                                                        class: "inline-flex rounded-md px-2.5 py-1 text-xs font-medium {identity_source_badge_class(user.identity_source)}",
                                                         "{identity_source_label(user.identity_source)}"
                                                     }
                                                 }
@@ -616,57 +616,60 @@ pub fn AdminView() -> Element {
                 }
 
                 div {
-                    class: "overflow-auto rounded-xl border {theme::surface::CARD_BORDER}",
-                    table {
-                        class: "min-w-full text-sm",
-                        thead {
-                            class: "{theme::surface::CARD_BG} text-left text-xs uppercase tracking-wide {theme::text::MUTED}",
-                            tr {
-                                th { class: "px-4 py-3", "Group" }
-                                th { class: "px-4 py-3", "Role" }
-                                th { class: "px-4 py-3", "Environments" }
-                                th { class: "px-4 py-3", "Updated" }
-                                th { class: "px-4 py-3", "Actions" }
-                            }
-                        }
-                        tbody {
-                            class: "divide-y {theme::surface::CARD_BORDER}",
-                            for mapping in oidc_mappings.read().iter() {
+                    class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm bg-gray-900/60",
+                    div {
+                        class: "overflow-x-auto",
+                        table {
+                            class: "w-full text-sm",
+                            thead {
+                                class: "{theme::surface::SUBTLE_BG}",
                                 tr {
-                                    class: "{theme::surface::CARD_BG}",
-                                    td { class: "px-4 py-3 text-white", "{mapping.group_name}" }
-                                    td { class: "px-4 py-3 {theme::text::SECONDARY}", "{editable_role_label(mapping.role)}" }
-                                    td { class: "px-4 py-3 text-slate-300", "{format_environments(&mapping.environments)}" }
-                                    td { class: "px-4 py-3 {theme::text::MUTED}", "{format_time(mapping.updated_at)}" }
-                                    td {
-                                        class: "px-4 py-3",
-                                        button {
-                                            class: "rounded-md border border-red-500/40 px-2 py-1 text-xs font-medium text-red-200 hover:bg-red-950/40",
-                                            onclick: {
-                                                let mapping_id = mapping.id.clone();
-                                                let mut oidc_mappings = oidc_mappings.clone();
-                                                let mut oidc_error = oidc_error.clone();
-                                                move |_| {
-                                                    let mapping_id = mapping_id.clone();
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Group" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Role" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Environments" }
+                                    th { class: "px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider", "Updated" }
+                                    th { class: "px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider", "Actions" }
+                                }
+                            }
+                            tbody {
+                                class: "divide-y {theme::surface::DIVIDER}",
+                                for mapping in oidc_mappings.read().iter() {
+                                    tr {
+                                        class: "hover:bg-gray-800/40 transition",
+                                        td { class: "px-4 py-3 text-sm text-white", "{mapping.group_name}" }
+                                        td { class: "px-4 py-3 text-sm {theme::text::SECONDARY}", "{editable_role_label(mapping.role)}" }
+                                        td { class: "px-4 py-3 text-sm text-slate-300", "{format_environments(&mapping.environments)}" }
+                                        td { class: "px-4 py-3 text-sm {theme::text::MUTED}", "{format_time(mapping.updated_at)}" }
+                                        td {
+                                            class: "px-4 py-3 text-right",
+                                            button {
+                                                class: "rounded-md bg-red-900/60 border border-red-500/40 px-3 py-1.5 text-xs font-medium text-red-200 hover:bg-red-800/60 transition-colors",
+                                                onclick: {
+                                                    let mapping_id = mapping.id.clone();
                                                     let mut oidc_mappings = oidc_mappings.clone();
                                                     let mut oidc_error = oidc_error.clone();
-                                                    spawn(async move {
-                                                        match delete_admin_oidc_mapping(&mapping_id).await {
-                                                            Ok(()) => match fetch_admin_oidc_mappings().await {
-                                                                Ok(next) => {
-                                                                    oidc_mappings.set(next);
-                                                                    oidc_error.set(None);
-                                                                }
-                                                                Err(e) => {
-                                                                    oidc_error.set(Some(format!("Failed to reload OIDC mappings: {e}")));
-                                                                }
-                                                            },
-                                                            Err(e) => oidc_error.set(Some(format!("Failed to delete OIDC mapping: {e}"))),
-                                                        }
-                                                    });
-                                                }
-                                            },
-                                            "Delete"
+                                                    move |_| {
+                                                        let mapping_id = mapping_id.clone();
+                                                        let mut oidc_mappings = oidc_mappings.clone();
+                                                        let mut oidc_error = oidc_error.clone();
+                                                        spawn(async move {
+                                                            match delete_admin_oidc_mapping(&mapping_id).await {
+                                                                Ok(()) => match fetch_admin_oidc_mappings().await {
+                                                                    Ok(next) => {
+                                                                        oidc_mappings.set(next);
+                                                                        oidc_error.set(None);
+                                                                    }
+                                                                    Err(e) => {
+                                                                        oidc_error.set(Some(format!("Failed to reload OIDC mappings: {e}")));
+                                                                    }
+                                                                },
+                                                                Err(e) => oidc_error.set(Some(format!("Failed to delete OIDC mapping: {e}"))),
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                "Delete"
+                                            }
                                         }
                                     }
                                 }
@@ -682,9 +685,9 @@ pub fn AdminView() -> Element {
                 div {
                     class: "grid gap-3 sm:grid-cols-2 xl:grid-cols-5",
                     input {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
+                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
                         r#type: "text",
-                        placeholder: "Filter by actor",
+                        placeholder: "Filter by actor...",
                         value: "{actor_filter.read()}",
                         oninput: move |evt| {
                             actor_filter.set(evt.value());
@@ -711,28 +714,40 @@ pub fn AdminView() -> Element {
                         option { value: "system_rollback_requested", "System rollback requested" }
                         option { value: "session_invalidated", "Session invalidated" }
                     }
-                    input {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                        r#type: "text",
-                        placeholder: "From (RFC3339)",
-                        value: "{from_filter.read()}",
-                        oninput: move |evt| {
-                            from_filter.set(evt.value());
-                            audit_page.set(1);
+                    div {
+                        class: "flex flex-col gap-1",
+                        label {
+                            class: "text-xs {theme::text::MUTED}",
+                            "Start date"
+                        }
+                        input {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                            r#type: "datetime-local",
+                            value: "{from_filter.read()}",
+                            oninput: move |evt| {
+                                from_filter.set(evt.value());
+                                audit_page.set(1);
+                            }
                         }
                     }
-                    input {
-                        class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white",
-                        r#type: "text",
-                        placeholder: "To (RFC3339)",
-                        value: "{to_filter.read()}",
-                        oninput: move |evt| {
-                            to_filter.set(evt.value());
-                            audit_page.set(1);
+                    div {
+                        class: "flex flex-col gap-1",
+                        label {
+                            class: "text-xs {theme::text::MUTED}",
+                            "End date"
+                        }
+                        input {
+                            class: "rounded-lg border {theme::surface::CARD_BORDER} {theme::surface::CARD_BG} px-3 py-2 text-sm text-white {theme::interactive::FOCUS_RING}",
+                            r#type: "datetime-local",
+                            value: "{to_filter.read()}",
+                            oninput: move |evt| {
+                                to_filter.set(evt.value());
+                                audit_page.set(1);
+                            }
                         }
                     }
                     button {
-                        class: "rounded-lg bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors",
+                        class: "rounded-lg bg-gray-800 border {theme::surface::CARD_BORDER} px-4 py-2 text-sm font-medium text-white hover:bg-gray-700 transition-colors self-end",
                         onclick: move |_| {
                             actor_filter.set(String::new());
                             action_filter.set(String::new());
