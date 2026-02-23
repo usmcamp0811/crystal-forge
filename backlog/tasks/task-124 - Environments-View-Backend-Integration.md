@@ -1,10 +1,10 @@
 ---
 id: TASK-124
 title: Environments View - Backend Integration
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 21:18'
+updated_date: '2026-02-23 22:54'
 labels:
   - backend
   - api
@@ -169,3 +169,9 @@ Low-Medium
 - Implement environment create/update operations
 - Add environment health monitoring
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-sonnet-4-6 on gray in ~/code/crystal-forge/TASK-124-environments-backend-integration
+<!-- SECTION:NOTES:END -->
