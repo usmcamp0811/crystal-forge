@@ -1,11 +1,11 @@
 ---
 id: TASK-64
 title: Refine flakes git history card density and visual styling
-status: Review
+status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-19 13:26'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-02-23 03:15'
 labels:
   - ui
   - flakes
@@ -13,7 +13,7 @@ labels:
 milestone: m-10
 dependencies: []
 priority: medium
-ordinal: 4000
+ordinal: 64000
 ---
 
 ## Description
