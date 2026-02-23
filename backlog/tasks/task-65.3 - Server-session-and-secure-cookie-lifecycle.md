@@ -5,7 +5,7 @@ status: Done
 assignee:
   - Codex 5.3
 created_date: ''
-updated_date: '2026-02-21 05:01'
+updated_date: '2026-02-23 03:15'
 labels:
   - security
   - auth
@@ -15,6 +15,7 @@ milestone: m-14
 dependencies:
   - TASK-65.2
 priority: high
+ordinal: 59000
 ---
 
 ## Description

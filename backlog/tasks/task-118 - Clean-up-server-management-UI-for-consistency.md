@@ -4,9 +4,10 @@ title: Clean up server management UI for consistency
 status: Done
 assignee: []
 created_date: '2026-02-22 23:40'
-updated_date: '2026-02-23 00:01'
+updated_date: '2026-02-23 03:15'
 labels: []
 dependencies: []
+ordinal: 54000
 ---
 
 ## Description
