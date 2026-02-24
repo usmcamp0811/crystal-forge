@@ -9,9 +9,10 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CveSummary, DeploymentStatus, PaginatedResponse, PipelineStage,
-    SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo,
-    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemsListParams,
+    ApiError, AuditAction, CreateSystemRequest, CveSummary, DeploymentStatus, PaginatedResponse,
+    PipelineStage, SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse,
+    SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
+    SystemsListParams,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
@@ -94,6 +95,127 @@ pub async fn list_systems(
         }),
     )
         .into_response()
+}
+
+pub async fn create_system(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateSystemRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    // Validate required fields
+    let hostname = payload.hostname.trim();
+    if hostname.is_empty() {
+        return bad_request("Hostname is required");
+    }
+
+    let public_key = payload.public_key.trim();
+    if public_key.is_empty() {
+        return bad_request("Public key is required");
+    }
+
+    // Validate deployment policy
+    if !matches!(
+        payload.deployment_policy.as_str(),
+        "manual" | "auto_latest" | "pinned"
+    ) {
+        return bad_request("Invalid deployment policy (must be: manual, auto_latest, or pinned)");
+    }
+
+    // Look up environment ID from name
+    let environment_id = if let Some(env_name) = payload.environment.as_ref() {
+        let env_name_trimmed = env_name.trim();
+        if !env_name_trimmed.is_empty() {
+            match sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM environments WHERE name = $1"
+            )
+            .bind(env_name_trimmed)
+            .fetch_optional(&pool)
+            .await
+            {
+                Ok(id) => id,
+                Err(_) => return internal_error("Failed to lookup environment"),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Look up flake ID from name
+    let flake_id = if let Some(flake_name) = payload.flake_name.as_ref() {
+        let flake_name_trimmed = flake_name.trim();
+        if !flake_name_trimmed.is_empty() {
+            match sqlx::query_scalar::<_, i32>(
+                "SELECT id FROM flakes WHERE name = $1"
+            )
+            .bind(flake_name_trimmed)
+            .fetch_optional(&pool)
+            .await
+            {
+                Ok(id) => id,
+                Err(_) => return internal_error("Failed to lookup flake"),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Use the System model to create and validate the system
+    use crate::models::systems::System;
+    let system = match System::new(
+        &pool,
+        hostname.to_string(),
+        environment_id,
+        true, // is_active
+        public_key.to_string(),
+        flake_id,
+        None, // desired_target
+        payload.deployment_policy.clone(),
+    )
+    .await
+    {
+        Ok(sys) => sys,
+        Err(e) => return bad_request(&format!("Failed to create system: {}", e)),
+    };
+
+    // Record audit event
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::UserCreated, // Using UserCreated as placeholder - ideally would be SystemCreated
+        format!("{} ({})", system.hostname, system.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "create", "hostname": system.hostname }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    // Fetch the created system from view to return complete data
+    let detail = match get_system_detail_by_id(&pool, system.id).await {
+        Ok(Some(row)) => detail_row_to_api_model(row),
+        Ok(None) => return internal_error("System created but not found in view"),
+        Err(_) => return internal_error("Failed to fetch created system"),
+    };
+
+    (StatusCode::CREATED, Json(detail)).into_response()
 }
 
 pub async fn get_system(
