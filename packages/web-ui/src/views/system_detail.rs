@@ -125,41 +125,30 @@ pub fn SystemDetailView(id: String) -> Element {
     // Toast notification state
     let mut toast_message: Signal<Option<(String, bool)>> = use_signal(|| None); // (message, is_success)
 
-    // System data state — initialise with fallback; use_effect replaces with real data.
-    let mut system_signal = use_signal(fallback_system_detail);
-    let mut api_notice: Signal<Option<String>> = use_signal(|| None);
-    let mut redirect_to_login = use_signal(|| false);
-    let mut not_found = use_signal(|| false);
-
-    {
+    // System data state — use_resource keyed on id prevents repeated fetches.
+    let detail_resource = use_resource(move || {
         let id = id.clone();
-        let mut system_signal = system_signal.clone();
-        let mut api_notice = api_notice.clone();
-        let mut redirect_to_login = redirect_to_login.clone();
-        let mut not_found = not_found.clone();
-        use_effect(move || {
-            let id = id.clone();
-            spawn(async move {
-                let result = load_system_detail_with_fallback(&id).await;
-                if result.redirect_to_login {
-                    redirect_to_login.set(true);
-                    return;
-                }
-                match result.system {
-                    Some(detail) => {
-                        system_signal.set(detail);
-                        api_notice.set(result.notice);
-                    }
-                    None => {
-                        not_found.set(true);
-                    }
-                }
-            });
-        });
-    }
+        async move { load_system_detail_with_fallback(&id).await }
+    });
+
+    // Derive state from resource result
+    let (system, api_notice, redirect_to_login, not_found) = match &*detail_resource.read_unchecked() {
+        Some(result) => (
+            result.system.clone().unwrap_or_else(fallback_system_detail),
+            result.notice.clone(),
+            result.redirect_to_login,
+            result.system.is_none() && !result.redirect_to_login,
+        ),
+        None => (
+            fallback_system_detail(),
+            None,
+            false,
+            false,
+        ),
+    };
 
     // Redirect to login (early return matching dashboard pattern).
-    if *redirect_to_login.read() {
+    if redirect_to_login {
         nav.push(Route::LoginView {});
         return rsx! {
             div {
@@ -170,7 +159,7 @@ pub fn SystemDetailView(id: String) -> Element {
     }
 
     // Not found state.
-    if *not_found.read() {
+    if not_found {
         return rsx! {
             div {
                 class: "space-y-4",
@@ -188,7 +177,6 @@ pub fn SystemDetailView(id: String) -> Element {
         };
     }
 
-    let system = system_signal.read().clone();
     let commit_history = mock_commit_history_for_system(&system);
     let vulnerabilities = mock_vulnerabilities();
     let deployment_logs = mock_deployment_logs();
@@ -226,7 +214,7 @@ pub fn SystemDetailView(id: String) -> Element {
             "data-testid": "system-detail",
 
             // API fallback notice banner (shown when using mock data)
-            if let Some(ref notice) = *api_notice.read() {
+            if let Some(ref notice) = api_notice {
                 div {
                     class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
                     "{notice}"
