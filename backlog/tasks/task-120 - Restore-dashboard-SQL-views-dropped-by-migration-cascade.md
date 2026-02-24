@@ -26,3 +26,13 @@ Suggested acceptance checks:
 - SELECT against dashboard view set succeeds.
 - GET /api/v1/dashboard/summary does not fail due to missing relations.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode on gray in /home/mcamp/code/crystal-forge/TASK-120-restore-dashboard-views
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/132
+
+Verification: migration 0076 applied via cargo sqlx migrate run; dashboard views now exist and dashboard aggregate queries succeed; cargo test dashboard_summary passed.
+<!-- SECTION:NOTES:END -->
