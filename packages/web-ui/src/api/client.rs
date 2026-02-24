@@ -90,6 +90,15 @@ pub async fn create_system(
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
+/// Update a system's public key.
+pub async fn update_system_public_key(
+    id: &uuid::Uuid,
+    request: &UpdateSystemPublicKeyRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/public-key", base_url(), id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
 pub async fn request_system_sync(
     id: &uuid::Uuid,
 ) -> Result<SystemMutationResponse, ApiClientError> {

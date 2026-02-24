@@ -14,6 +14,15 @@ pub async fn update_hostname(pool: &PgPool, system: &System, new_hostname: &str)
     Ok(())
 }
 
+pub async fn update_public_key(pool: &PgPool, system_id: Uuid, new_public_key: &str) -> Result<()> {
+    sqlx::query("UPDATE systems SET public_key = $1, updated_at = NOW() WHERE id = $2")
+        .bind(new_public_key)
+        .bind(system_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn get_by_hostname(pool: &PgPool, hostname: &str) -> Result<Option<System>> {
     let system = sqlx::query_as::<_, System>("SELECT * FROM systems WHERE hostname = $1")
         .bind(hostname)

@@ -6,7 +6,7 @@ use axum::http::{
 };
 use axum::{
     Router,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
@@ -128,6 +128,9 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/environments/:id",
             get(environments::get_environment),
+        .route(
+            "/api/v1/systems/:id/public-key",
+            put(systems::update_system_public_key),
         )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
