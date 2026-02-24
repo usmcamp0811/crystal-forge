@@ -17,12 +17,15 @@ use crate::components::filters::{
 use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog,
+    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
 };
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
 use crate::routes::Route;
-use crate::systems::adapter::{create_system_via_api, fallback_systems, load_systems_with_fallback};
+use crate::systems::adapter::{
+    create_system_via_api, fallback_systems, load_systems_with_fallback,
+    update_system_public_key_via_api,
+};
 use crate::theme;
 use chrono::Utc;
 
@@ -137,8 +140,10 @@ pub fn SystemsListView() -> Element {
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(NewSystemDraft::new);
     let mut pending_remove = use_signal(|| None::<SystemSummary>);
+    let mut pending_update_key = use_signal(|| None::<SystemSummary>);
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
+    let mut update_key_error = use_signal(|| None::<String>);
     
     let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
@@ -326,6 +331,7 @@ pub fn SystemsListView() -> Element {
                         SystemCard {
                             system: system.clone(),
                             on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
+                            on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
                         }
                     }
                 }
@@ -333,6 +339,7 @@ pub fn SystemsListView() -> Element {
                 SystemsTable {
                     systems: filtered_systems.clone(),
                     on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
+                    on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
                 }
             }
 
@@ -348,6 +355,34 @@ pub fn SystemsListView() -> Element {
                         values.retain(|item| item.id != system.id);
                         local_systems.set(values);
                         pending_remove.set(None);
+                    }
+                }
+            }
+
+            // Update Public Key Modal
+            if let Some(system) = pending_update_key.read().clone() {
+                UpdatePublicKeyModal {
+                    system_id: system.id,
+                    hostname: system.hostname.clone(),
+                    on_cancel: move |_| {
+                        pending_update_key.set(None);
+                        update_key_error.set(None);
+                    },
+                    on_confirm: move |new_public_key| {
+                        let system_id = system.id;
+                        spawn(async move {
+                            match update_system_public_key_via_api(system_id, new_public_key).await {
+                                Ok(message) => {
+                                    // Success - close modal and maybe show a success toast
+                                    pending_update_key.set(None);
+                                    update_key_error.set(None);
+                                    // TODO: Show success toast with message
+                                }
+                                Err(error_message) => {
+                                    update_key_error.set(Some(error_message));
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -371,6 +406,21 @@ fn remove_system_by_id(
         .cloned();
     if let Some(system) = target {
         pending_remove.set(Some(system));
+    }
+}
+
+fn update_key_for_system(
+    systems: Signal<Vec<SystemSummary>>,
+    mut pending_update_key: Signal<Option<SystemSummary>>,
+    system_id: Uuid,
+) {
+    let target = systems
+        .read()
+        .iter()
+        .find(|item| item.id == system_id)
+        .cloned();
+    if let Some(system) = target {
+        pending_update_key.set(Some(system));
     }
 }
 
