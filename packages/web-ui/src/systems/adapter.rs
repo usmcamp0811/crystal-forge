@@ -16,7 +16,8 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_system, fetch_system, fetch_systems, update_system_public_key,
+    ApiClientError, create_system, deactivate_system, fetch_system, fetch_systems,
+    update_system_public_key,
 };
 use crate::api::models::{
     CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PipelineStage,
@@ -160,6 +161,19 @@ pub async fn update_system_public_key_via_api(
     };
 
     match update_system_public_key(&system_id, &request).await {
+        Ok(response) => Ok(response.message),
+        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
+            Err("Authentication required. Please log in.".to_string())
+        }
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
+    }
+}
+
+/// Disable (soft-delete) a system via the backend API.
+pub async fn deactivate_system_via_api(system_id: Uuid) -> Result<String, String> {
+    match deactivate_system(&system_id).await {
         Ok(response) => Ok(response.message),
         Err(ApiClientError::Status { code: 401 | 403, .. }) => {
             Err("Authentication required. Please log in.".to_string())

@@ -18,6 +18,7 @@ use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::systems::{
+    deactivate_system,
     SystemAccessRow, SystemDetailRow, SystemListRow, find_system_access_row,
     get_system_detail_by_id, get_user_environment_membership_ids, list_system_access_rows,
     list_systems_from_view, touch_system_updated_at, update_public_key,
@@ -451,6 +452,66 @@ pub async fn update_system_public_key(
         Json(SystemMutationResponse {
             status: "success".to_string(),
             message: format!("Public key updated for {}", row.hostname),
+        }),
+    )
+        .into_response()
+}
+
+pub async fn deactivate_system_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    if deactivate_system(&pool, system_id).await.is_err() {
+        return internal_error("Failed to disable system");
+    }
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::UserUpdated,
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "deactivate_system" }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    (
+        StatusCode::OK,
+        Json(SystemMutationResponse {
+            status: "success".to_string(),
+            message: format!("System {} disabled", row.hostname),
         }),
     )
         .into_response()

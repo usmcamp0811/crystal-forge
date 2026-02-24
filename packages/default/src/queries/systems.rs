@@ -180,6 +180,14 @@ pub async fn update_system_desired_target(
     Ok(())
 }
 
+pub async fn deactivate_system(pool: &PgPool, system_id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE systems SET is_active = FALSE, updated_at = NOW() WHERE id = $1")
+        .bind(system_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn get_user_environment_membership_ids(
     pool: &PgPool,
     user_id: Uuid,
