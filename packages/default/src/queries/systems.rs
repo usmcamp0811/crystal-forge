@@ -183,3 +183,96 @@ pub async fn get_user_environment_membership_ids(
     .await?;
     Ok(ids.into_iter().collect())
 }
+
+/// Row type for view_system_detail
+#[derive(Debug, sqlx::FromRow)]
+pub struct SystemDetailRow {
+    pub id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub is_active: bool,
+    pub deployment_policy: String,
+    pub health_status: String,
+    pub deployment_status: String,
+    pub pipeline_stage: String,
+    pub nixos_version: Option<String>,
+    pub kernel: Option<String>,
+    pub agent_version: Option<String>,
+    pub current_store_path: Option<String>,
+    // Hardware
+    pub cpu_brand: Option<String>,
+    pub cpu_cores: Option<i32>,
+    pub memory_gb: Option<f64>,
+    pub uptime_secs: Option<i64>,
+    pub board_serial: Option<String>,
+    pub bios_version: Option<String>,
+    // Network
+    pub primary_ip_address: Option<String>,
+    pub primary_mac_address: Option<String>,
+    pub gateway_ip: Option<String>,
+    // Security
+    pub tpm_present: Option<bool>,
+    pub secure_boot_enabled: Option<bool>,
+    pub fips_mode: Option<bool>,
+    pub selinux_status: Option<String>,
+    // Hardware change flags
+    pub hardware_changed_24h: Option<bool>,
+    pub hardware_ever_changed: Option<bool>,
+    // CVE counts
+    pub critical_cve_count: i32,
+    pub high_cve_count: i32,
+    pub medium_cve_count: i32,
+    pub low_cve_count: i32,
+    // Flake info
+    pub flake_id: Option<i32>,
+    pub flake_name: Option<String>,
+    pub flake_repo_url: Option<String>,
+    pub flake_latest_commit: Option<String>,
+    // Timestamps
+    pub last_seen: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Fetch system detail from view_system_detail
+pub async fn get_system_detail_by_id(
+    pool: &PgPool,
+    system_id: Uuid,
+) -> Result<Option<SystemDetailRow>> {
+    let row = sqlx::query_as::<_, SystemDetailRow>(
+        "SELECT * FROM view_system_detail WHERE id = $1",
+    )
+    .bind(system_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row)
+}
+
+/// Row type for view_system_list
+#[derive(Debug, sqlx::FromRow)]
+pub struct SystemListRow {
+    pub id: Uuid,
+    pub hostname: String,
+    pub environment: Option<String>,
+    pub primary_ip_address: Option<String>,
+    pub health_status: String,
+    pub deployment_status: String,
+    pub pipeline_stage: String,
+    pub critical_cve_count: i32,
+    pub high_cve_count: i32,
+    pub medium_cve_count: i32,
+    pub low_cve_count: i32,
+    pub nixos_version: Option<String>,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub deployment_policy: String,
+}
+
+/// Fetch all active systems from view_system_list
+pub async fn list_systems_from_view(pool: &PgPool) -> Result<Vec<SystemListRow>> {
+    let rows = sqlx::query_as::<_, SystemListRow>(
+        "SELECT * FROM view_system_list ORDER BY hostname",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
