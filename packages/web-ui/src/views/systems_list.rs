@@ -22,7 +22,7 @@ use crate::components::modals::{
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
 use crate::routes::Route;
-use crate::systems::adapter::{fallback_systems, load_systems_with_fallback};
+use crate::systems::adapter::{create_system_via_api, fallback_systems, load_systems_with_fallback};
 use crate::theme;
 use chrono::Utc;
 
@@ -221,29 +221,44 @@ pub fn SystemsListView() -> Element {
                             return;
                         }
 
-                        let new_item = SystemSummary {
-                            id: Uuid::new_v4(),
-                            hostname: next.hostname.trim().to_string(),
-                            environment: normalize_optional(&next.environment),
-                            primary_ip: None,
-                            health_status: HealthStatus::Healthy,
-                            deployment_status: DeploymentStatus::NeverDeployed,
-                            pipeline_stage: Some(PipelineStage::ReadyForBuild),
-                            cve_counts: CveSummary { critical: 0, high: 0, medium: 0, low: 0 },
-                            nixos_version: None,
-                            last_seen: Some(Utc::now()),
-                            deployment_policy: normalize_policy(&next.deployment_policy),
-                        };
+                        // Call backend API to create the system
+                        spawn(async move {
+                            match create_system_via_api(
+                                next.hostname.trim().to_string(),
+                                next.public_key.clone(),
+                                normalize_optional(&next.environment),
+                                normalize_optional(&next.flake_name),
+                                normalize_policy(&next.deployment_policy),
+                            ).await {
+                                Ok(detail) => {
+                                    // Convert SystemDetail to SystemSummary for the list
+                                    let new_item = SystemSummary {
+                                        id: detail.id,
+                                        hostname: detail.hostname,
+                                        environment: detail.environment,
+                                        primary_ip: detail.network.primary_ip,
+                                        health_status: detail.health_status,
+                                        deployment_status: detail.deployment_status,
+                                        pipeline_stage: detail.pipeline_stage,
+                                        cve_counts: detail.cve_counts,
+                                        nixos_version: detail.nixos_version,
+                                        last_seen: detail.last_seen,
+                                        deployment_policy: detail.deployment_policy,
+                                    };
 
-                        // Note: This currently only updates local state.
-                        // TODO: Call backend API to persist the new system to the database.
-                        let mut values = local_systems.read().clone();
-                        values.push(new_item);
-                        values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
-                        local_systems.set(values);
-                        draft.set(NewSystemDraft::new());
-                        add_error.set(None);
-                        show_add_form.set(false);
+                                    let mut values = local_systems.read().clone();
+                                    values.push(new_item);
+                                    values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+                                    local_systems.set(values);
+                                    draft.set(NewSystemDraft::new());
+                                    add_error.set(None);
+                                    show_add_form.set(false);
+                                }
+                                Err(error_message) => {
+                                    add_error.set(Some(error_message));
+                                }
+                            }
+                        });
                     },
                     on_generate_keys: move |_| {
                         generated_keys.set(Some(generate_key_pair()));

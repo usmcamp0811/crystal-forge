@@ -327,6 +327,16 @@ pub struct CreateFlakeRequest {
     pub repo_url: String,
 }
 
+/// Request payload for creating a new system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSystemRequest {
+    pub hostname: String,
+    pub public_key: String,
+    pub environment: Option<String>,
+    pub flake_name: Option<String>,
+    pub deployment_policy: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Environment DTOs — GET /api/v1/environments, GET /api/v1/environments/:id
 // ─────────────────────────────────────────────────────────────────────────────

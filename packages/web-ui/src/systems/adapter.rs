@@ -15,10 +15,11 @@
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
-use crate::api::client::{ApiClientError, fetch_system, fetch_systems};
+use crate::api::client::{ApiClientError, create_system, fetch_system, fetch_systems};
 use crate::api::models::{
-    CveSummary, DeploymentStatus, HealthStatus, PipelineStage, PaginatedResponse, SystemDetail,
-    SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo, SystemSummary, SystemsListParams,
+    CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PipelineStage,
+    PaginatedResponse, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
+    SystemSummary, SystemsListParams,
 };
 use crate::views::systems_mock::mock_system_detail_by_id;
 
@@ -117,6 +118,33 @@ pub async fn load_system_detail_with_fallback(id: &str) -> SystemDetailLoadResul
                 redirect_to_login: false,
             }
         }
+    }
+}
+
+/// Create a new system via the backend API.
+pub async fn create_system_via_api(
+    hostname: String,
+    public_key: String,
+    environment: Option<String>,
+    flake_name: Option<String>,
+    deployment_policy: String,
+) -> Result<SystemDetail, String> {
+    let request = CreateSystemRequest {
+        hostname,
+        public_key,
+        environment,
+        flake_name,
+        deployment_policy,
+    };
+
+    match create_system(&request).await {
+        Ok(detail) => Ok(detail),
+        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
+            Err("Authentication required. Please log in.".to_string())
+        }
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
     }
 }
 
