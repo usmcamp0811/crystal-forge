@@ -109,13 +109,13 @@ flake_info AS (
         f.repo_url AS flake_repo_url,
         (
             SELECT c.git_commit_hash
-            FROM tbl_commits c
+            FROM commits c
             WHERE c.flake_id = f.id
             ORDER BY c.commit_timestamp DESC
             LIMIT 1
         ) AS latest_commit
     FROM systems s
-    LEFT JOIN tbl_flakes f ON f.id = s.flake_id
+    LEFT JOIN flakes f ON f.id = s.flake_id
 )
 SELECT
     s.id,
