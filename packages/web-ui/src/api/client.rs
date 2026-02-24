@@ -99,6 +99,12 @@ pub async fn update_system_public_key(
     send_json_with_csrf("PUT", &url, Some(request)).await
 }
 
+/// Disable (soft-delete) a system.
+pub async fn deactivate_system(id: &uuid::Uuid) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/deactivate", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 pub async fn request_system_sync(
     id: &uuid::Uuid,
 ) -> Result<SystemMutationResponse, ApiClientError> {

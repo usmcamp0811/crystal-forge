@@ -23,7 +23,7 @@ use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
 use crate::routes::Route;
 use crate::systems::adapter::{
-    create_system_via_api, fallback_systems, load_systems_with_fallback,
+    create_system_via_api, deactivate_system_via_api, fallback_systems, load_systems_with_fallback,
     update_system_public_key_via_api,
 };
 use crate::theme;
@@ -349,12 +349,21 @@ pub fn SystemsListView() -> Element {
                     hostname: system.hostname.clone(),
                     on_cancel: move |_| pending_remove.set(None),
                     on_confirm: move |_| {
-                        // Note: This currently only updates local state.
-                        // TODO: Call backend API to delete the system from the database.
-                        let mut values = local_systems.read().clone();
-                        values.retain(|item| item.id != system.id);
-                        local_systems.set(values);
-                        pending_remove.set(None);
+                        let system_id = system.id;
+                        spawn(async move {
+                            match deactivate_system_via_api(system_id).await {
+                                Ok(_) => {
+                                    let mut values = local_systems.read().clone();
+                                    values.retain(|item| item.id != system_id);
+                                    local_systems.set(values);
+                                    pending_remove.set(None);
+                                }
+                                Err(error_message) => {
+                                    api_notice.set(Some(error_message));
+                                    pending_remove.set(None);
+                                }
+                            }
+                        });
                     }
                 }
             }
