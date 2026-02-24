@@ -15,11 +15,13 @@
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
-use crate::api::client::{ApiClientError, create_system, fetch_system, fetch_systems};
+use crate::api::client::{
+    ApiClientError, create_system, fetch_system, fetch_systems, update_system_public_key,
+};
 use crate::api::models::{
     CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PipelineStage,
     PaginatedResponse, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
-    SystemSummary, SystemsListParams,
+    SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest,
 };
 use crate::views::systems_mock::mock_system_detail_by_id;
 
@@ -139,6 +141,26 @@ pub async fn create_system_via_api(
 
     match create_system(&request).await {
         Ok(detail) => Ok(detail),
+        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
+            Err("Authentication required. Please log in.".to_string())
+        }
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
+    }
+}
+
+/// Update a system's public key via the backend API.
+pub async fn update_system_public_key_via_api(
+    system_id: Uuid,
+    new_public_key: String,
+) -> Result<String, String> {
+    let request = UpdateSystemPublicKeyRequest {
+        public_key: new_public_key,
+    };
+
+    match update_system_public_key(&system_id, &request).await {
+        Ok(response) => Ok(response.message),
         Err(ApiClientError::Status { code: 401 | 403, .. }) => {
             Err("Authentication required. Please log in.".to_string())
         }

@@ -12,7 +12,7 @@ use crate::api::models::{
     ApiError, AuditAction, CreateSystemRequest, CveSummary, DeploymentStatus, PaginatedResponse,
     PipelineStage, SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse,
     SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
-    SystemsListParams,
+    SystemsListParams, UpdateSystemPublicKeyRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
@@ -20,7 +20,8 @@ use crate::models::auth_identity::AuthRole;
 use crate::queries::systems::{
     SystemAccessRow, SystemDetailRow, SystemListRow, find_system_access_row,
     get_system_detail_by_id, get_user_environment_membership_ids, list_system_access_rows,
-    list_systems_from_view, touch_system_updated_at, update_system_desired_target,
+    list_systems_from_view, touch_system_updated_at, update_public_key,
+    update_system_desired_target,
 };
 
 pub async fn list_systems(
@@ -373,6 +374,83 @@ pub async fn rollback_system(
         Json(SystemMutationResponse {
             status: "accepted".to_string(),
             message: format!("Rollback requested for {}", row.hostname),
+        }),
+    )
+        .into_response()
+}
+
+pub async fn update_system_public_key(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(system_id): Path<Uuid>,
+    Json(payload): Json<UpdateSystemPublicKeyRequest>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_mutate_systems() {
+        return forbidden_mutation();
+    }
+
+    let new_public_key = payload.public_key.trim();
+    if new_public_key.is_empty() {
+        return bad_request("Public key is required");
+    }
+
+    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+        Ok(value) => value,
+        Err(_) => return internal_error("Failed to load environment memberships"),
+    };
+
+    // Verify system exists and user has access
+    let row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+
+    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
+        return not_found();
+    }
+
+    // Validate the public key format using the PublicKey model
+    use crate::models::public_key::PublicKey;
+    if let Err(e) = PublicKey::from_base64(new_public_key, &row.hostname) {
+        return bad_request(&format!("Invalid public key: {}", e));
+    }
+
+    // Update the public key
+    if update_public_key(&pool, system_id, new_public_key)
+        .await
+        .is_err()
+    {
+        return internal_error("Failed to update public key");
+    }
+
+    if record_system_mutation_audit(
+        &pool,
+        user_id,
+        AuditAction::UserUpdated, // Using UserUpdated as placeholder - ideally would be SystemKeyRotated
+        format!("{} ({})", row.hostname, row.id),
+        extract_request_origin(&headers),
+        serde_json::json!({ "operation": "update_public_key" }),
+    )
+    .await
+    .is_err()
+    {
+        return internal_error("Failed to write audit event");
+    }
+
+    (
+        StatusCode::OK,
+        Json(SystemMutationResponse {
+            status: "success".to_string(),
+            message: format!("Public key updated for {}", row.hostname),
         }),
     )
         .into_response()

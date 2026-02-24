@@ -543,6 +543,11 @@ pub struct CreateSystemRequest {
     pub deployment_policy: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSystemPublicKeyRequest {
+    pub public_key: String,
+}
+
 /// Sort direction for list queries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

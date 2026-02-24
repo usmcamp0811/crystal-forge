@@ -337,6 +337,12 @@ pub struct CreateSystemRequest {
     pub deployment_policy: String,
 }
 
+/// Request payload for updating a system's public key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSystemPublicKeyRequest {
+    pub public_key: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pagination
 // ─────────────────────────────────────────────────────────────────────────────
