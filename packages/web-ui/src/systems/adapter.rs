@@ -84,7 +84,7 @@ pub async fn load_system_detail_with_fallback(id: &str) -> SystemDetailLoadResul
             let system = mock_system_detail_by_id(id);
             return SystemDetailLoadResult {
                 system,
-                notice: Some("System ID is not a valid UUID; showing mock data.".to_string()),
+                notice: Some("Unrecognized system ID format; showing fallback data.".to_string()),
                 redirect_to_login: false,
             };
         }

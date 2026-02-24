@@ -90,37 +90,40 @@ pub fn SystemsListView() -> Element {
     let mut health_filter = use_signal(Vec::<HealthStatus>::new);
     let mut deployment_filter = use_signal(Vec::<DeploymentStatus>::new);
 
-    // Data state — initialise immediately with deterministic fallback so the
-    // page renders at once; the use_effect below replaces with real API data.
-    let mut systems = use_signal(fallback_systems);
+    // Load real data from the backend using use_resource to prevent repeated fetches.
+    // Note: Currently loads all systems; filters applied client-side.
+    // Future improvement: pass filters to API via SystemsListParams.
+    let systems_resource = use_resource(move || async move {
+        load_systems_with_fallback(&SystemsListParams::default()).await
+    });
+
+    // Local mutable state for systems (allows client-side add/remove until backend supports it)
+    let mut local_systems = use_signal(fallback_systems);
+    let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
-    let mut api_notice: Signal<Option<String>> = use_signal(|| None);
-    let mut redirect_to_login = use_signal(|| false);
+    
+    // Sync local_systems with fetched systems when resource loads
+    // This effect runs when systems_resource changes
+    use_effect(move || {
+        if let Some(result) = &*systems_resource.read_unchecked() {
+            if result.redirect_to_login {
+                // Will be handled by early return below
+                return;
+            }
+            local_systems.set(result.systems.clone());
+            api_notice.set(result.notice.clone());
+            loading.set(false);
+        }
+    });
 
-    // Load real data from the backend (replaces fallback on success).
-    {
-        let mut systems = systems.clone();
-        let mut loading = loading.clone();
-        let mut api_notice = api_notice.clone();
-        let mut redirect_to_login = redirect_to_login.clone();
-        use_effect(move || {
-            spawn(async move {
-                let result =
-                    load_systems_with_fallback(&SystemsListParams::default()).await;
-                if result.redirect_to_login {
-                    redirect_to_login.set(true);
-                    loading.set(false);
-                    return;
-                }
-                systems.set(result.systems);
-                api_notice.set(result.notice);
-                loading.set(false);
-            });
-        });
-    }
+    // Check for redirect (early return ensures no flash of fallback data)
+    let should_redirect = systems_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.redirect_to_login)
+        .unwrap_or(false);
 
-    // Redirect to login when flagged by the adapter (early return like dashboard).
-    if *redirect_to_login.read() {
+    if should_redirect {
         nav.push(Route::LoginView {});
         return rsx! {
             div {
@@ -136,8 +139,8 @@ pub fn SystemsListView() -> Element {
     let mut pending_remove = use_signal(|| None::<SystemSummary>);
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
-
-    let current_systems = systems.read().clone();
+    
+    let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
     let registered_flakes = unique_registered_flakes();
 
@@ -213,7 +216,7 @@ pub fn SystemsListView() -> Element {
                     },
                     on_submit: move |_| {
                         let next = draft.read().clone();
-                        if let Err(message) = validate_new_system(&next, &systems.read(), &registered_flakes_for_submit) {
+                        if let Err(message) = validate_new_system(&next, &local_systems.read(), &registered_flakes_for_submit) {
                             add_error.set(Some(message));
                             return;
                         }
@@ -232,10 +235,12 @@ pub fn SystemsListView() -> Element {
                             deployment_policy: normalize_policy(&next.deployment_policy),
                         };
 
-                        let mut values = systems.read().clone();
+                        // Note: This currently only updates local state.
+                        // TODO: Call backend API to persist the new system to the database.
+                        let mut values = local_systems.read().clone();
                         values.push(new_item);
                         values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
-                        systems.set(values);
+                        local_systems.set(values);
                         draft.set(NewSystemDraft::new());
                         add_error.set(None);
                         show_add_form.set(false);
@@ -305,14 +310,14 @@ pub fn SystemsListView() -> Element {
                     for system in filtered_systems.clone() {
                         SystemCard {
                             system: system.clone(),
-                            on_remove: move |_| remove_system_by_id(systems, pending_remove, system.id),
+                            on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
                         }
                     }
                 }
             } else {
                 SystemsTable {
                     systems: filtered_systems.clone(),
-                    on_remove: move |id| remove_system_by_id(systems, pending_remove, id),
+                    on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
                 }
             }
 
@@ -322,9 +327,11 @@ pub fn SystemsListView() -> Element {
                     hostname: system.hostname.clone(),
                     on_cancel: move |_| pending_remove.set(None),
                     on_confirm: move |_| {
-                        let mut values = systems.read().clone();
+                        // Note: This currently only updates local state.
+                        // TODO: Call backend API to delete the system from the database.
+                        let mut values = local_systems.read().clone();
                         values.retain(|item| item.id != system.id);
-                        systems.set(values);
+                        local_systems.set(values);
                         pending_remove.set(None);
                     }
                 }
