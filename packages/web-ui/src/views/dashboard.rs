@@ -17,7 +17,7 @@ use crate::components::stat_card::StatCard;
 use crate::components::widget_grid::{GridWidget, WidgetGrid};
 use crate::dashboard::adapter::{
     deterministic_mock_timestamp, fallback_build_queue_summary, fallback_dashboard_summary,
-    load_dashboard_with_fallback,
+    load_dashboard_with_fallback, load_flake_timelines_with_fallback,
 };
 use crate::routes::Route;
 use crate::theme;
@@ -130,6 +130,11 @@ pub fn DashboardView() -> Element {
     let loading_dashboard = use_signal(|| true);
     let redirect_to_login = use_signal(|| false);
 
+    // Flake timelines state
+    let flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
+    let timelines_notice = use_signal(|| None::<String>);
+    let loading_timelines = use_signal(|| true);
+
     {
         let mut dashboard = dashboard.clone();
         let mut dashboard_notice = dashboard_notice.clone();
@@ -153,6 +158,29 @@ pub fn DashboardView() -> Element {
         });
     }
 
+    {
+        let mut flake_timelines = flake_timelines.clone();
+        let mut timelines_notice = timelines_notice.clone();
+        let mut loading_timelines = loading_timelines.clone();
+        let mut redirect_to_login = redirect_to_login.clone();
+
+        use_effect(move || {
+            spawn(async move {
+                let load_result = load_flake_timelines_with_fallback().await;
+
+                if load_result.redirect_to_login {
+                    redirect_to_login.set(true);
+                    loading_timelines.set(false);
+                    return;
+                }
+
+                flake_timelines.set(load_result.timelines);
+                timelines_notice.set(load_result.notice);
+                loading_timelines.set(false);
+            });
+        });
+    }
+
     if *redirect_to_login.read() {
         nav.push(Route::LoginView {});
         return rsx! {
@@ -167,7 +195,7 @@ pub fn DashboardView() -> Element {
     }
 
     let dashboard = dashboard.read().clone();
-    let flake_timelines = mock_flake_timelines();
+    let timelines = flake_timelines.read().clone();
     let build_queue = dashboard
         .build_queue
         .clone()
@@ -424,17 +452,34 @@ pub fn DashboardView() -> Element {
             }
 
             // Flake Commit Timeline with multi-select filter
+            if *loading_timelines.read() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
+                    style: "background-color: #23354B; border-color: #406084;",
+                    "Loading flake timelines..."
+                }
+            }
+
+            if let Some(message) = timelines_notice.read().clone() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
+                    style: "background-color: #493E26; border-color: #8C7041;",
+                    "{message}"
+                }
+            }
+
             Card {
                 title: None,
                 children: rsx! {
                     FlakeTimelineWidget {
-                        timelines: flake_timelines.clone(),
+                        timelines: timelines.clone(),
                         selected_flake_indices: dashboard_filter.read().selected_flake_indices.clone(),
                         on_filter_change: {
-                            let flake_timelines = flake_timelines.clone();
+                            let timelines_signal = flake_timelines.clone();
                             move |indices: HashSet<usize>| {
+                                let current_timelines = timelines_signal.read();
                                 let names: Vec<String> = indices.iter()
-                                    .filter_map(|&idx| flake_timelines.get(idx).map(|t| t.flake_name.clone()))
+                                    .filter_map(|&idx| current_timelines.get(idx).map(|t| t.flake_name.clone()))
                                     .collect();
                                 dashboard_filter.set(DashboardFilter {
                                     selected_flake_indices: indices,

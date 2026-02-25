@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT \n                c.git_commit_hash,\n                c.commit_timestamp,\n                0::bigint as system_count,\n                ARRAY[]::text[] as \"systems!\",\n                (\n                    SELECT COUNT(*)::bigint\n                    FROM commits c2\n                    WHERE c2.flake_id = c.flake_id\n                    AND c2.commit_timestamp > c.commit_timestamp\n                ) as \"commits_behind!\"\n            FROM commits c\n            WHERE c.flake_id = $1\n            GROUP BY c.id, c.git_commit_hash, c.commit_timestamp, c.flake_id\n            ORDER BY c.commit_timestamp DESC\n            LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "git_commit_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "commit_timestamp",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "system_count",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "systems!",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 4,
+        "name": "commits_behind!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "8fbfd045fd7e9982e4231f8b98d329c3ec915d4034bf201c52eee1f6162edbcb"
+}

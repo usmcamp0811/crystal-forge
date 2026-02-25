@@ -1,4 +1,4 @@
-use crate::api::models::FlakeRegistryItem;
+use crate::api::models::{BuildStatus, FlakeCommit, FlakeRegistryItem, FlakeTimeline};
 use crate::config::{FlakeConfig, WatchedFlake};
 use crate::models::flakes::Flake;
 use anyhow::Context;
@@ -148,4 +148,83 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
         .await?;
 
     Ok(result.rows_affected())
+}
+
+/// Fetch flake timelines with recent commits for the dashboard.
+///
+/// Returns up to `max_commits_per_flake` most recent commits for each flake,
+/// including system count and commits-behind calculation.
+pub async fn fetch_flake_timelines(
+    pool: &PgPool,
+    max_commits_per_flake: i64,
+) -> Result<Vec<FlakeTimeline>> {
+    // First, get all flakes
+    let flakes = sqlx::query_as::<_, (i32, String, String)>(
+        "SELECT id, name, repo_url FROM flakes ORDER BY name ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut timelines = Vec::new();
+
+    for (flake_id, flake_name, repo_url) in flakes {
+        // Get the latest commit timestamp for this flake to calculate commits_behind
+        let latest_commit_ts = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
+            "SELECT commit_timestamp FROM commits WHERE flake_id = $1 ORDER BY commit_timestamp DESC LIMIT 1"
+        )
+        .bind(flake_id)
+        .fetch_optional(pool)
+        .await?
+        .flatten();
+
+        // Fetch recent commits for this flake
+        // TODO: Add system counts when we have proper commit->system tracking
+        let commits_rows = sqlx::query!(
+            r#"
+            SELECT 
+                c.git_commit_hash,
+                c.commit_timestamp,
+                0::bigint as system_count,
+                ARRAY[]::text[] as "systems!",
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM commits c2
+                    WHERE c2.flake_id = c.flake_id
+                    AND c2.commit_timestamp > c.commit_timestamp
+                ) as "commits_behind!"
+            FROM commits c
+            WHERE c.flake_id = $1
+            GROUP BY c.id, c.git_commit_hash, c.commit_timestamp, c.flake_id
+            ORDER BY c.commit_timestamp DESC
+            LIMIT $2
+            "#,
+            flake_id,
+            max_commits_per_flake
+        )
+        .fetch_all(pool)
+        .await?;
+
+        let commits: Vec<FlakeCommit> = commits_rows
+            .into_iter()
+            .map(|row| FlakeCommit {
+                hash: row.git_commit_hash,
+                message: "".to_string(), // We don't store commit messages in the database
+                author: "".to_string(),   // We don't store commit authors in the database
+                committed_at: row.commit_timestamp,
+                system_count: row.system_count.unwrap_or(0),
+                commits_behind: row.commits_behind,
+                systems: row.systems,
+                build_status: Some(BuildStatus::Idle), // TODO: Query actual build status from derivations
+            })
+            .collect();
+
+        timelines.push(FlakeTimeline {
+            flake_id,
+            flake_name,
+            repo_url,
+            commits,
+        });
+    }
+
+    Ok(timelines)
 }

@@ -1,9 +1,9 @@
 use chrono::{Duration, TimeZone, Utc};
 
-use crate::api::client::{ApiClientError, fetch_dashboard};
+use crate::api::client::{ApiClientError, fetch_dashboard, fetch_flake_timelines};
 use crate::api::models::{
     BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary, DeploymentStatus,
-    DeploymentStatusSummary, FleetHealthSummary, RecentDeployment,
+    DeploymentStatusSummary, FleetHealthSummary, FlakeTimeline, RecentDeployment,
 };
 
 #[derive(Debug, Clone)]
@@ -111,8 +111,42 @@ pub fn deterministic_mock_timestamp() -> chrono::DateTime<chrono::Utc> {
 fn should_redirect_to_login(error: &ApiClientError) -> bool {
     matches!(
         error,
-        ApiClientError::Status { code: 401 | 403, .. }
+        ApiClientError::Status { code, .. } if *code == 401 || *code == 403
     )
+}
+
+/// Load result for flake timelines.
+#[derive(Debug, Clone)]
+pub struct FlakeTimelinesLoadResult {
+    pub timelines: Vec<FlakeTimeline>,
+    pub notice: Option<String>,
+    pub redirect_to_login: bool,
+}
+
+/// Load flake timelines from API with fallback to mock data.
+pub async fn load_flake_timelines_with_fallback() -> FlakeTimelinesLoadResult {
+    match fetch_flake_timelines().await {
+        Ok(timelines) => FlakeTimelinesLoadResult {
+            timelines,
+            notice: None,
+            redirect_to_login: false,
+        },
+        Err(error) if should_redirect_to_login(&error) => FlakeTimelinesLoadResult {
+            timelines: vec![],
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => {
+            // Fall back to mock data if API is unavailable
+            FlakeTimelinesLoadResult {
+                timelines: crate::views::dashboard::mock_flake_timelines(),
+                notice: Some(format!(
+                    "Flake timelines API unavailable, using mock data: {error}"
+                )),
+                redirect_to_login: false,
+            }
+        }
+    }
 }
 
 pub fn fallback_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> BuildQueueSummary {
