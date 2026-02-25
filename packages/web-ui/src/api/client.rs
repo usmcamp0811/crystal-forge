@@ -155,6 +155,19 @@ pub async fn update_environment(
     send_json_with_csrf("PATCH", &url, Some(request)).await
 }
 
+/// Update environment required policies.
+pub async fn update_environment_policies(
+    id: &uuid::Uuid,
+    required_policy_ids: &[uuid::Uuid],
+) -> Result<UpdateEnvironmentPoliciesRequest, ApiClientError> {
+    use super::models::UpdateEnvironmentPoliciesRequest as Req;
+    let url = format!("{}/environments/{}/policies", base_url(), id);
+    let req = Req {
+        required_policy_ids: required_policy_ids.to_vec(),
+    };
+    send_json_with_csrf("PATCH", &url, Some(&req)).await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());

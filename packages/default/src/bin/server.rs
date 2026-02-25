@@ -142,6 +142,10 @@ async fn main() -> anyhow::Result<()> {
                 .patch(environments::update_environment_handler)
                 .delete(environments::delete_environment_handler),
         )
+        .route(
+            "/api/v1/environments/:id/policies",
+            patch(environments::update_environment_policies_handler),
+        )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))

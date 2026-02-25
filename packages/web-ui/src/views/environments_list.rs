@@ -11,7 +11,7 @@ use crate::components::environments::{
 };
 use crate::environments::adapter::{
     create_environment_via_api, delete_environment_via_api, load_environments_with_fallback,
-    update_environment_via_api,
+    update_environment_policies_via_api, update_environment_via_api,
 };
 use crate::routes::Route;
 use crate::theme;
@@ -252,13 +252,32 @@ pub fn EnvironmentsListView() -> Element {
                             return;
                         }
 
-                        let mut values = environments.read().clone();
-                        if let Some(target) = values.iter_mut().find(|env| env.id == env_id) {
-                            target.required_policy_ids = selected;
-                        }
-                        environments.set(values);
-                        editing_environment.set(None);
-                        edit_error.set(None);
+                        let mut environments = environments.clone();
+                        let env_id = env_id;
+                        let mut editing_environment = editing_environment.clone();
+                        let mut edit_error = edit_error.clone();
+                        let mut api_notice = api_notice.clone();
+
+                        spawn(async move {
+                            // Call the API to update policies
+                            match update_environment_policies_via_api(env_id, selected.clone()).await {
+                                Ok(()) => {
+                                    // Update local state on success
+                                    let mut values = environments.read().clone();
+                                    if let Some(target) = values.iter_mut().find(|env| env.id == env_id) {
+                                        target.required_policy_ids = selected;
+                                    }
+                                    environments.set(values);
+                                    editing_environment.set(None);
+                                    edit_error.set(None);
+                                }
+                                Err(message) => {
+                                    // Show error but still update local state for now
+                                    api_notice.set(Some(message.clone()));
+                                    edit_error.set(Some(message));
+                                }
+                            }
+                        });
                     }
                 }
             }

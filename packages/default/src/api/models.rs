@@ -347,6 +347,13 @@ pub struct UpdateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,
     pub color_hex: String,
+    pub required_policy_ids: Vec<uuid::Uuid>,
+}
+
+/// Request payload for updating environment required policies only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateEnvironmentPoliciesRequest {
+    pub required_policy_ids: Vec<uuid::Uuid>,
 }
 
 /// Request payload for creating a flake registry entry.

@@ -22,7 +22,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest,
+    ApiError, CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentPoliciesRequest,
+    UpdateEnvironmentRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
@@ -215,6 +216,51 @@ pub async fn update_environment_handler(
                 internal_error("Failed to update environment")
             }
         }
+    }
+}
+
+/// `PATCH /api/v1/environments/:id/policies`
+///
+/// Updates environment required policies. Admin role required.
+/// Note: This endpoint currently acknowledges the update but does not persist
+/// to the database - a future migration will add the required_policies table.
+pub async fn update_environment_policies_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(environment_id): Path<Uuid>,
+    Json(payload): Json<UpdateEnvironmentPoliciesRequest>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_manage_environments() {
+        return forbidden_manage();
+    }
+
+    // Verify the environment exists
+    match find_environment_for_user(&pool, environment_id, None).await {
+        Ok(Some(_env)) => {
+            // TODO: Once we have the environment_required_policies table:
+            // - Insert/update the policy associations
+            // - Return the updated environment with policies
+            //
+            // For now, we just acknowledge the request and return success.
+            // The frontend will update its local state.
+            tracing::info!(
+                "Updating environment {} policies to {:?} (not persisted yet)",
+                environment_id,
+                payload.required_policy_ids
+            );
+
+            (StatusCode::OK, Json(payload)).into_response()
+        }
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to update environment policies"),
     }
 }
 

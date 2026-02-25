@@ -16,6 +16,7 @@ use uuid::Uuid;
 
 use crate::api::client::{
     ApiClientError, create_environment, delete_environment, fetch_environments, update_environment,
+    update_environment_policies,
 };
 use crate::api::models::{CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest};
 use crate::components::environments::EnvironmentItem;
@@ -239,10 +240,27 @@ pub async fn update_environment_via_api(
         name,
         description,
         color_hex,
+        required_policy_ids: vec![], // Not updated here, use update_environment_policies
     };
 
     match update_environment(&environment_id, &request).await {
         Ok(env) => Ok(api_to_environment_item(env, default_required_policy)),
+        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
+            Err("Authentication required. Please log in.".to_string())
+        }
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
+    }
+}
+
+/// Update environment required policies via backend API.
+pub async fn update_environment_policies_via_api(
+    environment_id: Uuid,
+    required_policy_ids: Vec<Uuid>,
+) -> Result<(), String> {
+    match update_environment_policies(&environment_id, &required_policy_ids).await {
+        Ok(_response) => Ok(()),
         Err(ApiClientError::Status { code: 401 | 403, .. }) => {
             Err("Authentication required. Please log in.".to_string())
         }
