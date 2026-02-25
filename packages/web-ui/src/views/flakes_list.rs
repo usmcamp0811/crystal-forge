@@ -13,6 +13,8 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
+#[cfg(target_arch = "wasm32")]
+use web_sys::console;
 
 use crate::api::client::{create_flake, delete_flake, fetch_commit_diff, fetch_flakes, fetch_flake_timelines};
 use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
@@ -918,18 +920,28 @@ fn FlakeHistoryExplorer(
                 let key = (flake_id, commit_hash.clone());
                 let already_loaded = loaded_diffs.read().contains_key(&key);
                 
+                #[cfg(target_arch = "wasm32")]
+                console::log_1(&format!("Diff check - hash: {}, already_loaded: {}", &commit_hash[..7.min(commit_hash.len())], already_loaded).into());
+                
                 if !already_loaded {
                     let commit_hash = commit_hash.clone();
                     let flake_id = flake_id;
                     
+                    #[cfg(target_arch = "wasm32")]
+                    console::log_1(&format!("Loading diff for commit {} (flake {})", &commit_hash[..7.min(commit_hash.len())], flake_id).into());
+                    
                     spawn(async move {
                         match fetch_commit_diff(flake_id, &commit_hash).await {
                             Ok(response) => {
+                                #[cfg(target_arch = "wasm32")]
+                                console::log_1(&format!("Diff loaded! Size: {} bytes", response.diff.len()).into());
                                 loaded_diffs.write().insert(key.clone(), response.diff);
                                 // Update the key to trigger re-render
                                 current_key.set(key);
                             }
                             Err(e) => {
+                                #[cfg(target_arch = "wasm32")]
+                                console::log_1(&format!("Diff load error: {}", e).into());
                                 // Fall back to placeholder on error
                                 loaded_diffs.write().insert(
                                     key.clone(),
