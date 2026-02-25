@@ -1,9 +1,12 @@
 ---
 id: TASK-127
-title: Refactor backend/UI boundaries for long-term maintainability (services + query-level filtering + UI bootstrap split)
+title: >-
+  Refactor backend/UI boundaries for long-term maintainability (services +
+  query-level filtering + UI bootstrap split)
 status: To Do
 assignee: []
-created_date: "2026-02-24 13:46"
+created_date: '2026-02-24 13:46'
+updated_date: '2026-02-25 00:35'
 labels: []
 dependencies: []
 priority: high
@@ -12,7 +15,6 @@ priority: high
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-
 ### Goal
 
 Reduce handler/UI hotspot bloat and clarify architectural boundaries by introducing a lightweight service layer, moving list filtering/sorting/pagination into query functions, and splitting Web UI bootstrap concerns out of `web-ui/src/main.rs`. Keep behavior identical.
@@ -52,34 +54,52 @@ Reduce handler/UI hotspot bloat and clarify architectural boundaries by introduc
    - `src/bootstrap/auth.rs` (auth fetch / hydration)
    - `src/bootstrap/assets.rs` (CSS/script injection)
    - Keep `main.rs` thin: launch + root component composition
-   <!-- SECTION:DESCRIPTION:END -->
+
+Test Code and Performance Tests
+At this point, we are already writing a complete project. However, an essential part of any project is testing, including unit tests and performance tests. So where should these test files be placed? Let’s continue using our sdk project as an example.
+
+According to community and official standards, test and benchmark files should be placed in tests and benches directories at the same level as src, as shown below:
+
+sdk/
+  ├── Cargo.toml
+  ├── src/
+  │   └── lib.rs
+  ├── tests/
+  │   ├── some-integration-tests.rs
+  │   └── multi-file-test/
+  │       ├── main.rs
+  │       └── test_module.rs
+  └── benches/
+      ├── large-input.rs
+      └── multi-file-bench/
+          ├── main.rs
+          └── bench_module.rs
+When initially writing the project, unit tests can be placed directly below the relevant code files, so there is no need to create the multi-file-test directory and files. However, as development progresses and test code starts occupying significant space, it is recommended to move them to the tests folder to keep the main code clean.
+
+tests/ contains functional test code, primarily for verifying feature implementation.
+benches/ contains performance test code, primarily for measuring performance (e.g., service API performance tests).
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
-
 <!-- AC:BEGIN -->
-
-- [ ] `packages/default/src/handlers/api/systems.rs` no longer performs in-memory filtering/sorting/pagination; it delegates to `services::systems::list_systems_for_user(...)` (or equivalent).
-- [ ] `packages/default/src/queries/systems.rs` (or equivalent) supports server-side filters + sorting + pagination that match existing behavior.
-- [ ] No `packages/default/src/models/*` module calls into `packages/default/src/queries/*` directly for creation/insertion for the refactored domain (at least systems). Models are plain data + validation helpers only.
-- [ ] All existing endpoints return the same JSON schema and semantics as before.
-- [ ] Backend tests exist for systems list behavior:
-  - [ ] Filter by environment (member vs non-member) matches existing behavior.
-  - [ ] Sort order is stable and correct.
-  - [ ] Pagination returns correct window and correct `total_count`.
-- [ ] At least one test covers “RBAC scoping + env membership filtering” for systems list (extend existing tests if present).
-- [ ] `packages/web-ui/src/main.rs` contains no auth-fetch logic and no raw asset injection logic.
-- [ ] Auth bootstrap is isolated in `packages/web-ui/src/bootstrap/auth.rs` and invoked from the root component or startup path.
-- [ ] Asset/script/style injection is isolated in `packages/web-ui/src/bootstrap/assets.rs`.
-- [ ] UI behavior is identical (including fallback/mock behavior if already implemented elsewhere).
-- [ ] `cargo test` passes for both crates.
-- [ ] `cargo fmt` is clean and `clippy` is clean (or matches current repo policy).
-- [ ] `nix flake check` (or repo check entrypoints) passes.
+- [ ] #1 `packages/default/src/handlers/api/systems.rs` no longer performs in-memory filtering/sorting/pagination; it delegates to `services::systems::list_systems_for_user(...)` (or equivalent).
+- [ ] #2 `packages/default/src/queries/systems.rs` (or equivalent) supports server-side filters + sorting + pagination that match existing behavior.
+- [ ] #3 No `packages/default/src/models/*` module calls into `packages/default/src/queries/*` directly for creation/insertion for the refactored domain (at least systems). Models are plain data + validation helpers only.
+- [ ] #4 All existing endpoints return the same JSON schema and semantics as before.
+- [ ] #5 Backend tests exist for systems list behavior:
+- [ ] #6 At least one test covers “RBAC scoping + env membership filtering” for systems list (extend existing tests if present).
+- [ ] #7 `packages/web-ui/src/main.rs` contains no auth-fetch logic and no raw asset injection logic.
+- [ ] #8 Auth bootstrap is isolated in `packages/web-ui/src/bootstrap/auth.rs` and invoked from the root component or startup path.
+- [ ] #9 Asset/script/style injection is isolated in `packages/web-ui/src/bootstrap/assets.rs`.
+- [ ] #10 UI behavior is identical (including fallback/mock behavior if already implemented elsewhere).
+- [ ] #11 `cargo test` passes for both crates.
+- [ ] #12 `cargo fmt` is clean and `clippy` is clean (or matches current repo policy).
+- [ ] #13 `nix flake check` (or repo check entrypoints) passes.
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-
 ### Part A — Backend service layer (systems)
 
 1. Create services module:
@@ -196,13 +216,11 @@ Definition of done (Part C): models no longer depend on queries for the touched 
   - mount the app
 
 Definition of done (Part D): `main.rs` is mostly wiring, not logic.
-
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-
 ### Guardrails
 
 - Keep changes incremental: do systems end-to-end; don’t refactor other endpoints unless required for compilation.
@@ -213,6 +231,7 @@ Definition of done (Part D): `main.rs` is mostly wiring, not logic.
 
 ## Final Summary
 
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
 
 ### Deliverables
@@ -236,3 +255,4 @@ Definition of done (Part D): `main.rs` is mostly wiring, not logic.
 <!--
 SECTION:FINAL_SUMMARY:END
 -->
+<!-- SECTION:FINAL_SUMMARY:END -->
