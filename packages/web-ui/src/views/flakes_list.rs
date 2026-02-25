@@ -898,7 +898,7 @@ fn FlakeHistoryExplorer(
         .unwrap_or_else(|| flakes[0].clone());
     let commits = history.get(&active_flake.id).cloned().unwrap_or_default();
 
-    let active_commit_initial = selected_commit_hash
+    let active_commit = selected_commit_hash
         .read()
         .as_ref()
         .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
@@ -909,20 +909,21 @@ fn FlakeHistoryExplorer(
     {
         let mut loaded_diffs = loaded_diffs.clone();
         let mut loading_diff = loading_diff.clone();
-        let active_flake_id = active_flake.id;
-        let active_commit_clone = active_commit_initial.clone();
+        let selected_hash = selected_commit_hash.read().clone();
+        let flake_id = active_flake.id;
         
         use_effect(move || {
-            if let Some(commit) = &active_commit_clone {
-                let key = (active_flake_id, commit.hash.clone());
+            if let Some(commit_hash) = &selected_hash {
+                let key = (flake_id, commit_hash.clone());
                 let already_loaded = loaded_diffs.read().contains_key(&key);
                 
                 if !already_loaded && !*loading_diff.read() {
-                    let commit_hash = commit.hash.clone();
+                    let commit_hash = commit_hash.clone();
+                    let flake_id = flake_id;
                     loading_diff.set(true);
                     
                     spawn(async move {
-                        match fetch_commit_diff(active_flake_id, &commit_hash).await {
+                        match fetch_commit_diff(flake_id, &commit_hash).await {
                             Ok(response) => {
                                 loaded_diffs.write().insert(key.clone(), response.diff);
                             }
@@ -941,20 +942,24 @@ fn FlakeHistoryExplorer(
         });
     }
     
-    let mut active_commit = active_commit_initial;
-    
     // Update active_commit with loaded diff if available
-    if let Some(ref mut commit) = active_commit {
+    let active_commit = if let Some(commit) = active_commit.clone() {
         let key = (active_flake.id, commit.hash.clone());
         if let Some(diff) = loaded_diffs.read().get(&key) {
+            let mut commit = commit;
             commit.diff = diff.clone();
             // Calculate stats from the diff
             let (files_changed, insertions, deletions) = diff_stats(&commit.diff);
             commit.files_changed = files_changed;
             commit.insertions = insertions;
             commit.deletions = deletions;
+            Some(commit)
+        } else {
+            Some(commit)
         }
-    }
+    } else {
+        None
+    };
     
     let active_repo = active_flake.repo_url.clone();
     let flake_sync_label = active_flake
@@ -1158,6 +1163,16 @@ fn FlakeHistoryExplorer(
 
 #[component]
 fn FriendlyDiffViewer(diff: String) -> Element {
+    // Show loading message if diff is empty
+    if diff.is_empty() {
+        return rsx! {
+            div {
+                class: "text-sm text-gray-400 p-4 text-center",
+                "Loading diff..."
+            }
+        };
+    }
+    
     let parsed_files = parse_unified_diff(&diff);
     if parsed_files.is_empty() {
         return rsx! {
