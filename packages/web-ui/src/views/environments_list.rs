@@ -1,8 +1,6 @@
 //! Environments list view with add/remove and required policy assignment.
 
 use dioxus::prelude::*;
-use gloo_storage::{LocalStorage, Storage};
-use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::components::environments::{
@@ -17,8 +15,6 @@ use crate::environments::adapter::{
 };
 use crate::routes::Route;
 use crate::theme;
-
-const ENV_COLOR_STORAGE_KEY: &str = "crystal_forge.environments.colors";
 
 #[component]
 pub fn EnvironmentsListView() -> Element {
@@ -41,19 +37,12 @@ pub fn EnvironmentsListView() -> Element {
 
             if result.redirect_to_login {
                 redirect_to_login.set(true);
+                loading.set(false);
                 return;
             }
 
-            // Apply persisted color overrides from localStorage.
-            let stored_colors = load_environment_colors();
             let mut items = result.environments;
-            for env in &mut items {
-                if let Some(color) = stored_colors.get(&env.name.to_lowercase()) {
-                    env.color_hex = normalize_color_hex(color);
-                }
-            }
             items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-            persist_environment_colors(&items);
 
             environments.set(items);
             api_notice.set(result.notice);
@@ -63,6 +52,12 @@ pub fn EnvironmentsListView() -> Element {
 
     if *redirect_to_login.read() {
         nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "flex items-center justify-center py-12",
+                p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
+            }
+        };
     }
 
     let mut show_add_form = use_signal(|| false);
@@ -165,18 +160,17 @@ pub fn EnvironmentsListView() -> Element {
                             match create_environment_via_api(
                                 next.name.trim().to_string(),
                                 normalize_optional(&next.description),
+                                normalize_color_hex(&next.color_hex),
                                 true,
                                 default_required_policy,
                             )
                             .await
                             {
                                 Ok(mut created) => {
-                                    created.color_hex = normalize_color_hex(&next.color_hex);
                                     created.required_policy_ids = next.required_policy_ids;
                                     let mut values = environments.read().clone();
                                     values.push(created);
                                     values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                                    persist_environment_colors(&values);
                                     environments.set(values);
                                     draft.set(NewEnvironmentDraft {
                                         name: String::new(),
@@ -293,26 +287,25 @@ pub fn EnvironmentsListView() -> Element {
                                 next.id,
                                 next.name.trim().to_string(),
                                 normalize_optional(&next.description),
+                                normalize_color_hex(&next.color_hex),
                                 default_required_policy,
                             )
                             .await
                             {
-                                Ok(mut updated) => {
-                                    updated.color_hex = normalize_color_hex(&next.color_hex);
+                                Ok(updated) => {
                                     let mut values = environments.read().clone();
                                     if let Some(target) = values.iter_mut().find(|env| env.id == updated.id)
                                     {
                                         *target = updated;
                                     }
                                     values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                                    persist_environment_colors(&values);
                                     environments.set(values);
                                     editing_environment_meta.set(None);
                                     edit_meta_error.set(None);
                                 }
                                 Err(message) => {
-                                    api_notice.set(Some(message));
-                                    edit_meta_error.set(Some("Failed to save changes.".to_string()));
+                                    api_notice.set(Some(message.clone()));
+                                    edit_meta_error.set(Some(message));
                                 }
                             }
                         });
@@ -335,7 +328,6 @@ pub fn EnvironmentsListView() -> Element {
                                     Ok(()) => {
                                         let mut values = environments.read().clone();
                                         values.retain(|item| item.id != environment_id);
-                                        persist_environment_colors(&values);
                                         environments.set(values);
                                         pending_remove.set(None);
                                     }
@@ -353,20 +345,4 @@ pub fn EnvironmentsListView() -> Element {
             }
         }
     }
-}
-
-fn environment_color_map(items: &[EnvironmentItem]) -> HashMap<String, String> {
-    items
-        .iter()
-        .map(|env| (env.name.to_lowercase(), normalize_color_hex(&env.color_hex)))
-        .collect()
-}
-
-fn persist_environment_colors(items: &[EnvironmentItem]) {
-    let map = environment_color_map(items);
-    let _ = LocalStorage::set(ENV_COLOR_STORAGE_KEY, map);
-}
-
-fn load_environment_colors() -> HashMap<String, String> {
-    LocalStorage::get::<HashMap<String, String>>(ENV_COLOR_STORAGE_KEY).unwrap_or_default()
 }

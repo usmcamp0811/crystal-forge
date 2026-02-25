@@ -378,6 +378,7 @@ pub struct EnvironmentSummary {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    pub color_hex: String,
     pub is_active: bool,
     /// Number of systems assigned to this environment.
     pub system_count: i64,
@@ -387,6 +388,7 @@ pub struct EnvironmentSummary {
 pub struct CreateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,
+    pub color_hex: String,
     pub is_active: bool,
 }
 
@@ -394,6 +396,7 @@ pub struct CreateEnvironmentRequest {
 pub struct UpdateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,
+    pub color_hex: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

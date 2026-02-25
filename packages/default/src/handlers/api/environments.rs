@@ -116,8 +116,12 @@ pub async fn create_environment(
     }
 
     let description = payload.description.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let color_hex = payload.color_hex.trim();
+    if !looks_like_hex_color(color_hex) {
+        return bad_request("Environment color must be a valid #RRGGBB value");
+    }
 
-    match create_environment_row(&pool, name, description, payload.is_active).await {
+    match create_environment_row(&pool, name, description, color_hex, payload.is_active).await {
         Ok(env) => (StatusCode::CREATED, Json(env)).into_response(),
         Err(err) => {
             if is_unique_violation(&err) {
@@ -196,8 +200,12 @@ pub async fn update_environment_handler(
     }
 
     let description = payload.description.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let color_hex = payload.color_hex.trim();
+    if !looks_like_hex_color(color_hex) {
+        return bad_request("Environment color must be a valid #RRGGBB value");
+    }
 
-    match update_environment_metadata(&pool, environment_id, name, description).await {
+    match update_environment_metadata(&pool, environment_id, name, description, color_hex).await {
         Ok(Some(env)) => (StatusCode::OK, Json(env)).into_response(),
         Ok(None) => not_found(),
         Err(err) => {
@@ -227,6 +235,16 @@ fn is_unique_violation(err: &anyhow::Error) -> bool {
         .and_then(|sqlx_err| sqlx_err.as_database_error())
         .and_then(|db_err| db_err.code())
         .is_some_and(|code| code == "23505")
+}
+
+fn looks_like_hex_color(value: &str) -> bool {
+    if value.len() != 7 {
+        return false;
+    }
+    let Some(hex) = value.strip_prefix('#') else {
+        return false;
+    };
+    hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -349,18 +367,18 @@ mod tests {
 
     #[test]
     fn environment_summary_serializes_correctly() {
-        use chrono::Utc;
-
         let summary = EnvironmentSummary {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
             name: "production".to_string(),
             description: Some("Live fleet".to_string()),
+            color_hex: "#0F766E".to_string(),
             is_active: true,
             system_count: 12,
         };
 
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["name"], "production");
+        assert_eq!(json["color_hex"], "#0F766E");
         assert_eq!(json["system_count"], 12);
         assert_eq!(json["is_active"], true);
     }
@@ -371,6 +389,7 @@ mod tests {
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
             name: "staging".to_string(),
             description: None,
+            color_hex: "#B45309".to_string(),
             is_active: true,
             system_count: 0,
         };

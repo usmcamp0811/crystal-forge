@@ -178,12 +178,11 @@ pub fn api_to_environment_item(
     env: EnvironmentSummary,
     default_required_policy: Uuid,
 ) -> EnvironmentItem {
-    let color_hex = color_for_name(&env.name);
     EnvironmentItem {
         id: env.id,
         name: env.name,
         description: env.description,
-        color_hex,
+        color_hex: env.color_hex,
         system_count: env.system_count as usize,
         required_policy_ids: vec![default_required_policy],
     }
@@ -193,12 +192,14 @@ pub fn api_to_environment_item(
 pub async fn create_environment_via_api(
     name: String,
     description: Option<String>,
+    color_hex: String,
     is_active: bool,
     default_required_policy: Uuid,
 ) -> Result<EnvironmentItem, String> {
     let request = CreateEnvironmentRequest {
         name,
         description,
+        color_hex,
         is_active,
     };
 
@@ -231,9 +232,14 @@ pub async fn update_environment_via_api(
     environment_id: Uuid,
     name: String,
     description: Option<String>,
+    color_hex: String,
     default_required_policy: Uuid,
 ) -> Result<EnvironmentItem, String> {
-    let request = UpdateEnvironmentRequest { name, description };
+    let request = UpdateEnvironmentRequest {
+        name,
+        description,
+        color_hex,
+    };
 
     match update_environment(&environment_id, &request).await {
         Ok(env) => Ok(api_to_environment_item(env, default_required_policy)),
@@ -243,18 +249,6 @@ pub async fn update_environment_via_api(
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
-    }
-}
-
-/// Return a stable color for a well-known environment name, or a default.
-fn color_for_name(name: &str) -> String {
-    match name.to_ascii_lowercase().as_str() {
-        "production" | "prod" => "#0F766E".to_string(),  // teal
-        "staging" | "stage" => "#B45309".to_string(),    // amber
-        "development" | "dev" => "#2563EB".to_string(),  // blue
-        "test" | "testing" => "#7C3AED".to_string(),     // violet
-        "preprod" | "pre-prod" => "#9D174D".to_string(), // rose
-        _ => "#6B7280".to_string(),                      // neutral grey
     }
 }
 
@@ -329,6 +323,7 @@ mod tests {
             id: Uuid::from_u128(999),
             name: "production".to_string(),
             description: Some("Live fleet".to_string()),
+            color_hex: "#0F766E".to_string(),
             is_active: true,
             system_count: 6,
         };
@@ -346,17 +341,12 @@ mod tests {
             id: Uuid::from_u128(888),
             name: "my-custom-env".to_string(),
             description: None,
+            color_hex: "#123456".to_string(),
             is_active: true,
             system_count: 0,
         };
         let item = api_to_environment_item(summary, DEFAULT_POLICY);
-        assert_eq!(item.color_hex, "#6B7280");
+        assert_eq!(item.color_hex, "#123456");
         assert!(item.description.is_none());
-    }
-
-    #[test]
-    fn color_for_name_is_case_insensitive() {
-        assert_eq!(color_for_name("PRODUCTION"), color_for_name("production"));
-        assert_eq!(color_for_name("Staging"), color_for_name("staging"));
     }
 }

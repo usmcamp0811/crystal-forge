@@ -14,6 +14,7 @@ pub struct EnvironmentRow {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    pub color_hex: String,
     pub is_active: bool,
     pub system_count: i64,
 }
@@ -99,11 +100,12 @@ pub async fn list_environments_for_user(
                 e.id,
                 e.name,
                 e.description,
+                COALESCE(e.color_hex, '#6B7280') AS color_hex,
                 COALESCE(e.is_active, TRUE) AS is_active,
                 COUNT(s.id) AS system_count
             FROM environments e
             LEFT JOIN systems s ON s.environment_id = e.id
-            GROUP BY e.id, e.name, e.description, e.is_active
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
             ORDER BY e.name ASC
             "#,
         )
@@ -117,6 +119,7 @@ pub async fn list_environments_for_user(
                 e.id,
                 e.name,
                 e.description,
+                COALESCE(e.color_hex, '#6B7280') AS color_hex,
                 COALESCE(e.is_active, TRUE) AS is_active,
                 COUNT(s.id) AS system_count
             FROM environments e
@@ -124,7 +127,7 @@ pub async fn list_environments_for_user(
               ON uem.environment_id = e.id
              AND uem.user_id = $1
             LEFT JOIN systems s ON s.environment_id = e.id
-            GROUP BY e.id, e.name, e.description, e.is_active
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
             ORDER BY e.name ASC
             "#,
         )
@@ -139,6 +142,7 @@ pub async fn list_environments_for_user(
             id: r.id,
             name: r.name,
             description: r.description,
+            color_hex: r.color_hex,
             is_active: r.is_active,
             system_count: r.system_count,
         })
@@ -161,12 +165,13 @@ pub async fn find_environment_for_user(
                 e.id,
                 e.name,
                 e.description,
+                COALESCE(e.color_hex, '#6B7280') AS color_hex,
                 COALESCE(e.is_active, TRUE) AS is_active,
                 COUNT(s.id) AS system_count
             FROM environments e
             LEFT JOIN systems s ON s.environment_id = e.id
             WHERE e.id = $1
-            GROUP BY e.id, e.name, e.description, e.is_active
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
             "#,
         )
         .bind(environment_id)
@@ -179,6 +184,7 @@ pub async fn find_environment_for_user(
                 e.id,
                 e.name,
                 e.description,
+                COALESCE(e.color_hex, '#6B7280') AS color_hex,
                 COALESCE(e.is_active, TRUE) AS is_active,
                 COUNT(s.id) AS system_count
             FROM environments e
@@ -187,7 +193,7 @@ pub async fn find_environment_for_user(
              AND uem.user_id = $1
             LEFT JOIN systems s ON s.environment_id = e.id
             WHERE e.id = $2
-            GROUP BY e.id, e.name, e.description, e.is_active
+            GROUP BY e.id, e.name, e.description, e.color_hex, e.is_active
             "#,
         )
         .bind(user_id.unwrap())
@@ -200,6 +206,7 @@ pub async fn find_environment_for_user(
         id: r.id,
         name: r.name,
         description: r.description,
+        color_hex: r.color_hex,
         is_active: r.is_active,
         system_count: r.system_count,
     }))
@@ -210,17 +217,19 @@ pub async fn create_environment(
     pool: &PgPool,
     name: &str,
     description: Option<&str>,
+    color_hex: &str,
     is_active: bool,
 ) -> Result<EnvironmentSummary> {
     let row = sqlx::query_as::<_, EnvironmentRow>(
         r#"
-        INSERT INTO environments (name, description, is_active)
-        VALUES ($1, $2, $3)
-        RETURNING id, name, description, COALESCE(is_active, TRUE) AS is_active, 0::bigint AS system_count
+        INSERT INTO environments (name, description, color_hex, is_active)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, name, description, COALESCE(color_hex, '#6B7280') AS color_hex, COALESCE(is_active, TRUE) AS is_active, 0::bigint AS system_count
         "#,
     )
     .bind(name)
     .bind(description)
+    .bind(color_hex)
     .bind(is_active)
     .fetch_one(pool)
     .await?;
@@ -229,6 +238,7 @@ pub async fn create_environment(
         id: row.id,
         name: row.name,
         description: row.description,
+        color_hex: row.color_hex,
         is_active: row.is_active,
         system_count: row.system_count,
     })
@@ -260,18 +270,21 @@ pub async fn update_environment_metadata(
     environment_id: Uuid,
     name: &str,
     description: Option<&str>,
+    color_hex: &str,
 ) -> Result<Option<EnvironmentSummary>> {
     let row = sqlx::query_as::<_, EnvironmentRow>(
         r#"
         UPDATE environments e
         SET name = $2,
             description = $3,
+            color_hex = $4,
             updated_at = NOW()
         WHERE e.id = $1
         RETURNING
             e.id,
             e.name,
             e.description,
+            COALESCE(e.color_hex, '#6B7280') AS color_hex,
             COALESCE(e.is_active, TRUE) AS is_active,
             (
                 SELECT COUNT(s.id)::bigint
@@ -283,6 +296,7 @@ pub async fn update_environment_metadata(
     .bind(environment_id)
     .bind(name)
     .bind(description)
+    .bind(color_hex)
     .fetch_optional(pool)
     .await?;
 
@@ -290,6 +304,7 @@ pub async fn update_environment_metadata(
         id: r.id,
         name: r.name,
         description: r.description,
+        color_hex: r.color_hex,
         is_active: r.is_active,
         system_count: r.system_count,
     }))
