@@ -181,6 +181,12 @@ pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Fetch the git diff for a specific commit in a flake.
+pub async fn fetch_commit_diff(flake_id: i32, commit_hash: &str) -> Result<CommitDiffResponse, ApiClientError> {
+    let url = format!("{}/flakes/{}/commits/{}/diff", base_url(), flake_id, commit_hash);
+    fetch_json(&url).await
+}
+
 /// Fetch current authentication context.
 pub async fn fetch_whoami() -> Result<AuthContext, ApiClientError> {
     let url = format!("{}/whoami", auth_base_url());

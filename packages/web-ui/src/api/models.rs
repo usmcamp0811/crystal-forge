@@ -457,6 +457,13 @@ impl BuildStatus {
     }
 }
 
+/// Response containing the git diff for a specific commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitDiffResponse {
+    pub commit_hash: String,
+    pub diff: String,
+}
+
 /// A single commit in a flake's history with deployment info.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]

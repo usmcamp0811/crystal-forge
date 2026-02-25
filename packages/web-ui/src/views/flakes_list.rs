@@ -14,7 +14,7 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
 
-use crate::api::client::{create_flake, delete_flake, fetch_flakes, fetch_flake_timelines};
+use crate::api::client::{create_flake, delete_flake, fetch_commit_diff, fetch_flakes, fetch_flake_timelines};
 use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::components::layout::Card;
 use crate::theme;
@@ -871,6 +871,10 @@ fn FlakeHistoryExplorer(
     timelines: Vec<FlakeTimeline>,
 ) -> Element {
     let history = build_flake_history(&timelines);
+    
+    // Cache for loaded commit diffs: (flake_id, commit_hash) -> diff
+    let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
+    let loading_diff = use_signal(|| false);
 
     if flakes.is_empty() {
         return rsx! {
@@ -894,12 +898,64 @@ fn FlakeHistoryExplorer(
         .unwrap_or_else(|| flakes[0].clone());
     let commits = history.get(&active_flake.id).cloned().unwrap_or_default();
 
-    let active_commit = selected_commit_hash
+    let active_commit_initial = selected_commit_hash
         .read()
         .as_ref()
         .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
         .map(|commit| commit.clone())
         .or_else(|| commits.first().cloned());
+    
+    // Load diff for the active commit if not already loaded
+    {
+        let mut loaded_diffs = loaded_diffs.clone();
+        let mut loading_diff = loading_diff.clone();
+        let active_flake_id = active_flake.id;
+        let active_commit_clone = active_commit_initial.clone();
+        
+        use_effect(move || {
+            if let Some(commit) = &active_commit_clone {
+                let key = (active_flake_id, commit.hash.clone());
+                let already_loaded = loaded_diffs.read().contains_key(&key);
+                
+                if !already_loaded && !*loading_diff.read() {
+                    let commit_hash = commit.hash.clone();
+                    loading_diff.set(true);
+                    
+                    spawn(async move {
+                        match fetch_commit_diff(active_flake_id, &commit_hash).await {
+                            Ok(response) => {
+                                loaded_diffs.write().insert(key.clone(), response.diff);
+                            }
+                            Err(e) => {
+                                // Fall back to placeholder on error
+                                loaded_diffs.write().insert(
+                                    key.clone(),
+                                    format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash)
+                                );
+                            }
+                        }
+                        loading_diff.set(false);
+                    });
+                }
+            }
+        });
+    }
+    
+    let mut active_commit = active_commit_initial;
+    
+    // Update active_commit with loaded diff if available
+    if let Some(ref mut commit) = active_commit {
+        let key = (active_flake.id, commit.hash.clone());
+        if let Some(diff) = loaded_diffs.read().get(&key) {
+            commit.diff = diff.clone();
+            // Calculate stats from the diff
+            let (files_changed, insertions, deletions) = diff_stats(&commit.diff);
+            commit.files_changed = files_changed;
+            commit.insertions = insertions;
+            commit.deletions = deletions;
+        }
+    }
+    
     let active_repo = active_flake.repo_url.clone();
     let flake_sync_label = active_flake
         .last_synced_at
@@ -1936,17 +1992,25 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
             .commits
             .iter()
             .map(|commit| {
-                let diff = full_diff_for_commit(&timeline.flake_name, commit);
-                let (files_changed, insertions, deletions) = diff_stats(&diff);
+                // Diff will be loaded on-demand when user views the commit
                 FlakeHistoryCommit {
                     hash: commit.hash.clone(),
-                    message: commit.message.clone(),
-                    author: commit.author.clone(),
+                    message: if commit.message.is_empty() {
+                        // Provide a placeholder if message is empty
+                        format!("Commit {}", &commit.hash[..7])
+                    } else {
+                        commit.message.clone()
+                    },
+                    author: if commit.author.is_empty() {
+                        "Unknown".to_string()
+                    } else {
+                        commit.author.clone()
+                    },
                     committed_at: commit.committed_at,
-                    files_changed,
-                    insertions,
-                    deletions,
-                    diff,
+                    files_changed: 0, // Will be calculated from diff when loaded
+                    insertions: 0,
+                    deletions: 0,
+                    diff: String::new(), // Empty initially, loaded on-demand
                 }
             })
             .collect();

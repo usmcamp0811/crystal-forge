@@ -8,11 +8,12 @@ use axum::response::IntoResponse;
 use sqlx::PgPool;
 use tracing::error;
 
-use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
+use crate::flake::commits::get_commit_diff;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
-    count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_name,
+    count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
     insert_flake, list_flake_registry,
 };
 
@@ -60,6 +61,59 @@ pub async fn get_flake_timelines(
                     error: "internal_error".to_string(),
                     message: "Failed to fetch flake timelines".to_string(),
                     details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Get the git diff for a specific commit in a flake.
+///
+/// **Authorization**: Requires Viewer role or above.
+pub async fn get_commit_diff_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path((flake_id, commit_hash)): Path<(i32, String)>,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&pool, &headers).await.is_none() {
+        return forbidden_viewer();
+    }
+
+    // Get flake details to get repo_url and branch
+    let flake = match get_flake_by_id(&pool, flake_id).await {
+        Ok(flake) => flake,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Flake not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Fetch the diff from git
+    match get_commit_diff(&flake.repo_url, "main", &commit_hash).await {
+        Ok(diff) => (
+            StatusCode::OK,
+            Json(CommitDiffResponse {
+                commit_hash: commit_hash.clone(),
+                diff,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("Failed to fetch commit diff for {}: {e:#}", commit_hash);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: format!("Failed to fetch diff for commit {}", commit_hash),
+                    details: Some(serde_json::json!({"error": e.to_string()})),
                 }),
             )
                 .into_response()

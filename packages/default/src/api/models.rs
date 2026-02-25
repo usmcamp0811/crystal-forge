@@ -349,6 +349,13 @@ pub struct FlakeCommit {
     pub build_status: Option<BuildStatus>,
 }
 
+/// Response containing the git diff for a specific commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitDiffResponse {
+    pub commit_hash: String,
+    pub diff: String,
+}
+
 /// Request payload for creating a new system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSystemRequest {

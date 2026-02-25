@@ -365,3 +365,80 @@ pub async fn fetch_and_insert_commits_since(
     );
     Ok(inserted)
 }
+
+/// Get the git diff for a specific commit.
+/// Returns the full unified diff output from `git show`.
+pub async fn get_commit_diff(
+    repo_url: &str,
+    branch: &str,
+    commit_hash: &str,
+) -> Result<String> {
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
+    let clone_path = temp_dir.path();
+
+    // Clone with minimal depth since we only need one specific commit
+    let clone_output = tokio::process::Command::new("git")
+        .args(&[
+            "clone",
+            "--depth", "50", // Get enough depth to potentially find the commit
+            "--branch",
+            branch,
+            "--single-branch",
+            &git_url,
+            ".",
+        ])
+        .current_dir(clone_path)
+        .output()
+        .await?;
+
+    if !clone_output.status.success() {
+        let stderr = String::from_utf8_lossy(&clone_output.stderr);
+        bail!("Git clone failed for {}: {}", repo_url, stderr);
+    }
+
+    // Try to get the diff for the commit
+    let show_output = tokio::process::Command::new("git")
+        .args(&[
+            "show",
+            "--format=", // Don't show commit message/metadata, just diff
+            commit_hash,
+        ])
+        .current_dir(clone_path)
+        .output()
+        .await?;
+
+    if !show_output.status.success() {
+        // If the commit isn't in the shallow clone, try to fetch it
+        let fetch_output = tokio::process::Command::new("git")
+            .args(&["fetch", "origin", commit_hash])
+            .current_dir(clone_path)
+            .output()
+            .await?;
+
+        if !fetch_output.status.success() {
+            let stderr = String::from_utf8_lossy(&show_output.stderr);
+            bail!("Failed to fetch commit {}: {}", commit_hash, stderr);
+        }
+
+        // Retry git show
+        let retry_output = tokio::process::Command::new("git")
+            .args(&[
+                "show",
+                "--format=",
+                commit_hash,
+            ])
+            .current_dir(clone_path)
+            .output()
+            .await?;
+
+        if !retry_output.status.success() {
+            let stderr = String::from_utf8_lossy(&retry_output.stderr);
+            bail!("git show failed for {}: {}", commit_hash, stderr);
+        }
+
+        return Ok(String::from_utf8_lossy(&retry_output.stdout).to_string());
+    }
+
+    Ok(String::from_utf8_lossy(&show_output.stdout).to_string())
+}
