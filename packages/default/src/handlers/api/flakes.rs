@@ -8,12 +8,12 @@ use axum::response::IntoResponse;
 use sqlx::PgPool;
 use tracing::error;
 
-use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem};
+use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
-    count_systems_for_flake, delete_flake_by_id, get_flake_by_name, insert_flake,
-    list_flake_registry,
+    count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_name,
+    insert_flake, list_flake_registry,
 };
 
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
@@ -30,6 +30,35 @@ pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl
                 Json(ApiError {
                     error: "internal_error".to_string(),
                     message: "Failed to list flakes".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Get flake timelines with recent commits for dashboard.
+///
+/// **Authorization**: Requires Viewer role or above.
+pub async fn get_flake_timelines(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&pool, &headers).await.is_none() {
+        return forbidden_viewer();
+    }
+
+    // Fetch up to 10 most recent commits per flake
+    match fetch_flake_timelines(&pool, 10).await {
+        Ok(timelines) => (StatusCode::OK, Json(timelines)).into_response(),
+        Err(e) => {
+            error!("Failed to fetch flake timelines: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to fetch flake timelines".to_string(),
                     details: None,
                 }),
             )

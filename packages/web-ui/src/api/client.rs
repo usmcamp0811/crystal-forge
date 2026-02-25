@@ -175,6 +175,12 @@ pub async fn delete_flake(id: i32) -> Result<(), ApiClientError> {
     send_empty("DELETE", &url).await
 }
 
+/// Fetch flake timelines with recent commits for dashboard.
+pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
+    let url = format!("{}/flakes/timelines", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch current authentication context.
 pub async fn fetch_whoami() -> Result<AuthContext, ApiClientError> {
     let url = format!("{}/whoami", auth_base_url());

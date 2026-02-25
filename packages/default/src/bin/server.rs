@@ -145,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
+        .route("/api/v1/flakes/timelines", get(flakes::get_flake_timelines))
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))
         .route("/api/v1/admin/users/:id", patch(admin::update_user))

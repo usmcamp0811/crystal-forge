@@ -327,6 +327,28 @@ pub struct CreateFlakeRequest {
     pub repo_url: String,
 }
 
+/// A flake with its commit timeline for the dashboard widget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeTimeline {
+    pub flake_id: i32,
+    pub flake_name: String,
+    pub repo_url: String,
+    pub commits: Vec<FlakeCommit>,
+}
+
+/// A commit in a flake timeline with deployment status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeCommit {
+    pub hash: String,
+    pub message: String,
+    pub author: String,
+    pub committed_at: DateTime<Utc>,
+    pub system_count: i64,
+    pub commits_behind: i64,
+    pub systems: Vec<String>,
+    pub build_status: Option<BuildStatus>,
+}
+
 /// Request payload for creating a new system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSystemRequest {
