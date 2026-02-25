@@ -1,10 +1,10 @@
 ---
 id: TASK-124
 title: Environments View - Backend Integration
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 23:08'
+updated_date: '2026-02-25 00:53'
 labels:
   - backend
   - api
@@ -13,6 +13,7 @@ labels:
 milestone: m-9
 dependencies: []
 priority: high
+ordinal: 76000
 ---
 
 ## Description
