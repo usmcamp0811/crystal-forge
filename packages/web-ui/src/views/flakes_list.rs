@@ -14,8 +14,8 @@ use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
 
-use crate::api::client::{create_flake, delete_flake, fetch_flakes};
-use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem};
+use crate::api::client::{create_flake, delete_flake, fetch_flakes, fetch_flake_timelines};
+use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::components::layout::Card;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
@@ -245,6 +245,7 @@ pub fn FlakesListView() -> Element {
     let mut flakes = use_signal(mock_flakes);
     let loading_flakes = use_signal(|| true);
     let server_notice = use_signal(|| None::<String>);
+    let mut flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(|| NewFlakeDraft {
@@ -315,6 +316,24 @@ pub fn FlakesListView() -> Element {
         });
     }
 
+    // Load flake timelines
+    {
+        let mut flake_timelines = flake_timelines.clone();
+        use_effect(move || {
+            spawn(async move {
+                match fetch_flake_timelines().await {
+                    Ok(timelines) => {
+                        flake_timelines.set(timelines);
+                    }
+                    Err(_error) => {
+                        // Fall back to mock timelines on error
+                        flake_timelines.set(crate::views::dashboard::mock_flake_timelines());
+                    }
+                }
+            });
+        });
+    }
+
     rsx! {
         div {
             class: "space-y-6",
@@ -331,7 +350,8 @@ pub fn FlakesListView() -> Element {
                         class: "px-3 py-2 rounded-lg text-sm font-medium border border-blue-500/50 text-blue-200 hover:text-white hover:bg-blue-500/20 transition-colors",
                         onclick: move |_| {
                             let mut next = flakes.read().clone();
-                            let changed = sync_flake_registry(&mut next);
+                            let timelines = flake_timelines.read();
+                            let changed = sync_flake_registry(&mut next, &timelines);
                             flakes.set(next);
                             let now = Utc::now();
                             last_manual_sync.set(Some(now));
@@ -488,6 +508,7 @@ pub fn FlakesListView() -> Element {
                 flakes: filtered_flakes.clone(),
                 selected_flake_id: selected_history_flake,
                 selected_commit_hash: selected_history_commit,
+                timelines: flake_timelines.read().clone(),
             }
 
             if let Some(editing) = editing_flake.read().clone() {
@@ -847,8 +868,9 @@ fn FlakeHistoryExplorer(
     flakes: Vec<FlakeListItem>,
     selected_flake_id: Signal<Option<i32>>,
     selected_commit_hash: Signal<Option<String>>,
+    timelines: Vec<FlakeTimeline>,
 ) -> Element {
-    let history = mock_flake_history();
+    let history = build_flake_history(&timelines);
 
     if flakes.is_empty() {
         return rsx! {
@@ -1880,10 +1902,10 @@ fn table_class(active: bool) -> &'static str {
     }
 }
 
-fn sync_flake_registry(flakes: &mut [FlakeListItem]) -> usize {
+fn sync_flake_registry(flakes: &mut [FlakeListItem], timelines: &[FlakeTimeline]) -> usize {
     let now = Utc::now();
-    let latest_by_id: HashMap<i32, String> = crate::views::dashboard::mock_flake_timelines()
-        .into_iter()
+    let latest_by_id: HashMap<i32, String> = timelines
+        .iter()
         .filter_map(|timeline| {
             timeline
                 .commits
@@ -1906,20 +1928,20 @@ fn sync_flake_registry(flakes: &mut [FlakeListItem]) -> usize {
     changed
 }
 
-fn mock_flake_history() -> HashMap<i32, Vec<FlakeHistoryCommit>> {
+fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHistoryCommit>> {
     let mut history = HashMap::new();
 
-    for timeline in crate::views::dashboard::mock_flake_timelines() {
+    for timeline in timelines {
         let commits: Vec<FlakeHistoryCommit> = timeline
             .commits
-            .into_iter()
+            .iter()
             .map(|commit| {
-                let diff = full_diff_for_commit(&timeline.flake_name, &commit);
+                let diff = full_diff_for_commit(&timeline.flake_name, commit);
                 let (files_changed, insertions, deletions) = diff_stats(&diff);
                 FlakeHistoryCommit {
-                    hash: commit.hash,
-                    message: commit.message,
-                    author: commit.author,
+                    hash: commit.hash.clone(),
+                    message: commit.message.clone(),
+                    author: commit.author.clone(),
                     committed_at: commit.committed_at,
                     files_changed,
                     insertions,
