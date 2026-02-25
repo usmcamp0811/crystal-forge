@@ -1,10 +1,10 @@
 ---
 id: TASK-121
 title: Systems View - Replace Mock Data with Backend API
-status: To Do
+status: Review
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 21:17'
+updated_date: '2026-02-23 22:34'
 labels:
   - backend
   - api
@@ -212,4 +212,39 @@ Medium
 - Add unit tests for systems adapter
 - Implement write operations for systems
 - Add system detail view with full information
+
+## Notes
+
+LOCK: claude-code on crystal-forge in ~/code/crystal-forge/TASK-121-systems-view-backend-api
+
+IMPLEMENTATION COMPLETE — awaiting MR creation (glab not authenticated).
+Branch: TASK-121-systems-view-backend-api pushed to origin.
+MR URL (create manually): https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-121-systems-view-backend-api&merge_request%5Btarget_branch%5D=dev
+Verification: cargo test 26/26 pass, nix build .#checks.x86_64-linux.web-ui exit 0
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/133\nStatus: In Review
+<!-- SECTION:NOTES:END -->
+
+## Notes
+
+LOCK: claude-code on crystal-forge in ~/code/crystal-forge/TASK-121-systems-view-backend-api
+
+IMPLEMENTATION COMPLETE — awaiting MR creation (glab not authenticated).
+Branch: TASK-121-systems-view-backend-api pushed to origin.
+MR URL (create manually): https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-121-systems-view-backend-api&merge_request%5Btarget_branch%5D=dev
+Verification: cargo test 26/26 pass, nix build .#checks.x86_64-linux.web-ui exit 0
+<!-- AC:END -->
+
+## Notes
+
+LOCK: claude-code on crystal-forge in ~/code/crystal-forge/TASK-121-systems-view-backend-api
+
+IMPLEMENTATION COMPLETE — awaiting MR creation (glab not authenticated).
+Branch: TASK-121-systems-view-backend-api pushed to origin.
+MR URL (create manually): https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/new?merge_request%5Bsource_branch%5D=TASK-121-systems-view-backend-api&merge_request%5Btarget_branch%5D=dev
+Verification: cargo test 26/26 pass, nix build .#checks.x86_64-linux.web-ui exit 0
 <!-- AC:END -->
