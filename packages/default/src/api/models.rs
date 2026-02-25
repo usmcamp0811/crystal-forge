@@ -320,6 +320,35 @@ pub struct FlakeRegistryItem {
     pub system_count: i64,
 }
 
+/// Environment summary for API responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentSummary {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+    /// Number of systems assigned to this environment.
+    pub system_count: i64,
+}
+
+/// Request payload for creating an environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+}
+
+/// Request payload for updating an environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+}
+
 /// Request payload for creating a flake registry entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlakeRequest {
@@ -347,6 +376,13 @@ pub struct FlakeCommit {
     pub commits_behind: i64,
     pub systems: Vec<String>,
     pub build_status: Option<BuildStatus>,
+}
+
+/// Response containing the git diff for a specific commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitDiffResponse {
+    pub commit_hash: String,
+    pub diff: String,
 }
 
 /// Request payload for creating a new system.
