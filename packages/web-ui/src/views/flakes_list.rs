@@ -872,9 +872,10 @@ fn FlakeHistoryExplorer(
 ) -> Element {
     let history = build_flake_history(&timelines);
     
-    // Cache for loaded commit diffs: (flake_id, commit_hash) -> diff
+    // Cache for loaded commit diffs
     let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
-    let loading_diff = use_signal(|| false);
+    // Track current active commit hash to force re-render when diff loads
+    let current_commit_key = use_signal(|| (0i32, String::new()));
 
     if flakes.is_empty() {
         return rsx! {
@@ -908,7 +909,7 @@ fn FlakeHistoryExplorer(
     // Load diff for the active commit if not already loaded
     {
         let mut loaded_diffs = loaded_diffs.clone();
-        let mut loading_diff = loading_diff.clone();
+        let mut current_key = current_commit_key.clone();
         let selected_hash = selected_commit_hash.read().clone();
         let flake_id = active_flake.id;
         
@@ -917,15 +918,16 @@ fn FlakeHistoryExplorer(
                 let key = (flake_id, commit_hash.clone());
                 let already_loaded = loaded_diffs.read().contains_key(&key);
                 
-                if !already_loaded && !*loading_diff.read() {
+                if !already_loaded {
                     let commit_hash = commit_hash.clone();
                     let flake_id = flake_id;
-                    loading_diff.set(true);
                     
                     spawn(async move {
                         match fetch_commit_diff(flake_id, &commit_hash).await {
                             Ok(response) => {
                                 loaded_diffs.write().insert(key.clone(), response.diff);
+                                // Update the key to trigger re-render
+                                current_key.set(key);
                             }
                             Err(e) => {
                                 // Fall back to placeholder on error
@@ -933,9 +935,10 @@ fn FlakeHistoryExplorer(
                                     key.clone(),
                                     format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash)
                                 );
+                                // Still update key to show the error
+                                current_key.set(key);
                             }
                         }
-                        loading_diff.set(false);
                     });
                 }
             }
