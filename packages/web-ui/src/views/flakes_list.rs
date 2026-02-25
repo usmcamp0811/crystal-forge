@@ -909,46 +909,48 @@ fn FlakeHistoryExplorer(
         .or_else(|| commits.first().cloned());
     
     // Load diff for the active commit if not already loaded
+    // We read the signal INSIDE use_effect so it tracks the dependency
     {
-        let mut loaded_diffs = loaded_diffs.clone();
-        let mut current_key = current_commit_key.clone();
-        let selected_hash = selected_commit_hash.read().clone();
-        let flake_id = active_flake.id;
+        let loaded_diffs = loaded_diffs.clone();
+        let current_key = current_commit_key.clone();
         
         use_effect(move || {
+            // Read signals inside the effect so it re-runs when they change
+            let selected_hash = selected_commit_hash.read().clone();
+            let flake_id = active_flake.id;
+            
             if let Some(commit_hash) = &selected_hash {
                 let key = (flake_id, commit_hash.clone());
                 let already_loaded = loaded_diffs.read().contains_key(&key);
                 
                 #[cfg(target_arch = "wasm32")]
-                console::log_1(&format!("Diff check - hash: {}, already_loaded: {}", &commit_hash[..7.min(commit_hash.len())], already_loaded).into());
+                console::log_1(&format!("Effect running - hash: {}, loaded: {}", &commit_hash[..7.min(commit_hash.len())], already_loaded).into());
                 
                 if !already_loaded {
                     let commit_hash = commit_hash.clone();
                     let flake_id = flake_id;
+                    let mut loaded_diffs_inner = loaded_diffs.clone();
+                    let mut current_key_inner = current_key.clone();
                     
                     #[cfg(target_arch = "wasm32")]
-                    console::log_1(&format!("Loading diff for commit {} (flake {})", &commit_hash[..7.min(commit_hash.len())], flake_id).into());
+                    console::log_1(&format!("Fetching diff for {}...", &commit_hash[..7.min(commit_hash.len())]).into());
                     
                     spawn(async move {
                         match fetch_commit_diff(flake_id, &commit_hash).await {
                             Ok(response) => {
                                 #[cfg(target_arch = "wasm32")]
-                                console::log_1(&format!("Diff loaded! Size: {} bytes", response.diff.len()).into());
-                                loaded_diffs.write().insert(key.clone(), response.diff);
-                                // Update the key to trigger re-render
-                                current_key.set(key);
+                                console::log_1(&format!("Diff loaded! {} bytes", response.diff.len()).into());
+                                loaded_diffs_inner.write().insert(key.clone(), response.diff);
+                                current_key_inner.set(key);
                             }
                             Err(e) => {
                                 #[cfg(target_arch = "wasm32")]
-                                console::log_1(&format!("Diff load error: {}", e).into());
-                                // Fall back to placeholder on error
-                                loaded_diffs.write().insert(
+                                console::log_1(&format!("Error: {}", e).into());
+                                loaded_diffs_inner.write().insert(
                                     key.clone(),
                                     format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash)
                                 );
-                                // Still update key to show the error
-                                current_key.set(key);
+                                current_key_inner.set(key);
                             }
                         }
                     });
