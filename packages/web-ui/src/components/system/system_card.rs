@@ -10,7 +10,11 @@ use crate::theme;
 
 /// Card displaying a system summary.
 #[component]
-pub fn SystemCard(system: SystemSummary, on_remove: EventHandler) -> Element {
+pub fn SystemCard(
+    system: SystemSummary,
+    on_remove: EventHandler,
+    on_update_key: EventHandler,
+) -> Element {
     let navigator = use_navigator();
     let environment = system
         .environment
@@ -89,7 +93,12 @@ pub fn SystemCard(system: SystemSummary, on_remove: EventHandler) -> Element {
 
             // Actions footer
             div {
-                class: "px-6 py-3 bg-gray-800/50 flex items-center justify-end border-t {theme::surface::CARD_BORDER}",
+                class: "px-6 py-3 bg-gray-800/50 flex items-center justify-end gap-2 border-t {theme::surface::CARD_BORDER}",
+                button {
+                    class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                    onclick: move |_| on_update_key.call(()),
+                    "Update Key"
+                }
                 button {
                     class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
                     onclick: move |_| on_remove.call(()),

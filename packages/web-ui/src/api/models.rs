@@ -276,6 +276,10 @@ pub struct SystemSummary {
     pub id: Uuid,
     pub hostname: String,
     pub environment: Option<String>,
+    /// Primary IP from agent heartbeat. Not included in server list responses
+    /// (use [`SystemNetworkInfo`] in [`SystemDetail`] for full network info).
+    /// Defaults to `None` for compatibility with the backend DTO.
+    #[serde(default)]
     pub primary_ip: Option<String>,
     pub health_status: HealthStatus,
     pub deployment_status: DeploymentStatus,
@@ -528,6 +532,20 @@ pub struct SystemRollbackRequest {
 pub struct SystemMutationResponse {
     pub status: String,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSystemRequest {
+    pub hostname: String,
+    pub public_key: String,
+    pub environment: Option<String>,
+    pub flake_name: Option<String>,
+    pub deployment_policy: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateSystemPublicKeyRequest {
+    pub public_key: String,
 }
 
 /// Sort direction for list queries.

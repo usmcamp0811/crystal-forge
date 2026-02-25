@@ -4,32 +4,38 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
 use uuid::Uuid;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 use crate::api::models::{
-    CveSummary, DeploymentStatus, FlakeSummary, HealthStatus, PipelineStage, SystemSummary,
+    CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemSummary, SystemsListParams,
 };
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
-use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
+use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, generate_key_pair,
+    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
 };
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
 use crate::routes::Route;
+use crate::systems::adapter::{
+    create_system_via_api, deactivate_system_via_api, fallback_systems, load_systems_with_fallback,
+    update_system_public_key_via_api,
+};
 use crate::theme;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 
 const VIEW_PREF_KEY: &str = "crystal_forge.systems.view";
 
 /// Systems list with toggles and filters.
 #[component]
 pub fn SystemsListView() -> Element {
+    let nav = navigator();
+
     let stored_view = LocalStorage::get::<String>(VIEW_PREF_KEY).ok();
     let mut view_mode = use_signal(|| ViewMode::from_storage(stored_view));
     let query_view = prefers_view_from_query();
@@ -87,16 +93,59 @@ pub fn SystemsListView() -> Element {
     let mut health_filter = use_signal(Vec::<HealthStatus>::new);
     let mut deployment_filter = use_signal(Vec::<DeploymentStatus>::new);
 
-    // Data state
-    let mut systems = use_signal(mock_systems);
+    // Load real data from the backend using use_resource to prevent repeated fetches.
+    // Note: Currently loads all systems; filters applied client-side.
+    // Future improvement: pass filters to API via SystemsListParams.
+    let systems_resource = use_resource(move || async move {
+        load_systems_with_fallback(&SystemsListParams::default()).await
+    });
+
+    // Local mutable state for systems (allows client-side add/remove until backend supports it)
+    let mut local_systems = use_signal(fallback_systems);
+    let mut api_notice = use_signal(|| None::<String>);
+    let mut loading = use_signal(|| true);
+    
+    // Sync local_systems with fetched systems when resource loads
+    // This effect runs when systems_resource changes
+    use_effect(move || {
+        if let Some(result) = &*systems_resource.read_unchecked() {
+            if result.redirect_to_login {
+                // Will be handled by early return below
+                return;
+            }
+            local_systems.set(result.systems.clone());
+            api_notice.set(result.notice.clone());
+            loading.set(false);
+        }
+    });
+
+    // Check for redirect (early return ensures no flash of fallback data)
+    let should_redirect = systems_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.redirect_to_login)
+        .unwrap_or(false);
+
+    if should_redirect {
+        nav.push(Route::LoginView {});
+        return rsx! {
+            div {
+                class: "flex items-center justify-center py-12",
+                p { class: "{theme::text::SECONDARY}", "Redirecting to login..." }
+            }
+        };
+    }
+
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(NewSystemDraft::new);
     let mut pending_remove = use_signal(|| None::<SystemSummary>);
+    let mut pending_update_key = use_signal(|| None::<SystemSummary>);
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
-
-    let current_systems = systems.read().clone();
+    let mut update_key_error = use_signal(|| None::<String>);
+    
+    let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
     let registered_flakes = unique_registered_flakes();
 
@@ -114,6 +163,25 @@ pub fn SystemsListView() -> Element {
         div {
             class: "space-y-6",
             id: "{container_id}",
+
+            // API fallback notice banner (shown when using mock data)
+            if let Some(ref notice) = *api_notice.read() {
+                div {
+                    class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
+                    "{notice}"
+                }
+            }
+
+            // Loading spinner (shown during initial fetch)
+            if *loading.read() {
+                div {
+                    class: "flex items-center justify-center py-12",
+                    div {
+                        class: "animate-spin rounded-full h-8 w-8 border-b-2 border-blue-400"
+                    }
+                }
+            }
+
             header {
                 class: "flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between",
                 div {
@@ -153,32 +221,49 @@ pub fn SystemsListView() -> Element {
                     },
                     on_submit: move |_| {
                         let next = draft.read().clone();
-                        if let Err(message) = validate_new_system(&next, &systems.read(), &registered_flakes_for_submit) {
+                        if let Err(message) = validate_new_system(&next, &local_systems.read(), &registered_flakes_for_submit) {
                             add_error.set(Some(message));
                             return;
                         }
 
-                        let new_item = SystemSummary {
-                            id: Uuid::new_v4(),
-                            hostname: next.hostname.trim().to_string(),
-                            environment: normalize_optional(&next.environment),
-                            primary_ip: None,
-                            health_status: HealthStatus::Healthy,
-                            deployment_status: DeploymentStatus::NeverDeployed,
-                            pipeline_stage: Some(PipelineStage::ReadyForBuild),
-                            cve_counts: CveSummary { critical: 0, high: 0, medium: 0, low: 0 },
-                            nixos_version: None,
-                            last_seen: Some(Utc::now()),
-                            deployment_policy: normalize_policy(&next.deployment_policy),
-                        };
+                        // Call backend API to create the system
+                        spawn(async move {
+                            match create_system_via_api(
+                                next.hostname.trim().to_string(),
+                                next.public_key.clone(),
+                                normalize_optional(&next.environment),
+                                normalize_optional(&next.flake_name),
+                                normalize_policy(&next.deployment_policy),
+                            ).await {
+                                Ok(detail) => {
+                                    // Convert SystemDetail to SystemSummary for the list
+                                    let new_item = SystemSummary {
+                                        id: detail.id,
+                                        hostname: detail.hostname,
+                                        environment: detail.environment,
+                                        primary_ip: detail.network.primary_ip,
+                                        health_status: detail.health_status,
+                                        deployment_status: detail.deployment_status,
+                                        pipeline_stage: detail.pipeline_stage,
+                                        cve_counts: detail.cve_counts,
+                                        nixos_version: detail.nixos_version,
+                                        last_seen: detail.last_seen,
+                                        deployment_policy: detail.deployment_policy,
+                                    };
 
-                        let mut values = systems.read().clone();
-                        values.push(new_item);
-                        values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
-                        systems.set(values);
-                        draft.set(NewSystemDraft::new());
-                        add_error.set(None);
-                        show_add_form.set(false);
+                                    let mut values = local_systems.read().clone();
+                                    values.push(new_item);
+                                    values.sort_by(|a, b| a.hostname.to_lowercase().cmp(&b.hostname.to_lowercase()));
+                                    local_systems.set(values);
+                                    draft.set(NewSystemDraft::new());
+                                    add_error.set(None);
+                                    show_add_form.set(false);
+                                }
+                                Err(error_message) => {
+                                    add_error.set(Some(error_message));
+                                }
+                            }
+                        });
                     },
                     on_generate_keys: move |_| {
                         generated_keys.set(Some(generate_key_pair()));
@@ -245,14 +330,16 @@ pub fn SystemsListView() -> Element {
                     for system in filtered_systems.clone() {
                         SystemCard {
                             system: system.clone(),
-                            on_remove: move |_| remove_system_by_id(systems, pending_remove, system.id),
+                            on_remove: move |_| remove_system_by_id(local_systems, pending_remove, system.id),
+                            on_update_key: move |_| update_key_for_system(local_systems, pending_update_key, system.id),
                         }
                     }
                 }
             } else {
                 SystemsTable {
                     systems: filtered_systems.clone(),
-                    on_remove: move |id| remove_system_by_id(systems, pending_remove, id),
+                    on_remove: move |id| remove_system_by_id(local_systems, pending_remove, id),
+                    on_update_key: move |id| update_key_for_system(local_systems, pending_update_key, id),
                 }
             }
 
@@ -262,10 +349,49 @@ pub fn SystemsListView() -> Element {
                     hostname: system.hostname.clone(),
                     on_cancel: move |_| pending_remove.set(None),
                     on_confirm: move |_| {
-                        let mut values = systems.read().clone();
-                        values.retain(|item| item.id != system.id);
-                        systems.set(values);
-                        pending_remove.set(None);
+                        let system_id = system.id;
+                        spawn(async move {
+                            match deactivate_system_via_api(system_id).await {
+                                Ok(_) => {
+                                    let mut values = local_systems.read().clone();
+                                    values.retain(|item| item.id != system_id);
+                                    local_systems.set(values);
+                                    pending_remove.set(None);
+                                }
+                                Err(error_message) => {
+                                    api_notice.set(Some(error_message));
+                                    pending_remove.set(None);
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+
+            // Update Public Key Modal
+            if let Some(system) = pending_update_key.read().clone() {
+                UpdatePublicKeyModal {
+                    system_id: system.id,
+                    hostname: system.hostname.clone(),
+                    on_cancel: move |_| {
+                        pending_update_key.set(None);
+                        update_key_error.set(None);
+                    },
+                    on_confirm: move |new_public_key| {
+                        let system_id = system.id;
+                        spawn(async move {
+                            match update_system_public_key_via_api(system_id, new_public_key).await {
+                                Ok(message) => {
+                                    // Success - close modal and maybe show a success toast
+                                    pending_update_key.set(None);
+                                    update_key_error.set(None);
+                                    // TODO: Show success toast with message
+                                }
+                                Err(error_message) => {
+                                    update_key_error.set(Some(error_message));
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -289,6 +415,21 @@ fn remove_system_by_id(
         .cloned();
     if let Some(system) = target {
         pending_remove.set(Some(system));
+    }
+}
+
+fn update_key_for_system(
+    systems: Signal<Vec<SystemSummary>>,
+    mut pending_update_key: Signal<Option<SystemSummary>>,
+    system_id: Uuid,
+) {
+    let target = systems
+        .read()
+        .iter()
+        .find(|item| item.id == system_id)
+        .cloned();
+    if let Some(system) = target {
+        pending_update_key.set(Some(system));
     }
 }
 
@@ -362,87 +503,7 @@ fn prefers_view_from_query() -> Option<ViewMode> {
     None
 }
 
-// =============================================================================
-// Mock Data
-// =============================================================================
-
-fn mock_systems() -> Vec<SystemSummary> {
-    let now = Utc::now();
-    vec![
-        SystemSummary {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap(),
-            hostname: "atlas-01".to_string(),
-            environment: Some("production".to_string()),
-            primary_ip: Some("10.0.1.10".to_string()),
-            health_status: HealthStatus::Healthy,
-            deployment_status: DeploymentStatus::UpToDate,
-            pipeline_stage: Some(PipelineStage::BuildComplete),
-            cve_counts: CveSummary {
-                critical: 0,
-                high: 2,
-                medium: 5,
-                low: 12,
-            },
-            nixos_version: Some("24.11".to_string()),
-            last_seen: Some(now - Duration::minutes(5)),
-            deployment_policy: "auto_latest".to_string(),
-        },
-        SystemSummary {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap(),
-            hostname: "atlas-02".to_string(),
-            environment: Some("production".to_string()),
-            primary_ip: Some("10.0.1.11".to_string()),
-            health_status: HealthStatus::Healthy,
-            deployment_status: DeploymentStatus::Behind,
-            pipeline_stage: Some(PipelineStage::ReadyForDeploy),
-            cve_counts: CveSummary {
-                critical: 1,
-                high: 3,
-                medium: 8,
-                low: 15,
-            },
-            nixos_version: Some("24.11".to_string()),
-            last_seen: Some(now - Duration::minutes(10)),
-            deployment_policy: "manual".to_string(),
-        },
-        SystemSummary {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap(),
-            hostname: "staging-01".to_string(),
-            environment: Some("staging".to_string()),
-            primary_ip: Some("10.0.2.10".to_string()),
-            health_status: HealthStatus::Warning,
-            deployment_status: DeploymentStatus::Behind,
-            pipeline_stage: Some(PipelineStage::ReadyForDeploy),
-            cve_counts: CveSummary {
-                critical: 0,
-                high: 0,
-                medium: 2,
-                low: 5,
-            },
-            nixos_version: Some("24.11".to_string()),
-            last_seen: Some(now - Duration::hours(1)),
-            deployment_policy: "manual".to_string(),
-        },
-        SystemSummary {
-            id: Uuid::parse_str("00000000-0000-0000-0000-000000000004").unwrap(),
-            hostname: "dev-box".to_string(),
-            environment: Some("development".to_string()),
-            primary_ip: Some("10.0.3.20".to_string()),
-            health_status: HealthStatus::Offline,
-            deployment_status: DeploymentStatus::NeverDeployed,
-            pipeline_stage: Some(PipelineStage::ReadyForBuild),
-            cve_counts: CveSummary {
-                critical: 0,
-                high: 0,
-                medium: 0,
-                low: 0,
-            },
-            nixos_version: None,
-            last_seen: Some(now - Duration::days(3)),
-            deployment_policy: "manual".to_string(),
-        },
-    ]
-}
+// Mock data has been moved to `crate::systems::adapter::fallback_systems`.
 
 #[cfg(test)]
 mod tests {

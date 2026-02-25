@@ -1,10 +1,10 @@
 ---
 id: TASK-120
 title: Restore dashboard SQL views dropped by migration cascade
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-23 04:10'
-updated_date: '2026-02-23 04:22'
+updated_date: '2026-02-23 21:20'
 labels: []
 dependencies: []
 ordinal: 75000

@@ -6,7 +6,7 @@ use axum::http::{
 };
 use axum::{
     Router,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use base64::{Engine as _, engine::general_purpose};
 use crystal_forge::{
@@ -117,12 +117,20 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
         )
-        .route("/api/v1/systems", get(systems::list_systems))
+        .route("/api/v1/systems", get(systems::list_systems).post(systems::create_system))
         .route("/api/v1/systems/:id", get(systems::get_system))
         .route("/api/v1/systems/:id/sync", post(systems::sync_system))
         .route(
             "/api/v1/systems/:id/rollback",
             post(systems::rollback_system),
+        )
+        .route(
+            "/api/v1/systems/:id/public-key",
+            put(systems::update_system_public_key),
+        )
+        .route(
+            "/api/v1/systems/:id/deactivate",
+            post(systems::deactivate_system_handler),
         )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))

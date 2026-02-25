@@ -143,18 +143,18 @@ This prevents meaningful operational use and correct environment scoping.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 #1 #1 #1 Backend GET /api/systems endpoint implemented with environment filtering
-- [ ] #2 #2 #2 #2 Backend GET /api/systems/:id endpoint implemented
-- [ ] #3 #3 #3 #3 Server-side RBAC enforcement applied
-- [ ] #4 #4 #4 #4 Server-side environment scoping enforced
-- [ ] #5 #5 #5 #5 Frontend systems/api.rs created
-- [ ] #6 #6 #6 #6 Frontend systems/models.rs created
-- [ ] #7 #7 #7 #7 Frontend systems/adapter.rs created with fallback logic
-- [ ] #8 #8 #8 #8 Frontend systems/view.rs updated to use adapter
-- [ ] #9 #9 #9 #9 401/403 redirects to login
-- [ ] #10 #10 #10 #10 500/network errors fallback to mock data
-- [ ] #11 #11 #11 #11 Empty state renders when no data
-- [ ] #12 #12 #12 #12 Verification commands pass
+- [ ] #1 #1 Backend GET /api/systems endpoint implemented with environment filtering
+- [ ] #2 #2 Backend GET /api/systems/:id endpoint implemented
+- [ ] #3 #3 Server-side RBAC enforcement applied
+- [ ] #4 #4 Server-side environment scoping enforced
+- [ ] #5 #5 Frontend systems/api.rs created
+- [ ] #6 #6 Frontend systems/models.rs created
+- [ ] #7 #7 Frontend systems/adapter.rs created with fallback logic
+- [ ] #8 #8 Frontend systems/view.rs updated to use adapter
+- [ ] #9 #9 401/403 redirects to login
+- [ ] #10 #10 500/network errors fallback to mock data
+- [ ] #11 #11 Empty state renders when no data
+- [ ] #12 #12 Verification commands pass
 
 ---
 

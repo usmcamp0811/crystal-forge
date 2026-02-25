@@ -30,6 +30,8 @@ pub fn SystemsTable(
     systems: Vec<SystemSummary>,
     /// Called when user clicks remove on a system
     on_remove: EventHandler<Uuid>,
+    /// Called when user clicks update key on a system
+    on_update_key: EventHandler<Uuid>,
 ) -> Element {
     let navigator = use_navigator();
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
@@ -190,13 +192,24 @@ pub fn SystemsTable(
                                 }
                                 td {
                                     class: "{theme::spacing::TABLE_CELL} text-right",
-                                    button {
-                                        class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                        onclick: move |evt| {
-                                            evt.stop_propagation();
-                                            on_remove.call(system.id);
-                                        },
-                                        "Remove"
+                                    div {
+                                        class: "flex gap-2 justify-end",
+                                        button {
+                                            class: "text-xs text-blue-400 hover:text-blue-300 px-2 py-1 rounded hover:bg-blue-500/10 transition-colors",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_update_key.call(system.id);
+                                            },
+                                            "Update Key"
+                                        }
+                                        button {
+                                            class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                                            onclick: move |evt| {
+                                                evt.stop_propagation();
+                                                on_remove.call(system.id);
+                                            },
+                                            "Remove"
+                                        }
                                     }
                                 }
                             }

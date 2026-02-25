@@ -82,6 +82,29 @@ pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Create a new system.
+pub async fn create_system(
+    request: &CreateSystemRequest,
+) -> Result<SystemDetail, ApiClientError> {
+    let url = format!("{}/systems", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Update a system's public key.
+pub async fn update_system_public_key(
+    id: &uuid::Uuid,
+    request: &UpdateSystemPublicKeyRequest,
+) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/public-key", base_url(), id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+/// Disable (soft-delete) a system.
+pub async fn deactivate_system(id: &uuid::Uuid) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/systems/{}/deactivate", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 pub async fn request_system_sync(
     id: &uuid::Uuid,
 ) -> Result<SystemMutationResponse, ApiClientError> {
