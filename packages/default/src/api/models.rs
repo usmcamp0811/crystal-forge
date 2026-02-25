@@ -349,13 +349,6 @@ pub struct FlakeCommit {
     pub build_status: Option<BuildStatus>,
 }
 
-/// Response containing the git diff for a specific commit.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CommitDiffResponse {
-    pub commit_hash: String,
-    pub diff: String,
-}
-
 /// Request payload for creating a new system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSystemRequest {
@@ -370,44 +363,6 @@ pub struct CreateSystemRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSystemPublicKeyRequest {
     pub public_key: String,
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Environment DTOs — GET /api/v1/environments, GET /api/v1/environments/:id
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Lightweight environment representation for the list view.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvironmentSummary {
-    pub id: Uuid,
-    pub name: String,
-    pub description: Option<String>,
-    pub color_hex: String,
-    pub is_active: bool,
-    /// Number of systems assigned to this environment.
-    pub system_count: i64,
-}
-
-/// Request payload for creating an environment.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CreateEnvironmentRequest {
-    pub name: String,
-    pub description: Option<String>,
-    pub color_hex: String,
-    #[serde(default = "default_true")]
-    pub is_active: bool,
-}
-
-/// Request payload for updating environment metadata.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateEnvironmentRequest {
-    pub name: String,
-    pub description: Option<String>,
-    pub color_hex: String,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

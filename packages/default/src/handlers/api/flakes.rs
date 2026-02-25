@@ -8,12 +8,12 @@ use axum::response::IntoResponse;
 use sqlx::PgPool;
 use tracing::error;
 
-use crate::api::models::{ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{ApiError, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
 use crate::flake::commits::get_commit_diff;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
-    count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id, get_flake_by_name,
+    count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_name,
     insert_flake, list_flake_registry,
 };
 
