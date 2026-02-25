@@ -383,6 +383,19 @@ pub struct EnvironmentSummary {
     pub system_count: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Flake Commit Timeline DTOs
 // ─────────────────────────────────────────────────────────────────────────────

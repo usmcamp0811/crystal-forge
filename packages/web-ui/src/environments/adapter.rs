@@ -14,8 +14,10 @@
 
 use uuid::Uuid;
 
-use crate::api::client::{ApiClientError, fetch_environments};
-use crate::api::models::EnvironmentSummary;
+use crate::api::client::{
+    ApiClientError, create_environment, delete_environment, fetch_environments, update_environment,
+};
+use crate::api::models::{CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest};
 use crate::components::environments::EnvironmentItem;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -30,6 +32,14 @@ pub struct EnvironmentsLoadResult {
     /// Human-readable notice shown when using fallback data.
     pub notice: Option<String>,
     /// True when the API returned 401/403 — view should redirect to login.
+    pub redirect_to_login: bool,
+}
+
+/// Result of loading environment names for dropdowns.
+#[derive(Debug, Clone)]
+pub struct EnvironmentNamesLoadResult {
+    pub names: Vec<String>,
+    pub notice: Option<String>,
     pub redirect_to_login: bool,
 }
 
@@ -72,6 +82,45 @@ pub async fn load_environments_with_fallback(
             redirect_to_login: false,
         },
     }
+}
+
+/// Fetch environment names from backend for form dropdowns.
+///
+/// Falls back to deterministic names when the API is unavailable.
+pub async fn load_environment_names_with_fallback() -> EnvironmentNamesLoadResult {
+    match fetch_environments().await {
+        Ok(items) => {
+            let mut names: Vec<String> = items.into_iter().map(|e| e.name).collect();
+            names.sort_by_key(|name| name.to_ascii_lowercase());
+            names.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+            EnvironmentNamesLoadResult {
+                names,
+                notice: None,
+                redirect_to_login: false,
+            }
+        }
+        Err(error) if should_redirect_to_login(&error) => EnvironmentNamesLoadResult {
+            names: fallback_environment_names(),
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => EnvironmentNamesLoadResult {
+            names: fallback_environment_names(),
+            notice: Some(format!(
+                "Environments API unavailable for system form, using fallback names: {error}"
+            )),
+            redirect_to_login: false,
+        },
+    }
+}
+
+fn fallback_environment_names() -> Vec<String> {
+    vec![
+        "production".to_string(),
+        "staging".to_string(),
+        "development".to_string(),
+        "remote".to_string(),
+    ]
 }
 
 /// Deterministic fallback environment list used when the API is unavailable.
@@ -137,6 +186,63 @@ pub fn api_to_environment_item(
         color_hex,
         system_count: env.system_count as usize,
         required_policy_ids: vec![default_required_policy],
+    }
+}
+
+/// Create a new environment via backend API.
+pub async fn create_environment_via_api(
+    name: String,
+    description: Option<String>,
+    is_active: bool,
+    default_required_policy: Uuid,
+) -> Result<EnvironmentItem, String> {
+    let request = CreateEnvironmentRequest {
+        name,
+        description,
+        is_active,
+    };
+
+    match create_environment(&request).await {
+        Ok(env) => Ok(api_to_environment_item(env, default_required_policy)),
+        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
+            Err("Authentication required. Please log in.".to_string())
+        }
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
+    }
+}
+
+/// Delete an environment via backend API.
+pub async fn delete_environment_via_api(environment_id: Uuid) -> Result<(), String> {
+    match delete_environment(&environment_id).await {
+        Ok(()) => Ok(()),
+        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
+            Err("Authentication required. Please log in.".to_string())
+        }
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
+    }
+}
+
+/// Update environment metadata via backend API.
+pub async fn update_environment_via_api(
+    environment_id: Uuid,
+    name: String,
+    description: Option<String>,
+    default_required_policy: Uuid,
+) -> Result<EnvironmentItem, String> {
+    let request = UpdateEnvironmentRequest { name, description };
+
+    match update_environment(&environment_id, &request).await {
+        Ok(env) => Ok(api_to_environment_item(env, default_required_policy)),
+        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
+            Err("Authentication required. Please log in.".to_string())
+        }
+        Err(ApiClientError::Status { body, .. }) => Err(body),
+        Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
+        Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
     }
 }
 

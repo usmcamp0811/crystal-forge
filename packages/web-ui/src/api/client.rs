@@ -132,6 +132,29 @@ pub async fn fetch_environment(id: &uuid::Uuid) -> Result<EnvironmentSummary, Ap
     fetch_json(&url).await
 }
 
+/// Create an environment.
+pub async fn create_environment(
+    request: &CreateEnvironmentRequest,
+) -> Result<EnvironmentSummary, ApiClientError> {
+    let url = format!("{}/environments", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Delete an environment by id.
+pub async fn delete_environment(id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/environments/{}", base_url(), id);
+    send_empty("DELETE", &url).await
+}
+
+/// Update an environment by id.
+pub async fn update_environment(
+    id: &uuid::Uuid,
+    request: &UpdateEnvironmentRequest,
+) -> Result<EnvironmentSummary, ApiClientError> {
+    let url = format!("{}/environments/{}", base_url(), id);
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());

@@ -124,10 +124,6 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:id/rollback",
             post(systems::rollback_system),
         )
-        .route("/api/v1/environments", get(environments::list_environments))
-        .route(
-            "/api/v1/environments/:id",
-            get(environments::get_environment),
         .route(
             "/api/v1/systems/:id/public-key",
             put(systems::update_system_public_key),
@@ -135,10 +131,16 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/deactivate",
             post(systems::deactivate_system_handler),
-        .route("/api/v1/environments", get(environments::list_environments))
+        )
+        .route(
+            "/api/v1/environments",
+            get(environments::list_environments).post(environments::create_environment),
+        )
         .route(
             "/api/v1/environments/:id",
-            get(environments::get_environment),
+            get(environments::get_environment)
+                .patch(environments::update_environment_handler)
+                .delete(environments::delete_environment_handler),
         )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))

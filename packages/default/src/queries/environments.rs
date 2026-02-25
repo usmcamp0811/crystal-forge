@@ -204,3 +204,93 @@ pub async fn find_environment_for_user(
         system_count: r.system_count,
     }))
 }
+
+/// Create a new environment and return API summary shape.
+pub async fn create_environment(
+    pool: &PgPool,
+    name: &str,
+    description: Option<&str>,
+    is_active: bool,
+) -> Result<EnvironmentSummary> {
+    let row = sqlx::query_as::<_, EnvironmentRow>(
+        r#"
+        INSERT INTO environments (name, description, is_active)
+        VALUES ($1, $2, $3)
+        RETURNING id, name, description, COALESCE(is_active, TRUE) AS is_active, 0::bigint AS system_count
+        "#,
+    )
+    .bind(name)
+    .bind(description)
+    .bind(is_active)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(EnvironmentSummary {
+        id: row.id,
+        name: row.name,
+        description: row.description,
+        is_active: row.is_active,
+        system_count: row.system_count,
+    })
+}
+
+/// Delete an environment by id.
+pub async fn delete_environment(pool: &PgPool, environment_id: Uuid) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM environments WHERE id = $1")
+        .bind(environment_id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected())
+}
+
+/// Count systems assigned to an environment.
+pub async fn count_systems_in_environment(pool: &PgPool, environment_id: Uuid) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*)::bigint FROM systems WHERE environment_id = $1",
+    )
+    .bind(environment_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(count)
+}
+
+/// Update an environment name/description and return summary shape.
+pub async fn update_environment_metadata(
+    pool: &PgPool,
+    environment_id: Uuid,
+    name: &str,
+    description: Option<&str>,
+) -> Result<Option<EnvironmentSummary>> {
+    let row = sqlx::query_as::<_, EnvironmentRow>(
+        r#"
+        UPDATE environments e
+        SET name = $2,
+            description = $3,
+            updated_at = NOW()
+        WHERE e.id = $1
+        RETURNING
+            e.id,
+            e.name,
+            e.description,
+            COALESCE(e.is_active, TRUE) AS is_active,
+            (
+                SELECT COUNT(s.id)::bigint
+                FROM systems s
+                WHERE s.environment_id = e.id
+            ) AS system_count
+        "#,
+    )
+    .bind(environment_id)
+    .bind(name)
+    .bind(description)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| EnvironmentSummary {
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        is_active: r.is_active,
+        system_count: r.system_count,
+    }))
+}

@@ -17,12 +17,20 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
+use sqlx::Error as SqlxError;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::api::models::{ApiError, EnvironmentSummary};
+use crate::api::models::{
+    ApiError, CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest,
+};
+use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
-use crate::queries::environments::{find_environment_for_user, list_environments_for_user};
+use crate::models::auth_identity::AuthRole;
+use crate::queries::environments::{
+    count_systems_in_environment, create_environment as create_environment_row, delete_environment,
+    find_environment_for_user, list_environments_for_user, update_environment_metadata,
+};
 
 /// `GET /api/v1/environments`
 ///
@@ -78,6 +86,149 @@ pub async fn get_environment(
     }
 }
 
+/// `POST /api/v1/environments`
+///
+/// Creates a new environment. Admin role required.
+pub async fn create_environment(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateEnvironmentRequest>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_manage_environments() {
+        return forbidden_manage();
+    }
+
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return bad_request("Environment name is required");
+    }
+
+    if name.len() > 50 {
+        return bad_request("Environment name must be 50 characters or fewer");
+    }
+
+    let description = payload.description.as_deref().map(str::trim).filter(|v| !v.is_empty());
+
+    match create_environment_row(&pool, name, description, payload.is_active).await {
+        Ok(env) => (StatusCode::CREATED, Json(env)).into_response(),
+        Err(err) => {
+            if is_unique_violation(&err) {
+                conflict("Environment name already exists")
+            } else {
+                internal_error("Failed to create environment")
+            }
+        }
+    }
+}
+
+/// `DELETE /api/v1/environments/:id`
+///
+/// Deletes an environment when it has no assigned systems. Admin role required.
+pub async fn delete_environment_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(environment_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_manage_environments() {
+        return forbidden_manage();
+    }
+
+    let assigned_systems = match count_systems_in_environment(&pool, environment_id).await {
+        Ok(count) => count,
+        Err(_) => return internal_error("Failed to validate environment usage"),
+    };
+
+    if assigned_systems > 0 {
+        return conflict("Cannot delete environment while systems are still assigned");
+    }
+
+    match delete_environment(&pool, environment_id).await {
+        Ok(0) => not_found(),
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => internal_error("Failed to delete environment"),
+    }
+}
+
+/// `PATCH /api/v1/environments/:id`
+///
+/// Updates environment metadata. Admin role required.
+pub async fn update_environment_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(environment_id): Path<Uuid>,
+    Json(payload): Json<UpdateEnvironmentRequest>,
+) -> impl IntoResponse {
+    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let Some(caller_role) = highest_role(&roles) else {
+        return forbidden();
+    };
+
+    if !caller_role.can_manage_environments() {
+        return forbidden_manage();
+    }
+
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return bad_request("Environment name is required");
+    }
+
+    if name.len() > 50 {
+        return bad_request("Environment name must be 50 characters or fewer");
+    }
+
+    let description = payload.description.as_deref().map(str::trim).filter(|v| !v.is_empty());
+
+    match update_environment_metadata(&pool, environment_id, name, description).await {
+        Ok(Some(env)) => (StatusCode::OK, Json(env)).into_response(),
+        Ok(None) => not_found(),
+        Err(err) => {
+            if is_unique_violation(&err) {
+                conflict("Environment name already exists")
+            } else {
+                internal_error("Failed to update environment")
+            }
+        }
+    }
+}
+
+fn highest_role(roles: &[AuthRole]) -> Option<Role> {
+    if roles.contains(&AuthRole::Admin) {
+        Some(Role::Admin)
+    } else if roles.contains(&AuthRole::Operator) {
+        Some(Role::Operator)
+    } else if roles.contains(&AuthRole::Viewer) {
+        Some(Role::Viewer)
+    } else {
+        None
+    }
+}
+
+fn is_unique_violation(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<SqlxError>()
+        .and_then(|sqlx_err| sqlx_err.as_database_error())
+        .and_then(|db_err| db_err.code())
+        .is_some_and(|code| code == "23505")
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Error Helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -100,6 +251,42 @@ fn not_found() -> axum::response::Response {
         Json(ApiError {
             error: "not_found".to_string(),
             message: "Environment not found".to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn bad_request(message: &str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiError {
+            error: "validation_error".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn conflict(message: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiError {
+            error: "conflict".to_string(),
+            message: message.to_string(),
+            details: None,
+        }),
+    )
+        .into_response()
+}
+
+fn forbidden_manage() -> axum::response::Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ApiError {
+            error: "forbidden".to_string(),
+            message: "Admin privileges are required".to_string(),
             details: None,
         }),
     )

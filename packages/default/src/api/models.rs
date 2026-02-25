@@ -358,6 +358,26 @@ pub struct EnvironmentSummary {
     pub system_count: i64,
 }
 
+/// Request payload for creating an environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+}
+
+/// Request payload for updating environment metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pagination
 // ─────────────────────────────────────────────────────────────────────────────
