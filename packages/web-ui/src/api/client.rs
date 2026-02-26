@@ -120,6 +120,76 @@ pub async fn request_system_rollback(
     send_json_with_csrf("POST", &url, Some(request)).await
 }
 
+/// Fetch the list of environments visible to the authenticated user.
+pub async fn fetch_environments() -> Result<Vec<EnvironmentSummary>, ApiClientError> {
+    let url = format!("{}/environments", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch a single environment by ID.
+pub async fn fetch_environment(id: &uuid::Uuid) -> Result<EnvironmentSummary, ApiClientError> {
+    let url = format!("{}/environments/{}", base_url(), id);
+    fetch_json(&url).await
+}
+
+/// Fetch a single environment with required policies.
+pub async fn fetch_environment_policies(
+    id: &uuid::Uuid,
+) -> Result<EnvironmentWithPolicies, ApiClientError> {
+    let url = format!("{}/environments/{}/policies", base_url(), id);
+    fetch_json(&url).await
+}
+
+/// Fetch required policy assignments for visible environments.
+pub async fn fetch_environment_policies_map(
+) -> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
+    let url = format!("{}/environments/policies-map", base_url());
+    fetch_json(&url).await
+}
+
+/// Create an environment.
+pub async fn create_environment(
+    request: &CreateEnvironmentRequest,
+) -> Result<EnvironmentSummary, ApiClientError> {
+    let url = format!("{}/environments", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Delete an environment by id.
+pub async fn delete_environment(id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/environments/{}", base_url(), id);
+    send_empty("DELETE", &url).await
+}
+
+/// Update an environment by id.
+pub async fn update_environment(
+    id: &uuid::Uuid,
+    request: &UpdateEnvironmentRequest,
+) -> Result<EnvironmentSummary, ApiClientError> {
+    let url = format!("{}/environments/{}", base_url(), id);
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
+/// Update environment required policies.
+pub async fn update_environment_policies(
+    id: &uuid::Uuid,
+    required_policy_ids: &[uuid::Uuid],
+) -> Result<(), ApiClientError> {
+    use super::models::UpdateEnvironmentPoliciesRequest as Req;
+    let url = format!("{}/environments/{}/policies", base_url(), id);
+    let req = Req {
+        required_policy_ids: required_policy_ids.to_vec(),
+    };
+    let _: serde_json::Value = send_json_with_csrf("PATCH", &url, Some(&req)).await?;
+    Ok(())
+}
+
+/// Fetch available deployment policies.
+pub async fn fetch_policies() -> Result<Vec<DeploymentPolicySummary>, ApiClientError> {
+    let url = format!("{}/policies", base_url());
+    fetch_json(&url).await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());
@@ -143,6 +213,12 @@ pub async fn delete_flake(id: i32) -> Result<(), ApiClientError> {
 /// Fetch flake timelines with recent commits for dashboard.
 pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
     let url = format!("{}/flakes/timelines", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch the git diff for a specific commit in a flake.
+pub async fn fetch_commit_diff(flake_id: i32, commit_hash: &str) -> Result<CommitDiffResponse, ApiClientError> {
+    let url = format!("{}/flakes/{}/commits/{}/diff", base_url(), flake_id, commit_hash);
     fetch_json(&url).await
 }
 

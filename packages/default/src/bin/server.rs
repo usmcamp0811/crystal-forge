@@ -18,7 +18,7 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            dashboard, flakes, systems,
+            dashboard, environments, flakes, systems,
         },
         status,
         webhook::webhook_handler,
@@ -132,10 +132,34 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:id/deactivate",
             post(systems::deactivate_system_handler),
         )
+        .route(
+            "/api/v1/environments",
+            get(environments::list_environments).post(environments::create_environment),
+        )
+        .route(
+            "/api/v1/environments/policies-map",
+            get(environments::list_environment_policy_map_handler),
+        )
+        .route(
+            "/api/v1/environments/:id",
+            get(environments::get_environment)
+                .patch(environments::update_environment_handler)
+                .delete(environments::delete_environment_handler),
+        )
+        .route(
+            "/api/v1/environments/:id/policies",
+            get(environments::get_environment_with_policies_handler)
+                .patch(environments::update_environment_policies_handler),
+        )
+        .route("/api/v1/policies", get(environments::list_policies_handler))
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
         .route("/api/v1/flakes/timelines", get(flakes::get_flake_timelines))
+        .route(
+            "/api/v1/flakes/:id/commits/:hash/diff",
+            get(flakes::get_commit_diff_handler),
+        )
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))
         .route("/api/v1/admin/users/:id", patch(admin::update_user))

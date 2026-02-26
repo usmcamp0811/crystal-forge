@@ -13,9 +13,11 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::Closure;
 use web_sys::{Node, window};
+#[cfg(target_arch = "wasm32")]
+use web_sys::console;
 
-use crate::api::client::{create_flake, delete_flake, fetch_flakes};
-use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem};
+use crate::api::client::{create_flake, delete_flake, fetch_commit_diff, fetch_flakes, fetch_flake_timelines};
+use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::components::layout::Card;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
@@ -245,6 +247,7 @@ pub fn FlakesListView() -> Element {
     let mut flakes = use_signal(mock_flakes);
     let loading_flakes = use_signal(|| true);
     let server_notice = use_signal(|| None::<String>);
+    let mut flake_timelines = use_signal(Vec::<FlakeTimeline>::new);
     let mut show_add_form = use_signal(|| false);
     let mut add_error = use_signal(|| None::<String>);
     let mut draft = use_signal(|| NewFlakeDraft {
@@ -315,6 +318,24 @@ pub fn FlakesListView() -> Element {
         });
     }
 
+    // Load flake timelines
+    {
+        let mut flake_timelines = flake_timelines.clone();
+        use_effect(move || {
+            spawn(async move {
+                match fetch_flake_timelines().await {
+                    Ok(timelines) => {
+                        flake_timelines.set(timelines);
+                    }
+                    Err(_error) => {
+                        // Fall back to mock timelines on error
+                        flake_timelines.set(crate::views::dashboard::mock_flake_timelines());
+                    }
+                }
+            });
+        });
+    }
+
     rsx! {
         div {
             class: "space-y-6",
@@ -331,7 +352,8 @@ pub fn FlakesListView() -> Element {
                         class: "px-3 py-2 rounded-lg text-sm font-medium border border-blue-500/50 text-blue-200 hover:text-white hover:bg-blue-500/20 transition-colors",
                         onclick: move |_| {
                             let mut next = flakes.read().clone();
-                            let changed = sync_flake_registry(&mut next);
+                            let timelines = flake_timelines.read();
+                            let changed = sync_flake_registry(&mut next, &timelines);
                             flakes.set(next);
                             let now = Utc::now();
                             last_manual_sync.set(Some(now));
@@ -488,6 +510,7 @@ pub fn FlakesListView() -> Element {
                 flakes: filtered_flakes.clone(),
                 selected_flake_id: selected_history_flake,
                 selected_commit_hash: selected_history_commit,
+                timelines: flake_timelines.read().clone(),
             }
 
             if let Some(editing) = editing_flake.read().clone() {
@@ -847,8 +870,14 @@ fn FlakeHistoryExplorer(
     flakes: Vec<FlakeListItem>,
     selected_flake_id: Signal<Option<i32>>,
     selected_commit_hash: Signal<Option<String>>,
+    timelines: Vec<FlakeTimeline>,
 ) -> Element {
-    let history = mock_flake_history();
+    let history = build_flake_history(&timelines);
+    
+    // Cache for loaded commit diffs
+    let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
+    // Track current active commit hash to force re-render when diff loads
+    let current_commit_key = use_signal(|| (0i32, String::new()));
 
     if flakes.is_empty() {
         return rsx! {
@@ -878,6 +907,77 @@ fn FlakeHistoryExplorer(
         .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
         .map(|commit| commit.clone())
         .or_else(|| commits.first().cloned());
+    
+    // Load diff for the active commit if not already loaded
+    // We read the signal INSIDE use_effect so it tracks the dependency
+    {
+        let loaded_diffs = loaded_diffs.clone();
+        let current_key = current_commit_key.clone();
+        
+        use_effect(move || {
+            // Read signals inside the effect so it re-runs when they change
+            let selected_hash = selected_commit_hash.read().clone();
+            let flake_id = active_flake.id;
+            
+            if let Some(commit_hash) = &selected_hash {
+                let key = (flake_id, commit_hash.clone());
+                let already_loaded = loaded_diffs.read().contains_key(&key);
+                
+                #[cfg(target_arch = "wasm32")]
+                console::log_1(&format!("Effect running - hash: {}, loaded: {}", &commit_hash[..7.min(commit_hash.len())], already_loaded).into());
+                
+                if !already_loaded {
+                    let commit_hash = commit_hash.clone();
+                    let flake_id = flake_id;
+                    let mut loaded_diffs_inner = loaded_diffs.clone();
+                    let mut current_key_inner = current_key.clone();
+                    
+                    #[cfg(target_arch = "wasm32")]
+                    console::log_1(&format!("Fetching diff for {}...", &commit_hash[..7.min(commit_hash.len())]).into());
+                    
+                    spawn(async move {
+                        match fetch_commit_diff(flake_id, &commit_hash).await {
+                            Ok(response) => {
+                                #[cfg(target_arch = "wasm32")]
+                                console::log_1(&format!("Diff loaded! {} bytes", response.diff.len()).into());
+                                loaded_diffs_inner.write().insert(key.clone(), response.diff);
+                                current_key_inner.set(key);
+                            }
+                            Err(e) => {
+                                #[cfg(target_arch = "wasm32")]
+                                console::log_1(&format!("Error: {}", e).into());
+                                loaded_diffs_inner.write().insert(
+                                    key.clone(),
+                                    format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash)
+                                );
+                                current_key_inner.set(key);
+                            }
+                        }
+                    });
+                }
+            }
+        });
+    }
+    
+    // Update active_commit with loaded diff if available
+    let active_commit = if let Some(commit) = active_commit.clone() {
+        let key = (active_flake.id, commit.hash.clone());
+        if let Some(diff) = loaded_diffs.read().get(&key) {
+            let mut commit = commit;
+            commit.diff = diff.clone();
+            // Calculate stats from the diff
+            let (files_changed, insertions, deletions) = diff_stats(&commit.diff);
+            commit.files_changed = files_changed;
+            commit.insertions = insertions;
+            commit.deletions = deletions;
+            Some(commit)
+        } else {
+            Some(commit)
+        }
+    } else {
+        None
+    };
+    
     let active_repo = active_flake.repo_url.clone();
     let flake_sync_label = active_flake
         .last_synced_at
@@ -1080,6 +1180,16 @@ fn FlakeHistoryExplorer(
 
 #[component]
 fn FriendlyDiffViewer(diff: String) -> Element {
+    // Show loading message if diff is empty
+    if diff.is_empty() {
+        return rsx! {
+            div {
+                class: "text-sm text-gray-400 p-4 text-center",
+                "Loading diff..."
+            }
+        };
+    }
+    
     let parsed_files = parse_unified_diff(&diff);
     if parsed_files.is_empty() {
         return rsx! {
@@ -1880,10 +1990,10 @@ fn table_class(active: bool) -> &'static str {
     }
 }
 
-fn sync_flake_registry(flakes: &mut [FlakeListItem]) -> usize {
+fn sync_flake_registry(flakes: &mut [FlakeListItem], timelines: &[FlakeTimeline]) -> usize {
     let now = Utc::now();
-    let latest_by_id: HashMap<i32, String> = crate::views::dashboard::mock_flake_timelines()
-        .into_iter()
+    let latest_by_id: HashMap<i32, String> = timelines
+        .iter()
         .filter_map(|timeline| {
             timeline
                 .commits
@@ -1906,25 +2016,33 @@ fn sync_flake_registry(flakes: &mut [FlakeListItem]) -> usize {
     changed
 }
 
-fn mock_flake_history() -> HashMap<i32, Vec<FlakeHistoryCommit>> {
+fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHistoryCommit>> {
     let mut history = HashMap::new();
 
-    for timeline in crate::views::dashboard::mock_flake_timelines() {
+    for timeline in timelines {
         let commits: Vec<FlakeHistoryCommit> = timeline
             .commits
-            .into_iter()
+            .iter()
             .map(|commit| {
-                let diff = full_diff_for_commit(&timeline.flake_name, &commit);
-                let (files_changed, insertions, deletions) = diff_stats(&diff);
+                // Diff will be loaded on-demand when user views the commit
                 FlakeHistoryCommit {
-                    hash: commit.hash,
-                    message: commit.message,
-                    author: commit.author,
+                    hash: commit.hash.clone(),
+                    message: if commit.message.is_empty() {
+                        // Provide a placeholder if message is empty
+                        format!("Commit {}", &commit.hash[..7])
+                    } else {
+                        commit.message.clone()
+                    },
+                    author: if commit.author.is_empty() {
+                        "Unknown".to_string()
+                    } else {
+                        commit.author.clone()
+                    },
                     committed_at: commit.committed_at,
-                    files_changed,
-                    insertions,
-                    deletions,
-                    diff,
+                    files_changed: 0, // Will be calculated from diff when loaded
+                    insertions: 0,
+                    deletions: 0,
+                    diff: String::new(), // Empty initially, loaded on-demand
                 }
             })
             .collect();

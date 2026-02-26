@@ -369,6 +369,69 @@ pub struct CreateFlakeRequest {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Environment DTOs — GET /api/v1/environments, GET /api/v1/environments/:id
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Lightweight environment summary returned by the environments API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+    /// Number of systems assigned to this environment.
+    pub system_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentWithPolicies {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+    pub system_count: i64,
+    pub required_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentPolicyMapEntry {
+    pub environment_id: Uuid,
+    pub required_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateEnvironmentRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateEnvironmentPoliciesRequest {
+    pub required_policy_ids: Vec<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPolicySummary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Flake Commit Timeline DTOs
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -424,6 +487,13 @@ impl BuildStatus {
             Self::Failed => "text-red-400",
         }
     }
+}
+
+/// Response containing the git diff for a specific commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommitDiffResponse {
+    pub commit_hash: String,
+    pub diff: String,
 }
 
 /// A single commit in a flake's history with deployment info.

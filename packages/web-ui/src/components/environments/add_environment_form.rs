@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use super::{
-    EnvironmentItem, NewEnvironmentDraft, PolicyOption, normalize_color_hex, normalize_optional,
-    required_policy_names, validate_environment as validate_env,
+    normalize_color_hex, normalize_optional, required_policy_names, EnvironmentItem,
+    NewEnvironmentDraft, PolicyOption,
 };
 use crate::components::layout::Card;
 use crate::theme;
@@ -15,7 +15,30 @@ pub fn validate_environment(
     existing: &[EnvironmentItem],
     policy_library: &[PolicyOption],
 ) -> Result<(), String> {
-    validate_env(draft, existing, policy_library)
+    let name = draft.name.trim();
+    if name.is_empty() {
+        return Err("Environment name is required.".to_string());
+    }
+    if existing
+        .iter()
+        .any(|item| item.name.eq_ignore_ascii_case(name))
+    {
+        return Err("Environment name already exists.".to_string());
+    }
+    if !super::looks_like_hex_color(&draft.color_hex) {
+        return Err("Environment color must be a valid hex value.".to_string());
+    }
+    if draft.required_policy_ids.is_empty() {
+        return Err("At least one required policy must be selected.".to_string());
+    }
+    if draft
+        .required_policy_ids
+        .iter()
+        .any(|id| !policy_library.iter().any(|p| p.id == *id))
+    {
+        return Err("One or more selected policies are invalid.".to_string());
+    }
+    Ok(())
 }
 
 /// Props for the add environment form.

@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use super::{EnvironmentItem, PolicyOption, required_policy_names, with_alpha};
+use super::{required_policy_names, with_alpha, EnvironmentItem, PolicyOption};
 use crate::theme;
 
 /// Props for the environment card.
@@ -68,6 +68,10 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
             div {
                 class: "px-6 py-3 bg-gray-900 space-y-2",
                 p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500", "Required Policies" }
+                p {
+                    class: "text-[10px] text-amber-300/80",
+                    "Policies are persisted server-side and inherited as environment baseline requirements."
+                }
                 div {
                     class: "flex flex-wrap gap-2",
                     for policy_name in visible_chips {
