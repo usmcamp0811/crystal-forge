@@ -140,10 +140,12 @@ pub mod text {
 
 /// Color tokens for buttons and interactive elements.
 pub mod interactive {
+    // Theme button colors are defined in `src/main.rs` CSS variables/classes.
+    // Update both this token mapping and the CSS vars together.
     /// Primary action button.
     pub const PRIMARY_BTN: &str = "cf-primary-btn";
     /// Danger action button.
-    pub const DANGER_BTN: &str = "bg-rose-700 hover:bg-rose-600";
+    pub const DANGER_BTN: &str = "cf-danger-btn";
     /// Success action button.
     pub const SUCCESS_BTN: &str = "bg-emerald-600 hover:bg-emerald-700";
     /// Ghost / subtle button.

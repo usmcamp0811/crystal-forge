@@ -785,9 +785,14 @@ fn FlakesTable(
                                 rsx! {
                                     tr {
                                         class: if is_selected {
-                                            "bg-blue-900/35 hover:bg-blue-900/45 transition cursor-pointer"
+                                            "cursor-pointer"
                                         } else {
-                                            "hover:bg-gray-800/40 transition cursor-pointer"
+                                            "hover:bg-gray-800/40 cursor-pointer"
+                                        },
+                                        style: if is_selected {
+                                            "background-color: rgba(130, 105, 155, 0.32);"
+                                        } else {
+                                            ""
                                         },
                                         onclick: move |_| on_select_history_flake.call(flake.id),
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
