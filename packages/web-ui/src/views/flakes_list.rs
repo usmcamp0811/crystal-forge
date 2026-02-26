@@ -746,6 +746,7 @@ fn FlakesTable(
                                 let is_selected = selected_history_flake_id == Some(flake.id);
                                 rsx! {
                                     tr {
+                                        key: "{flake.id}",
                                         class: if is_selected {
                                             "cursor-pointer"
                                         } else {
@@ -754,7 +755,7 @@ fn FlakesTable(
                                         style: if is_selected {
                                             "background-color: rgba(130, 105, 155, 0.32);"
                                         } else {
-                                            ""
+                                            "background-color: transparent;"
                                         },
                                         onclick: move |_| on_select_history_flake.call(flake.id),
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
