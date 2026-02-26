@@ -1,10 +1,10 @@
 ---
 id: TASK-130
 title: Implement Flake Sync From Source Button Behavior
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-26 08:45'
-updated_date: '2026-02-26 08:59'
+updated_date: '2026-02-26 11:28'
 labels:
   - ui
   - flakes
@@ -67,4 +67,5 @@ None.
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on gray in ~/code/crystal-forge/TASK-130-implement-flake-sync-from-source
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/138
 <!-- SECTION:NOTES:END -->
