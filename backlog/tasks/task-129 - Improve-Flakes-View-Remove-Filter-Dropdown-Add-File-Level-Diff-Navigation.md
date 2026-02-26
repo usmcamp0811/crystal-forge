@@ -1,10 +1,10 @@
 ---
 id: TASK-129
 title: Improve Flakes View - Remove Filter Dropdown & Add File-Level Diff Navigation
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-25 22:45'
-updated_date: '2026-02-26 04:26'
+updated_date: '2026-02-26 05:19'
 labels:
   - ui
   - flakes-view
@@ -147,3 +147,9 @@ The current flakes view has two UX issues:
 Improve the flakes view by:
 1. Making the flake selection intuitive (click flake in table/cards to see its git history)
 2. Adding file-level navigation for diffs (show list of changed files, click to drill down)
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-sonnet-4-6 on gray in ~/code/crystal-forge/TASK-129-improve-flakes-view-file-level-diff
+<!-- SECTION:NOTES:END -->
