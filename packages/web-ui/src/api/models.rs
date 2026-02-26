@@ -358,6 +358,7 @@ pub struct FlakeRegistryItem {
     pub id: i32,
     pub name: String,
     pub repo_url: String,
+    pub branch: String,
     pub system_count: i64,
 }
 
@@ -366,6 +367,7 @@ pub struct FlakeRegistryItem {
 pub struct CreateFlakeRequest {
     pub name: String,
     pub repo_url: String,
+    pub branch: Option<String>,
 }
 
 /// Request payload for updating a flake.
@@ -373,6 +375,7 @@ pub struct CreateFlakeRequest {
 pub struct UpdateFlakeRequest {
     pub name: String,
     pub repo_url: String,
+    pub branch: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

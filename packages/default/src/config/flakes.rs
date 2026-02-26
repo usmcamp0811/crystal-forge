@@ -16,6 +16,8 @@ pub struct FlakeConfig {
 pub struct WatchedFlake {
     pub name: String,
     pub repo_url: String,
+    #[serde(default)]
+    pub branch: Option<String>,
     pub auto_poll: bool,
     #[serde(default = "default_initial_commit_depth")]
     pub initial_commit_depth: usize,
@@ -27,7 +29,12 @@ fn default_initial_commit_depth() -> usize {
 
 impl WatchedFlake {
     pub fn branch(&self) -> String {
-        parse_branch_from_url(&self.repo_url)
+        self.branch
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| parse_branch_from_url(&self.repo_url))
     }
 }
 

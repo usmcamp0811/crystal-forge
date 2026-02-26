@@ -139,8 +139,8 @@ pub async fn fetch_environment_policies(
 }
 
 /// Fetch required policy assignments for visible environments.
-pub async fn fetch_environment_policies_map()
--> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
+pub async fn fetch_environment_policies_map(
+) -> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
     let url = format!("{}/environments/policies-map", base_url());
     fetch_json(&url).await
 }
@@ -221,6 +221,18 @@ pub async fn delete_flake(id: i32) -> Result<(), ApiClientError> {
 pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
     let url = format!("{}/flakes/timelines", base_url());
     fetch_json(&url).await
+}
+
+/// Trigger sync for all flakes.
+pub async fn request_sync_all_flakes() -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/flakes/sync", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Trigger sync for a specific flake.
+pub async fn request_sync_flake(id: i32) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/flakes/{id}/sync", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
 /// Fetch the git diff for a specific commit in a flake.

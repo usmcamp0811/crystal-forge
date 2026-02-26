@@ -49,12 +49,12 @@ Dependencies:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Creating a flake accepts optional branch input; when omitted, backend auto-detects and persists remote default branch.
-- [ ] #2 Editing a flake allows changing branch and repo URL; changes persist across navigation/reload.
-- [ ] #3 Sync all and sync single flake use persisted branch for each flake, not hard-coded defaults.
-- [ ] #4 Validation errors are returned for unreachable repo URLs or invalid branch inputs with user-visible messages.
-- [ ] #5 Flakes UI clearly shows branch field in add/edit flow and preserves existing UX quality.
-- [ ] #6 Targeted verification commands pass for touched backend and web-ui crates.
+- [x] #1 Creating a flake accepts optional branch input; when omitted, backend auto-detects and persists remote default branch.
+- [x] #2 Editing a flake allows changing branch and repo URL; changes persist across navigation/reload.
+- [x] #3 Sync all and sync single flake use persisted branch for each flake, not hard-coded defaults.
+- [x] #4 Validation errors are returned for unreachable repo URLs or invalid branch inputs with user-visible messages.
+- [x] #5 Flakes UI clearly shows branch field in add/edit flow and preserves existing UX quality.
+- [x] #6 Targeted verification commands pass for touched backend and web-ui crates.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -71,4 +71,14 @@ Dependencies:
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-132-explicit-flake-branch
+
+2026-02-26 verification:
+- `nix develop -c cargo check` (packages/default) passed.
+- `nix develop -c cargo test handlers::api::flakes::tests` (packages/default) passed.
+- `nix develop -c cargo check` (packages/web-ui) passed.
+- `nix develop -c rustfmt --edition 2021 --config skip_children=true --check <touched-files>` passed.
+
+SQLx sync:
+- `nix develop -c cargo sqlx migrate run` applied migration `0082_add_branch_to_flakes.sql`.
+- `nix develop -c cargo sqlx prepare` completed and updated `.sqlx` metadata.
 <!-- SECTION:NOTES:END -->

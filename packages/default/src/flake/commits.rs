@@ -1,7 +1,7 @@
 use crate::config;
 use crate::models::commits::Commit;
 use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use tracing::{debug, info, warn};
 
@@ -251,6 +251,26 @@ pub async fn infer_default_branch(repo_url: &str) -> Result<String> {
 
     bail!("Unable to determine default branch for {repo_url}")
 }
+
+/// Check whether a specific branch exists on the remote repository.
+pub async fn branch_exists(repo_url: &str, branch: &str) -> Result<bool> {
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let branch_ref = format!("refs/heads/{branch}");
+    let output = tokio::process::Command::new("git")
+        .args(["ls-remote", "--heads", &git_url, &branch_ref])
+        .output()
+        .await
+        .with_context(|| format!("Failed to validate branch {branch} for {repo_url}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Git ls-remote failed for {repo_url}: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(!stdout.trim().is_empty())
+}
+
 fn normalize_repo_url_for_git(repo_url: &str) -> String {
     let base_url = if let Some(stripped) = repo_url.strip_prefix("git+") {
         stripped
