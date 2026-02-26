@@ -790,20 +790,7 @@ fn FlakesTable(
                                             "hover:bg-gray-800/40 transition cursor-pointer"
                                         },
                                         onclick: move |_| on_select_history_flake.call(flake.id),
-                                        td {
-                                            class: "{theme::spacing::TABLE_CELL} text-sm text-white",
-                                            div {
-                                                class: "flex items-center gap-2",
-                                                span { "{flake.name}" }
-                                                if is_selected {
-                                                    span {
-                                                        class: "inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide text-blue-100",
-                                                        style: "background-color: #2A3A57; border-color: #7AA2E3;",
-                                                        "Selected"
-                                                    }
-                                                }
-                                            }
-                                        }
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{flake.repo_url}" }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
@@ -874,13 +861,6 @@ fn FlakeCard(
                 div {
                     h3 { class: "text-lg font-semibold text-white", "{flake.name}" }
                     p { class: "text-xs text-gray-300 mt-1 font-mono", "{flake.repo_url}" }
-                }
-                if is_selected {
-                    span {
-                        class: "inline-flex items-center px-2.5 py-1 rounded-full border text-[10px] font-semibold uppercase tracking-wide text-blue-100",
-                        style: "background-color: #2A3A57; border-color: #7AA2E3;",
-                        "Selected"
-                    }
                 }
             }
             div {
