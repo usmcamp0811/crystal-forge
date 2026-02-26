@@ -1,10 +1,10 @@
 ---
 id: TASK-129
 title: Improve Flakes View - Remove Filter Dropdown & Add File-Level Diff Navigation
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-25 22:45'
-updated_date: '2026-02-26 05:19'
+updated_date: '2026-02-26 08:08'
 labels:
   - ui
   - flakes-view
@@ -152,4 +152,5 @@ Improve the flakes view by:
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on gray in ~/code/crystal-forge/TASK-129-improve-flakes-view-file-level-diff
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/137
 <!-- SECTION:NOTES:END -->
