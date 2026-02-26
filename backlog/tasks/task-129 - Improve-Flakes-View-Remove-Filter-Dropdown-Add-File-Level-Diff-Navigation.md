@@ -1,31 +1,21 @@
 ---
 id: TASK-129
 title: Improve Flakes View - Remove Filter Dropdown & Add File-Level Diff Navigation
-status: Backlog
+status: Review
 assignee: []
 created_date: '2026-02-25 22:45'
-labels: [ui, flakes-view, ux-improvement]
-dependencies: [TASK-124]
+updated_date: '2026-02-26 08:08'
+labels:
+  - ui
+  - flakes-view
+  - ux-improvement
+dependencies:
+  - TASK-124
 ---
-
-## Problem
-
-The current flakes view has two UX issues:
-
-1. **Filter dropdown for flake selection** - There's a dropdown in the git history section that lets you select which flake's history to view. This is awkward and not intuitive.
-
-2. **Continuous scroll diff** - The git diff shows all files in one long continuous scroll, which makes it hard to navigate when many files are changed.
-
-## Goal
-
-Improve the flakes view by:
-1. Making the flake selection intuitive (click flake in table/cards to see its git history)
-2. Adding file-level navigation for diffs (show list of changed files, click to drill down)
 
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-
 ### Current State
 
 The flakes view currently has:
@@ -142,5 +132,25 @@ The flakes view currently has:
    - Show file entries with stats
    - Handle file selection
 4. Update diff viewer to filter by selected file
-
 <!-- SECTION:DESCRIPTION:END -->
+
+## Problem
+
+The current flakes view has two UX issues:
+
+1. **Filter dropdown for flake selection** - There's a dropdown in the git history section that lets you select which flake's history to view. This is awkward and not intuitive.
+
+2. **Continuous scroll diff** - The git diff shows all files in one long continuous scroll, which makes it hard to navigate when many files are changed.
+
+## Goal
+
+Improve the flakes view by:
+1. Making the flake selection intuitive (click flake in table/cards to see its git history)
+2. Adding file-level navigation for diffs (show list of changed files, click to drill down)
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on gray in ~/code/crystal-forge/TASK-129-improve-flakes-view-file-level-diff
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/137
+<!-- SECTION:NOTES:END -->
