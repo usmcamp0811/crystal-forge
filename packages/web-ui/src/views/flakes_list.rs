@@ -12,15 +12,17 @@ use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
+use web_sys::{Node, window};
 
 use crate::api::client::{
     create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,
-    request_sync_all_flakes, request_sync_flake,
+    request_sync_all_flakes, request_sync_flake, update_flake,
 };
-use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{
+    CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
+};
 use crate::components::layout::Card;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
@@ -368,19 +370,38 @@ pub fn FlakesListView() -> Element {
 
                                 match sync_result {
                                     Ok(response) => {
-                                        if let Ok(items) = fetch_flakes().await {
-                                            flakes_signal.set(
-                                                items
-                                                    .into_iter()
-                                                    .map(FlakeListItem::from_registry)
-                                                    .collect(),
-                                            );
+                                        let mut refresh_warning = false;
+                                        match fetch_flakes().await {
+                                            Ok(items) => {
+                                                flakes_signal.set(
+                                                    items
+                                                        .into_iter()
+                                                        .map(FlakeListItem::from_registry)
+                                                        .collect(),
+                                                );
+                                            }
+                                            Err(_) => {
+                                                refresh_warning = true;
+                                            }
                                         }
-                                        if let Ok(timelines) = fetch_flake_timelines().await {
-                                            timelines_signal.set(timelines);
+                                        match fetch_flake_timelines().await {
+                                            Ok(timelines) => {
+                                                timelines_signal.set(timelines);
+                                            }
+                                            Err(_) => {
+                                                refresh_warning = true;
+                                            }
                                         }
                                         last_manual_sync.set(Some(Utc::now()));
-                                        sync_note.set(Some(response.message));
+                                        let message = if refresh_warning {
+                                            format!(
+                                                "{} UI refresh was partial; reload if data looks stale.",
+                                                response.message
+                                            )
+                                        } else {
+                                            response.message
+                                        };
+                                        sync_note.set(Some(message));
                                     }
                                     Err(_error) => {
                                         let mut next = flakes_signal.read().clone();
@@ -392,11 +413,16 @@ pub fn FlakesListView() -> Element {
                                         };
                                         flakes_signal.set(next);
                                         last_manual_sync.set(Some(Utc::now()));
-                                        sync_note.set(Some(format!(
-                                            "Polled {} flakes from source ({} updated).",
-                                            flakes_signal.read().len(),
-                                            changed
-                                        )));
+                                        let fallback_message = if selected_flake_id.is_some() {
+                                            format!("Polled selected flake from source ({changed} updated).")
+                                        } else {
+                                            format!(
+                                                "Polled {} flakes from source ({} updated).",
+                                                flakes_signal.read().len(),
+                                                changed
+                                            )
+                                        };
+                                        sync_note.set(Some(fallback_message));
                                     }
                                 }
                             });
@@ -579,15 +605,36 @@ pub fn FlakesListView() -> Element {
                             return;
                         }
 
-                        let mut values = flakes.read().clone();
-                        if let Some(target) = values.iter_mut().find(|item| item.id == next.id) {
-                            target.name = next.name.trim().to_string();
-                            target.repo_url = next.repo_url.trim().to_string();
-                        }
-                        values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        flakes.set(values);
-                        editing_flake.set(None);
-                        edit_error.set(None);
+                        let mut flakes = flakes.clone();
+                        let mut editing_flake = editing_flake.clone();
+                        let mut edit_error = edit_error.clone();
+                        let mut server_notice = server_notice.clone();
+                        spawn(async move {
+                            let request = UpdateFlakeRequest {
+                                name: next.name.trim().to_string(),
+                                repo_url: next.repo_url.trim().to_string(),
+                            };
+
+                            match update_flake(next.id, &request).await {
+                                Ok(updated) => {
+                                    let mut values = flakes.read().clone();
+                                    if let Some(target) = values.iter_mut().find(|item| item.id == updated.id)
+                                    {
+                                        target.name = updated.name;
+                                        target.repo_url = updated.repo_url;
+                                        target.system_count = updated.system_count.max(0) as usize;
+                                    }
+                                    values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    flakes.set(values);
+                                    editing_flake.set(None);
+                                    edit_error.set(None);
+                                    server_notice.set(None);
+                                }
+                                Err(error) => {
+                                    edit_error.set(Some(error.to_string()));
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -962,7 +1009,7 @@ fn FlakeHistoryExplorer(
     timelines: Vec<FlakeTimeline>,
 ) -> Element {
     let history = build_flake_history(&timelines);
-    
+
     // Cache for loaded commit diffs
     let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
     // Track current active commit hash to force re-render when diff loads
@@ -996,40 +1043,57 @@ fn FlakeHistoryExplorer(
         .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
         .map(|commit| commit.clone())
         .or_else(|| commits.first().cloned());
-    
+
     // Load diff for the active commit if not already loaded
     // We read the signal INSIDE use_effect so it tracks the dependency
     {
         let loaded_diffs = loaded_diffs.clone();
         let current_key = current_commit_key.clone();
-        
+
         use_effect(move || {
             // Read signals inside the effect so it re-runs when they change
             let selected_hash = selected_commit_hash.read().clone();
             let flake_id = active_flake.id;
-            
+
             if let Some(commit_hash) = &selected_hash {
                 let key = (flake_id, commit_hash.clone());
                 let already_loaded = loaded_diffs.read().contains_key(&key);
-                
+
                 #[cfg(target_arch = "wasm32")]
-                console::log_1(&format!("Effect running - hash: {}, loaded: {}", &commit_hash[..7.min(commit_hash.len())], already_loaded).into());
-                
+                console::log_1(
+                    &format!(
+                        "Effect running - hash: {}, loaded: {}",
+                        &commit_hash[..7.min(commit_hash.len())],
+                        already_loaded
+                    )
+                    .into(),
+                );
+
                 if !already_loaded {
                     let commit_hash = commit_hash.clone();
                     let flake_id = flake_id;
                     let mut loaded_diffs_inner = loaded_diffs.clone();
                     let mut current_key_inner = current_key.clone();
-                    
+
                     #[cfg(target_arch = "wasm32")]
-                    console::log_1(&format!("Fetching diff for {}...", &commit_hash[..7.min(commit_hash.len())]).into());
-                    
+                    console::log_1(
+                        &format!(
+                            "Fetching diff for {}...",
+                            &commit_hash[..7.min(commit_hash.len())]
+                        )
+                        .into(),
+                    );
+
                     spawn(async move {
                         match fetch_commit_diff(flake_id, &commit_hash).await {
                             Ok(response) => {
                                 #[cfg(target_arch = "wasm32")]
-                                console::log_1(&format!("Diff loaded! {} bytes", response.diff.len()).into());
-                                loaded_diffs_inner.write().insert(key.clone(), response.diff);
+                                console::log_1(
+                                    &format!("Diff loaded! {} bytes", response.diff.len()).into(),
+                                );
+                                loaded_diffs_inner
+                                    .write()
+                                    .insert(key.clone(), response.diff);
                                 current_key_inner.set(key);
                             }
                             Err(e) => {
@@ -1037,7 +1101,7 @@ fn FlakeHistoryExplorer(
                                 console::log_1(&format!("Error: {}", e).into());
                                 loaded_diffs_inner.write().insert(
                                     key.clone(),
-                                    format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash)
+                                    format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash),
                                 );
                                 current_key_inner.set(key);
                             }
@@ -1047,7 +1111,7 @@ fn FlakeHistoryExplorer(
             }
         });
     }
-    
+
     // Update active_commit with loaded diff if available
     let active_commit = if let Some(commit) = active_commit.clone() {
         let key = (active_flake.id, commit.hash.clone());
@@ -1066,7 +1130,7 @@ fn FlakeHistoryExplorer(
     } else {
         None
     };
-    
+
     let active_repo = active_flake.repo_url.clone();
     let history_title = format!("Git Commit History - {}", active_flake.name);
     let flake_sync_label = active_flake
@@ -1253,7 +1317,7 @@ fn FriendlyDiffViewer(diff: String) -> Element {
             }
         };
     }
-    
+
     let parsed_files = parse_unified_diff(&diff);
     if parsed_files.is_empty() {
         return rsx! {
@@ -2180,12 +2244,15 @@ fn sync_single_flake_registry(
     flake_id: i32,
 ) -> usize {
     let now = Utc::now();
-    let latest = timelines.iter().find(|timeline| timeline.flake_id == flake_id).and_then(|timeline| {
-        timeline
-            .commits
-            .first()
-            .map(|commit| commit.hash.chars().take(7).collect::<String>())
-    });
+    let latest = timelines
+        .iter()
+        .find(|timeline| timeline.flake_id == flake_id)
+        .and_then(|timeline| {
+            timeline
+                .commits
+                .first()
+                .map(|commit| commit.hash.chars().take(7).collect::<String>())
+        });
 
     let Some(flake) = flakes.iter_mut().find(|flake| flake.id == flake_id) else {
         return 0;

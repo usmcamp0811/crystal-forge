@@ -207,7 +207,9 @@ pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) 
                 .with_context(|| format!("Failed to load last commit for {repo_url}"))?;
             let inserted = fetch_and_insert_commits_since(pool, repo_url, branch, &last_commit)
                 .await
-                .with_context(|| format!("Failed to sync commits since last known hash for {repo_url}"))?;
+                .with_context(|| {
+                    format!("Failed to sync commits since last known hash for {repo_url}")
+                })?;
             Ok(inserted.len())
         }
         Ok(false) => {
@@ -218,6 +220,36 @@ pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) 
         }
         Err(e) => Err(e).with_context(|| format!("Failed to inspect commit state for {repo_url}")),
     }
+}
+
+/// Resolve the remote default branch name for a repository.
+pub async fn infer_default_branch(repo_url: &str) -> Result<String> {
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let output = tokio::process::Command::new("git")
+        .args(["ls-remote", "--symref", &git_url, "HEAD"])
+        .output()
+        .await
+        .with_context(|| format!("Failed to probe default branch for {repo_url}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Git ls-remote failed for {repo_url}: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(target) = line
+            .strip_prefix("ref: refs/heads/")
+            .and_then(|value| value.split('\t').next())
+        {
+            let branch = target.trim();
+            if !branch.is_empty() {
+                return Ok(branch.to_string());
+            }
+        }
+    }
+
+    bail!("Unable to determine default branch for {repo_url}")
 }
 
 fn normalize_repo_url_for_git(repo_url: &str) -> String {
@@ -393,15 +425,11 @@ pub async fn fetch_and_insert_commits_since(
 /// Get the git diff for a specific commit.
 /// Returns the full unified diff output from `git show`.
 /// Tries multiple common branch names if the specified branch doesn't work.
-pub async fn get_commit_diff(
-    repo_url: &str,
-    branch: &str,
-    commit_hash: &str,
-) -> Result<String> {
+pub async fn get_commit_diff(repo_url: &str, branch: &str, commit_hash: &str) -> Result<String> {
     let git_url = normalize_repo_url_for_git(repo_url);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
-    
+
     // Try the specified branch first, then fall back to common branch names
     let branches_to_try = vec![
         branch.to_string(),
@@ -409,17 +437,22 @@ pub async fn get_commit_diff(
         "master".to_string(),
         "HEAD".to_string(),
     ];
-    
+
     for branch_to_try in branches_to_try.iter() {
-        let result = try_get_diff_for_branch(&git_url, clone_path, branch_to_try, commit_hash).await;
+        let result =
+            try_get_diff_for_branch(&git_url, clone_path, branch_to_try, commit_hash).await;
         if let Ok(diff) = result {
             return Ok(diff);
         }
     }
-    
+
     // If all branches fail, return an error
     let branch_list = branches_to_try.join(", ");
-    bail!("Could not find commit {} in any branch (tried: {})", commit_hash, branch_list)
+    bail!(
+        "Could not find commit {} in any branch (tried: {})",
+        commit_hash,
+        branch_list
+    )
 }
 
 async fn try_get_diff_for_branch(
@@ -432,7 +465,8 @@ async fn try_get_diff_for_branch(
     let clone_output = tokio::process::Command::new("git")
         .args(&[
             "clone",
-            "--depth", "50", // Get enough depth to potentially find the commit
+            "--depth",
+            "50", // Get enough depth to potentially find the commit
             "--branch",
             branch,
             "--single-branch",
@@ -474,11 +508,7 @@ async fn try_get_diff_for_branch(
 
         // Retry git show
         let retry_output = tokio::process::Command::new("git")
-            .args(&[
-                "show",
-                "--format=",
-                commit_hash,
-            ])
+            .args(&["show", "--format=", commit_hash])
             .current_dir(clone_path)
             .output()
             .await?;

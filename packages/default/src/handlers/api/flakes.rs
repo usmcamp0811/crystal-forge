@@ -8,13 +8,16 @@ use axum::response::IntoResponse;
 use sqlx::PgPool;
 use tracing::error;
 
-use crate::api::models::{ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{
+    ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
+    UpdateFlakeRequest,
+};
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
-use crate::flake::commits::{get_commit_diff, sync_commits_for_repo};
-use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::flake::commits::{get_commit_diff, infer_default_branch, sync_commits_for_repo};
+use crate::handlers::api::rbac::require_viewer_or_above;
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id,
-    get_flake_by_name, insert_flake, list_flake_registry,
+    get_flake_by_name, insert_flake, list_flake_registry, update_flake,
 };
 
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
@@ -96,8 +99,10 @@ pub async fn get_commit_diff_handler(
         }
     };
 
+    let branch = resolve_sync_branch(&flake.repo_url).await;
+
     // Fetch the diff from git
-    match get_commit_diff(&flake.repo_url, "main", &commit_hash).await {
+    match get_commit_diff(&flake.repo_url, &branch, &commit_hash).await {
         Ok(diff) => (
             StatusCode::OK,
             Json(CommitDiffResponse {
@@ -127,13 +132,8 @@ pub async fn get_commit_diff_handler(
 pub async fn create_flake(
     RequireOperator(_user): RequireOperator,
     State(pool): State<PgPool>,
-    headers: HeaderMap,
     Json(payload): Json<CreateFlakeRequest>,
 ) -> impl IntoResponse {
-    if require_operator_or_admin(&pool, &headers).await.is_none() {
-        return forbidden();
-    }
-
     if let Err(message) = validate_create_payload(&payload) {
         return (
             StatusCode::BAD_REQUEST,
@@ -148,6 +148,18 @@ pub async fn create_flake(
 
     let name = payload.name.trim();
     let repo_url = payload.repo_url.trim();
+
+    if let Err(message) = validate_repo_url_reachable(repo_url).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message,
+                details: None,
+            }),
+        )
+            .into_response();
+    }
 
     match get_flake_by_name(&pool, name).await {
         Ok(existing) if !existing.repo_url.eq_ignore_ascii_case(repo_url) => {
@@ -207,19 +219,106 @@ pub async fn create_flake(
     }
 }
 
+/// Update an existing flake in the registry.
+///
+/// **Authorization**: Requires Operator or Admin role (write operation).
+pub async fn update_flake_handler(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+    Json(payload): Json<UpdateFlakeRequest>,
+) -> impl IntoResponse {
+    if let Err(message) = validate_update_payload(&payload) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message,
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let name = payload.name.trim();
+    let repo_url = payload.repo_url.trim();
+
+    if let Err(message) = validate_repo_url_reachable(repo_url).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message,
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    match update_flake(&pool, flake_id, name, repo_url).await {
+        Ok(flake) => (
+            StatusCode::OK,
+            Json(FlakeRegistryItem {
+                id: flake.id,
+                name: flake.name,
+                repo_url: flake.repo_url,
+                system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::RowNotFound)
+            ) {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ApiError {
+                        error: "not_found".to_string(),
+                        message: "Flake not found".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505")
+            ) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ApiError {
+                        error: "conflict".to_string(),
+                        message: "Repository URL already exists in the registry".to_string(),
+                        details: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            error!("Failed to update flake: {e:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to update flake".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// Delete a flake from the registry.
 ///
 /// **Authorization**: Requires Admin role (destructive operation).
 pub async fn delete_flake(
     RequireAdmin(_user): RequireAdmin,
     State(pool): State<PgPool>,
-    headers: HeaderMap,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {
-    if require_operator_or_admin(&pool, &headers).await.is_none() {
-        return forbidden();
-    }
-
     match count_systems_for_flake(&pool, flake_id).await {
         Ok(system_count) if system_count > 0 => {
             return (
@@ -281,12 +380,7 @@ pub async fn delete_flake(
 pub async fn sync_all_flakes_handler(
     RequireOperator(_user): RequireOperator,
     State(pool): State<PgPool>,
-    headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_operator_or_admin(&pool, &headers).await.is_none() {
-        return forbidden();
-    }
-
     let flakes = match list_flake_registry(&pool).await {
         Ok(flakes) => flakes,
         Err(e) => {
@@ -303,16 +397,28 @@ pub async fn sync_all_flakes_handler(
         }
     };
 
+    let attempted = flakes.len();
     let mut synced = 0usize;
     let mut inserted = 0usize;
+    let mut failed = Vec::new();
     for flake in flakes {
-        match sync_commits_for_repo(&pool, &flake.repo_url, "main").await {
+        let branch = resolve_sync_branch(&flake.repo_url).await;
+        match sync_commits_for_repo(&pool, &flake.repo_url, &branch).await {
             Ok(new_commits) => {
                 synced += 1;
                 inserted += new_commits;
             }
             Err(e) => {
-                error!("Failed syncing flake {} ({}): {e:#}", flake.name, flake.repo_url);
+                error!(
+                    "Failed syncing flake {} ({}): {e:#}",
+                    flake.name, flake.repo_url
+                );
+                failed.push(serde_json::json!({
+                    "id": flake.id,
+                    "name": flake.name,
+                    "repo_url": flake.repo_url,
+                    "error": e.to_string(),
+                }));
             }
         }
     }
@@ -320,11 +426,14 @@ pub async fn sync_all_flakes_handler(
     (
         StatusCode::OK,
         Json(serde_json::json!({
-            "status": "ok",
+            "status": if failed.is_empty() { "ok" } else { "partial" },
             "message": format!(
-                "Synced {} flakes from source ({} new commits).",
-                synced, inserted
-            )
+                "Synced {synced}/{attempted} flakes from source ({inserted} new commits)."
+            ),
+            "attempted": attempted,
+            "succeeded": synced,
+            "failed_count": failed.len(),
+            "failed": failed,
         })),
     )
         .into_response()
@@ -336,13 +445,8 @@ pub async fn sync_all_flakes_handler(
 pub async fn sync_flake_handler(
     RequireOperator(_user): RequireOperator,
     State(pool): State<PgPool>,
-    headers: HeaderMap,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {
-    if require_operator_or_admin(&pool, &headers).await.is_none() {
-        return forbidden();
-    }
-
     let flake = match get_flake_by_id(&pool, flake_id).await {
         Ok(flake) => flake,
         Err(_) => {
@@ -358,20 +462,26 @@ pub async fn sync_flake_handler(
         }
     };
 
-    match sync_commits_for_repo(&pool, &flake.repo_url, "main").await {
+    let branch = resolve_sync_branch(&flake.repo_url).await;
+
+    match sync_commits_for_repo(&pool, &flake.repo_url, &branch).await {
         Ok(new_commits) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "status": "ok",
                 "message": format!(
-                    "Synced {} from source ({} new commits).",
-                    flake.name, new_commits
-                )
+                    "Synced {} from source on {} ({} new commits).",
+                    flake.name, branch, new_commits
+                ),
+                "branch": branch,
             })),
         )
             .into_response(),
         Err(e) => {
-            error!("Failed syncing flake {} ({}): {e:#}", flake.name, flake.repo_url);
+            error!(
+                "Failed syncing flake {} ({}): {e:#}",
+                flake.name, flake.repo_url
+            );
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
@@ -383,18 +493,6 @@ pub async fn sync_flake_handler(
                 .into_response()
         }
     }
-}
-
-fn forbidden() -> axum::response::Response {
-    (
-        StatusCode::FORBIDDEN,
-        Json(ApiError {
-            error: "forbidden".to_string(),
-            message: "Admin or operator privileges are required".to_string(),
-            details: None,
-        }),
-    )
-        .into_response()
 }
 
 fn forbidden_viewer() -> axum::response::Response {
@@ -426,6 +524,34 @@ fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_update_payload(payload: &UpdateFlakeRequest) -> Result<(), String> {
+    let create_payload = CreateFlakeRequest {
+        name: payload.name.clone(),
+        repo_url: payload.repo_url.clone(),
+    };
+    validate_create_payload(&create_payload)
+}
+
+async fn validate_repo_url_reachable(repo_url: &str) -> Result<(), String> {
+    infer_default_branch(repo_url)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Repository URL is not reachable as a git remote: {e}"))
+}
+
+async fn resolve_sync_branch(repo_url: &str) -> String {
+    match infer_default_branch(repo_url).await {
+        Ok(branch) => branch,
+        Err(e) => {
+            error!(
+                "Failed to resolve default branch for {} (falling back to main): {e:#}",
+                repo_url
+            );
+            "main".to_string()
+        }
+    }
+}
+
 fn looks_like_repo_url(value: &str) -> bool {
     let lower = value.to_lowercase();
     lower.starts_with("https://")
@@ -438,10 +564,6 @@ fn looks_like_repo_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::auth_identity::AuthRole;
-    use axum::extract::State;
-    use axum::response::IntoResponse;
-    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn create_payload_requires_name() {
@@ -481,26 +603,4 @@ mod tests {
         };
         assert!(validate_create_payload(&payload).is_ok());
     }
-
-    #[test]
-    fn require_operator_or_admin_checks_role_membership() {
-        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
-            AuthRole::Operator,
-        ]));
-        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
-            AuthRole::Admin
-        ]));
-        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
-            AuthRole::Viewer,
-            AuthRole::Operator,
-        ]));
-        assert!(!crate::handlers::api::rbac::has_operator_or_admin_role(&[
-            AuthRole::Viewer,
-        ]));
-    }
-
-    // NOTE: Authorization tests for create_flake, delete_flake moved to extractor-level tests
-    // in auth/extractors.rs. These handlers now use RequireOperator and RequireAdmin extractors
-    // which enforce authorization before the handler is called, so unit tests at this level
-    // cannot test authorization behavior. Integration tests should test the full request path.
 }
