@@ -1,9 +1,10 @@
 ---
 id: TASK-133
 title: Improve flake timeline cards with commit message + better author display
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-26 22:12'
+updated_date: '2026-02-26 22:40'
 labels: []
 dependencies: []
 ---
