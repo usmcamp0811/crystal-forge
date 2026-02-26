@@ -5,21 +5,21 @@ use uuid::Uuid;
 
 use crate::components::environments::{
     AddEnvironmentForm, EditEnvironmentDraft, EditEnvironmentModal, EditRequirementsModal,
-    EnvironmentCard, EnvironmentItem, NewEnvironmentDraft, PolicyOption, PolicyPickerModal,
+    EnvironmentCard, EnvironmentItem, NewEnvironmentDraft, PolicyPickerModal,
     RemoveEnvironmentDialog, environment_name_for_id, normalize_color_hex, normalize_optional,
     policy_library, required_agent_policy_id, validate_environment, validate_environment_edit,
 };
 use crate::environments::adapter::{
     create_environment_via_api, delete_environment_via_api, load_environments_with_fallback,
-    update_environment_policies_via_api, update_environment_via_api,
+    load_policies_with_fallback, update_environment_policies_via_api, update_environment_via_api,
 };
 use crate::routes::Route;
 use crate::theme;
 
 #[component]
 pub fn EnvironmentsListView() -> Element {
-    let policy_library = policy_library();
-    let default_required_policy = required_agent_policy_id(&policy_library);
+    let mut policy_library_state = use_signal(policy_library);
+    let default_required_policy = required_agent_policy_id(&policy_library_state.read());
 
     // Seed initial state from the backend API; fall back to deterministic mock
     // on error. The rest of the component's local-state CRUD (add/edit/remove)
@@ -33,9 +33,11 @@ pub fn EnvironmentsListView() -> Element {
 
     use_effect(move || {
         spawn(async move {
-            let result = load_environments_with_fallback(default_required_policy).await;
+            let policies_result = load_policies_with_fallback().await;
+            let effective_default_policy = required_agent_policy_id(&policies_result.policies);
+            let result = load_environments_with_fallback(effective_default_policy).await;
 
-            if result.redirect_to_login {
+            if result.redirect_to_login || policies_result.redirect_to_login {
                 redirect_to_login.set(true);
                 loading.set(false);
                 return;
@@ -45,7 +47,16 @@ pub fn EnvironmentsListView() -> Element {
             items.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 
             environments.set(items);
-            api_notice.set(result.notice);
+            policy_library_state.set(policies_result.policies);
+
+            let merged_notice = match (result.notice, policies_result.notice) {
+                (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+
+            api_notice.set(merged_notice);
             loading.set(false);
         });
     });
@@ -78,7 +89,7 @@ pub fn EnvironmentsListView() -> Element {
     let mut edit_error = use_signal(|| None::<String>);
 
     let items = environments.read().clone();
-    let policy_library_for_add = policy_library.clone();
+    let policy_library_for_add = policy_library_state.read().clone();
 
     rsx! {
         div {
@@ -132,7 +143,7 @@ pub fn EnvironmentsListView() -> Element {
                 AddEnvironmentForm {
                     draft: draft.clone(),
                     error: add_error.clone(),
-                    policy_library: policy_library.clone(),
+                    policy_library: policy_library_state.read().clone(),
                     default_required_policy,
                     on_cancel: move |_| {
                         draft.set(NewEnvironmentDraft {
@@ -195,7 +206,7 @@ pub fn EnvironmentsListView() -> Element {
                 PolicyPickerModal {
                     title: "Choose Required Policies".to_string(),
                     current_ids: draft.read().required_policy_ids.clone(),
-                    policy_library: policy_library.clone(),
+                    policy_library: policy_library_state.read().clone(),
                     on_apply: move |ids| {
                         let mut next = draft.read().clone();
                         next.required_policy_ids = ids;
@@ -212,7 +223,7 @@ pub fn EnvironmentsListView() -> Element {
                 for env in items {
                     EnvironmentCard {
                         environment: env.clone(),
-                        policy_library: policy_library.clone(),
+                        policy_library: policy_library_state.read().clone(),
                         on_edit_meta: move |e: EnvironmentItem| {
                             editing_environment_meta.set(Some(EditEnvironmentDraft {
                                 id: e.id,
@@ -238,7 +249,7 @@ pub fn EnvironmentsListView() -> Element {
             if let Some(env_id) = editing_environment.read().clone() {
                 EditRequirementsModal {
                     environment_name: environment_name_for_id(env_id, &environments.read()),
-                    policy_library: policy_library.clone(),
+                    policy_library: policy_library_state.read().clone(),
                     selected_policy_ids: editing_required_policy_ids.clone(),
                     error: edit_error.clone(),
                     on_close: move |_| {

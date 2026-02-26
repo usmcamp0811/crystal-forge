@@ -385,6 +385,17 @@ pub struct EnvironmentSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentWithPolicies {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+    pub system_count: i64,
+    pub required_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,
@@ -403,6 +414,16 @@ pub struct UpdateEnvironmentRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateEnvironmentPoliciesRequest {
     pub required_policy_ids: Vec<uuid::Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPolicySummary {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -329,7 +329,11 @@ pub async fn update_environment_policies_handler(
                 }
                 Err(e) => {
                     tracing::error!("Failed to update environment policies: {}", e);
-                    internal_error("Failed to update environment policies")
+                    if is_foreign_key_violation(&e) {
+                        bad_request("One or more selected policies are invalid")
+                    } else {
+                        internal_error("Failed to update environment policies")
+                    }
                 }
             }
         }
@@ -355,6 +359,13 @@ fn is_unique_violation(err: &anyhow::Error) -> bool {
         .and_then(|sqlx_err| sqlx_err.as_database_error())
         .and_then(|db_err| db_err.code())
         .is_some_and(|code| code == "23505")
+}
+
+fn is_foreign_key_violation(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<SqlxError>()
+        .and_then(|sqlx_err| sqlx_err.as_database_error())
+        .and_then(|db_err| db_err.code())
+        .is_some_and(|code| code == "23503")
 }
 
 fn looks_like_hex_color(value: &str) -> bool {

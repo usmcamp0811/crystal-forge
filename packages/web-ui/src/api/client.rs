@@ -132,6 +132,14 @@ pub async fn fetch_environment(id: &uuid::Uuid) -> Result<EnvironmentSummary, Ap
     fetch_json(&url).await
 }
 
+/// Fetch a single environment with required policies.
+pub async fn fetch_environment_policies(
+    id: &uuid::Uuid,
+) -> Result<EnvironmentWithPolicies, ApiClientError> {
+    let url = format!("{}/environments/{}/policies", base_url(), id);
+    fetch_json(&url).await
+}
+
 /// Create an environment.
 pub async fn create_environment(
     request: &CreateEnvironmentRequest,
@@ -159,13 +167,20 @@ pub async fn update_environment(
 pub async fn update_environment_policies(
     id: &uuid::Uuid,
     required_policy_ids: &[uuid::Uuid],
-) -> Result<UpdateEnvironmentPoliciesRequest, ApiClientError> {
+) -> Result<(), ApiClientError> {
     use super::models::UpdateEnvironmentPoliciesRequest as Req;
     let url = format!("{}/environments/{}/policies", base_url(), id);
     let req = Req {
         required_policy_ids: required_policy_ids.to_vec(),
     };
-    send_json_with_csrf("PATCH", &url, Some(&req)).await
+    let _: serde_json::Value = send_json_with_csrf("PATCH", &url, Some(&req)).await?;
+    Ok(())
+}
+
+/// Fetch available deployment policies.
+pub async fn fetch_policies() -> Result<Vec<DeploymentPolicySummary>, ApiClientError> {
+    let url = format!("{}/policies", base_url());
+    fetch_json(&url).await
 }
 
 /// Fetch all flakes from registry.

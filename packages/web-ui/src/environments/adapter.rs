@@ -15,11 +15,11 @@
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_environment, delete_environment, fetch_environments, update_environment,
-    update_environment_policies,
+    ApiClientError, create_environment, delete_environment, fetch_environment_policies,
+    fetch_environments, fetch_policies, update_environment, update_environment_policies,
 };
 use crate::api::models::{CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest};
-use crate::components::environments::EnvironmentItem;
+use crate::components::environments::{EnvironmentItem, PolicyOption, policy_library as fallback_policy_library};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Result Types
@@ -44,6 +44,13 @@ pub struct EnvironmentNamesLoadResult {
     pub redirect_to_login: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct PoliciesLoadResult {
+    pub policies: Vec<PolicyOption>,
+    pub notice: Option<String>,
+    pub redirect_to_login: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Public Adapter Functions
 // ─────────────────────────────────────────────────────────────────────────────
@@ -59,10 +66,14 @@ pub async fn load_environments_with_fallback(
 ) -> EnvironmentsLoadResult {
     match fetch_environments().await {
         Ok(items) => {
-            let environments = items
-                .into_iter()
-                .map(|e| api_to_environment_item(e, default_required_policy))
-                .collect();
+            let mut environments = Vec::with_capacity(items.len());
+            for env in items {
+                let required_policy_ids = match fetch_environment_policies(&env.id).await {
+                    Ok(details) => details.required_policy_ids,
+                    Err(_) => vec![default_required_policy],
+                };
+                environments.push(api_to_environment_item(env, required_policy_ids));
+            }
 
             EnvironmentsLoadResult {
                 environments,
@@ -109,6 +120,42 @@ pub async fn load_environment_names_with_fallback() -> EnvironmentNamesLoadResul
             names: fallback_environment_names(),
             notice: Some(format!(
                 "Environments API unavailable for system form, using fallback names: {error}"
+            )),
+            redirect_to_login: false,
+        },
+    }
+}
+
+/// Fetch policy options from backend for environment requirements modal.
+pub async fn load_policies_with_fallback() -> PoliciesLoadResult {
+    match fetch_policies().await {
+        Ok(items) => {
+            let mut policies: Vec<PolicyOption> = items
+                .into_iter()
+                .filter(|p| p.enabled)
+                .map(|p| PolicyOption {
+                    id: p.id,
+                    name: p.name,
+                    description: p.description.unwrap_or_default(),
+                })
+                .collect();
+            policies.sort_by_key(|p| p.name.to_ascii_lowercase());
+
+            PoliciesLoadResult {
+                policies,
+                notice: None,
+                redirect_to_login: false,
+            }
+        }
+        Err(error) if should_redirect_to_login(&error) => PoliciesLoadResult {
+            policies: fallback_policy_library(),
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => PoliciesLoadResult {
+            policies: fallback_policy_library(),
+            notice: Some(format!(
+                "Policies API unavailable, using fallback policy list: {error}"
             )),
             redirect_to_login: false,
         },
@@ -172,12 +219,10 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
 /// well-known environment names (production, staging, development) get
 /// consistent colours. Unknown names fall back to a neutral grey.
 ///
-/// Policy requirements are not stored per environment in the current backend
-/// schema; the default agent policy is used as a placeholder until that
-/// feature is implemented.
+/// Policy requirements are provided by the policies endpoint and persisted server-side.
 pub fn api_to_environment_item(
     env: EnvironmentSummary,
-    default_required_policy: Uuid,
+    required_policy_ids: Vec<Uuid>,
 ) -> EnvironmentItem {
     EnvironmentItem {
         id: env.id,
@@ -185,7 +230,7 @@ pub fn api_to_environment_item(
         description: env.description,
         color_hex: env.color_hex,
         system_count: env.system_count as usize,
-        required_policy_ids: vec![default_required_policy],
+        required_policy_ids,
     }
 }
 
@@ -205,7 +250,7 @@ pub async fn create_environment_via_api(
     };
 
     match create_environment(&request).await {
-        Ok(env) => Ok(api_to_environment_item(env, default_required_policy)),
+        Ok(env) => Ok(api_to_environment_item(env, vec![default_required_policy])),
         Err(ApiClientError::Status { code: 401 | 403, .. }) => {
             Err("Authentication required. Please log in.".to_string())
         }
@@ -244,7 +289,13 @@ pub async fn update_environment_via_api(
     };
 
     match update_environment(&environment_id, &request).await {
-        Ok(env) => Ok(api_to_environment_item(env, default_required_policy)),
+        Ok(env) => {
+            let required_policy_ids = match fetch_environment_policies(&environment_id).await {
+                Ok(details) => details.required_policy_ids,
+                Err(_) => vec![default_required_policy],
+            };
+            Ok(api_to_environment_item(env, required_policy_ids))
+        }
         Err(ApiClientError::Status { code: 401 | 403, .. }) => {
             Err("Authentication required. Please log in.".to_string())
         }
@@ -345,7 +396,7 @@ mod tests {
             is_active: true,
             system_count: 6,
         };
-        let item = api_to_environment_item(summary, DEFAULT_POLICY);
+        let item = api_to_environment_item(summary, vec![DEFAULT_POLICY]);
         assert_eq!(item.id, Uuid::from_u128(999));
         assert_eq!(item.name, "production");
         assert_eq!(item.color_hex, "#0F766E");
@@ -363,7 +414,7 @@ mod tests {
             is_active: true,
             system_count: 0,
         };
-        let item = api_to_environment_item(summary, DEFAULT_POLICY);
+        let item = api_to_environment_item(summary, vec![DEFAULT_POLICY]);
         assert_eq!(item.color_hex, "#123456");
         assert!(item.description.is_none());
     }
