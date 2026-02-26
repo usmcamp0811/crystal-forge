@@ -40,6 +40,30 @@ pub async fn get_flake_by_id(pool: &PgPool, id: i32) -> Result<Flake> {
     Ok(commit)
 }
 
+pub async fn update_flake(
+    pool: &PgPool,
+    flake_id: i32,
+    name: &str,
+    repo_url: &str,
+) -> Result<Flake> {
+    let flake = sqlx::query_as::<_, Flake>(
+        r#"
+        UPDATE flakes
+        SET name = $1,
+            repo_url = $2
+        WHERE id = $3
+        RETURNING *
+        "#,
+    )
+    .bind(name)
+    .bind(repo_url)
+    .bind(flake_id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(flake)
+}
+
 pub async fn get_flake_id_by_repo_url(pool: &PgPool, repo_url: &str) -> Result<Option<i32>> {
     let flake_id = sqlx::query_scalar!("SELECT id FROM flakes WHERE repo_url = $1", repo_url)
         .fetch_optional(pool)
@@ -209,7 +233,7 @@ pub async fn fetch_flake_timelines(
             .map(|row| FlakeCommit {
                 hash: row.git_commit_hash,
                 message: "".to_string(), // We don't store commit messages in the database
-                author: "".to_string(),   // We don't store commit authors in the database
+                author: "".to_string(),  // We don't store commit authors in the database
                 committed_at: row.commit_timestamp,
                 system_count: row.system_count.unwrap_or(0),
                 commits_behind: row.commits_behind,
