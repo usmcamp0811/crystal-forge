@@ -13,10 +13,12 @@
 //! All HTTP interactions go through the functions in this module.
 
 use uuid::Uuid;
+use std::collections::HashMap;
 
 use crate::api::client::{
     ApiClientError, create_environment, delete_environment, fetch_environment_policies,
-    fetch_environments, fetch_policies, update_environment, update_environment_policies,
+    fetch_environment_policies_map, fetch_environments, fetch_policies, update_environment,
+    update_environment_policies,
 };
 use crate::api::models::{CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest};
 use crate::components::environments::{EnvironmentItem, PolicyOption, policy_library as fallback_policy_library};
@@ -57,23 +59,27 @@ pub struct PoliciesLoadResult {
 
 /// Fetch the environments list from the backend, with fallback to deterministic mock data.
 ///
-/// The `default_required_policy` is the ID of the "Require Crystal Forge Agent"
-/// policy, which is assigned to all environments by default when creating new ones.
-/// It is applied as the sole `required_policy_ids` for API-loaded environments
-/// (the backend does not yet store policy requirements per environment).
+/// The `default_required_policy` is used only for fallback data and create flows.
 pub async fn load_environments_with_fallback(
     default_required_policy: Uuid,
 ) -> EnvironmentsLoadResult {
-    match fetch_environments().await {
-        Ok(items) => {
-            let mut environments = Vec::with_capacity(items.len());
-            for env in items {
-                let required_policy_ids = match fetch_environment_policies(&env.id).await {
-                    Ok(details) => details.required_policy_ids,
-                    Err(_) => vec![default_required_policy],
-                };
-                environments.push(api_to_environment_item(env, required_policy_ids));
-            }
+    match (fetch_environments().await, fetch_environment_policies_map().await) {
+        (Ok(items), Ok(policy_map_entries)) => {
+            let policy_map: HashMap<Uuid, Vec<Uuid>> = policy_map_entries
+                .into_iter()
+                .map(|entry| (entry.environment_id, entry.required_policy_ids))
+                .collect();
+
+            let environments = items
+                .into_iter()
+                .map(|env| {
+                    let required_policy_ids = policy_map
+                        .get(&env.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    api_to_environment_item(env, required_policy_ids)
+                })
+                .collect();
 
             EnvironmentsLoadResult {
                 environments,
@@ -81,12 +87,12 @@ pub async fn load_environments_with_fallback(
                 redirect_to_login: false,
             }
         }
-        Err(error) if should_redirect_to_login(&error) => EnvironmentsLoadResult {
-            environments: fallback_environments(default_required_policy),
+        (Err(error), _) | (_, Err(error)) if should_redirect_to_login(&error) => EnvironmentsLoadResult {
+            environments: Vec::new(),
             notice: None,
             redirect_to_login: true,
         },
-        Err(error) => EnvironmentsLoadResult {
+        (Err(error), _) | (_, Err(error)) => EnvironmentsLoadResult {
             environments: fallback_environments(default_required_policy),
             notice: Some(format!(
                 "Environments API unavailable, using deterministic fallback data: {error}"

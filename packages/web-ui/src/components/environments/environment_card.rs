@@ -70,7 +70,7 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                 p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500", "Required Policies" }
                 p {
                     class: "text-[10px] text-amber-300/80",
-                    "Policy requirement persistence is not yet backed by server storage."
+                    "Policies are persisted server-side and inherited as environment baseline requirements."
                 }
                 div {
                     class: "flex flex-wrap gap-2",

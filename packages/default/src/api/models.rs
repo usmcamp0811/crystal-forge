@@ -380,6 +380,13 @@ pub struct EnvironmentWithPolicies {
     pub required_policy_ids: Vec<uuid::Uuid>,
 }
 
+/// Bulk mapping of environment IDs to required policies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentPolicyMapEntry {
+    pub environment_id: uuid::Uuid,
+    pub required_policy_ids: Vec<uuid::Uuid>,
+}
+
 /// Request payload for creating a flake registry entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlakeRequest {

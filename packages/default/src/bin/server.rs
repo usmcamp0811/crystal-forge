@@ -137,6 +137,10 @@ async fn main() -> anyhow::Result<()> {
             get(environments::list_environments).post(environments::create_environment),
         )
         .route(
+            "/api/v1/environments/policies-map",
+            get(environments::list_environment_policy_map_handler),
+        )
+        .route(
             "/api/v1/environments/:id",
             get(environments::get_environment)
                 .patch(environments::update_environment_handler)

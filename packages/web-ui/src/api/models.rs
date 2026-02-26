@@ -396,6 +396,12 @@ pub struct EnvironmentWithPolicies {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnvironmentPolicyMapEntry {
+    pub environment_id: Uuid,
+    pub required_policy_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CreateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,

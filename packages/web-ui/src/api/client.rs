@@ -140,6 +140,13 @@ pub async fn fetch_environment_policies(
     fetch_json(&url).await
 }
 
+/// Fetch required policy assignments for visible environments.
+pub async fn fetch_environment_policies_map(
+) -> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
+    let url = format!("{}/environments/policies-map", base_url());
+    fetch_json(&url).await
+}
+
 /// Create an environment.
 pub async fn create_environment(
     request: &CreateEnvironmentRequest,

@@ -1,4 +1,6 @@
-use crate::api::models::{DeploymentPolicySummary, EnvironmentSummary, EnvironmentWithPolicies};
+use crate::api::models::{
+    DeploymentPolicySummary, EnvironmentPolicyMapEntry, EnvironmentSummary, EnvironmentWithPolicies,
+};
 use crate::config::EnvironmentConfig;
 use crate::models::environments::Environment;
 use anyhow::Result;
@@ -359,6 +361,60 @@ pub async fn get_environment_required_policy_ids(
     .await?;
 
     Ok(rows)
+}
+
+/// Get required policy IDs for all environments visible to the caller.
+pub async fn list_environment_policy_map_for_user(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+) -> Result<Vec<EnvironmentPolicyMapEntry>> {
+    let rows: Vec<(Uuid, Vec<Uuid>)> = if user_id.is_none() {
+        sqlx::query_as::<_, (Uuid, Vec<Uuid>)>(
+            r#"
+            SELECT
+                e.id AS environment_id,
+                COALESCE(
+                    array_agg(DISTINCT ep.policy_id) FILTER (WHERE ep.policy_id IS NOT NULL),
+                    ARRAY[]::uuid[]
+                ) AS required_policy_ids
+            FROM environments e
+            LEFT JOIN environment_policies ep ON ep.environment_id = e.id
+            GROUP BY e.id
+            ORDER BY e.id
+            "#,
+        )
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, (Uuid, Vec<Uuid>)>(
+            r#"
+            SELECT
+                e.id AS environment_id,
+                COALESCE(
+                    array_agg(DISTINCT ep.policy_id) FILTER (WHERE ep.policy_id IS NOT NULL),
+                    ARRAY[]::uuid[]
+                ) AS required_policy_ids
+            FROM environments e
+            JOIN user_environment_memberships uem
+              ON uem.environment_id = e.id
+             AND uem.user_id = $1
+            LEFT JOIN environment_policies ep ON ep.environment_id = e.id
+            GROUP BY e.id
+            ORDER BY e.id
+            "#,
+        )
+        .bind(user_id.unwrap())
+        .fetch_all(pool)
+        .await?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|(environment_id, required_policy_ids)| EnvironmentPolicyMapEntry {
+            environment_id,
+            required_policy_ids,
+        })
+        .collect())
 }
 
 /// Get an environment with its required policies (baseline).

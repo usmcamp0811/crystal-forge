@@ -31,8 +31,8 @@ use crate::models::auth_identity::AuthRole;
 use crate::queries::environments::{
     count_systems_in_environment, create_environment as create_environment_row, delete_environment,
     find_environment_for_user, get_environment_required_policy_ids, get_environment_with_policies,
-    list_deployment_policies, list_environments_for_user, set_environment_required_policies,
-    update_environment_metadata,
+    list_deployment_policies, list_environment_policy_map_for_user, list_environments_for_user,
+    set_environment_required_policies, update_environment_metadata,
 };
 
 /// `GET /api/v1/environments`
@@ -273,6 +273,29 @@ pub async fn list_policies_handler(
     match list_deployment_policies(&pool).await {
         Ok(policies) => (StatusCode::OK, Json(policies)).into_response(),
         Err(_) => internal_error("Failed to load policies"),
+    }
+}
+
+/// `GET /api/v1/environments/policies`
+///
+/// Returns policy assignments for all environments visible to the authenticated user.
+pub async fn list_environment_policy_map_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let scoped_user_id = if has_admin_role(&roles) {
+        None
+    } else {
+        Some(user_id)
+    };
+
+    match list_environment_policy_map_for_user(&pool, scoped_user_id).await {
+        Ok(items) => (StatusCode::OK, Json(items)).into_response(),
+        Err(_) => internal_error("Failed to load environment policy assignments"),
     }
 }
 
