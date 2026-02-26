@@ -785,12 +785,25 @@ fn FlakesTable(
                                 rsx! {
                                     tr {
                                         class: if is_selected {
-                                            "bg-blue-900/20 hover:bg-blue-900/30 transition cursor-pointer"
+                                            "bg-blue-900/35 hover:bg-blue-900/45 transition cursor-pointer"
                                         } else {
                                             "hover:bg-gray-800/40 transition cursor-pointer"
                                         },
                                         onclick: move |_| on_select_history_flake.call(flake.id),
-                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
+                                        td {
+                                            class: "{theme::spacing::TABLE_CELL} text-sm text-white",
+                                            div {
+                                                class: "flex items-center gap-2",
+                                                span { "{flake.name}" }
+                                                if is_selected {
+                                                    span {
+                                                        class: "inline-flex items-center px-2 py-0.5 rounded-full border text-[10px] font-semibold uppercase tracking-wide text-blue-100",
+                                                        style: "background-color: #2A3A57; border-color: #7AA2E3;",
+                                                        "Selected"
+                                                    }
+                                                }
+                                            }
+                                        }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{flake.repo_url}" }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
@@ -850,7 +863,7 @@ fn FlakeCard(
     rsx! {
         div {
             class: if is_selected {
-                "rounded-xl border border-blue-500/60 overflow-hidden shadow-sm ring-1 ring-blue-500/40 cursor-pointer"
+                "rounded-xl border border-blue-400/70 overflow-hidden shadow-sm ring-2 ring-blue-400/40 cursor-pointer"
             } else {
                 "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm cursor-pointer"
             },
@@ -861,6 +874,13 @@ fn FlakeCard(
                 div {
                     h3 { class: "text-lg font-semibold text-white", "{flake.name}" }
                     p { class: "text-xs text-gray-300 mt-1 font-mono", "{flake.repo_url}" }
+                }
+                if is_selected {
+                    span {
+                        class: "inline-flex items-center px-2.5 py-1 rounded-full border text-[10px] font-semibold uppercase tracking-wide text-blue-100",
+                        style: "background-color: #2A3A57; border-color: #7AA2E3;",
+                        "Selected"
+                    }
                 }
             }
             div {
