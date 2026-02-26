@@ -1284,9 +1284,14 @@ fn FriendlyDiffViewer(diff: String) -> Element {
                                     button {
                                         key: "{file.old_path}->{file.new_path}",
                                         class: if is_active {
-                                            "w-full text-left px-3 py-2 bg-blue-500/15"
+                                            "w-full text-left px-3 py-2 border-l-2 border-violet-300"
                                         } else {
-                                            "w-full text-left px-3 py-2 hover:bg-gray-800/70"
+                                            "w-full text-left px-3 py-2 border-l-2 border-transparent hover:bg-gray-800/70"
+                                        },
+                                        style: if is_active {
+                                            "background-color: rgba(130, 105, 155, 0.28);"
+                                        } else {
+                                            "background-color: transparent;"
                                         },
                                         onclick: move |_| selected_file_index.set(idx),
                                         div {
