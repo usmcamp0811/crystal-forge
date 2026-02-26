@@ -257,8 +257,8 @@ pub fn FlakesListView() -> Element {
     let mut pending_remove = use_signal(|| None::<FlakeListItem>);
     let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
     let mut edit_error = use_signal(|| None::<String>);
-    let selected_history_flake = use_signal(|| None::<i32>);
-    let selected_history_commit = use_signal(|| None::<String>);
+    let mut selected_history_flake = use_signal(|| None::<i32>);
+    let mut selected_history_commit = use_signal(|| None::<String>);
     let mut sync_note = use_signal(|| None::<String>);
     let mut last_manual_sync = use_signal(|| None::<DateTime<Utc>>);
 
@@ -493,6 +493,11 @@ pub fn FlakesListView() -> Element {
                     for flake in filtered_flakes.clone() {
                         FlakeCard {
                             flake,
+                            selected_history_flake_id: *selected_history_flake.read(),
+                            on_select_history_flake: move |id| {
+                                selected_history_flake.set(Some(id));
+                                selected_history_commit.set(None);
+                            },
                             on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                             on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
                         }
@@ -501,6 +506,11 @@ pub fn FlakesListView() -> Element {
             } else {
                 FlakesTable {
                     flakes: filtered_flakes.clone(),
+                    selected_history_flake_id: *selected_history_flake.read(),
+                    on_select_history_flake: move |id| {
+                        selected_history_flake.set(Some(id));
+                        selected_history_commit.set(None);
+                    },
                     on_remove: move |id| remove_flake_by_id(flakes, pending_remove, id),
                     on_edit: move |id| start_edit_flake(flakes, editing_flake, edit_error, id),
                 }
@@ -637,6 +647,8 @@ fn FiltersBar(
 #[component]
 fn FlakesTable(
     flakes: Vec<FlakeListItem>,
+    selected_history_flake_id: Option<i32>,
+    on_select_history_flake: EventHandler<i32>,
     on_remove: EventHandler<i32>,
     on_edit: EventHandler<i32>,
 ) -> Element {
@@ -730,33 +742,49 @@ fn FlakesTable(
                     tbody {
                         class: "divide-y {theme::surface::DIVIDER}",
                         for flake in sorted_flakes {
-                            tr {
-                                class: "hover:bg-gray-800/40 transition",
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{flake.repo_url}" }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
-                                td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{latest_commit_label(&flake)}" }
-                                td {
-                                    class: "{theme::spacing::TABLE_CELL} text-right",
-                                    div {
-                                        class: "inline-flex items-center gap-2",
-                                        button {
-                                            class: "text-xs px-2 py-1 rounded transition-colors",
-                                            style: "color: #D6C3E8;",
-                                            onclick: move |_| on_edit.call(flake.id),
-                                            "Edit"
-                                        }
-                                        if flake.system_count > 0 {
-                                            span {
-                                                class: "text-xs text-gray-500",
-                                                "In Use"
-                                            }
+                            {
+                                let is_selected = selected_history_flake_id == Some(flake.id);
+                                rsx! {
+                                    tr {
+                                        class: if is_selected {
+                                            "bg-blue-900/20 hover:bg-blue-900/30 transition cursor-pointer"
                                         } else {
-                                            button {
-                                                class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                                                onclick: move |_| on_remove.call(flake.id),
-                                                "Remove"
+                                            "hover:bg-gray-800/40 transition cursor-pointer"
+                                        },
+                                        onclick: move |_| on_select_history_flake.call(flake.id),
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{flake.repo_url}" }
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
+                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{latest_commit_label(&flake)}" }
+                                        td {
+                                            class: "{theme::spacing::TABLE_CELL} text-right",
+                                            div {
+                                                class: "inline-flex items-center gap-2",
+                                                button {
+                                                    class: "text-xs px-2 py-1 rounded transition-colors",
+                                                    style: "color: #D6C3E8;",
+                                                    onclick: move |evt| {
+                                                        evt.stop_propagation();
+                                                        on_edit.call(flake.id)
+                                                    },
+                                                    "Edit"
+                                                }
+                                                if flake.system_count > 0 {
+                                                    span {
+                                                        class: "text-xs text-gray-500",
+                                                        "In Use"
+                                                    }
+                                                } else {
+                                                    button {
+                                                        class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                                                        onclick: move |evt| {
+                                                            evt.stop_propagation();
+                                                            on_remove.call(flake.id)
+                                                        },
+                                                        "Remove"
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -773,14 +801,22 @@ fn FlakesTable(
 #[component]
 fn FlakeCard(
     flake: FlakeListItem,
+    selected_history_flake_id: Option<i32>,
+    on_select_history_flake: EventHandler<i32>,
     on_remove: EventHandler<i32>,
     on_edit: EventHandler<i32>,
 ) -> Element {
     let latest_commit = latest_commit_label(&flake);
+    let is_selected = selected_history_flake_id == Some(flake.id);
 
     rsx! {
         div {
-            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm",
+            class: if is_selected {
+                "rounded-xl border border-blue-500/60 overflow-hidden shadow-sm ring-1 ring-blue-500/40 cursor-pointer"
+            } else {
+                "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm cursor-pointer"
+            },
+            onclick: move |_| on_select_history_flake.call(flake.id),
             div {
                 class: "px-6 py-4 border-b border-gray-800 flex items-center justify-between",
                 style: "background: linear-gradient(135deg, rgba(130, 105, 155, 0.42) 0%, rgba(17, 24, 39, 0.92) 100%);",
@@ -836,7 +872,10 @@ fn FlakeCard(
                         button {
                             class: "text-xs px-2 py-1 rounded transition-colors",
                             style: "color: #D6C3E8;",
-                            onclick: move |_| on_edit.call(flake.id),
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_edit.call(flake.id)
+                            },
                             "Edit"
                         }
                         span {
@@ -850,12 +889,18 @@ fn FlakeCard(
                         button {
                             class: "text-xs px-2 py-1 rounded transition-colors",
                             style: "color: #D6C3E8;",
-                            onclick: move |_| on_edit.call(flake.id),
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_edit.call(flake.id)
+                            },
                             "Edit"
                         }
                         button {
                             class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                            onclick: move |_| on_remove.call(flake.id),
+                            onclick: move |evt| {
+                                evt.stop_propagation();
+                                on_remove.call(flake.id)
+                            },
                             "Remove"
                         }
                     }
@@ -979,6 +1024,7 @@ fn FlakeHistoryExplorer(
     };
     
     let active_repo = active_flake.repo_url.clone();
+    let history_title = format!("Git Commit History - {}", active_flake.name);
     let flake_sync_label = active_flake
         .last_synced_at
         .format("%Y-%m-%d %H:%M UTC")
@@ -986,33 +1032,7 @@ fn FlakeHistoryExplorer(
 
     rsx! {
         Card {
-            title: Some("Git Commit History".to_string()),
-            header_actions: Some(rsx! {
-                div {
-                    class: "flex items-center gap-2",
-                    label {
-                        class: "text-xs {theme::text::MUTED}",
-                        "Flake"
-                    }
-                    select {
-                        class: "rounded-md px-2 py-1 text-xs {theme::interactive::INPUT}",
-                        value: "{active_flake.id}",
-                        onchange: move |evt| {
-                            if let Ok(id) = evt.value().parse::<i32>() {
-                                selected_flake_id.set(Some(id));
-                                selected_commit_hash.set(None);
-                            }
-                        },
-                        for flake in flakes.iter() {
-                            option {
-                                key: "{flake.id}",
-                                value: "{flake.id}",
-                                "{flake.name}"
-                            }
-                        }
-                    }
-                }
-            }),
+            title: Some(history_title),
             children: rsx! {
                 div {
                     class: "space-y-3",
@@ -1200,44 +1220,133 @@ fn FriendlyDiffViewer(diff: String) -> Element {
         };
     }
 
+    let mut selected_file_index = use_signal(|| 0usize);
+    let mut show_file_list = use_signal(|| true);
+    let file_count = parsed_files.len();
+    let is_file_list_open = *show_file_list.read();
+    let active_index = (*selected_file_index.read()).min(file_count.saturating_sub(1));
+    let active_file = parsed_files.get(active_index).cloned();
+    let (total_insertions, total_deletions) = parsed_files
+        .iter()
+        .map(diff_file_stats)
+        .fold((0usize, 0usize), |(ia, da), (ib, db)| (ia + ib, da + db));
+
     rsx! {
         div {
             class: "space-y-4",
-            for file in parsed_files {
+            tabindex: "0",
+            onkeydown: move |evt| {
+                let key = evt.key();
+                if file_count == 0 {
+                    return;
+                }
+                if key == Key::ArrowDown {
+                    evt.prevent_default();
+                    let next = ((*selected_file_index.read()) + 1).min(file_count - 1);
+                    selected_file_index.set(next);
+                } else if key == Key::ArrowUp {
+                    evt.prevent_default();
+                    let next = (*selected_file_index.read()).saturating_sub(1);
+                    selected_file_index.set(next);
+                }
+            },
+            div {
+                class: "rounded-lg border border-gray-700 bg-gray-900/70",
                 div {
-                    key: "{file.new_path}",
-                    class: "rounded-lg border border-gray-700 overflow-hidden",
+                    class: "px-3 py-2 border-b border-gray-700 flex items-center justify-between gap-3",
                     div {
-                        class: "px-3 py-2 border-b border-gray-700 bg-gray-900 flex items-center justify-between gap-2",
-                        p { class: "text-xs font-mono text-gray-300 truncate", "{file.old_path} -> {file.new_path}" }
-                        span { class: "text-[10px] uppercase tracking-wide text-gray-500", "{file.language}" }
+                        class: "flex flex-wrap items-center gap-2 text-xs",
+                        span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{file_count} files changed" }
+                        span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{total_insertions}" }
+                        span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{total_deletions}" }
                     }
+                    button {
+                        class: "text-xs px-2 py-1 rounded border border-gray-600 text-gray-300 hover:bg-gray-800",
+                        onclick: move |_| show_file_list.set(!is_file_list_open),
+                        if is_file_list_open { "Hide files" } else { "Show files" }
+                    }
+                }
+                if is_file_list_open {
                     div {
-                        class: "bg-gray-950",
-                        for line in file.lines {
-                            div {
-                                class: "grid",
-                                style: "grid-template-columns: 3.2rem 3.2rem 1.5rem minmax(0, 1fr);",
-                                class: "{line.class_name}",
-                                div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.old_number.map(|value| value.to_string()).unwrap_or_default()}" }
-                                div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.new_number.map(|value| value.to_string()).unwrap_or_default()}" }
-                                div { class: "px-1 py-0.5 text-[11px] text-gray-400 border-r border-gray-800", "{line.prefix}" }
-                                div {
-                                    class: if line.is_hunk_header {
-                                        "px-2 py-0.5 text-[11px] font-mono text-sky-300"
-                                    } else {
-                                        "px-2 py-0.5 text-[11px] font-mono text-gray-200 hljs language-{file.language}"
-                                    },
-                                    if line.is_hunk_header {
-                                        "{line.content}"
-                                    } else {
-                                        span { dangerous_inner_html: "{highlight_diff_fragment(file.language, &line.content)}" }
+                        class: "max-h-52 overflow-y-auto divide-y divide-gray-800",
+                        for (idx, file) in parsed_files.iter().enumerate() {
+                            {
+                                let (insertions, deletions) = diff_file_stats(file);
+                                let file_label = diff_file_label(file);
+                                let is_active = idx == active_index;
+                                rsx! {
+                                    button {
+                                        key: "{file.old_path}->{file.new_path}",
+                                        class: if is_active {
+                                            "w-full text-left px-3 py-2 bg-blue-500/15"
+                                        } else {
+                                            "w-full text-left px-3 py-2 hover:bg-gray-800/70"
+                                        },
+                                        onclick: move |_| selected_file_index.set(idx),
+                                        div {
+                                            class: "flex items-center justify-between gap-2",
+                                            p { class: "text-xs font-mono text-gray-200 truncate", "{file_label}" }
+                                            div {
+                                                class: "flex items-center gap-2 text-[11px]",
+                                                span { class: "text-emerald-300", "+{insertions}" }
+                                                span { class: "text-red-300", "-{deletions}" }
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+            }
+
+            if let Some(file) = active_file {
+                {
+                    let file_label = diff_file_label(&file);
+                    let (insertions, deletions) = diff_file_stats(&file);
+                    rsx! {
+                        div {
+                            class: "rounded-lg border border-gray-700 overflow-hidden",
+                            div {
+                                class: "px-3 py-2 border-b border-gray-700 bg-gray-900 flex items-center justify-between gap-2",
+                                p { class: "text-xs font-mono text-gray-300 truncate", "{file_label}" }
+                                div {
+                                    class: "flex items-center gap-2",
+                                    span { class: "text-[10px] uppercase tracking-wide text-gray-500", "{file.language}" }
+                                    span { class: "text-[10px] text-emerald-300", "+{insertions}" }
+                                    span { class: "text-[10px] text-red-300", "-{deletions}" }
+                                }
+                            }
+                            div {
+                                class: "bg-gray-950",
+                                for line in file.lines {
+                                    div {
+                                        class: "grid",
+                                        style: "grid-template-columns: 3.2rem 3.2rem 1.5rem minmax(0, 1fr);",
+                                        class: "{line.class_name}",
+                                        div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.old_number.map(|value| value.to_string()).unwrap_or_default()}" }
+                                        div { class: "px-2 py-0.5 text-[10px] text-gray-500 text-right border-r border-gray-800", "{line.new_number.map(|value| value.to_string()).unwrap_or_default()}" }
+                                        div { class: "px-1 py-0.5 text-[11px] text-gray-400 border-r border-gray-800", "{line.prefix}" }
+                                        div {
+                                            class: if line.is_hunk_header {
+                                                "px-2 py-0.5 text-[11px] font-mono text-sky-300"
+                                            } else {
+                                                "px-2 py-0.5 text-[11px] font-mono text-gray-200 hljs language-{file.language}"
+                                            },
+                                            if line.is_hunk_header {
+                                                "{line.content}"
+                                            } else {
+                                                span { dangerous_inner_html: "{highlight_diff_fragment(file.language, &line.content)}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                p { class: "text-sm text-gray-400", "No file diff selected." }
             }
         }
     }
@@ -2192,6 +2301,33 @@ fn diff_stats(diff: &str) -> (usize, usize, usize) {
     }
 
     (files_changed, insertions, deletions)
+}
+
+fn diff_file_stats(file: &ParsedDiffFile) -> (usize, usize) {
+    let mut insertions = 0;
+    let mut deletions = 0;
+
+    for line in &file.lines {
+        if line.prefix == '+' {
+            insertions += 1;
+        } else if line.prefix == '-' {
+            deletions += 1;
+        }
+    }
+
+    (insertions, deletions)
+}
+
+fn diff_file_label(file: &ParsedDiffFile) -> String {
+    if file.new_path == "/dev/null" {
+        format!("{} (deleted)", file.old_path)
+    } else if file.old_path == "/dev/null" {
+        format!("{} (new)", file.new_path)
+    } else if file.new_path == file.old_path {
+        file.new_path.clone()
+    } else {
+        format!("{} -> {}", file.old_path, file.new_path)
+    }
 }
 
 fn parse_unified_diff(diff: &str) -> Vec<ParsedDiffFile> {
