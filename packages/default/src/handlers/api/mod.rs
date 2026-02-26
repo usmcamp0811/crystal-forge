@@ -6,6 +6,7 @@ pub mod auth_session;
 pub mod auth_status;
 pub mod auth_whoami;
 pub mod dashboard;
+pub mod environments;
 pub mod flakes;
 pub mod rbac;
 pub mod systems;

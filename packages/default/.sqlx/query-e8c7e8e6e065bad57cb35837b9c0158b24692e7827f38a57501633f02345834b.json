@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM system_policies WHERE system_id = $1 AND policy_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e8c7e8e6e065bad57cb35837b9c0158b24692e7827f38a57501633f02345834b"
+}

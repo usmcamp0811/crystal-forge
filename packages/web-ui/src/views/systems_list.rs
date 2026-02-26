@@ -21,6 +21,7 @@ use crate::components::modals::{
 };
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
+use crate::environments::adapter::load_environment_names_with_fallback;
 use crate::routes::Route;
 use crate::systems::adapter::{
     create_system_via_api, deactivate_system_via_api, fallback_systems, load_systems_with_fallback,
@@ -100,6 +101,9 @@ pub fn SystemsListView() -> Element {
         load_systems_with_fallback(&SystemsListParams::default()).await
     });
 
+    let environment_names_resource =
+        use_resource(move || async move { load_environment_names_with_fallback().await });
+
     // Local mutable state for systems (allows client-side add/remove until backend supports it)
     let mut local_systems = use_signal(fallback_systems);
     let mut api_notice = use_signal(|| None::<String>);
@@ -124,7 +128,12 @@ pub fn SystemsListView() -> Element {
         .read_unchecked()
         .as_ref()
         .map(|r| r.redirect_to_login)
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || environment_names_resource
+            .read_unchecked()
+            .as_ref()
+            .map(|r| r.redirect_to_login)
+            .unwrap_or(false);
 
     if should_redirect {
         nav.push(Route::LoginView {});
@@ -147,6 +156,11 @@ pub fn SystemsListView() -> Element {
     
     let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
+    let dropdown_environments = environment_names_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.names.clone())
+        .unwrap_or_else(|| environments.clone());
     let registered_flakes = unique_registered_flakes();
 
     let filtered_systems: Vec<SystemSummary> = current_systems
@@ -169,6 +183,15 @@ pub fn SystemsListView() -> Element {
                 div {
                     class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
                     "{notice}"
+                }
+            }
+
+            if let Some(result) = environment_names_resource.read_unchecked().as_ref() {
+                if let Some(ref notice) = result.notice {
+                    div {
+                        class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
+                        "{notice}"
+                    }
                 }
             }
 
@@ -269,7 +292,7 @@ pub fn SystemsListView() -> Element {
                         generated_keys.set(Some(generate_key_pair()));
                         show_key_modal.set(true);
                     },
-                    environments: environments.clone(),
+                    environments: dropdown_environments,
                     flake_names: registered_flakes.clone(),
                 }
             }
