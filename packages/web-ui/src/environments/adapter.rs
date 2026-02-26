@@ -221,10 +221,7 @@ pub fn fallback_environments(default_required_policy: Uuid) -> Vec<EnvironmentIt
 
 /// Convert an [`EnvironmentSummary`] API DTO into an [`EnvironmentItem`] UI type.
 ///
-/// Color is derived from the environment name using a stable palette so that
-/// well-known environment names (production, staging, development) get
-/// consistent colours. Unknown names fall back to a neutral grey.
-///
+/// Color comes directly from the backend-provided `color_hex` field.
 /// Policy requirements are provided by the policies endpoint and persisted server-side.
 pub fn api_to_environment_item(
     env: EnvironmentSummary,
@@ -291,7 +288,6 @@ pub async fn update_environment_via_api(
         name,
         description,
         color_hex,
-        required_policy_ids: vec![], // Not updated here, use update_environment_policies
     };
 
     match update_environment(&environment_id, &request).await {

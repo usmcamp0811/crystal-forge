@@ -414,7 +414,6 @@ pub struct UpdateEnvironmentRequest {
     pub name: String,
     pub description: Option<String>,
     pub color_hex: String,
-    pub required_policy_ids: Vec<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
