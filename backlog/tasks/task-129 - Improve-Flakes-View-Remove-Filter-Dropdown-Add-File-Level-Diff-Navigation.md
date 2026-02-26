@@ -151,5 +151,5 @@ Improve the flakes view by:
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: claude-sonnet-4-6 on gray in ~/code/crystal-forge/TASK-129-improve-flakes-view-file-level-diff
+LOCK: OpenCode on gray in ~/code/crystal-forge/TASK-129-improve-flakes-view-file-level-diff
 <!-- SECTION:NOTES:END -->
