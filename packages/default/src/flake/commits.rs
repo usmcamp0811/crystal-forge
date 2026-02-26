@@ -196,6 +196,30 @@ pub async fn sync_all_watched_flakes_commits(
     Ok(())
 }
 
+/// Sync commits for a single flake repository URL.
+///
+/// Returns the number of newly inserted commits.
+pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) -> Result<usize> {
+    match flake_has_commits(pool, repo_url).await {
+        Ok(true) => {
+            let last_commit = flake_last_commit(pool, repo_url)
+                .await
+                .with_context(|| format!("Failed to load last commit for {repo_url}"))?;
+            let inserted = fetch_and_insert_commits_since(pool, repo_url, branch, &last_commit)
+                .await
+                .with_context(|| format!("Failed to sync commits since last known hash for {repo_url}"))?;
+            Ok(inserted.len())
+        }
+        Ok(false) => {
+            let inserted = fetch_and_insert_recent_commits(pool, repo_url, branch, Some(10))
+                .await
+                .with_context(|| format!("Failed to initialize commits for {repo_url}"))?;
+            Ok(inserted.len())
+        }
+        Err(e) => Err(e).with_context(|| format!("Failed to inspect commit state for {repo_url}")),
+    }
+}
+
 fn normalize_repo_url_for_git(repo_url: &str) -> String {
     let base_url = if let Some(stripped) = repo_url.strip_prefix("git+") {
         stripped

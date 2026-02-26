@@ -16,7 +16,10 @@ use web_sys::{Node, window};
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
 
-use crate::api::client::{create_flake, delete_flake, fetch_commit_diff, fetch_flakes, fetch_flake_timelines};
+use crate::api::client::{
+    create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,
+    request_sync_all_flakes, request_sync_flake,
+};
 use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::components::layout::Card;
 use crate::theme;
@@ -349,19 +352,54 @@ pub fn FlakesListView() -> Element {
                 div {
                     class: "flex items-center gap-3",
                     button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium border border-blue-500/50 text-blue-200 hover:text-white hover:bg-blue-500/20 transition-colors",
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
                         onclick: move |_| {
-                            let mut next = flakes.read().clone();
-                            let timelines = flake_timelines.read();
-                            let changed = sync_flake_registry(&mut next, &timelines);
-                            flakes.set(next);
-                            let now = Utc::now();
-                            last_manual_sync.set(Some(now));
-                            sync_note.set(Some(format!(
-                                "Polled {} flakes from source ({} updated).",
-                                flakes.read().len(),
-                                changed
-                            )));
+                            let selected_flake_id = *selected_history_flake.read();
+                            let mut flakes_signal = flakes.clone();
+                            let mut timelines_signal = flake_timelines.clone();
+                            let mut last_manual_sync = last_manual_sync.clone();
+                            let mut sync_note = sync_note.clone();
+                            spawn(async move {
+                                let sync_result = if let Some(flake_id) = selected_flake_id {
+                                    request_sync_flake(flake_id).await
+                                } else {
+                                    request_sync_all_flakes().await
+                                };
+
+                                match sync_result {
+                                    Ok(response) => {
+                                        if let Ok(items) = fetch_flakes().await {
+                                            flakes_signal.set(
+                                                items
+                                                    .into_iter()
+                                                    .map(FlakeListItem::from_registry)
+                                                    .collect(),
+                                            );
+                                        }
+                                        if let Ok(timelines) = fetch_flake_timelines().await {
+                                            timelines_signal.set(timelines);
+                                        }
+                                        last_manual_sync.set(Some(Utc::now()));
+                                        sync_note.set(Some(response.message));
+                                    }
+                                    Err(_error) => {
+                                        let mut next = flakes_signal.read().clone();
+                                        let timelines = timelines_signal.read();
+                                        let changed = if let Some(flake_id) = selected_flake_id {
+                                            sync_single_flake_registry(&mut next, &timelines, flake_id)
+                                        } else {
+                                            sync_flake_registry(&mut next, &timelines)
+                                        };
+                                        flakes_signal.set(next);
+                                        last_manual_sync.set(Some(Utc::now()));
+                                        sync_note.set(Some(format!(
+                                            "Polled {} flakes from source ({} updated).",
+                                            flakes_signal.read().len(),
+                                            changed
+                                        )));
+                                    }
+                                }
+                            });
                         },
                         "Sync from Source"
                     }
@@ -2013,6 +2051,34 @@ fn sync_flake_registry(flakes: &mut [FlakeListItem], timelines: &[FlakeTimeline]
         flake.last_synced_at = now;
     }
 
+    changed
+}
+
+fn sync_single_flake_registry(
+    flakes: &mut [FlakeListItem],
+    timelines: &[FlakeTimeline],
+    flake_id: i32,
+) -> usize {
+    let now = Utc::now();
+    let latest = timelines.iter().find(|timeline| timeline.flake_id == flake_id).and_then(|timeline| {
+        timeline
+            .commits
+            .first()
+            .map(|commit| commit.hash.chars().take(7).collect::<String>())
+    });
+
+    let Some(flake) = flakes.iter_mut().find(|flake| flake.id == flake_id) else {
+        return 0;
+    };
+
+    let mut changed = 0;
+    if let Some(latest_commit) = latest {
+        if flake.latest_commit.as_deref() != Some(latest_commit.as_str()) {
+            flake.latest_commit = Some(latest_commit);
+            changed = 1;
+        }
+    }
+    flake.last_synced_at = now;
     changed
 }
 

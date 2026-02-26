@@ -10,7 +10,7 @@ use tracing::error;
 
 use crate::api::models::{ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
-use crate::flake::commits::get_commit_diff;
+use crate::flake::commits::{get_commit_diff, sync_commits_for_repo};
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id,
@@ -268,6 +268,116 @@ pub async fn delete_flake(
                     error: "internal_error".to_string(),
                     message: "Failed to delete flake".to_string(),
                     details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Trigger a commit sync for all tracked flakes.
+///
+/// **Authorization**: Requires Operator or Admin role.
+pub async fn sync_all_flakes_handler(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_operator_or_admin(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
+    let flakes = match list_flake_registry(&pool).await {
+        Ok(flakes) => flakes,
+        Err(e) => {
+            error!("Failed to list flakes for sync: {e:#}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to start flake sync".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let mut synced = 0usize;
+    let mut inserted = 0usize;
+    for flake in flakes {
+        match sync_commits_for_repo(&pool, &flake.repo_url, "main").await {
+            Ok(new_commits) => {
+                synced += 1;
+                inserted += new_commits;
+            }
+            Err(e) => {
+                error!("Failed syncing flake {} ({}): {e:#}", flake.name, flake.repo_url);
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": "ok",
+            "message": format!(
+                "Synced {} flakes from source ({} new commits).",
+                synced, inserted
+            )
+        })),
+    )
+        .into_response()
+}
+
+/// Trigger a commit sync for a specific flake.
+///
+/// **Authorization**: Requires Operator or Admin role.
+pub async fn sync_flake_handler(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(flake_id): Path<i32>,
+) -> impl IntoResponse {
+    if require_operator_or_admin(&pool, &headers).await.is_none() {
+        return forbidden();
+    }
+
+    let flake = match get_flake_by_id(&pool, flake_id).await {
+        Ok(flake) => flake,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Flake not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    match sync_commits_for_repo(&pool, &flake.repo_url, "main").await {
+        Ok(new_commits) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "message": format!(
+                    "Synced {} from source ({} new commits).",
+                    flake.name, new_commits
+                )
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!("Failed syncing flake {} ({}): {e:#}", flake.name, flake.repo_url);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: format!("Failed to sync {} from source", flake.name),
+                    details: Some(serde_json::json!({"error": e.to_string()})),
                 }),
             )
                 .into_response()

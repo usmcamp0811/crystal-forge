@@ -216,6 +216,18 @@ pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Trigger sync for all flakes from source.
+pub async fn request_sync_all_flakes() -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/flakes/sync", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Trigger sync for a single flake from source.
+pub async fn request_sync_flake(id: i32) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/flakes/{}/sync", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Fetch the git diff for a specific commit in a flake.
 pub async fn fetch_commit_diff(flake_id: i32, commit_hash: &str) -> Result<CommitDiffResponse, ApiClientError> {
     let url = format!("{}/flakes/{}/commits/{}/diff", base_url(), flake_id, commit_hash);
