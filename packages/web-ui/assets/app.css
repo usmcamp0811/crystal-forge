@@ -1,0 +1,47 @@
+:root {
+  --cf-brand-purple: #82699B;
+  --cf-brand-purple-hover: #8616e0;
+  --cf-danger-berry: #6f1649;
+  --cf-danger-berry-hover: #A3748E;
+}
+
+.cf-primary-btn {
+  background-color: var(--cf-brand-purple);
+}
+
+.cf-primary-btn:hover {
+  background-color: var(--cf-brand-purple-hover);
+}
+
+.cf-danger-btn {
+  background-color: var(--cf-danger-berry);
+}
+
+.cf-danger-btn:hover {
+  background-color: var(--cf-danger-berry-hover);
+}
+
+.cf-builds-split {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: 1.5rem;
+}
+
+.cf-flakes-history-split {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+  gap: 1.5rem;
+}
+
+@media (max-width: 1280px) {
+  .cf-flakes-history-split {
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  }
+}
+
+@media (max-width: 1024px) {
+  .cf-builds-split,
+  .cf-flakes-history-split {
+    grid-template-columns: 1fr;
+  }
+}
