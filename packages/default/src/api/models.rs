@@ -356,6 +356,30 @@ pub struct UpdateEnvironmentPoliciesRequest {
     pub required_policy_ids: Vec<uuid::Uuid>,
 }
 
+/// A deployment policy available in the system.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentPolicySummary {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
+}
+
+/// Environment with its required policies (the baseline).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnvironmentWithPolicies {
+    pub id: uuid::Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub color_hex: String,
+    pub is_active: bool,
+    pub system_count: i64,
+    /// The required policy IDs that form the baseline for this environment.
+    pub required_policy_ids: Vec<uuid::Uuid>,
+}
+
 /// Request payload for creating a flake registry entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateFlakeRequest {

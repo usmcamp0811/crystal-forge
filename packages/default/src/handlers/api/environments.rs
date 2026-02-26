@@ -22,15 +22,17 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentPoliciesRequest,
-    UpdateEnvironmentRequest,
+    ApiError, CreateEnvironmentRequest, DeploymentPolicySummary, EnvironmentSummary, 
+    UpdateEnvironmentPoliciesRequest, UpdateEnvironmentRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::environments::{
     count_systems_in_environment, create_environment as create_environment_row, delete_environment,
-    find_environment_for_user, list_environments_for_user, update_environment_metadata,
+    find_environment_for_user, get_environment_required_policy_ids, get_environment_with_policies,
+    list_deployment_policies, list_environments_for_user, set_environment_required_policies,
+    update_environment_metadata,
 };
 
 /// `GET /api/v1/environments`
@@ -219,18 +221,73 @@ pub async fn update_environment_handler(
     }
 }
 
+/// `GET /api/v1/environments/:id`
+///
+/// Returns a single environment by ID with its required policies, scoped to the authenticated user.
+///
+/// Returns 404 if the environment does not exist or the user is not a member.
+pub async fn get_environment_with_policies_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+    Path(environment_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    let scoped_user_id = if has_admin_role(&roles) {
+        None
+    } else {
+        Some(user_id)
+    };
+
+    // First check access to the environment
+    match find_environment_for_user(&pool, environment_id, scoped_user_id).await {
+        Ok(Some(_env)) => {
+            // Now get with policies
+            match get_environment_with_policies(&pool, environment_id).await {
+                Ok(Some(env_with_policies)) => {
+                    (StatusCode::OK, Json(env_with_policies)).into_response()
+                }
+                Ok(None) => not_found(),
+                Err(_) => internal_error("Failed to load environment policies"),
+            }
+        }
+        Ok(None) => not_found(),
+        Err(_) => internal_error("Failed to load environment"),
+    }
+}
+
+/// `GET /api/v1/policies`
+///
+/// Returns all available deployment policies.
+/// These can be assigned as required policies to environments.
+pub async fn list_policies_handler(
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+
+    match list_deployment_policies(&pool).await {
+        Ok(policies) => (StatusCode::OK, Json(policies)).into_response(),
+        Err(_) => internal_error("Failed to load policies"),
+    }
+}
+
 /// `PATCH /api/v1/environments/:id/policies`
 ///
-/// Updates environment required policies. Admin role required.
-/// Note: This endpoint currently acknowledges the update but does not persist
-/// to the database - a future migration will add the required_policies table.
+/// Updates environment required policies (the baseline). Admin role required.
+/// Environment policies serve as the baseline for all systems in that environment.
+/// Systems can add more policies on top, but cannot remove the baseline.
 pub async fn update_environment_policies_handler(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(environment_id): Path<Uuid>,
     Json(payload): Json<UpdateEnvironmentPoliciesRequest>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
 
@@ -245,19 +302,36 @@ pub async fn update_environment_policies_handler(
     // Verify the environment exists
     match find_environment_for_user(&pool, environment_id, None).await {
         Ok(Some(_env)) => {
-            // TODO: Once we have the environment_required_policies table:
-            // - Insert/update the policy associations
-            // - Return the updated environment with policies
-            //
-            // For now, we just acknowledge the request and return success.
-            // The frontend will update its local state.
-            tracing::info!(
-                "Updating environment {} policies to {:?} (not persisted yet)",
+            // Persist the policy associations to the database
+            match set_environment_required_policies(
+                &pool,
                 environment_id,
-                payload.required_policy_ids
-            );
-
-            (StatusCode::OK, Json(payload)).into_response()
+                &payload.required_policy_ids,
+                Some(user_id),
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        "Updated environment {} policies to {:?}",
+                        environment_id,
+                        payload.required_policy_ids
+                    );
+                    
+                    // Return the updated environment with policies
+                    match get_environment_with_policies(&pool, environment_id).await {
+                        Ok(Some(env_with_policies)) => {
+                            (StatusCode::OK, Json(env_with_policies)).into_response()
+                        }
+                        Ok(None) => not_found(),
+                        Err(_) => internal_error("Failed to fetch updated environment"),
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("Failed to update environment policies: {}", e);
+                    internal_error("Failed to update environment policies")
+                }
+            }
         }
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to update environment policies"),

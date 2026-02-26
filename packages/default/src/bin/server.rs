@@ -144,8 +144,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .route(
             "/api/v1/environments/:id/policies",
-            patch(environments::update_environment_policies_handler),
+            get(environments::get_environment_with_policies_handler)
+                .patch(environments::update_environment_policies_handler),
         )
+        .route("/api/v1/policies", get(environments::list_policies_handler))
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
