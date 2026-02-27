@@ -1,21 +1,25 @@
 //! Flakes registry API handlers.
 
-use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use axum::Json;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use tracing::error;
 
-use crate::api::models::{ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{
+    ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
+};
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
-use crate::flake::commits::get_commit_diff;
+use crate::flake::commits::{get_commit_diff, get_commit_metadata, GitCommitMetadata};
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id,
     get_flake_by_name, insert_flake, list_flake_registry,
 };
+use crate::queries::users::get_by_email;
 
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
@@ -52,7 +56,47 @@ pub async fn get_flake_timelines(
 
     // Fetch up to 10 most recent commits per flake
     match fetch_flake_timelines(&pool, 10).await {
-        Ok(timelines) => (StatusCode::OK, Json(timelines)).into_response(),
+        Ok(mut timelines) => {
+            for timeline in &mut timelines {
+                let hashes: Vec<String> = timeline
+                    .commits
+                    .iter()
+                    .map(|commit| commit.hash.clone())
+                    .collect();
+                let metadata = match get_commit_metadata(&timeline.repo_url, &hashes).await {
+                    Ok(data) => data,
+                    Err(err) => {
+                        error!(
+                            "Failed to hydrate commit metadata for {}: {:#}",
+                            timeline.repo_url, err
+                        );
+                        HashMap::new()
+                    }
+                };
+
+                let mut user_lookup_cache: HashMap<String, Option<String>> = HashMap::new();
+                for commit in &mut timeline.commits {
+                    if let Some(detail) = metadata.get(&commit.hash) {
+                        if commit.message.trim().is_empty() {
+                            commit.message = detail.message.trim().to_string();
+                        }
+
+                        commit.author =
+                            resolve_timeline_author(&pool, detail, &mut user_lookup_cache).await;
+                    }
+
+                    if commit.message.trim().is_empty() {
+                        let short = commit.hash.chars().take(7).collect::<String>();
+                        commit.message = format!("Commit {short}");
+                    }
+                    if commit.author.trim().is_empty() {
+                        commit.author = "Unknown author".to_string();
+                    }
+                }
+            }
+
+            (StatusCode::OK, Json(timelines)).into_response()
+        }
         Err(e) => {
             error!("Failed to fetch flake timelines: {e:#}");
             (
@@ -66,6 +110,62 @@ pub async fn get_flake_timelines(
                 .into_response()
         }
     }
+}
+
+async fn resolve_timeline_author(
+    pool: &PgPool,
+    detail: &GitCommitMetadata,
+    user_lookup_cache: &mut HashMap<String, Option<String>>,
+) -> String {
+    if let Some(email) = detail
+        .author_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let key = email.to_ascii_lowercase();
+        let username = if let Some(value) = user_lookup_cache.get(&key) {
+            value.clone()
+        } else {
+            let resolved = match get_by_email(pool, email).await {
+                Ok(Some(user)) => Some(user.username),
+                Ok(None) => None,
+                Err(err) => {
+                    error!(
+                        "Failed to resolve user for commit email {}: {:#}",
+                        email, err
+                    );
+                    None
+                }
+            };
+            user_lookup_cache.insert(key.clone(), resolved.clone());
+            resolved
+        };
+
+        if let Some(username) = username {
+            let author_name = detail.author_name.trim();
+            if author_name.is_empty() || author_name.eq_ignore_ascii_case(&username) {
+                return format!("@{username}");
+            }
+            return format!("@{username} ({author_name})");
+        }
+    }
+
+    let author_name = detail.author_name.trim();
+    if !author_name.is_empty() {
+        return author_name.to_string();
+    }
+
+    if let Some(email) = detail
+        .author_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return email.to_string();
+    }
+
+    "Unknown author".to_string()
 }
 
 /// Get the git diff for a specific commit in a flake.

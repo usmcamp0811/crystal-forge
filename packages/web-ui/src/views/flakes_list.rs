@@ -8,15 +8,17 @@ use gloo_storage::{LocalStorage, Storage};
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use uuid::Uuid;
+use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
-use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
+use web_sys::{window, Node};
 
-use crate::api::client::{create_flake, delete_flake, fetch_commit_diff, fetch_flakes, fetch_flake_timelines};
+use crate::api::client::{
+    create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,
+};
 use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::components::layout::Card;
 use crate::theme;
@@ -924,7 +926,7 @@ fn FlakeHistoryExplorer(
     timelines: Vec<FlakeTimeline>,
 ) -> Element {
     let history = build_flake_history(&timelines);
-    
+
     // Cache for loaded commit diffs
     let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
     // Track current active commit hash to force re-render when diff loads
@@ -958,40 +960,57 @@ fn FlakeHistoryExplorer(
         .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
         .map(|commit| commit.clone())
         .or_else(|| commits.first().cloned());
-    
+
     // Load diff for the active commit if not already loaded
     // We read the signal INSIDE use_effect so it tracks the dependency
     {
         let loaded_diffs = loaded_diffs.clone();
         let current_key = current_commit_key.clone();
-        
+
         use_effect(move || {
             // Read signals inside the effect so it re-runs when they change
             let selected_hash = selected_commit_hash.read().clone();
             let flake_id = active_flake.id;
-            
+
             if let Some(commit_hash) = &selected_hash {
                 let key = (flake_id, commit_hash.clone());
                 let already_loaded = loaded_diffs.read().contains_key(&key);
-                
+
                 #[cfg(target_arch = "wasm32")]
-                console::log_1(&format!("Effect running - hash: {}, loaded: {}", &commit_hash[..7.min(commit_hash.len())], already_loaded).into());
-                
+                console::log_1(
+                    &format!(
+                        "Effect running - hash: {}, loaded: {}",
+                        &commit_hash[..7.min(commit_hash.len())],
+                        already_loaded
+                    )
+                    .into(),
+                );
+
                 if !already_loaded {
                     let commit_hash = commit_hash.clone();
                     let flake_id = flake_id;
                     let mut loaded_diffs_inner = loaded_diffs.clone();
                     let mut current_key_inner = current_key.clone();
-                    
+
                     #[cfg(target_arch = "wasm32")]
-                    console::log_1(&format!("Fetching diff for {}...", &commit_hash[..7.min(commit_hash.len())]).into());
-                    
+                    console::log_1(
+                        &format!(
+                            "Fetching diff for {}...",
+                            &commit_hash[..7.min(commit_hash.len())]
+                        )
+                        .into(),
+                    );
+
                     spawn(async move {
                         match fetch_commit_diff(flake_id, &commit_hash).await {
                             Ok(response) => {
                                 #[cfg(target_arch = "wasm32")]
-                                console::log_1(&format!("Diff loaded! {} bytes", response.diff.len()).into());
-                                loaded_diffs_inner.write().insert(key.clone(), response.diff);
+                                console::log_1(
+                                    &format!("Diff loaded! {} bytes", response.diff.len()).into(),
+                                );
+                                loaded_diffs_inner
+                                    .write()
+                                    .insert(key.clone(), response.diff);
                                 current_key_inner.set(key);
                             }
                             Err(e) => {
@@ -999,7 +1018,7 @@ fn FlakeHistoryExplorer(
                                 console::log_1(&format!("Error: {}", e).into());
                                 loaded_diffs_inner.write().insert(
                                     key.clone(),
-                                    format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash)
+                                    format!("Error loading diff: {}\n\nCommit: {}", e, commit_hash),
                                 );
                                 current_key_inner.set(key);
                             }
@@ -1009,7 +1028,7 @@ fn FlakeHistoryExplorer(
             }
         });
     }
-    
+
     // Update active_commit with loaded diff if available
     let active_commit = if let Some(commit) = active_commit.clone() {
         let key = (active_flake.id, commit.hash.clone());
@@ -1028,7 +1047,7 @@ fn FlakeHistoryExplorer(
     } else {
         None
     };
-    
+
     let active_repo = active_flake.repo_url.clone();
     let history_title = format!("Git Commit History - {}", active_flake.name);
     let flake_sync_label = active_flake
@@ -1076,6 +1095,7 @@ fn FlakeHistoryExplorer(
                                                         .unwrap_or(false);
                                                     let short_hash = commit.hash.chars().take(7).collect::<String>();
                                                     let commit_time = commit.committed_at.format("%b %d %H:%M").to_string();
+                                                    let (message_title, message_secondary) = commit_message_lines(&commit.message, 120);
                                                     let commit_for_select = commit.hash.clone();
                                                     let commit_card_style = if is_active {
                                                         "background-color: #1B2940; border-color: #7C67A4;"
@@ -1135,7 +1155,18 @@ fn FlakeHistoryExplorer(
                                                                 class: "w-full justify-self-start rounded-xl border px-4 py-3 text-left transition",
                                                                 style: "{commit_card_style}",
                                                                 onclick: move |_| selected_commit_hash.set(Some(commit_for_select.clone())),
-                                                                p { class: "text-sm text-white font-semibold text-left truncate", style: "text-align: left;", "{commit.message}" }
+                                                                p {
+                                                                    class: "text-sm text-white font-semibold text-left leading-snug break-words",
+                                                                    style: "text-align: left; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;",
+                                                                    "{message_title}"
+                                                                }
+                                                                if let Some(secondary) = message_secondary {
+                                                                    p {
+                                                                        class: "mt-1 text-xs text-gray-300 leading-snug break-words",
+                                                                        style: "display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden;",
+                                                                        "{secondary}"
+                                                                    }
+                                                                }
                                                                 div {
                                                                     class: "mt-2 flex flex-wrap items-center gap-2 text-[10px]",
                                                                     span {
@@ -1167,24 +1198,39 @@ fn FlakeHistoryExplorer(
                         div {
                             class: "rounded-xl border {theme::surface::CARD_BORDER} bg-gray-900/50 overflow-hidden",
                             if let Some(commit) = active_commit {
-                                div {
-                                    class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} space-y-2",
-                                    p { class: "text-base text-white font-semibold text-left", "{commit.message}" }
-                                    div {
-                                        class: "flex flex-wrap items-center gap-2 text-xs",
-                                        span {
-                                            class: "font-mono px-2.5 py-1 rounded border",
-                                            style: "background-color: rgba(130, 105, 155, 0.22); border-color: #82699B; color: #E5D8F3;",
-                                            "{commit.hash}"
+                                {
+                                    let (message_title, message_secondary) =
+                                        commit_message_lines(&commit.message, 160);
+                                    rsx! {
+                                        div {
+                                            class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} space-y-2",
+                                            p {
+                                                class: "text-base text-white font-semibold text-left leading-snug whitespace-pre-wrap break-words",
+                                                "{message_title}"
+                                            }
+                                            if let Some(secondary) = message_secondary {
+                                                p {
+                                                    class: "text-sm text-gray-300 text-left leading-snug whitespace-pre-wrap break-words",
+                                                    "{secondary}"
+                                                }
+                                            }
+                                            div {
+                                                class: "flex flex-wrap items-center gap-2 text-xs",
+                                                span {
+                                                    class: "font-mono px-2.5 py-1 rounded border",
+                                                    style: "background-color: rgba(130, 105, 155, 0.22); border-color: #82699B; color: #E5D8F3;",
+                                                    "{commit.hash}"
+                                                }
+                                                span { class: "px-2.5 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
+                                                span {
+                                                    class: "px-2 py-1 rounded bg-gray-800 text-gray-300",
+                                                    {commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()}
+                                                }
+                                                span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{commit.files_changed} files" }
+                                                span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{commit.insertions}" }
+                                                span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{commit.deletions}" }
+                                            }
                                         }
-                                        span { class: "px-2.5 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
-                                        span {
-                                            class: "px-2 py-1 rounded bg-gray-800 text-gray-300",
-                                            {commit.committed_at.format("%Y-%m-%d %H:%M UTC").to_string()}
-                                        }
-                                        span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{commit.files_changed} files" }
-                                        span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{commit.insertions}" }
-                                        span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{commit.deletions}" }
                                     }
                                 }
                                 div {
@@ -1215,7 +1261,7 @@ fn FriendlyDiffViewer(diff: String) -> Element {
             }
         };
     }
-    
+
     let parsed_files = parse_unified_diff(&diff);
     if parsed_files.is_empty() {
         return rsx! {
@@ -2144,25 +2190,16 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
             .commits
             .iter()
             .map(|commit| {
-                // Diff will be loaded on-demand when user views the commit
+                let short_hash = commit.hash.chars().take(7).collect::<String>();
                 FlakeHistoryCommit {
                     hash: commit.hash.clone(),
-                    message: if commit.message.is_empty() {
-                        // Provide a placeholder if message is empty
-                        format!("Commit {}", &commit.hash[..7])
-                    } else {
-                        commit.message.clone()
-                    },
-                    author: if commit.author.is_empty() {
-                        "Unknown".to_string()
-                    } else {
-                        commit.author.clone()
-                    },
+                    message: normalize_commit_message(&commit.message, &short_hash),
+                    author: normalize_commit_author(&commit.author),
                     committed_at: commit.committed_at,
-                    files_changed: 0, // Will be calculated from diff when loaded
+                    files_changed: 0,
                     insertions: 0,
                     deletions: 0,
-                    diff: String::new(), // Empty initially, loaded on-demand
+                    diff: String::new(),
                 }
             })
             .collect();
@@ -2171,6 +2208,84 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
     }
 
     history
+}
+
+fn normalize_commit_message(message: &str, short_hash: &str) -> String {
+    let cleaned = message.trim();
+    if cleaned.is_empty() {
+        return format!("Commit {short_hash}");
+    }
+
+    cleaned
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn normalize_commit_author(author: &str) -> String {
+    let cleaned = author.trim();
+    if cleaned.is_empty() {
+        "Unknown author".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn commit_message_lines(message: &str, headline_limit: usize) -> (String, Option<String>) {
+    let mut lines: Vec<String> = message
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect();
+
+    if lines.is_empty() {
+        return ("Commit".to_string(), None);
+    }
+
+    let first = lines.remove(0);
+    if !lines.is_empty() {
+        let secondary = lines.join(" ");
+        return (
+            truncate_with_ellipsis(&first, headline_limit),
+            Some(truncate_with_ellipsis(&secondary, 220)),
+        );
+    }
+
+    if first.chars().count() > headline_limit {
+        let headline = truncate_with_ellipsis(&first, headline_limit);
+        let remainder = first
+            .chars()
+            .skip(headline_limit)
+            .collect::<String>()
+            .trim()
+            .to_string();
+        if remainder.is_empty() {
+            (headline, None)
+        } else {
+            (headline, Some(truncate_with_ellipsis(&remainder, 220)))
+        }
+    } else {
+        (first, None)
+    }
+}
+
+fn truncate_with_ellipsis(input: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let chars: Vec<char> = input.chars().collect();
+    if chars.len() <= max_chars {
+        return input.to_string();
+    }
+
+    let cutoff = max_chars.saturating_sub(1);
+    let mut truncated = chars[..cutoff].iter().collect::<String>();
+    truncated = truncated.trim_end().to_string();
+    format!("{truncated}…")
 }
 
 fn full_diff_for_commit(flake_name: &str, commit: &crate::api::models::FlakeCommit) -> String {
@@ -2568,4 +2683,35 @@ fn escape_html(value: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_commit_message_uses_hash_placeholder_when_empty() {
+        assert_eq!(normalize_commit_message("   ", "abc1234"), "Commit abc1234");
+    }
+
+    #[test]
+    fn commit_message_lines_splits_multiline_messages() {
+        let (headline, secondary) =
+            commit_message_lines("Improve sync error handling\n\nAlso tighten validation", 80);
+        assert_eq!(headline, "Improve sync error handling");
+        assert_eq!(secondary, Some("Also tighten validation".to_string()));
+    }
+
+    #[test]
+    fn commit_message_lines_truncates_long_single_line() {
+        let message = "this is a very long commit subject that should be truncated for compact cards and still retain a readable continuation";
+        let (headline, secondary) = commit_message_lines(message, 40);
+        assert!(headline.ends_with('…'));
+        assert!(secondary.is_some());
+    }
+
+    #[test]
+    fn normalize_commit_author_falls_back_for_empty_value() {
+        assert_eq!(normalize_commit_author("  \n"), "Unknown author");
+    }
 }
