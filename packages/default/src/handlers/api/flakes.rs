@@ -8,10 +8,14 @@ use axum::response::IntoResponse;
 use sqlx::PgPool;
 use tracing::error;
 
-use crate::api::models::{ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{
+    ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
+};
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
-use crate::flake::commits::get_commit_diff;
-use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::flake::commits::{
+    get_commit_diff, infer_default_branch, repo_has_branch, sync_commits_for_repo,
+};
+use crate::handlers::api::rbac::require_viewer_or_above;
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id,
     get_flake_by_name, insert_flake, list_flake_registry,
@@ -96,8 +100,10 @@ pub async fn get_commit_diff_handler(
         }
     };
 
+    let branch = resolve_sync_branch(&flake.repo_url).await;
+
     // Fetch the diff from git
-    match get_commit_diff(&flake.repo_url, "main", &commit_hash).await {
+    match get_commit_diff(&flake.repo_url, &branch, &commit_hash).await {
         Ok(diff) => (
             StatusCode::OK,
             Json(CommitDiffResponse {
@@ -113,7 +119,7 @@ pub async fn get_commit_diff_handler(
                 Json(ApiError {
                     error: "internal_error".to_string(),
                     message: format!("Failed to fetch diff for commit {}", commit_hash),
-                    details: Some(serde_json::json!({"error": e.to_string()})),
+                    details: None,
                 }),
             )
                 .into_response()
@@ -127,13 +133,8 @@ pub async fn get_commit_diff_handler(
 pub async fn create_flake(
     RequireOperator(_user): RequireOperator,
     State(pool): State<PgPool>,
-    headers: HeaderMap,
     Json(payload): Json<CreateFlakeRequest>,
 ) -> impl IntoResponse {
-    if require_operator_or_admin(&pool, &headers).await.is_none() {
-        return forbidden();
-    }
-
     if let Err(message) = validate_create_payload(&payload) {
         return (
             StatusCode::BAD_REQUEST,
@@ -148,6 +149,18 @@ pub async fn create_flake(
 
     let name = payload.name.trim();
     let repo_url = payload.repo_url.trim();
+
+    if let Err(message) = validate_repo_url_reachable(repo_url).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError {
+                error: "validation_error".to_string(),
+                message,
+                details: None,
+            }),
+        )
+            .into_response();
+    }
 
     match get_flake_by_name(&pool, name).await {
         Ok(existing) if !existing.repo_url.eq_ignore_ascii_case(repo_url) => {
@@ -213,13 +226,8 @@ pub async fn create_flake(
 pub async fn delete_flake(
     RequireAdmin(_user): RequireAdmin,
     State(pool): State<PgPool>,
-    headers: HeaderMap,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {
-    if require_operator_or_admin(&pool, &headers).await.is_none() {
-        return forbidden();
-    }
-
     match count_systems_for_flake(&pool, flake_id).await {
         Ok(system_count) if system_count > 0 => {
             return (
@@ -275,16 +283,120 @@ pub async fn delete_flake(
     }
 }
 
-fn forbidden() -> axum::response::Response {
+/// Trigger a commit sync for all tracked flakes.
+///
+/// **Authorization**: Requires Operator or Admin role.
+pub async fn sync_all_flakes_handler(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+) -> impl IntoResponse {
+    let flakes = match list_flake_registry(&pool).await {
+        Ok(flakes) => flakes,
+        Err(e) => {
+            error!("Failed to list flakes for sync: {e:#}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: "Failed to start flake sync".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let attempted = flakes.len();
+    let mut synced = 0usize;
+    let mut inserted = 0usize;
+    let mut failed = Vec::new();
+    for flake in flakes {
+        let branch = resolve_sync_branch(&flake.repo_url).await;
+        match sync_commits_for_repo(&pool, &flake.repo_url, &branch).await {
+            Ok(new_commits) => {
+                synced += 1;
+                inserted += new_commits;
+            }
+            Err(e) => {
+                error!(
+                    "Failed syncing flake {} ({}): {e:#}",
+                    flake.name, flake.repo_url
+                );
+                failed.push(sanitized_sync_failure_entry(flake.id, &flake.name));
+            }
+        }
+    }
+
     (
-        StatusCode::FORBIDDEN,
-        Json(ApiError {
-            error: "forbidden".to_string(),
-            message: "Admin or operator privileges are required".to_string(),
-            details: None,
-        }),
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": if failed.is_empty() { "ok" } else { "partial" },
+            "message": format!(
+                "Synced {synced}/{attempted} flakes from source ({inserted} new commits)."
+            ),
+            "attempted": attempted,
+            "succeeded": synced,
+            "failed_count": failed.len(),
+            "failed": failed,
+        })),
     )
         .into_response()
+}
+
+/// Trigger a commit sync for a specific flake.
+///
+/// **Authorization**: Requires Operator or Admin role.
+pub async fn sync_flake_handler(
+    RequireOperator(_user): RequireOperator,
+    State(pool): State<PgPool>,
+    Path(flake_id): Path<i32>,
+) -> impl IntoResponse {
+    let flake = match get_flake_by_id(&pool, flake_id).await {
+        Ok(flake) => flake,
+        Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: "Flake not found".to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let branch = resolve_sync_branch(&flake.repo_url).await;
+
+    match sync_commits_for_repo(&pool, &flake.repo_url, &branch).await {
+        Ok(new_commits) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "message": format!(
+                    "Synced {} from source on {} ({} new commits).",
+                    flake.name, branch, new_commits
+                ),
+                "branch": branch,
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            error!(
+                "Failed syncing flake {} ({}): {e:#}",
+                flake.name, flake.repo_url
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_error".to_string(),
+                    message: format!("Failed to sync {} from source", flake.name),
+                    details: None,
+                }),
+            )
+                .into_response()
+        }
+    }
 }
 
 fn forbidden_viewer() -> axum::response::Response {
@@ -316,6 +428,51 @@ fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
     Ok(())
 }
 
+async fn validate_repo_url_reachable(repo_url: &str) -> Result<(), String> {
+    infer_default_branch(repo_url)
+        .await
+        .map(|_| ())
+        .map_err(|e| format!("Repository URL is not reachable as a git remote: {e}"))
+}
+
+async fn resolve_sync_branch(repo_url: &str) -> String {
+    match infer_default_branch(repo_url).await {
+        Ok(branch) => branch,
+        Err(e) => {
+            error!(
+                "Failed to resolve default branch for {} (trying main/master fallback): {e:#}",
+                repo_url
+            );
+            resolve_fallback_branch(repo_url).await
+        }
+    }
+}
+
+async fn resolve_fallback_branch(repo_url: &str) -> String {
+    for candidate in ["main", "master"] {
+        match repo_has_branch(repo_url, candidate).await {
+            Ok(true) => return candidate.to_string(),
+            Ok(false) => continue,
+            Err(e) => {
+                error!(
+                    "Failed fallback branch probe for {} on {}: {e:#}",
+                    repo_url, candidate
+                );
+            }
+        }
+    }
+
+    "main".to_string()
+}
+
+fn sanitized_sync_failure_entry(flake_id: i32, flake_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": flake_id,
+        "name": flake_name,
+        "error": "sync_failed",
+    })
+}
+
 fn looks_like_repo_url(value: &str) -> bool {
     let lower = value.to_lowercase();
     lower.starts_with("https://")
@@ -328,10 +485,6 @@ fn looks_like_repo_url(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::auth_identity::AuthRole;
-    use axum::extract::State;
-    use axum::response::IntoResponse;
-    use sqlx::postgres::PgPoolOptions;
 
     #[test]
     fn create_payload_requires_name() {
@@ -373,24 +526,18 @@ mod tests {
     }
 
     #[test]
-    fn require_operator_or_admin_checks_role_membership() {
-        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
-            AuthRole::Operator,
-        ]));
-        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
-            AuthRole::Admin
-        ]));
-        assert!(crate::handlers::api::rbac::has_operator_or_admin_role(&[
-            AuthRole::Viewer,
-            AuthRole::Operator,
-        ]));
-        assert!(!crate::handlers::api::rbac::has_operator_or_admin_role(&[
-            AuthRole::Viewer,
-        ]));
-    }
+    fn sync_failure_entry_is_sanitized() {
+        let entry = sanitized_sync_failure_entry(42, "prod-core");
 
-    // NOTE: Authorization tests for create_flake, delete_flake moved to extractor-level tests
-    // in auth/extractors.rs. These handlers now use RequireOperator and RequireAdmin extractors
-    // which enforce authorization before the handler is called, so unit tests at this level
-    // cannot test authorization behavior. Integration tests should test the full request path.
+        assert_eq!(entry.get("id").and_then(|v| v.as_i64()), Some(42));
+        assert_eq!(
+            entry.get("name").and_then(|v| v.as_str()),
+            Some("prod-core")
+        );
+        assert_eq!(
+            entry.get("error").and_then(|v| v.as_str()),
+            Some("sync_failed")
+        );
+        assert!(entry.get("repo_url").is_none());
+    }
 }

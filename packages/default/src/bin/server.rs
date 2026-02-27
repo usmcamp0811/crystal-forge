@@ -117,7 +117,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
         )
-        .route("/api/v1/systems", get(systems::list_systems).post(systems::create_system))
+        .route(
+            "/api/v1/systems",
+            get(systems::list_systems).post(systems::create_system),
+        )
         .route("/api/v1/systems/:id", get(systems::get_system))
         .route("/api/v1/systems/:id/sync", post(systems::sync_system))
         .route(
@@ -154,7 +157,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/v1/policies", get(environments::list_policies_handler))
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
+        .route("/api/v1/flakes/sync", post(flakes::sync_all_flakes_handler))
         .route("/api/v1/flakes/:id", delete(flakes::delete_flake))
+        .route("/api/v1/flakes/:id/sync", post(flakes::sync_flake_handler))
         .route("/api/v1/flakes/timelines", get(flakes::get_flake_timelines))
         .route(
             "/api/v1/flakes/:id/commits/:hash/diff",
