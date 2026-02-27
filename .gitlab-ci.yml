@@ -226,6 +226,17 @@ flake-check:
   stage: check
   tags:
     - nix
+  parallel:
+    matrix:
+      - CHECK_NAME:
+          - attic_cache
+          - builder
+          - dashboard
+          - database
+          - oidc-auth
+          - s3_cache
+          - server
+          - web-ui
   before_script:
     # Create .netrc using CI job token (more secure)
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
@@ -233,7 +244,7 @@ flake-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix flake check -L --show-trace
+    - nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
   only:
     - merge_requests
     - main

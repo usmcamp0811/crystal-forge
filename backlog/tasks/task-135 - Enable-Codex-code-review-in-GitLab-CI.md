@@ -4,16 +4,18 @@ title: Enable Codex code review in GitLab CI
 status: Review
 assignee: []
 created_date: '2026-02-27 01:08'
-updated_date: '2026-02-27 02:01'
+updated_date: '2026-02-27 05:10'
 labels: []
 dependencies: []
 priority: high
+ordinal: 82000
 ---
 
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
 <!-- SECTION:DESCRIPTION:BEGIN -->
+
 ### Problem Statement
 
 Current GitLab CI configuration does not support running Codex code review in merge request pipelines.
@@ -68,23 +70,12 @@ SECTION:DESCRIPTION:END
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Inspect current CI stages and merge-request-only job patterns.
-2. Add a dedicated Codex review stage/job with strict MR rules and variable-based auth.
-3. Lint CI YAML and review diff to ensure existing jobs are unaffected.
-4. Record verification notes in task notes.
+1. Inspect existing `.gitlab-ci.yml` stages, includes, and pipeline source rules.
+2. Add Codex review job configuration with scoped MR `rules` and appropriate stage.
+3. Wire required variables/inputs through CI variable references.
+4. Validate CI syntax and job inclusion/exclusion behavior.
+5. Record verification results in task notes.
 <!-- SECTION:PLAN:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: codex-gpt-5.3 on gray in /home/mcamp/code/crystal-forge/TASK-135-enable-codex-codereview-ci
-
-Verification (local): nix develop -c nix run nixpkgs#glab -- ci lint --include-jobs => CI/CD YAML is valid.\nImplemented: codex-code-review job in ai_review stage with MR-only rules and CI-variable-based auth (OPENAI_API_KEY).
-
-Verification (full): nix develop -c nix flake check => passed (warnings only about unknown flake outputs/incompatible systems).
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/140
-<!-- SECTION:NOTES:END -->
 
 ## Verification Plan
 
@@ -94,5 +85,10 @@ Automated:
 
 Manual:
 
-- Validate job rules in MR pipeline context and confirm Codex job inclusion.
-- Confirm no secrets are hardcoded in repository files.
+- Open/update an MR and confirm Codex review job is present in MR pipeline.
+- Confirm Codex job is absent from excluded pipeline sources per configured rules.
+- Confirm no secrets were committed and CI variables are documented/referenced correctly.
+
+## Follow-Up Tasks
+
+- If broader CI refactor opportunities are discovered, create separate Backlog tasks.
