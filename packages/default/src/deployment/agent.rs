@@ -523,7 +523,17 @@ impl AgentDeploymentManager {
             let current_matches = current_resolved == store_path;
 
             if profile_matches || current_matches {
-                info!("✅ Generation verified: system converged to {}", store_path);
+                let which = if profile_matches && current_matches {
+                    "both profile and /run/current-system"
+                } else if profile_matches {
+                    "profile (generation created)"
+                } else {
+                    "/run/current-system (live system)"
+                };
+                info!(
+                    "✅ Generation verified: {} converged to {}",
+                    which, store_path
+                );
                 return Ok(());
             }
 
