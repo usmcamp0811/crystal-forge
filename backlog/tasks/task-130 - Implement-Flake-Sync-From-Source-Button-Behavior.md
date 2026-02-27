@@ -1,10 +1,10 @@
 ---
 id: TASK-130
 title: Implement Flake Sync From Source Button Behavior
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-26 08:45'
-updated_date: '2026-02-27 01:34'
+updated_date: '2026-02-27 01:48'
 labels:
   - ui
   - flakes
@@ -67,6 +67,10 @@ None.
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-130-implement-flake-sync-from-source
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/138
+
+Commit: c3984c4
 <!-- SECTION:NOTES:END -->
 
 ## Notes
