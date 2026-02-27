@@ -497,27 +497,104 @@ impl AgentDeploymentManager {
         Ok(())
     }
 
-    /// Verify that generation was created correctly
+    /// Verify that generation was created correctly with bounded retry for convergence
     async fn verify_generation_created(&self, store_path: &str) -> Result<()> {
         let profile_path = "/nix/var/nix/profiles/system";
+        let current_system_path = "/run/current-system";
 
-        let output = Command::new("readlink")
-            .arg(profile_path)
-            .output()
-            .context("Failed to read system profile")?;
+        // Canonicalize the expected store path once to ensure consistent comparison
+        // (handles case where store_path could theoretically contain symlinks or relative components)
+        let store_path_owned = store_path.to_string();
+        let store_path_canonical =
+            tokio::task::spawn_blocking(move || Self::resolve_symlink(&store_path_owned))
+                .await
+                .context("Task panicked while resolving target store path")??;
 
-        let current_link = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        // Retry configuration: up to 20 attempts with 500ms between = 10 seconds max
+        const MAX_ATTEMPTS: u32 = 20;
+        const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-        if current_link != store_path {
-            anyhow::bail!(
-                "Generation verification failed: profile points to {} but expected {}",
-                current_link,
-                store_path
+        for attempt in 1..=MAX_ATTEMPTS {
+            // Resolve the actual store paths (follow symlinks completely)
+            // Use spawn_blocking to avoid blocking Tokio worker threads with sync fs calls
+            let profile_path_owned = profile_path.to_string();
+            let profile_resolved =
+                tokio::task::spawn_blocking(move || Self::resolve_symlink(&profile_path_owned))
+                    .await
+                    .context("Task panicked while resolving profile symlink")??;
+
+            let current_system_path_owned = current_system_path.to_string();
+            let current_resolved = tokio::task::spawn_blocking(move || {
+                Self::resolve_symlink(&current_system_path_owned)
+            })
+            .await
+            .context("Task panicked while resolving current-system symlink")??;
+
+            debug!(
+                "Verification attempt {}/{}: profile={}, current_system={}, desired={}",
+                attempt, MAX_ATTEMPTS, profile_resolved, current_resolved, store_path_canonical
             );
+
+            // Check if either the profile or current-system points to the desired target
+            let profile_matches = profile_resolved == store_path_canonical;
+            let current_matches = current_resolved == store_path_canonical;
+
+            if profile_matches || current_matches {
+                let which = if profile_matches && current_matches {
+                    "both profile and /run/current-system"
+                } else if profile_matches {
+                    "profile (generation created)"
+                } else {
+                    "/run/current-system (live system)"
+                };
+                info!(
+                    "✅ Generation verified: {} converged to {}",
+                    which, store_path_canonical
+                );
+                return Ok(());
+            }
+
+            // Check if we're in a transient activatable state
+            let is_activatable = profile_resolved.contains("-activatable-nixos-system-")
+                || current_resolved.contains("-activatable-nixos-system-");
+
+            if is_activatable {
+                debug!(
+                    "System in transient activatable state, continuing to wait for convergence..."
+                );
+            } else if attempt == MAX_ATTEMPTS {
+                // Final attempt failed and we're not in activatable state
+                anyhow::bail!(
+                    "Generation verification failed: system did not converge to desired target within {} seconds. \
+                     Profile resolved to: {}, /run/current-system resolved to: {}, expected: {}",
+                    (MAX_ATTEMPTS as f64 * RETRY_DELAY.as_secs_f64()),
+                    profile_resolved,
+                    current_resolved,
+                    store_path_canonical
+                );
+            }
+
+            // Wait before next attempt (unless this was the last attempt)
+            if attempt < MAX_ATTEMPTS {
+                tokio::time::sleep(RETRY_DELAY).await;
+            }
         }
 
-        debug!("✅ Generation verified: {}", current_link);
-        Ok(())
+        // Should be unreachable due to bail in loop, but satisfy compiler
+        anyhow::bail!("Verification loop exited unexpectedly")
+    }
+
+    /// Resolve a symlink to its final target (equivalent to readlink -f)
+    fn resolve_symlink(path: &str) -> Result<String> {
+        let path_buf = std::fs::canonicalize(path)
+            .with_context(|| format!("Failed to canonicalize path: {}", path))?;
+
+        let resolved = path_buf
+            .to_str()
+            .context("Resolved path is not valid UTF-8")?
+            .to_string();
+
+        Ok(resolved)
     }
 
     /// Activate configuration via systemd-run
