@@ -202,15 +202,6 @@ pub async fn create_flake(
     send_json("POST", &url, Some(request)).await
 }
 
-/// Update an existing flake registry entry.
-pub async fn update_flake(
-    id: i32,
-    request: &UpdateFlakeRequest,
-) -> Result<FlakeRegistryItem, ApiClientError> {
-    let url = format!("{}/flakes/{id}", base_url());
-    send_json_with_csrf("PATCH", &url, Some(request)).await
-}
-
 /// Remove a flake by id.
 pub async fn delete_flake(id: i32) -> Result<(), ApiClientError> {
     let url = format!("{}/flakes/{id}", base_url());

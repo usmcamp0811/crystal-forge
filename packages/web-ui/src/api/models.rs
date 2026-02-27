@@ -368,13 +368,6 @@ pub struct CreateFlakeRequest {
     pub repo_url: String,
 }
 
-/// Request payload for updating a flake.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct UpdateFlakeRequest {
-    pub name: String,
-    pub repo_url: String,
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Environment DTOs — GET /api/v1/environments, GET /api/v1/environments/:id
 // ─────────────────────────────────────────────────────────────────────────────

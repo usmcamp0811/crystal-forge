@@ -10,14 +10,15 @@ use tracing::error;
 
 use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
-    UpdateFlakeRequest,
 };
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
-use crate::flake::commits::{get_commit_diff, infer_default_branch, sync_commits_for_repo};
+use crate::flake::commits::{
+    get_commit_diff, infer_default_branch, repo_has_branch, sync_commits_for_repo,
+};
 use crate::handlers::api::rbac::require_viewer_or_above;
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id,
-    get_flake_by_name, insert_flake, list_flake_registry, update_flake,
+    get_flake_by_name, insert_flake, list_flake_registry,
 };
 
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
@@ -118,7 +119,7 @@ pub async fn get_commit_diff_handler(
                 Json(ApiError {
                     error: "internal_error".to_string(),
                     message: format!("Failed to fetch diff for commit {}", commit_hash),
-                    details: Some(serde_json::json!({"error": e.to_string()})),
+                    details: None,
                 }),
             )
                 .into_response()
@@ -211,98 +212,6 @@ pub async fn create_flake(
                 Json(ApiError {
                     error: "internal_error".to_string(),
                     message: "Failed to create flake".to_string(),
-                    details: None,
-                }),
-            )
-                .into_response()
-        }
-    }
-}
-
-/// Update an existing flake in the registry.
-///
-/// **Authorization**: Requires Operator or Admin role (write operation).
-pub async fn update_flake_handler(
-    RequireOperator(_user): RequireOperator,
-    State(pool): State<PgPool>,
-    Path(flake_id): Path<i32>,
-    Json(payload): Json<UpdateFlakeRequest>,
-) -> impl IntoResponse {
-    if let Err(message) = validate_update_payload(&payload) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: "validation_error".to_string(),
-                message,
-                details: None,
-            }),
-        )
-            .into_response();
-    }
-
-    let name = payload.name.trim();
-    let repo_url = payload.repo_url.trim();
-
-    if let Err(message) = validate_repo_url_reachable(repo_url).await {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: "validation_error".to_string(),
-                message,
-                details: None,
-            }),
-        )
-            .into_response();
-    }
-
-    match update_flake(&pool, flake_id, name, repo_url).await {
-        Ok(flake) => (
-            StatusCode::OK,
-            Json(FlakeRegistryItem {
-                id: flake.id,
-                name: flake.name,
-                repo_url: flake.repo_url,
-                system_count: count_systems_for_flake(&pool, flake_id).await.unwrap_or(0),
-            }),
-        )
-            .into_response(),
-        Err(e) => {
-            if matches!(
-                e.downcast_ref::<sqlx::Error>(),
-                Some(sqlx::Error::RowNotFound)
-            ) {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ApiError {
-                        error: "not_found".to_string(),
-                        message: "Flake not found".to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-
-            if matches!(
-                e.downcast_ref::<sqlx::Error>(),
-                Some(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505")
-            ) {
-                return (
-                    StatusCode::CONFLICT,
-                    Json(ApiError {
-                        error: "conflict".to_string(),
-                        message: "Repository URL already exists in the registry".to_string(),
-                        details: None,
-                    }),
-                )
-                    .into_response();
-            }
-
-            error!("Failed to update flake: {e:#}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to update flake".to_string(),
                     details: None,
                 }),
             )
@@ -413,12 +322,7 @@ pub async fn sync_all_flakes_handler(
                     "Failed syncing flake {} ({}): {e:#}",
                     flake.name, flake.repo_url
                 );
-                failed.push(serde_json::json!({
-                    "id": flake.id,
-                    "name": flake.name,
-                    "repo_url": flake.repo_url,
-                    "error": e.to_string(),
-                }));
+                failed.push(sanitized_sync_failure_entry(flake.id, &flake.name));
             }
         }
     }
@@ -487,7 +391,7 @@ pub async fn sync_flake_handler(
                 Json(ApiError {
                     error: "internal_error".to_string(),
                     message: format!("Failed to sync {} from source", flake.name),
-                    details: Some(serde_json::json!({"error": e.to_string()})),
+                    details: None,
                 }),
             )
                 .into_response()
@@ -524,14 +428,6 @@ fn validate_create_payload(payload: &CreateFlakeRequest) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_update_payload(payload: &UpdateFlakeRequest) -> Result<(), String> {
-    let create_payload = CreateFlakeRequest {
-        name: payload.name.clone(),
-        repo_url: payload.repo_url.clone(),
-    };
-    validate_create_payload(&create_payload)
-}
-
 async fn validate_repo_url_reachable(repo_url: &str) -> Result<(), String> {
     infer_default_branch(repo_url)
         .await
@@ -544,12 +440,37 @@ async fn resolve_sync_branch(repo_url: &str) -> String {
         Ok(branch) => branch,
         Err(e) => {
             error!(
-                "Failed to resolve default branch for {} (falling back to main): {e:#}",
+                "Failed to resolve default branch for {} (trying main/master fallback): {e:#}",
                 repo_url
             );
-            "main".to_string()
+            resolve_fallback_branch(repo_url).await
         }
     }
+}
+
+async fn resolve_fallback_branch(repo_url: &str) -> String {
+    for candidate in ["main", "master"] {
+        match repo_has_branch(repo_url, candidate).await {
+            Ok(true) => return candidate.to_string(),
+            Ok(false) => continue,
+            Err(e) => {
+                error!(
+                    "Failed fallback branch probe for {} on {}: {e:#}",
+                    repo_url, candidate
+                );
+            }
+        }
+    }
+
+    "main".to_string()
+}
+
+fn sanitized_sync_failure_entry(flake_id: i32, flake_name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": flake_id,
+        "name": flake_name,
+        "error": "sync_failed",
+    })
 }
 
 fn looks_like_repo_url(value: &str) -> bool {
@@ -602,5 +523,21 @@ mod tests {
             repo_url: "git@github.com:org/repo.git".to_string(),
         };
         assert!(validate_create_payload(&payload).is_ok());
+    }
+
+    #[test]
+    fn sync_failure_entry_is_sanitized() {
+        let entry = sanitized_sync_failure_entry(42, "prod-core");
+
+        assert_eq!(entry.get("id").and_then(|v| v.as_i64()), Some(42));
+        assert_eq!(
+            entry.get("name").and_then(|v| v.as_str()),
+            Some("prod-core")
+        );
+        assert_eq!(
+            entry.get("error").and_then(|v| v.as_str()),
+            Some("sync_failed")
+        );
+        assert!(entry.get("repo_url").is_none());
     }
 }

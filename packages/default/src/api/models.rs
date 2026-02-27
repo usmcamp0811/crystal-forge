@@ -393,13 +393,6 @@ pub struct CreateFlakeRequest {
     pub repo_url: String,
 }
 
-/// Request payload for updating a flake registry entry.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateFlakeRequest {
-    pub name: String,
-    pub repo_url: String,
-}
-
 /// A flake with its commit timeline for the dashboard widget.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlakeTimeline {

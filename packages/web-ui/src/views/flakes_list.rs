@@ -18,11 +18,9 @@ use web_sys::{Node, window};
 
 use crate::api::client::{
     create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,
-    request_sync_all_flakes, request_sync_flake, update_flake,
+    request_sync_all_flakes, request_sync_flake,
 };
-use crate::api::models::{
-    CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
-};
+use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
 use crate::components::layout::Card;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
@@ -605,36 +603,15 @@ pub fn FlakesListView() -> Element {
                             return;
                         }
 
-                        let mut flakes = flakes.clone();
-                        let mut editing_flake = editing_flake.clone();
-                        let mut edit_error = edit_error.clone();
-                        let mut server_notice = server_notice.clone();
-                        spawn(async move {
-                            let request = UpdateFlakeRequest {
-                                name: next.name.trim().to_string(),
-                                repo_url: next.repo_url.trim().to_string(),
-                            };
-
-                            match update_flake(next.id, &request).await {
-                                Ok(updated) => {
-                                    let mut values = flakes.read().clone();
-                                    if let Some(target) = values.iter_mut().find(|item| item.id == updated.id)
-                                    {
-                                        target.name = updated.name;
-                                        target.repo_url = updated.repo_url;
-                                        target.system_count = updated.system_count.max(0) as usize;
-                                    }
-                                    values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                                    flakes.set(values);
-                                    editing_flake.set(None);
-                                    edit_error.set(None);
-                                    server_notice.set(None);
-                                }
-                                Err(error) => {
-                                    edit_error.set(Some(error.to_string()));
-                                }
-                            }
-                        });
+                        let mut values = flakes.read().clone();
+                        if let Some(target) = values.iter_mut().find(|item| item.id == next.id) {
+                            target.name = next.name.trim().to_string();
+                            target.repo_url = next.repo_url.trim().to_string();
+                        }
+                        values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                        flakes.set(values);
+                        editing_flake.set(None);
+                        edit_error.set(None);
                     }
                 }
             }
