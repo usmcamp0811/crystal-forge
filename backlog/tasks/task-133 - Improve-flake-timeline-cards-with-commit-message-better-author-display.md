@@ -1,10 +1,10 @@
 ---
 id: TASK-133
 title: Improve flake timeline cards with commit message + better author display
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-26 22:12'
-updated_date: '2026-02-26 23:46'
+updated_date: '2026-02-27 01:57'
 labels: []
 dependencies: []
 priority: high
@@ -87,4 +87,10 @@ Verification executed:
 
 Note:
 - `nix develop -c cargo check` in `packages/default` against live DB failed due incomplete local schema state; used SQLx offline mode for deterministic compile verification.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/139
+
+Commit: 8b5e05b
+
+2026-02-27 verification rerun: nix develop -c cargo check (web-ui), nix develop -c cargo test views::flakes_list::tests (web-ui), targeted rustfmt --check for touched files, SQLX_OFFLINE=true nix develop -c cargo check (default).
 <!-- SECTION:NOTES:END -->
