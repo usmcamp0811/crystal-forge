@@ -1,10 +1,10 @@
 ---
 id: TASK-135
 title: Enable Codex code review in GitLab CI
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-27 01:08'
-updated_date: '2026-02-27 05:10'
+updated_date: '2026-02-27 22:14'
 labels: []
 dependencies: []
 priority: high
