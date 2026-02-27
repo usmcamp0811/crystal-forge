@@ -21,6 +21,8 @@ use crate::queries::flakes::{
 };
 use crate::queries::users::get_by_email;
 
+const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
+
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
         return forbidden_viewer();
@@ -57,20 +59,32 @@ pub async fn get_flake_timelines(
     // Fetch up to 10 most recent commits per flake
     match fetch_flake_timelines(&pool, 10).await {
         Ok(mut timelines) => {
+            let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;
+
             for timeline in &mut timelines {
                 let hashes: Vec<String> = timeline
                     .commits
                     .iter()
+                    .filter(|commit| {
+                        commit.message.trim().is_empty() || commit.author.trim().is_empty()
+                    })
+                    .take(remaining_hydration_budget)
                     .map(|commit| commit.hash.clone())
                     .collect();
-                let metadata = match get_commit_metadata(&timeline.repo_url, &hashes).await {
-                    Ok(data) => data,
-                    Err(err) => {
-                        error!(
-                            "Failed to hydrate commit metadata for {}: {:#}",
-                            timeline.repo_url, err
-                        );
-                        HashMap::new()
+                let metadata = if hashes.is_empty() {
+                    HashMap::new()
+                } else {
+                    remaining_hydration_budget =
+                        remaining_hydration_budget.saturating_sub(hashes.len());
+                    match get_commit_metadata(&timeline.repo_url, &hashes).await {
+                        Ok(data) => data,
+                        Err(err) => {
+                            error!(
+                                "Failed to hydrate commit metadata for flake {}: {:#}",
+                                timeline.flake_name, err
+                            );
+                            HashMap::new()
+                        }
                     }
                 };
 
@@ -120,14 +134,13 @@ async fn resolve_timeline_author(
     if let Some(email) = detail
         .author_email
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(normalize_author_email)
     {
         let key = email.to_ascii_lowercase();
         let username = if let Some(value) = user_lookup_cache.get(&key) {
             value.clone()
         } else {
-            let resolved = match get_by_email(pool, email).await {
+            let resolved = match get_by_email(pool, &email).await {
                 Ok(Some(user)) => Some(user.username),
                 Ok(None) => None,
                 Err(err) => {
@@ -159,13 +172,28 @@ async fn resolve_timeline_author(
     if let Some(email) = detail
         .author_email
         .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(normalize_author_email)
     {
         return email.to_string();
     }
 
     "Unknown author".to_string()
+}
+
+fn normalize_author_email(email: &str) -> Option<String> {
+    let trimmed = email.trim();
+    let without_brackets = trimmed
+        .strip_prefix('<')
+        .unwrap_or(trimmed)
+        .strip_suffix('>')
+        .unwrap_or(trimmed)
+        .trim();
+
+    if without_brackets.is_empty() {
+        None
+    } else {
+        Some(without_brackets.to_string())
+    }
 }
 
 /// Get the git diff for a specific commit in a flake.
@@ -487,6 +515,16 @@ mod tests {
         assert!(!crate::handlers::api::rbac::has_operator_or_admin_role(&[
             AuthRole::Viewer,
         ]));
+    }
+
+    #[test]
+    fn normalize_author_email_trims_and_strips_brackets() {
+        assert_eq!(
+            normalize_author_email(" <dev@example.com> "),
+            Some("dev@example.com".to_string())
+        );
+        assert_eq!(normalize_author_email(""), None);
+        assert_eq!(normalize_author_email("   "), None);
     }
 
     // NOTE: Authorization tests for create_flake, delete_flake moved to extractor-level tests

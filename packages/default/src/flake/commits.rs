@@ -4,7 +4,10 @@ use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commi
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
+use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
+
+const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct GitCommitMetadata {
@@ -389,22 +392,56 @@ pub async fn get_commit_metadata(
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
 
-    let clone_output = tokio::process::Command::new("git")
-        .args([
-            "clone",
-            "--depth",
-            "200",
-            "--filter=blob:none",
-            &git_url,
-            ".",
-        ])
-        .current_dir(clone_path)
-        .output()
-        .await?;
+    let clone_output = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "200",
+                "--filter=blob:none",
+                &git_url,
+                ".",
+            ])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out cloning repo for metadata: {repo_url}"))?
+    .with_context(|| format!("Failed to clone repo for metadata: {repo_url}"))?;
 
     if !clone_output.status.success() {
         let stderr = String::from_utf8_lossy(&clone_output.stderr);
         bail!("Git clone failed for {}: {}", repo_url, stderr.trim());
+    }
+
+    let prefetch = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["fetch", "--quiet", "--depth", "200", "origin"])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await;
+    match prefetch {
+        Ok(Ok(output)) if output.status.success() => {}
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "Best-effort metadata prefetch failed for {}: {}",
+                repo_url,
+                stderr.trim()
+            );
+        }
+        Ok(Err(err)) => {
+            warn!(
+                "Best-effort metadata prefetch failed for {}: {}",
+                repo_url, err
+            );
+        }
+        Err(_) => {
+            warn!("Best-effort metadata prefetch timed out for {}", repo_url);
+        }
     }
 
     let mut metadata = HashMap::new();
@@ -426,35 +463,16 @@ async fn load_commit_metadata(
     clone_path: &std::path::Path,
     commit_hash: &str,
 ) -> Result<GitCommitMetadata> {
-    let output = tokio::process::Command::new("git")
-        .args(["show", "-s", "--format=%H%x1f%s%x1f%an%x1f%ae", commit_hash])
-        .current_dir(clone_path)
-        .output()
-        .await?;
-
-    let output = if output.status.success() {
-        output
-    } else {
-        let fetch_output = tokio::process::Command::new("git")
-            .args(["fetch", "origin", commit_hash])
-            .current_dir(clone_path)
-            .output()
-            .await?;
-        if !fetch_output.status.success() {
-            let stderr = String::from_utf8_lossy(&fetch_output.stderr);
-            bail!(
-                "Failed to fetch commit {} from origin: {}",
-                commit_hash,
-                stderr.trim()
-            );
-        }
-
+    let output = timeout(
+        GIT_METADATA_TIMEOUT,
         tokio::process::Command::new("git")
             .args(["show", "-s", "--format=%H%x1f%s%x1f%an%x1f%ae", commit_hash])
             .current_dir(clone_path)
-            .output()
-            .await?
-    };
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out loading metadata for commit {commit_hash}"))?
+    .with_context(|| format!("Failed to load metadata for commit {commit_hash}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
