@@ -3,7 +3,10 @@ use crate::models::commits::Commit;
 use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
+use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
+
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Fetches the latest commit from a git repository and inserts it into the database
 pub async fn fetch_and_insert_latest_commit(
@@ -225,11 +228,15 @@ pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) 
 /// Resolve the remote default branch name for a repository.
 pub async fn infer_default_branch(repo_url: &str) -> Result<String> {
     let git_url = normalize_repo_url_for_git(repo_url);
-    let output = tokio::process::Command::new("git")
-        .args(["ls-remote", "--symref", &git_url, "HEAD"])
-        .output()
-        .await
-        .with_context(|| format!("Failed to probe default branch for {repo_url}"))?;
+    let output = timeout(
+        GIT_PROBE_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["ls-remote", "--symref", &git_url, "HEAD"])
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out probing default branch for {repo_url}"))?
+    .with_context(|| format!("Failed to probe default branch for {repo_url}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -255,20 +262,27 @@ pub async fn infer_default_branch(repo_url: &str) -> Result<String> {
 /// Check whether a specific branch exists on the remote repository.
 pub async fn branch_exists(repo_url: &str, branch: &str) -> Result<bool> {
     let git_url = normalize_repo_url_for_git(repo_url);
-    let branch_ref = format!("refs/heads/{branch}");
-    let output = tokio::process::Command::new("git")
-        .args(["ls-remote", "--heads", &git_url, &branch_ref])
-        .output()
-        .await
-        .with_context(|| format!("Failed to validate branch {branch} for {repo_url}"))?;
+    let refspec = format!("refs/heads/{branch}");
+
+    let output = timeout(
+        GIT_PROBE_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["ls-remote", &git_url, &refspec])
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out probing branch {branch} for {repo_url}"))?
+    .with_context(|| format!("Failed to probe branch {branch} for {repo_url}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("Git ls-remote failed for {repo_url}: {}", stderr.trim());
+        bail!(
+            "Git ls-remote failed for {repo_url} on {branch}: {}",
+            stderr.trim()
+        );
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(!stdout.trim().is_empty())
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 fn normalize_repo_url_for_git(repo_url: &str) -> String {

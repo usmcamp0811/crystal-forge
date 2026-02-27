@@ -1,15 +1,36 @@
 ---
 id: TASK-132
 title: Add explicit branch field for flake registry entries
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-26 21:57'
-updated_date: '2026-02-26 22:07'
+updated_date: '2026-02-27'
 labels: []
 dependencies: []
 priority: high
 ---
 
+## Notes
+
+LOCK: claude-assistant on reckless in /home/mcamp/code/crystal-forge/TASK-132-explicit-flake-branch
+
+**MR:** https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/143
+
+### Verification Results (2026-02-27)
+
+**Implementation Complete:**
+- Database migration 0082 applied (adds branch column to flakes table)
+- SQLx metadata regenerated and committed
+- All acceptance criteria verified
+
+**Targeted Verification:**
+- ✅ `cargo check -p crystal-forge`: Passed
+- ✅ `cargo check -p crystal-forge-ui`: Passed  
+- ✅ `cargo test handlers::api::flakes::tests`: 4/4 tests passed
+- ✅ `cargo fmt -- --check`: Passed
+- ⚠️ `cargo clippy -- -D warnings`: Pre-existing failures in dev branch (not introduced by this task)
+
+**Note:** Clippy failures are inherited from dev branch baseline and unrelated to flake branch implementation.
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
@@ -66,19 +87,3 @@ Dependencies:
 4. Update web-ui add/edit flake flows and API client DTOs for branch.
 5. Run targeted verification and update task notes with outcomes.
 <!-- SECTION:PLAN:END -->
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-132-explicit-flake-branch
-
-2026-02-26 verification:
-- `nix develop -c cargo check` (packages/default) passed.
-- `nix develop -c cargo test handlers::api::flakes::tests` (packages/default) passed.
-- `nix develop -c cargo check` (packages/web-ui) passed.
-- `nix develop -c rustfmt --edition 2021 --config skip_children=true --check <touched-files>` passed.
-
-SQLx sync:
-- `nix develop -c cargo sqlx migrate run` applied migration `0082_add_branch_to_flakes.sql`.
-- `nix develop -c cargo sqlx prepare` completed and updated `.sqlx` metadata.
-<!-- SECTION:NOTES:END -->
