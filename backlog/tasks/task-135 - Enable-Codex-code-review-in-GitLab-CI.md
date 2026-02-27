@@ -4,7 +4,7 @@ title: Enable Codex code review in GitLab CI
 status: In Progress
 assignee: []
 created_date: '2026-02-27 01:08'
-updated_date: '2026-02-27 01:59'
+updated_date: '2026-02-27 02:00'
 labels: []
 dependencies: []
 priority: high
@@ -58,11 +58,11 @@ SECTION:DESCRIPTION:END
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 `.gitlab-ci.yml` defines a Codex code review job.
-- [ ] #2 The Codex job runs only for merge request pipelines by explicit rules.
-- [ ] #3 The Codex job references API credentials through CI variables only (no committed secrets).
-- [ ] #4 Existing non-Codex jobs keep their prior pipeline contexts.
-- [ ] #5 CI syntax validates and the new job appears in MR pipeline graph/rules evaluation.
+- [x] #1 `.gitlab-ci.yml` defines a Codex code review job.
+- [x] #2 The Codex job runs only for merge request pipelines by explicit rules.
+- [x] #3 The Codex job references API credentials through CI variables only (no committed secrets).
+- [x] #4 Existing non-Codex jobs keep their prior pipeline contexts.
+- [x] #5 CI syntax validates and the new job appears in MR pipeline graph/rules evaluation.
 <!-- AC:END -->
 
 ## Implementation Plan
