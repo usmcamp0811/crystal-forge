@@ -317,6 +317,7 @@ pub struct FlakeRegistryItem {
     pub id: i32,
     pub name: String,
     pub repo_url: String,
+    pub branch: String,
     pub system_count: i64,
 }
 
@@ -391,6 +392,15 @@ pub struct EnvironmentPolicyMapEntry {
 pub struct CreateFlakeRequest {
     pub name: String,
     pub repo_url: String,
+    pub branch: Option<String>,
+}
+
+/// Request payload for updating a flake registry entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateFlakeRequest {
+    pub name: String,
+    pub repo_url: String,
+    pub branch: Option<String>,
 }
 
 /// A flake with its commit timeline for the dashboard widget.

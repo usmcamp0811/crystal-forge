@@ -249,6 +249,7 @@ pub struct FlakeBuilder {
     id: i32,
     name: String,
     repo_url: String,
+    branch: String,
 }
 
 impl FlakeBuilder {
@@ -257,6 +258,7 @@ impl FlakeBuilder {
             id: 1,
             name: "test-flake".into(),
             repo_url: "https://github.com/example/test-flake.git".into(),
+            branch: "main".into(),
         }
     }
 
@@ -272,12 +274,17 @@ impl FlakeBuilder {
         self.repo_url = url.into();
         self
     }
+    pub fn branch(&mut self, branch: &str) -> &mut Self {
+        self.branch = branch.into();
+        self
+    }
 
     pub fn build(&self) -> Flake {
         Flake {
             id: self.id,
             name: self.name.clone(),
             repo_url: self.repo_url.clone(),
+            branch: self.branch.clone(),
         }
     }
 }

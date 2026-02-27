@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT name, repo_url FROM flakes",
+  "query": "SELECT name, repo_url, branch FROM flakes",
   "describe": {
     "columns": [
       {
@@ -12,6 +12,11 @@
         "ordinal": 1,
         "name": "repo_url",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "branch",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -19,8 +24,9 @@
     },
     "nullable": [
       false,
+      false,
       false
     ]
   },
-  "hash": "4b930f627765413f3304cbe1185582e7adac7067b1c389541ead48001ff96683"
+  "hash": "295e01286c8436cb90a463ac19844df08cb032a38e66c604bb58b205546636b3"
 }

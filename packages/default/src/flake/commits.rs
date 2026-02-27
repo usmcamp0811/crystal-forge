@@ -1,7 +1,7 @@
 use crate::config;
 use crate::models::commits::Commit;
 use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use tokio::time::{Duration, timeout};
 use tracing::{debug, info, warn};
@@ -259,7 +259,8 @@ pub async fn infer_default_branch(repo_url: &str) -> Result<String> {
     bail!("Unable to determine default branch for {repo_url}")
 }
 
-pub async fn repo_has_branch(repo_url: &str, branch: &str) -> Result<bool> {
+/// Check whether a specific branch exists on the remote repository.
+pub async fn branch_exists(repo_url: &str, branch: &str) -> Result<bool> {
     let git_url = normalize_repo_url_for_git(repo_url);
     let refspec = format!("refs/heads/{branch}");
 
