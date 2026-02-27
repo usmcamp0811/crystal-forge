@@ -209,7 +209,7 @@ pub async fn fetch_flake_timelines(
             .map(|row| FlakeCommit {
                 hash: row.git_commit_hash,
                 message: "".to_string(), // We don't store commit messages in the database
-                author: "".to_string(),   // We don't store commit authors in the database
+                author: "".to_string(),  // We don't store commit authors in the database
                 committed_at: row.commit_timestamp,
                 system_count: row.system_count.unwrap_or(0),
                 commits_behind: row.commits_behind,

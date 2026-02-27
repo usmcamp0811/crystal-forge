@@ -83,9 +83,7 @@ pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientErro
 }
 
 /// Create a new system.
-pub async fn create_system(
-    request: &CreateSystemRequest,
-) -> Result<SystemDetail, ApiClientError> {
+pub async fn create_system(request: &CreateSystemRequest) -> Result<SystemDetail, ApiClientError> {
     let url = format!("{}/systems", base_url());
     send_json_with_csrf("POST", &url, Some(request)).await
 }
@@ -141,8 +139,8 @@ pub async fn fetch_environment_policies(
 }
 
 /// Fetch required policy assignments for visible environments.
-pub async fn fetch_environment_policies_map(
-) -> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
+pub async fn fetch_environment_policies_map()
+-> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
     let url = format!("{}/environments/policies-map", base_url());
     fetch_json(&url).await
 }
@@ -216,9 +214,29 @@ pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Trigger sync for all flakes from source.
+pub async fn request_sync_all_flakes() -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/flakes/sync", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Trigger sync for a single flake from source.
+pub async fn request_sync_flake(id: i32) -> Result<SystemMutationResponse, ApiClientError> {
+    let url = format!("{}/flakes/{}/sync", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Fetch the git diff for a specific commit in a flake.
-pub async fn fetch_commit_diff(flake_id: i32, commit_hash: &str) -> Result<CommitDiffResponse, ApiClientError> {
-    let url = format!("{}/flakes/{}/commits/{}/diff", base_url(), flake_id, commit_hash);
+pub async fn fetch_commit_diff(
+    flake_id: i32,
+    commit_hash: &str,
+) -> Result<CommitDiffResponse, ApiClientError> {
+    let url = format!(
+        "{}/flakes/{}/commits/{}/diff",
+        base_url(),
+        flake_id,
+        commit_hash
+    );
     fetch_json(&url).await
 }
 
