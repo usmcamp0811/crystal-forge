@@ -1,10 +1,10 @@
 ---
 id: TASK-137
 title: 'Hotfix: eliminate NixOS generation verification race in crystal-forge agents'
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-27 14:58'
-updated_date: '2026-02-27 15:05'
+updated_date: '2026-02-27 15:10'
 labels:
   - hotfix
   - deployment
@@ -108,6 +108,8 @@ sudo nix-env -p /nix/var/nix/profiles/system --list-generations | tail -n 5
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-137-agent-generation-verification-fix
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/142
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
