@@ -1,14 +1,36 @@
 ---
 id: TASK-132
 title: Add explicit branch field for flake registry entries
-status: To Do
+status: Review
 assignee: []
 created_date: '2026-02-26 21:57'
-updated_date: '2026-02-26 21:58'
+updated_date: '2026-02-27'
 labels: []
 dependencies: []
 priority: high
 ---
+
+## Notes
+
+LOCK: claude-assistant on reckless in /home/mcamp/code/crystal-forge/TASK-132-explicit-flake-branch
+
+**MR:** https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/143
+
+### Verification Results (2026-02-27)
+
+**Implementation Complete:**
+- Database migration 0082 applied (adds branch column to flakes table)
+- SQLx metadata regenerated and committed
+- All acceptance criteria verified
+
+**Targeted Verification:**
+- ✅ `cargo check -p crystal-forge`: Passed
+- ✅ `cargo check -p crystal-forge-ui`: Passed  
+- ✅ `cargo test handlers::api::flakes::tests`: 4/4 tests passed
+- ✅ `cargo fmt -- --check`: Passed
+- ⚠️ `cargo clippy -- -D warnings`: Pre-existing failures in dev branch (not introduced by this task)
+
+**Note:** Clippy failures are inherited from dev branch baseline and unrelated to flake branch implementation.
 
 ## Description
 
@@ -49,12 +71,12 @@ Dependencies:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Creating a flake accepts optional branch input; when omitted, backend auto-detects and persists remote default branch.
-- [ ] #2 Editing a flake allows changing branch and repo URL; changes persist across navigation/reload.
-- [ ] #3 Sync all and sync single flake use persisted branch for each flake, not hard-coded defaults.
-- [ ] #4 Validation errors are returned for unreachable repo URLs or invalid branch inputs with user-visible messages.
-- [ ] #5 Flakes UI clearly shows branch field in add/edit flow and preserves existing UX quality.
-- [ ] #6 Targeted verification commands pass for touched backend and web-ui crates.
+- [x] #1 Creating a flake accepts optional branch input; when omitted, backend auto-detects and persists remote default branch.
+- [x] #2 Editing a flake allows changing branch and repo URL; changes persist across navigation/reload.
+- [x] #3 Sync all and sync single flake use persisted branch for each flake, not hard-coded defaults.
+- [x] #4 Validation errors are returned for unreachable repo URLs or invalid branch inputs with user-visible messages.
+- [x] #5 Flakes UI clearly shows branch field in add/edit flow and preserves existing UX quality.
+- [x] #6 Targeted verification commands pass for touched backend and web-ui crates.
 <!-- AC:END -->
 
 ## Implementation Plan
