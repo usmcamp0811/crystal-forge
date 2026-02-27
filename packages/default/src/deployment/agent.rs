@@ -502,25 +502,42 @@ impl AgentDeploymentManager {
         let profile_path = "/nix/var/nix/profiles/system";
         let current_system_path = "/run/current-system";
 
+        // Canonicalize the expected store path once to ensure consistent comparison
+        // (handles case where store_path could theoretically contain symlinks or relative components)
+        let store_path_owned = store_path.to_string();
+        let store_path_canonical =
+            tokio::task::spawn_blocking(move || Self::resolve_symlink(&store_path_owned))
+                .await
+                .context("Task panicked while resolving target store path")??;
+
         // Retry configuration: up to 20 attempts with 500ms between = 10 seconds max
         const MAX_ATTEMPTS: u32 = 20;
         const RETRY_DELAY: Duration = Duration::from_millis(500);
 
         for attempt in 1..=MAX_ATTEMPTS {
             // Resolve the actual store paths (follow symlinks completely)
-            let profile_resolved = Self::resolve_symlink(profile_path)
-                .context("Failed to resolve system profile symlink")?;
-            let current_resolved = Self::resolve_symlink(current_system_path)
-                .context("Failed to resolve /run/current-system symlink")?;
+            // Use spawn_blocking to avoid blocking Tokio worker threads with sync fs calls
+            let profile_path_owned = profile_path.to_string();
+            let profile_resolved =
+                tokio::task::spawn_blocking(move || Self::resolve_symlink(&profile_path_owned))
+                    .await
+                    .context("Task panicked while resolving profile symlink")??;
+
+            let current_system_path_owned = current_system_path.to_string();
+            let current_resolved = tokio::task::spawn_blocking(move || {
+                Self::resolve_symlink(&current_system_path_owned)
+            })
+            .await
+            .context("Task panicked while resolving current-system symlink")??;
 
             debug!(
                 "Verification attempt {}/{}: profile={}, current_system={}, desired={}",
-                attempt, MAX_ATTEMPTS, profile_resolved, current_resolved, store_path
+                attempt, MAX_ATTEMPTS, profile_resolved, current_resolved, store_path_canonical
             );
 
             // Check if either the profile or current-system points to the desired target
-            let profile_matches = profile_resolved == store_path;
-            let current_matches = current_resolved == store_path;
+            let profile_matches = profile_resolved == store_path_canonical;
+            let current_matches = current_resolved == store_path_canonical;
 
             if profile_matches || current_matches {
                 let which = if profile_matches && current_matches {
@@ -532,7 +549,7 @@ impl AgentDeploymentManager {
                 };
                 info!(
                     "✅ Generation verified: {} converged to {}",
-                    which, store_path
+                    which, store_path_canonical
                 );
                 return Ok(());
             }
@@ -553,7 +570,7 @@ impl AgentDeploymentManager {
                     (MAX_ATTEMPTS as f64 * RETRY_DELAY.as_secs_f64()),
                     profile_resolved,
                     current_resolved,
-                    store_path
+                    store_path_canonical
                 );
             }
 
