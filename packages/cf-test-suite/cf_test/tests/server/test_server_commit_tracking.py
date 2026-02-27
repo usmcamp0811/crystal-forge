@@ -102,10 +102,10 @@ def test_branch_specific_flake_initialization(
     branch_repo_url = f"http://gitserver/crystal-forge{repo_url_suffix}"
     flake_name = f"crystal-forge-{branch_name.replace('/', '-')}"
 
-    # Insert the branch-specific flake into the database
+    # Insert the branch-specific flake into the database with explicit branch
     cf_client.execute_sql(
-        "INSERT INTO flakes (name, repo_url) VALUES (%s, %s) ON CONFLICT (repo_url) DO NOTHING",
-        (flake_name, branch_repo_url),
+        "INSERT INTO flakes (name, repo_url, branch) VALUES (%s, %s, %s) ON CONFLICT (repo_url) DO NOTHING",
+        (flake_name, branch_repo_url, branch_name),
     )
 
     # Get the flake ID
@@ -222,10 +222,10 @@ def test_branch_polling_picks_up_new_commit(cf_client, server, gitserver):
     branch_name = "development"
     repo_url = f"http://gitserver/crystal-forge?ref={branch_name}"
 
-    # Ensure the branch flake exists (idempotent)
+    # Ensure the branch flake exists (idempotent) with explicit branch
     cf_client.execute_sql(
-        "INSERT INTO flakes (name, repo_url) VALUES (%s, %s) ON CONFLICT (repo_url) DO NOTHING",
-        (f"crystal-forge-{branch_name}", repo_url),
+        "INSERT INTO flakes (name, repo_url, branch) VALUES (%s, %s, %s) ON CONFLICT (repo_url) DO NOTHING",
+        (f"crystal-forge-{branch_name}", repo_url, branch_name),
     )
 
     # Resolve flake_id
