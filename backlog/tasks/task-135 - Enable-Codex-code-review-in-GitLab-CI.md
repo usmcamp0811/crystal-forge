@@ -1,17 +1,19 @@
 ---
 id: TASK-135
 title: Enable Codex code review in GitLab CI
-status: To Do
+status: Review
 assignee: []
-created_date: "2026-02-27 01:08"
-updated_date: "2026-02-27 01:14"
+created_date: '2026-02-27 01:08'
+updated_date: '2026-02-27 05:10'
 labels: []
 dependencies: []
 priority: high
+ordinal: 82000
 ---
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 <!-- SECTION:DESCRIPTION:BEGIN -->
 
 ### Problem Statement
@@ -54,9 +56,9 @@ Desired Outcome: `.gitlab-ci.yml` supports Codex code review in the appropriate 
 <!--
 SECTION:DESCRIPTION:END
 -->
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
-
 <!-- AC:BEGIN -->
 - [ ] #1 GitLab CI includes a Codex code review job (or equivalent integration job) defined in `.gitlab-ci.yml`.
 - [ ] #2 The Codex job runs for merge request pipelines under explicit `rules`/conditions.
@@ -65,6 +67,16 @@ SECTION:DESCRIPTION:END
 - [ ] #5 Existing core CI jobs continue to run under their prior conditions (no unintended regressions in pipeline triggering).
 - [ ] #6 The task notes include verification evidence showing the Codex job appears in the intended pipeline context.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Inspect existing `.gitlab-ci.yml` stages, includes, and pipeline source rules.
+2. Add Codex review job configuration with scoped MR `rules` and appropriate stage.
+3. Wire required variables/inputs through CI variable references.
+4. Validate CI syntax and job inclusion/exclusion behavior.
+5. Record verification results in task notes.
+<!-- SECTION:PLAN:END -->
 
 ## Verification Plan
 
@@ -78,16 +90,6 @@ Manual:
 - Open/update an MR and confirm Codex review job is present in MR pipeline.
 - Confirm Codex job is absent from excluded pipeline sources per configured rules.
 - Confirm no secrets were committed and CI variables are documented/referenced correctly.
-
-## Implementation Plan
-
-<!-- SECTION:PLAN:BEGIN -->
-1. Inspect existing `.gitlab-ci.yml` stages, includes, and pipeline source rules.
-2. Add Codex review job configuration with scoped MR `rules` and appropriate stage.
-3. Wire required variables/inputs through CI variable references.
-4. Validate CI syntax and job inclusion/exclusion behavior.
-5. Record verification results in task notes.
-<!-- SECTION:PLAN:END -->
 
 ## Follow-Up Tasks
 
