@@ -4,7 +4,7 @@ title: Improve flake timeline cards with commit message + better author display
 status: Review
 assignee: []
 created_date: '2026-02-26 22:12'
-updated_date: '2026-02-27 01:57'
+updated_date: '2026-02-27 02:07'
 labels: []
 dependencies: []
 priority: high
@@ -93,4 +93,8 @@ MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/139
 Commit: 8b5e05b
 
 2026-02-27 verification rerun: nix develop -c cargo check (web-ui), nix develop -c cargo test views::flakes_list::tests (web-ui), targeted rustfmt --check for touched files, SQLX_OFFLINE=true nix develop -c cargo check (default).
+
+Follow-up perf hardening commit: 101541a
+
+Addressed review blocker by adding git metadata timeouts, removing per-commit fetch, and capping request-time hydration to missing fields only.
 <!-- SECTION:NOTES:END -->
