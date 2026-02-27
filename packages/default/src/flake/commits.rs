@@ -8,6 +8,7 @@ use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
+const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct GitCommitMetadata {
@@ -205,6 +206,91 @@ pub async fn sync_all_watched_flakes_commits(
     }
 
     Ok(())
+}
+
+/// Sync commits for a single flake repository URL.
+///
+/// Returns the number of newly inserted commits.
+pub async fn sync_commits_for_repo(pool: &PgPool, repo_url: &str, branch: &str) -> Result<usize> {
+    match flake_has_commits(pool, repo_url).await {
+        Ok(true) => {
+            let last_commit = flake_last_commit(pool, repo_url)
+                .await
+                .with_context(|| format!("Failed to load last commit for {repo_url}"))?;
+            let inserted = fetch_and_insert_commits_since(pool, repo_url, branch, &last_commit)
+                .await
+                .with_context(|| {
+                    format!("Failed to sync commits since last known hash for {repo_url}")
+                })?;
+            Ok(inserted.len())
+        }
+        Ok(false) => {
+            let inserted = fetch_and_insert_recent_commits(pool, repo_url, branch, Some(10))
+                .await
+                .with_context(|| format!("Failed to initialize commits for {repo_url}"))?;
+            Ok(inserted.len())
+        }
+        Err(e) => Err(e).with_context(|| format!("Failed to inspect commit state for {repo_url}")),
+    }
+}
+
+/// Resolve the remote default branch name for a repository.
+pub async fn infer_default_branch(repo_url: &str) -> Result<String> {
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let output = timeout(
+        GIT_PROBE_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["ls-remote", "--symref", &git_url, "HEAD"])
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out probing default branch for {repo_url}"))?
+    .with_context(|| format!("Failed to probe default branch for {repo_url}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("Git ls-remote failed for {repo_url}: {}", stderr.trim());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(target) = line
+            .strip_prefix("ref: refs/heads/")
+            .and_then(|value| value.split('\t').next())
+        {
+            let branch = target.trim();
+            if !branch.is_empty() {
+                return Ok(branch.to_string());
+            }
+        }
+    }
+
+    bail!("Unable to determine default branch for {repo_url}")
+}
+
+pub async fn repo_has_branch(repo_url: &str, branch: &str) -> Result<bool> {
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let refspec = format!("refs/heads/{branch}");
+
+    let output = timeout(
+        GIT_PROBE_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["ls-remote", &git_url, &refspec])
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out probing branch {branch} for {repo_url}"))?
+    .with_context(|| format!("Failed to probe branch {branch} for {repo_url}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "Git ls-remote failed for {repo_url} on {branch}: {}",
+            stderr.trim()
+        );
+    }
+
+    Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
 }
 
 fn normalize_repo_url_for_git(repo_url: &str) -> String {
@@ -502,6 +588,9 @@ async fn load_commit_metadata(
     })
 }
 
+/// Get the git diff for a specific commit.
+/// Returns the full unified diff output from `git show`.
+/// Tries multiple common branch names if the specified branch doesn't work.
 /// Get the git diff for a specific commit.
 /// Returns the full unified diff output from `git show`.
 /// Tries multiple common branch names if the specified branch doesn't work.
