@@ -1,10 +1,10 @@
 ---
 id: TASK-135
 title: Enable Codex code review in GitLab CI
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-27 01:08'
-updated_date: '2026-02-27 02:00'
+updated_date: '2026-02-27 02:01'
 labels: []
 dependencies: []
 priority: high
@@ -82,6 +82,8 @@ LOCK: codex-gpt-5.3 on gray in /home/mcamp/code/crystal-forge/TASK-135-enable-co
 Verification (local): nix develop -c nix run nixpkgs#glab -- ci lint --include-jobs => CI/CD YAML is valid.\nImplemented: codex-code-review job in ai_review stage with MR-only rules and CI-variable-based auth (OPENAI_API_KEY).
 
 Verification (full): nix develop -c nix flake check => passed (warnings only about unknown flake outputs/incompatible systems).
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/140
 <!-- SECTION:NOTES:END -->
 
 ## Verification Plan
