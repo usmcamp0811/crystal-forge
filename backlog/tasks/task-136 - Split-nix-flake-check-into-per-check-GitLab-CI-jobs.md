@@ -1,10 +1,10 @@
 ---
 id: TASK-136
 title: Split nix flake check into per-check GitLab CI jobs
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-27 02:31'
-updated_date: '2026-02-27 09:30'
+updated_date: '2026-02-27 09:58'
 labels: []
 dependencies: []
 priority: high
@@ -75,3 +75,4 @@ Medium: CI structure changes can block merges if selectors or rules are incorrec
   - `nix flake check --show-trace --no-build .#checks.x86_64-linux.server` failed immediately because `nix flake check` does not accept a check fragment selector in this form.
   - `nix build .#checks.x86_64-linux.server --dry-run -L --show-trace` was attempted but exceeded local execution timeout.
   - `nix flake show --all-systems` completed and confirmed all check names used by CI matrix (`attic_cache`, `builder`, `dashboard`, `database`, `oidc-auth`, `s3_cache`, `server`, `web-ui`).
+- MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/141
