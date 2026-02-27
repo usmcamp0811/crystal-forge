@@ -1,5 +1,6 @@
 stages:
   - check
+  - ai_review
   - metrics
   - coverage
   - bump
@@ -7,6 +8,56 @@ stages:
 variables:
   # GitLab API for posting MR comments
   GITLAB_API_URL: "${CI_API_V4_URL}"
+  CODEX_QA_PATH: "gl-code-quality-report.json"
+  CODEX_RAW_LOG: "artifacts/codex-raw.log"
+
+codex-code-review:
+  stage: ai_review
+  tags:
+    - nix
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $OPENAI_API_KEY'
+      when: on_success
+    - when: never
+  script:
+    - set -euo pipefail
+    - mkdir -p artifacts
+    - ': > "${CODEX_RAW_LOG}"'
+    - ': > "${CODEX_QA_PATH}"'
+    - |
+      PROMPT=$'Review this repository and output ONLY GitLab Code Quality JSON between markers.\n=== BEGIN_CODE_QUALITY_JSON ===\n<JSON ARRAY HERE>\n=== END_CODE_QUALITY_JSON ===\nRules: output a single CodeClimate JSON array, use existing repo-relative file paths, no markdown, no prose, no placeholders. If no issues, output [] between markers.'
+      FILE_LIST="$(git ls-files | sed 's/^/- /')"
+      PROMPT="${PROMPT}\nOnly report issues in these files:\n${FILE_LIST}"
+      export PROMPT
+      nix shell nixpkgs#nodejs_24 nixpkgs#git nixpkgs#gnused nixpkgs#gawk nixpkgs#util-linux nixpkgs#bash -c bash -lc '
+        set -euo pipefail
+        npm -g i @openai/codex@latest
+        codex --version
+        set +e
+        script -q -c "codex exec --full-auto \"$PROMPT\"" | tee "${CODEX_RAW_LOG}" >/dev/null
+        CODEX_RC=${PIPESTATUS[0]}
+        set -e
+        echo "Codex exit code: ${CODEX_RC}"
+        TMP_OUT="$(mktemp)"
+        sed -E "s/\\x1B\\[[0-9;]*[A-Za-z]//g" "${CODEX_RAW_LOG}" \
+          | tr -d "\\r" \
+          | awk " /^\\s*=== BEGIN_CODE_QUALITY_JSON ===\\s*$/ {grab=1; next} /^\\s*=== END_CODE_QUALITY_JSON ===\\s*$/ {grab=0} grab " > "${TMP_OUT}"
+        if ! node -e "const f=process.argv[1]; const s=require(\"fs\").readFileSync(f,\"utf8\").trim(); if(!s || /(<JSON ARRAY HERE>|BEGIN_CODE_QUALITY_JSON|END_CODE_QUALITY_JSON)/.test(s)) process.exit(2); JSON.parse(s);" "${TMP_OUT}"; then
+          echo "[]" > "${TMP_OUT}"
+        fi
+        mv -f "${TMP_OUT}" "${CODEX_QA_PATH}"
+      '
+  artifacts:
+    when: always
+    reports:
+      codequality: gl-code-quality-report.json
+    paths:
+      - artifacts/codex-raw.log
+      - gl-code-quality-report.json
+    expire_in: 14 days
 
 # Post coverage report as MR comment
 .coverage-mr-comment:
