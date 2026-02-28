@@ -316,6 +316,6 @@ mod tests {
         let (id, sig) = client.sign_request(body);
         
         assert_eq!(id, builder_id.to_string());
-        assert_eq!(sig.len(), 128); // 64 bytes = 128 hex chars
+        assert_eq!(sig.len(), 88); // 64 bytes Ed25519 signature as base64
     }
 }
