@@ -4,7 +4,7 @@ title: Consolidate repeated web-ui inline styles into shared CSS classes
 status: To Do
 assignee: []
 created_date: '2026-02-28 18:05'
-updated_date: '2026-02-28 18:51'
+updated_date: '2026-02-28 18:52'
 labels:
   - web-ui
   - frontend
@@ -19,20 +19,21 @@ priority: high
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
-The web UI currently mixes Tailwind/theme classes with many repeated inline `style` fragments (badges, chips, modal shells, gradients, and status colors). This duplication increases maintenance cost and causes visual-token drift.
+The web UI currently mixes Tailwind/theme classes with many repeated inline `style` fragments (badges, chips, modal shells, gradients, and status colors). This duplication increases maintenance cost, causes visual-token drift, and makes future theme expansion harder.
 
 ## Goal
-Perform an **exhaustive** pass across `packages/web-ui` to move repeated **static** inline styles into shared CSS classes/tokens, while preserving runtime-calculated inline styles that are required for dynamic rendering. Deliver as one large PR.
+Perform an **exhaustive** pass across `packages/web-ui` to move repeated **static** inline styles into shared CSS classes/tokens, while preserving runtime-calculated inline styles required for dynamic rendering. Structure extracted styles so adding additional UI themes is straightforward. Deliver as one large PR.
 
 ## Non-Goals
 - No visual redesign or intentional look-and-feel change
 - No migration of truly dynamic computed styles (pixel-positioned timeline/layout math, runtime color interpolation) out of inline style attributes
 - No API/domain/business-logic changes
+- No requirement to ship a fully new alternate theme in this task (foundation only)
 
 ## Architectural Constraints
 - Keep rendering behavior and UX equivalent to baseline
-- Continue using the existing design token approach (`theme.rs`) and shared stylesheet (`assets/app.css`)
-- Use semantic, reusable class names for extracted styles
+- Continue using existing design token approach (`theme.rs`) and shared stylesheet (`assets/app.css`)
+- Prefer CSS variables/tokens and semantic reusable classes for extracted static styles
 - Keep presentation concerns isolated from non-UI logic
 
 ## Verification Plan
@@ -58,8 +59,9 @@ None.
 <!-- AC:BEGIN -->
 - [ ] #1 An exhaustive inventory of repeated static inline style fragments across `packages/web-ui/src` is completed and addressed in this task.
 - [ ] #2 Repeated static inline styles are replaced with shared reusable classes and/or CSS variables, with no intentional visual redesign.
-- [ ] #3 Dynamic inline styles that depend on runtime-calculated values remain inline and are documented in task notes as intentionally retained.
-- [ ] #4 Coding standards documentation is updated to require shared classes/tokens for repeated static styles and to define when inline styles are acceptable.
-- [ ] #5 All affected web-ui views/components render equivalently to baseline in local verification.
-- [ ] #6 Local verification (build/check + targeted manual UI checks) is completed and recorded in task notes.
+- [ ] #3 Extracted static color/style primitives are tokenized (CSS variables/theme classes) so additional themes can be added with minimal component-level changes.
+- [ ] #4 Dynamic inline styles that depend on runtime-calculated values remain inline and are documented in task notes as intentionally retained.
+- [ ] #5 Coding standards documentation is updated to require shared classes/tokens for repeated static styles and to define when inline styles are acceptable.
+- [ ] #6 All affected web-ui views/components render equivalently to baseline in local verification.
+- [ ] #7 Local verification (build/check + targeted manual UI checks) is completed and recorded in task notes.
 <!-- AC:END -->
