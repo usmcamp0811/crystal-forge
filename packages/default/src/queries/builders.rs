@@ -5,8 +5,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::models::builders::{
-    Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus, BuilderSummary,
-    BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderRequest,
+    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus,
+    BuilderSummary, BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest,
+    UpdateBuilderRequest,
 };
 use crate::models::public_key::PublicKey;
 
@@ -355,17 +356,17 @@ pub async fn remove_builder_from_environment(
     Ok(())
 }
 
-/// Get all environment IDs assigned to a builder
+/// Get all environment IDs assigned to a builder (returns empty vec for wildcard builders)
 pub async fn get_builder_environment_ids(pool: &PgPool, builder_id: &Uuid) -> Result<Vec<Uuid>> {
-    let env_ids = sqlx::query_scalar!(
+    let env_ids = sqlx::query_scalar::<_, Uuid>(
         r#"
         SELECT environment_id
         FROM builder_environment_assignments
         WHERE builder_id = $1
-        ORDER BY created_at
+        ORDER BY created_at ASC
         "#,
-        builder_id
     )
+    .bind(builder_id)
     .fetch_all(pool)
     .await
     .context("Failed to fetch builder environment assignments")?;
@@ -430,6 +431,153 @@ pub async fn mark_stale_builders_offline(pool: &PgPool, timeout_seconds: i64) ->
     .context("Failed to mark stale builders offline")?;
 
     Ok(result.rows_affected() as i64)
+}
+
+// =============================================================================
+// BUILD JOB QUERIES (Work Queue Operations)
+// =============================================================================
+
+/// Get the number of active (building) jobs for a builder
+pub async fn count_active_jobs_for_builder(pool: &PgPool, builder_id: &Uuid) -> Result<i64> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)
+        FROM build_jobs
+        WHERE builder_id = $1 AND status = 'building'
+        "#,
+    )
+    .bind(builder_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to count active jobs for builder")?;
+
+    Ok(count)
+}
+
+/// Get the next queued job for a builder based on environment assignments
+/// Returns None if no jobs available
+/// If builder has no environment assignments, returns jobs from any environment (wildcard)
+pub async fn get_next_queued_job(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+) -> Result<Option<BuildJob>> {
+    let job = if environment_ids.is_empty() {
+        // Wildcard: builder can pick up jobs from any environment
+        sqlx::query_as::<_, BuildJob>(
+            r#"
+            SELECT *
+            FROM build_jobs
+            WHERE status = 'queued'
+            ORDER BY priority_weight DESC, created_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch next queued job (wildcard)")?
+    } else {
+        // Filtered: only jobs matching builder's environment assignments
+        sqlx::query_as::<_, BuildJob>(
+            r#"
+            SELECT *
+            FROM build_jobs
+            WHERE status = 'queued'
+              AND (environment_id = ANY($1) OR environment_id IS NULL)
+            ORDER BY priority_weight DESC, created_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            "#,
+        )
+        .bind(environment_ids)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch next queued job (filtered)")?
+    };
+
+    Ok(job)
+}
+
+/// Assign a job to a builder and mark it as building
+pub async fn assign_job_to_builder(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+) -> Result<BuildJob> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET builder_id = $2,
+            status = 'building',
+            started_at = now(),
+            updated_at = now()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to assign job to builder")?;
+
+    Ok(job)
+}
+
+/// Mark a job as successfully completed
+pub async fn mark_job_complete(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        UPDATE build_jobs
+        SET status = 'success',
+            completed_at = now(),
+            updated_at = now()
+        WHERE id = $1
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .fetch_one(pool)
+    .await
+    .context("Failed to mark job as complete")?;
+
+    Ok(job)
+}
+
+/// Append logs to a job
+pub async fn append_job_logs(pool: &PgPool, job_id: &Uuid, new_logs: &str) -> Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET logs = COALESCE(logs, '') || $2,
+            updated_at = now()
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .bind(new_logs)
+    .execute(pool)
+    .await
+    .context("Failed to append job logs")?;
+
+    Ok(())
+}
+
+/// Get a build job by ID
+pub async fn get_build_job_by_id(pool: &PgPool, job_id: &Uuid) -> Result<Option<BuildJob>> {
+    let job = sqlx::query_as::<_, BuildJob>(
+        r#"
+        SELECT *
+        FROM build_jobs
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to fetch build job by ID")?;
+
+    Ok(job)
 }
 
 #[cfg(test)]

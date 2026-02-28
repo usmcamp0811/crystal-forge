@@ -181,3 +181,52 @@ mod tests {
         );
     }
 }
+
+// =============================================================================
+// BUILD JOB MODELS (for work queue)
+// =============================================================================
+
+/// Status of a build job
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuildJobStatus {
+    Queued,
+    Building,
+    Success,
+    Failed,
+}
+
+impl std::fmt::Display for BuildJobStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BuildJobStatus::Queued => write!(f, "queued"),
+            BuildJobStatus::Building => write!(f, "building"),
+            BuildJobStatus::Success => write!(f, "success"),
+            BuildJobStatus::Failed => write!(f, "failed"),
+        }
+    }
+}
+
+/// A build job in the queue
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct BuildJob {
+    pub id: Uuid,
+    pub builder_id: Option<Uuid>,
+    pub derivation_id: i32,
+    pub environment_id: Option<Uuid>,
+    pub status: String, // Will be parsed to BuildJobStatus
+    pub retry_count: i32,
+    pub max_retries: i32,
+    pub priority_weight: f64,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub logs: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Response for append_job_logs endpoint
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AppendLogsRequest {
+    pub logs: String,
+}

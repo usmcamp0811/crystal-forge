@@ -18,9 +18,9 @@ use crate::handlers::api::rbac::require_admin;
 use crate::handlers::agent_request::CFState;
 use crate::handlers::builder_request::{authenticate_builder_request, VerifiedBuilderRequest};
 use crate::models::builders::{
-    Builder, BuilderMetrics, BuilderSummary, BuilderWithEnvironments, CreateBuilderRequest,
-    ReportMetricsRequest, UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest,
-    UpdateBuilderRequest,
+    AppendLogsRequest, Builder, BuilderMetrics, BuilderSummary, BuilderWithEnvironments,
+    CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderEnvironmentsRequest,
+    UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
 };
 use crate::queries::builders;
 
@@ -262,13 +262,55 @@ pub async fn get_next_job(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // TODO: Implement job assignment logic (Phase 4)
-    // For now, return no jobs available
-    Ok(Json(NextJobResponse {
-        job_id: None,
-        derivation_id: None,
-        message: "No jobs available (job assignment not yet implemented)".to_string(),
-    }))
+    // Get builder to check max_concurrent_jobs
+    let builder = builders::get_builder_by_id(&state.pool, &builder_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Check current active jobs vs limit
+    let active_count = builders::count_active_jobs_for_builder(&state.pool, &builder_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if active_count >= builder.max_concurrent_jobs as i64 {
+        // Builder at capacity
+        return Ok(Json(NextJobResponse {
+            job_id: None,
+            derivation_id: None,
+            message: "Builder at max concurrent job limit".to_string(),
+        }));
+    }
+
+    // Get builder's environment assignments (empty = wildcard)
+    let environment_ids = builders::get_builder_environment_ids(&state.pool, &builder_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Get next queued job
+    let job = builders::get_next_queued_job(&state.pool, &environment_ids)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(job) = job {
+        // Assign job to builder
+        let assigned_job = builders::assign_job_to_builder(&state.pool, &job.id, &builder_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        Ok(Json(NextJobResponse {
+            job_id: Some(assigned_job.id),
+            derivation_id: Some(assigned_job.derivation_id),
+            message: "Job assigned".to_string(),
+        }))
+    } else {
+        // No jobs available
+        Ok(Json(NextJobResponse {
+            job_id: None,
+            derivation_id: None,
+            message: "No jobs available".to_string(),
+        }))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,6 +320,9 @@ pub struct JobStatusRequest {
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/start - Mark job as started
+/// 
+/// Note: This is a no-op since get_next_job already marks the job as building.
+/// Kept for API consistency and future extensibility.
 pub async fn start_job(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
@@ -291,9 +336,17 @@ pub async fn start_job(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // TODO: Implement job start logic (Phase 4)
-    // Update build_jobs status to 'building', set started_at timestamp
+    // Verify the job exists and is assigned to this builder
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
+    if job.builder_id != Some(builder_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Job already marked as building by get_next_job
     Ok(StatusCode::ACCEPTED)
 }
 
@@ -311,8 +364,20 @@ pub async fn complete_job(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // TODO: Implement job completion logic (Phase 4)
-    // Update build_jobs status to 'success', set completed_at timestamp
+    // Verify the job is assigned to this builder
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Mark job as complete
+    builders::mark_job_complete(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::OK)
 }
@@ -341,11 +406,6 @@ pub async fn fail_job(
     Ok(StatusCode::OK)
 }
 
-#[derive(Debug, Deserialize)]
-pub struct AppendLogsRequest {
-    pub logs: String,
-}
-
 /// POST /api/v1/builders/:id/jobs/:job_id/logs - Append build logs
 pub async fn append_job_logs(
     State(state): State<CFState>,
@@ -361,11 +421,23 @@ pub async fn append_job_logs(
     }
 
     // Parse log content
-    let _request: AppendLogsRequest =
+    let request: AppendLogsRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // TODO: Implement log appending logic (Phase 4)
-    // Append to build_jobs.logs field
+    // Verify the job is assigned to this builder
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(builder_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Append logs
+    builders::append_job_logs(&state.pool, &job_id, &request.logs)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(StatusCode::ACCEPTED)
 }
