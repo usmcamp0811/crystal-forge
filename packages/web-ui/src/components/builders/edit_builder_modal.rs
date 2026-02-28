@@ -51,6 +51,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                 max_memory_mb.set(builder_data.max_memory_mb.map(|n| n.to_string()).unwrap_or_default());
                 max_concurrent_jobs.set(builder_data.max_concurrent_jobs.to_string());
                 selected_environments.set(builder_data.assigned_environment_ids.clone());
+                rotated_public_key.set(builder_data.public_key.clone());
                 is_initialized.set(true);
             }
         }
@@ -411,29 +412,30 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                                 }
                                 p {
                                     class: "text-xs {theme::text::SECONDARY}",
-                                    "Generate a new keypair, save the private key securely, then apply the public key update."
+                                    "Paste a public key manually or generate a new keypair. Apply to save the public key to this builder."
                                 }
 
-                                if !rotated_public_key().is_empty() {
-                                    div {
-                                        label {
-                                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                            "New Public Key"
-                                        }
-                                        textarea {
-                                            class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white font-mono text-xs",
-                                            rows: "2",
-                                            readonly: true,
-                                            value: "{rotated_public_key}",
-                                        }
+                                div {
+                                    label {
+                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                        "Public Key (base64)"
                                     }
+                                    textarea {
+                                        class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white font-mono text-xs",
+                                        rows: "2",
+                                        value: "{rotated_public_key}",
+                                        oninput: move |e| rotated_public_key.set(e.value()),
+                                        disabled: is_submitting(),
+                                    }
+                                }
 
+                                if !rotated_private_key().is_empty() {
                                     div {
                                         div {
                                             class: "flex items-center justify-between mb-1",
                                             label {
                                                 class: "block text-sm font-medium text-amber-400",
-                                                "New Private Key"
+                                                "Generated Private Key"
                                                 span { class: "text-xs {theme::text::SECONDARY} ml-2", "(save this securely)" }
                                             }
                                             button {
@@ -456,18 +458,18 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                                             }
                                         }
                                     }
+                                }
 
-                                    div {
-                                        class: "pt-1",
-                                        button {
-                                            class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
-                                            onclick: handle_update_public_key,
-                                            disabled: is_submitting(),
-                                            if is_submitting() {
-                                                "Applying..."
-                                            } else {
-                                                "Apply Public Key Update"
-                                            }
+                                div {
+                                    class: "pt-1",
+                                    button {
+                                        class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
+                                        onclick: handle_update_public_key,
+                                        disabled: is_submitting() || rotated_public_key().trim().is_empty(),
+                                        if is_submitting() {
+                                            "Applying..."
+                                        } else {
+                                            "Apply Public Key Update"
                                         }
                                     }
                                 }

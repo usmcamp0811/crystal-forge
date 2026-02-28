@@ -14,6 +14,7 @@ use ed25519_dalek::{Signature, Verifier};
 use sqlx::PgPool;
 use std::future::Future;
 use std::pin::Pin;
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::models::builders::Builder;
@@ -110,6 +111,11 @@ pub async fn authenticate_builder_request_with_lookup<L: BuilderLookup>(
     // Only allow active builders to make API requests
     // (Inactive builders are paused, offline builders have timed out)
     if builder.status != crate::models::builders::BuilderStatus::Active {
+        warn!(
+            builder_id = %builder.id,
+            status = ?builder.status,
+            "builder auth rejected: builder is not active"
+        );
         return Err(StatusCode::UNAUTHORIZED);
     }
 
@@ -120,6 +126,11 @@ pub async fn authenticate_builder_request_with_lookup<L: BuilderLookup>(
         .verify(&body, &signature)
         .is_err()
     {
+        warn!(
+            builder_id = %builder.id,
+            public_key = %builder.public_key.to_base64(),
+            "builder auth rejected: signature verification failed"
+        );
         return Err(StatusCode::UNAUTHORIZED);
     }
 
