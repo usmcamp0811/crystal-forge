@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: Review
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 05:46'
+updated_date: '2026-02-28 14:38'
 labels:
   - backend
   - builder
@@ -233,7 +233,7 @@ poll_interval_seconds = 30
 - [x] #16 Authorization: admin required for builder management
 - [x] #17 Authorization: signed requests for builder API calls
 - [ ] #18 Migration preserves existing builder functionality
-- [ ] #19 Documentation for builder deployment and configuration
+- [x] #19 Documentation for builder deployment and configuration
 - [ ] #20 Separate server and builder binaries maintained (no merge required)
 <!-- AC:END -->
 
@@ -633,6 +633,21 @@ Follow-up work tracked separately:
 - Phase 6: Builder Binary Updates
 - Phase 8-9: Frontend UI
 - Phase 10: Testing & Documentation
+
+Documentation Added (2026-02-28)
+
+Created comprehensive API documentation in docs/multi-builder-api.md:
+- Complete API reference with request/response examples
+- Database schema documentation
+- Deployment guide with keypair generation
+- Architecture and security details
+- Troubleshooting guide
+
+691 lines of documentation covering all aspects of the multi-builder API.
+
+Commit: fa9aa8d2
+
+Acceptance criteria #19 complete.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
