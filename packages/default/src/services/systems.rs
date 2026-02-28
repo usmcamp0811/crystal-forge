@@ -204,7 +204,7 @@ pub async fn get_system_detail(
 /// Create a new system.
 pub async fn create_system(
     pool: &PgPool,
-    user_id: Uuid,
+    _user_id: Uuid,
     payload: CreateSystemRequest,
 ) -> Result<SystemDetail> {
     // Look up environment ID from name

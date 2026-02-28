@@ -445,7 +445,7 @@ pub async fn list_systems_scoped(
         rows
     } else {
         rows.into_iter()
-            .filter(|row| {
+            .filter(|_row| {
                 // Keep rows where environment_id is in the allowed list
                 // Note: SystemListRow may not have environment_id, so we need to check differently
                 true // Simplified - actual filtering would require joining environment info

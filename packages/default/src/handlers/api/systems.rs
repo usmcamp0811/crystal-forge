@@ -178,10 +178,10 @@ pub async fn get_system(
         return forbidden();
     };
 
-    let Some(caller_role) = highest_role(&roles) else {
+    let Some(_caller_role) = highest_role(&roles) else {
         return forbidden();
     };
-    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+    let _environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
@@ -479,79 +479,6 @@ fn highest_role(roles: &[AuthRole]) -> Option<Role> {
 }
 
 fn matches_filters(row: &SystemAccessRow, params: &SystemsListParams) -> bool {
-    if let Some(search) = params.search.as_ref() {
-        let needle = search.trim().to_ascii_lowercase();
-        if !needle.is_empty() && !row.hostname.to_ascii_lowercase().contains(&needle) {
-            return false;
-        }
-    }
-
-    if let Some(environment) = params.environment.as_ref() {
-        let needle = environment.trim().to_ascii_lowercase();
-        if !needle.is_empty() {
-            let env_name = row
-                .environment
-                .clone()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if env_name != needle {
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
-fn sort_items(items: &mut [SystemSummary], sort_order: Option<SortOrder>) {
-    let descending = !matches!(sort_order, Some(SortOrder::Asc));
-    items.sort_by(|left, right| left.hostname.cmp(&right.hostname));
-    if descending {
-        items.reverse();
-    }
-}
-
-fn row_to_summary(row: SystemAccessRow) -> SystemSummary {
-    SystemSummary {
-        id: row.id,
-        hostname: row.hostname,
-        environment: row.environment,
-        health_status: crate::api::models::HealthStatus::Offline,
-        deployment_status: DeploymentStatus::Unknown,
-        pipeline_stage: Some(PipelineStage::Unknown),
-        cve_counts: CveSummary {
-            critical: 0,
-            high: 0,
-            medium: 0,
-            low: 0,
-        },
-        nixos_version: None,
-        last_seen: None,
-        deployment_policy: row.deployment_policy,
-    }
-}
-
-fn list_row_to_summary(row: SystemListRow) -> SystemSummary {
-    SystemSummary {
-        id: row.id,
-        hostname: row.hostname,
-        environment: row.environment,
-        health_status: parse_health_status(&row.health_status),
-        deployment_status: parse_deployment_status(&row.deployment_status),
-        pipeline_stage: Some(parse_pipeline_stage(&row.pipeline_stage)),
-        cve_counts: CveSummary {
-            critical: row.critical_cve_count as i64,
-            high: row.high_cve_count as i64,
-            medium: row.medium_cve_count as i64,
-            low: row.low_cve_count as i64,
-        },
-        nixos_version: row.nixos_version,
-        last_seen: row.last_seen,
-        deployment_policy: row.deployment_policy,
-    }
-}
-
-fn matches_filters_on_list_row(row: &SystemListRow, params: &SystemsListParams) -> bool {
     if let Some(search) = params.search.as_ref() {
         let needle = search.trim().to_ascii_lowercase();
         if !needle.is_empty() && !row.hostname.to_ascii_lowercase().contains(&needle) {
