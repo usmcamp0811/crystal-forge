@@ -393,9 +393,9 @@ pub async fn deactivate_builder(id: &Uuid) -> Result<(), ApiClientError> {
 pub async fn update_builder_environments(
     id: &Uuid,
     request: &UpdateBuilderEnvironmentsRequest,
-) -> Result<BuilderDetail, ApiClientError> {
+) -> Result<(), ApiClientError> {
     let url = format!("{}/builders/{}/environments", base_url(), id);
-    send_json_with_csrf("PATCH", &url, Some(request)).await
+    send_empty_with_csrf("PATCH", &url, Some(request)).await
 }
 
 /// Fetch builder metrics history
@@ -433,6 +433,30 @@ async fn send_json_with_csrf<T: serde::de::DeserializeOwned, B: serde::Serialize
     }
 
     serde_json::from_str(&text).map_err(|e| ApiClientError::Deserialize(e.to_string()))
+}
+
+async fn send_empty_with_csrf<B: serde::Serialize>(
+    method: &str,
+    url: &str,
+    body: Option<&B>,
+) -> Result<(), ApiClientError> {
+    let payload = match body {
+        Some(value) => Some(
+            serde_json::to_string(value).map_err(|e| ApiClientError::Deserialize(e.to_string()))?,
+        ),
+        None => None,
+    };
+
+    let (status, text) = send_request_with_csrf(method, url, payload.as_deref()).await?;
+
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&text),
+        });
+    }
+
+    Ok(())
 }
 
 async fn send_request_with_csrf(

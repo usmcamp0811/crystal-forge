@@ -1001,6 +1001,7 @@ pub struct BuilderDetail {
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    #[serde(default)]
     pub assigned_environment_ids: Vec<Uuid>,
 }
 
