@@ -50,7 +50,7 @@ impl From<String> for BuilderStatus {
 }
 
 /// A registered builder
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Builder {
     pub id: Uuid,
     pub name: String,
@@ -65,7 +65,7 @@ pub struct Builder {
 }
 
 /// Summary view of a builder (for list endpoints)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct BuilderSummary {
     pub id: Uuid,
     pub name: String,

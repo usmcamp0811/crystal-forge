@@ -173,8 +173,7 @@ pub async fn update_builder_public_key(
     let public_key = PublicKey::from_base64(public_key_base64, builder_name)
         .context("Invalid public key format")?;
 
-    let builder = sqlx::query_as!(
-        Builder,
+    let builder = sqlx::query_as::<_, Builder>(
         r#"
         UPDATE builders
         SET public_key = $2, updated_at = now()
@@ -183,7 +182,7 @@ pub async fn update_builder_public_key(
             id,
             name,
             public_key,
-            status as "status: _",
+            status,
             max_cpu_cores,
             max_memory_mb,
             max_concurrent_jobs,
@@ -191,9 +190,9 @@ pub async fn update_builder_public_key(
             created_at,
             updated_at
         "#,
-        builder_id,
-        public_key.to_base64()
     )
+    .bind(builder_id)
+    .bind(public_key.to_base64())
     .fetch_one(pool)
     .await
     .context("Failed to update builder public key")?;
@@ -203,8 +202,7 @@ pub async fn update_builder_public_key(
 
 /// Deactivate a builder (soft delete)
 pub async fn deactivate_builder(pool: &PgPool, builder_id: &Uuid) -> Result<Builder> {
-    let builder = sqlx::query_as!(
-        Builder,
+    let builder = sqlx::query_as::<_, Builder>(
         r#"
         UPDATE builders
         SET status = 'inactive', updated_at = now()
@@ -213,7 +211,7 @@ pub async fn deactivate_builder(pool: &PgPool, builder_id: &Uuid) -> Result<Buil
             id,
             name,
             public_key,
-            status as "status: _",
+            status,
             max_cpu_cores,
             max_memory_mb,
             max_concurrent_jobs,
@@ -221,8 +219,8 @@ pub async fn deactivate_builder(pool: &PgPool, builder_id: &Uuid) -> Result<Buil
             created_at,
             updated_at
         "#,
-        builder_id
     )
+    .bind(builder_id)
     .fetch_one(pool)
     .await
     .context("Failed to deactivate builder")?;
