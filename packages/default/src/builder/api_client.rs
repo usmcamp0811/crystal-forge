@@ -1,6 +1,7 @@
 use crate::config::BuilderConfig;
 use crate::models::builders::{BuildJob, ReportMetricsRequest};
 use anyhow::{Context, Result};
+use base64::Engine;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -60,10 +61,10 @@ impl BuilderApiClient {
     /// Sign a request body and return signature headers
     fn sign_request(&self, body: &[u8]) -> (String, String) {
         let signature: Signature = self.signing_key.sign(body);
-        
+
         (
             self.builder_id.to_string(),
-            hex::encode(signature.to_bytes()),
+            base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
         )
     }
     
