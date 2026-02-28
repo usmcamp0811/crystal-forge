@@ -129,16 +129,8 @@ async fn run_heartbeat_loop(client: BuilderApiClient, interval: std::time::Durat
         // Collect system metrics
         let system_metrics = SystemMetrics::collect(0).await; // TODO: track actual active jobs
         
-        // Convert to MB for memory metrics
-        let memory_total_mb = system_metrics.memory_usage_percent
-            .and_then(|pct| {
-                // Rough estimate: if we have percentage, assume some typical total memory
-                // In production, we'd get this from /proc/meminfo
-                Some(8192) // Placeholder: 8GB
-            });
-        
-        let memory_used_mb = system_metrics.memory_usage_percent
-            .and_then(|pct| memory_total_mb.map(|total| (total as f64 * pct / 100.0) as i64));
+        let memory_total_mb = system_metrics.memory_total_mb;
+        let memory_used_mb = system_metrics.memory_used_mb;
         
         let metrics = ReportMetricsRequest {
             cpu_usage_percent: system_metrics.cpu_usage_percent.unwrap_or(0.0),

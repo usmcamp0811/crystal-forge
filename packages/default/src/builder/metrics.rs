@@ -12,6 +12,12 @@ pub struct SystemMetrics {
     
     /// Memory usage percentage (0.0-100.0)
     pub memory_usage_percent: Option<f64>,
+
+    /// Total system memory in MB
+    pub memory_total_mb: Option<i64>,
+
+    /// Used system memory in MB
+    pub memory_used_mb: Option<i64>,
     
     /// Available disk space in bytes
     pub disk_available_bytes: Option<i64>,
@@ -26,9 +32,12 @@ pub struct SystemMetrics {
 impl SystemMetrics {
     /// Collect current system metrics
     pub async fn collect(active_jobs: i32) -> Self {
+        let memory_totals = Self::get_memory_totals_mb().await;
         Self {
             cpu_usage_percent: Self::get_cpu_usage().await,
             memory_usage_percent: Self::get_memory_usage().await,
+            memory_total_mb: memory_totals.map(|(total, _)| total),
+            memory_used_mb: memory_totals.map(|(_, used)| used),
             disk_available_bytes: Self::get_disk_available().await,
             disk_total_bytes: Self::get_disk_total().await,
             active_jobs,
@@ -79,6 +88,28 @@ impl SystemMetrics {
         let used = total.saturating_sub(available);
         let usage = 100.0 * (used as f64 / total as f64);
         Some(usage.max(0.0).min(100.0))
+    }
+
+    /// Get memory totals in MB (total, used) from /proc/meminfo.
+    async fn get_memory_totals_mb() -> Option<(i64, i64)> {
+        let meminfo = fs::read_to_string("/proc/meminfo").ok()?;
+
+        let mut total_kb: Option<u64> = None;
+        let mut available_kb: Option<u64> = None;
+
+        for line in meminfo.lines() {
+            if line.starts_with("MemTotal:") {
+                total_kb = line.split_whitespace().nth(1)?.parse().ok();
+            } else if line.starts_with("MemAvailable:") {
+                available_kb = line.split_whitespace().nth(1)?.parse().ok();
+            }
+        }
+
+        let total_kb = total_kb?;
+        let available_kb = available_kb?;
+        let used_kb = total_kb.saturating_sub(available_kb);
+
+        Some(((total_kb / 1024) as i64, (used_kb / 1024) as i64))
     }
     
     /// Get available disk space for /nix/store
