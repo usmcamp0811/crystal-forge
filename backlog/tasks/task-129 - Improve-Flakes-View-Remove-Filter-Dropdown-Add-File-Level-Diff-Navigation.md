@@ -1,10 +1,10 @@
 ---
 id: TASK-129
 title: Improve Flakes View - Remove Filter Dropdown & Add File-Level Diff Navigation
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-25 22:45'
-updated_date: '2026-02-27 05:10'
+updated_date: '2026-02-28 00:32'
 labels:
   - ui
   - flakes-view
