@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: In Progress
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 05:41'
+updated_date: '2026-02-28 05:45'
 labels:
   - backend
   - builder
@@ -230,8 +230,8 @@ poll_interval_seconds = 30
 - [x] #13 Job status reporting (start, complete, fail) via API
 - [x] #14 Build log streaming via API
 - [x] #15 Environment-based job filtering (builders only get assigned env jobs)
-- [ ] #16 Authorization: admin required for builder management
-- [ ] #17 Authorization: signed requests for builder API calls
+- [x] #16 Authorization: admin required for builder management
+- [x] #17 Authorization: signed requests for builder API calls
 - [ ] #18 Migration preserves existing builder functionality
 - [ ] #19 Documentation for builder deployment and configuration
 - [ ] #20 Separate server and builder binaries maintained (no merge required)
@@ -564,6 +564,57 @@ Key Features:
 - Job ownership verification
 
 Commit: 11c6951a
+
+Phase 5 Complete: Retry & Queue Priority Logic (2026-02-28)
+
+Implemented intelligent job retry and re-queuing with priority adjustment:
+
+Retry Query Function (queries/builders.rs):
+- mark_job_failed_with_retry() - Handles retry logic with two paths:
+  * retry_count < max_retries: Re-queue job with incremented retry_count
+  * retry_count >= max_retries: Mark as permanently failed
+  * Priority reduction on retry (95% of previous)
+  * Unassign builder and reset started_at when re-queuing
+
+Fail Job Handler (handlers/api/builders.rs):
+- fail_job: Authenticate, verify ownership, call retry logic
+- Returns 200 for re-queued jobs, 202 for permanent failures
+
+Retry Strategy:
+- Eager retry: Failed jobs immediately return to queue
+- Priority adjustment: -5% per retry
+- Newer commits weighted higher (original priority maintained)
+- Strategy: fail X → build Y → retry X → build Z → retry X
+- Configurable max_retries (default: 3)
+
+Commit: debf8926
+
+---
+
+Backend Implementation Complete (Phases 1-5)
+
+The backend API infrastructure is now fully functional:
+- Database schema with all tables and indexes
+- Builder registration and authentication
+- Complete REST API for builder management
+- Job assignment with environment filtering
+- Retry logic with priority weighting
+- Concurrent job limits
+- Heartbeat tracking
+- Log appending
+
+Acceptance criteria status:
+- #1-4, #13-15, #17: Complete (backend API and auth)
+- #16: Complete (admin authorization already implemented)
+- #5-12: Require frontend UI (Phase 8-9) or builder binary (Phase 6)
+- #18-20: Require builder binary changes (Phase 6) and testing
+
+Next Steps:
+- Phase 6 (Builder Binary): Separate large effort to modify builder to use API
+- Phase 8-9 (Frontend UI): Builder management and metrics dashboard
+- Phase 10 (Testing & Docs): Integration tests and deployment docs
+
+Recommendation: Merge backend API now, implement Phase 6 and UI in follow-up tasks
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
