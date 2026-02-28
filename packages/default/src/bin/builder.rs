@@ -87,6 +87,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     
     let builder_id = builder_config.require_builder_id()?;
     info!("✅ Builder ID: {}", builder_id);
+    info!("✅ Derived Public Key (base64): {}", api_client.public_key_base64());
     info!("✅ Server URL: {}", builder_config.require_server_url()?);
     info!("✅ Poll interval: {:?}", builder_config.poll_interval);
     info!("✅ Heartbeat interval: {:?}", builder_config.heartbeat_interval);

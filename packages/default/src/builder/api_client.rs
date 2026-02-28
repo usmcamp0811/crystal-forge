@@ -67,6 +67,11 @@ impl BuilderApiClient {
             base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
         )
     }
+
+    /// Return the builder public key (base64) derived from configured private key.
+    pub fn public_key_base64(&self) -> String {
+        base64::engine::general_purpose::STANDARD.encode(self.signing_key.verifying_key().to_bytes())
+    }
     
     /// Send heartbeat and metrics to server
     pub async fn send_heartbeat(&self, metrics: &ReportMetricsRequest) -> Result<()> {
