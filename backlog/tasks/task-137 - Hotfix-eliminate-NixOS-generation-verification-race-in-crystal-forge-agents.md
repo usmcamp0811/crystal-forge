@@ -1,7 +1,7 @@
 ---
 id: TASK-137
 title: 'Hotfix: eliminate NixOS generation verification race in crystal-forge agents'
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-27 14:58'
 updated_date: '2026-02-28 00:31'
