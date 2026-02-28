@@ -1,10 +1,10 @@
 ---
 id: TASK-140
 title: Multi-Builder API Support with Centralized Management
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 05:45'
+updated_date: '2026-02-28 05:46'
 labels:
   - backend
   - builder
@@ -615,6 +615,24 @@ Next Steps:
 - Phase 10 (Testing & Docs): Integration tests and deployment docs
 
 Recommendation: Merge backend API now, implement Phase 6 and UI in follow-up tasks
+
+Merge Request Created: !144
+
+https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/144
+
+Backend implementation complete (Phases 1-5):
+- Database schema with migrations
+- Builder authentication and registration
+- Complete REST API for builder management
+- Job assignment with environment filtering
+- Retry logic with priority weighting
+
+2,179 lines changed across 18 files
+
+Follow-up work tracked separately:
+- Phase 6: Builder Binary Updates
+- Phase 8-9: Frontend UI
+- Phase 10: Testing & Documentation
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
