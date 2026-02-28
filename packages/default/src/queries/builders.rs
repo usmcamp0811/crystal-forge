@@ -643,8 +643,10 @@ pub async fn mark_job_failed_with_retry(
 mod tests {
     use super::*;
     use crate::test_utils::db::test_pool;
+    use base64::Engine;
 
     #[tokio::test]
+    #[ignore = "requires running test database"]
     async fn test_create_and_get_builder() {
         let pool = test_pool().await;
 
@@ -683,6 +685,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires running test database"]
     async fn test_builder_heartbeat() {
         let pool = test_pool().await;
 
