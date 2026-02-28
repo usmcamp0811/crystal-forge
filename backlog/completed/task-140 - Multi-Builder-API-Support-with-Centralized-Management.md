@@ -687,6 +687,10 @@ Total: 14 commits, ~6,000 lines. Backend+Builder+Frontend complete. Acceptance: 
 LOCK: opencode-gpt-5.3-codex on gray in ~/code/crystal-forge/TASK-140-multi-builder-api
 
 Resuming task due to active build break in Review; applying minimal fix-up for wasm compile errors (missing FlakeCommit.evaluation_status) and failing builder signature test expectation.
+
+Adjusted flakes commit timeline semantics: commit `systems` now returns nixosConfigurations discovered from derivations at that commit (`derivation_type='nixos'`) instead of deployed CF hostnames. Added `[CF system]` suffix marker for configs that match a Crystal Forge system deployed at that commit.
+
+Updated flakes view copy to explicitly label `nixosConfigurations at this commit` and show marker legend. Verified with wasm cargo check, server cargo check (SQLX_OFFLINE=true), and nix build --no-link.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
