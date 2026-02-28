@@ -359,7 +359,7 @@ pub fn FlakesListView() -> Element {
                 div {
                     class: "flex items-center gap-3",
                     button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium border border-blue-500/50 text-blue-200 hover:text-white hover:bg-blue-500/20 transition-colors",
+                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
                         onclick: move |_| {
                             let selected_flake_id = *selected_history_flake.read();
                             let mut flakes_signal = flakes.clone();
