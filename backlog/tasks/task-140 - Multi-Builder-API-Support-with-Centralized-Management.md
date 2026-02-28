@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: Review
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 15:09'
+updated_date: '2026-02-28 15:13'
 labels:
   - backend
   - builder
@@ -219,10 +219,10 @@ poll_interval_seconds = 30
 - [x] #2 Builder work queue API endpoints implemented
 - [x] #3 Public/private key authentication for builders
 - [x] #4 Database schema for builders, assignments, metrics, and jobs
-- [ ] #5 Builder management UI tab on Builds view
-- [ ] #6 Add/edit/delete builder functionality in UI
-- [ ] #7 Environment assignment UI (1:many relationship)
-- [ ] #8 Resource limit configuration (CPU, memory) in UI
+- [x] #5 Builder management UI tab on Builds view
+- [x] #6 Add/edit/delete builder functionality in UI
+- [x] #7 Environment assignment UI (1:many relationship)
+- [x] #8 Resource limit configuration (CPU, memory) in UI
 - [ ] #9 Builder heartbeat with resource metrics
 - [ ] #10 Metrics view showing CPU/memory usage per builder
 - [ ] #11 Metrics view showing system-wide resource usage
@@ -666,6 +666,14 @@ Frontend builder management UI partially complete. Created BuildersView route (/
 Seed script created: scripts/seed_builders.sh generates 3 demo builders with 24h metrics. API client functions complete: fetch/create/update/deactivate builders.
 
 Remaining: Full add/edit modal forms with keypair generation, environment assignment multi-select, metrics dashboard (Phase 9).
+
+## Phase 8 Nearly Complete (Commit: 29f9fe88)
+
+Full add/edit builder modals implemented with all features. Add modal: form validation, keypair generation (placeholder), show/hide private key, resource limits, environment multi-select. Edit modal: fetches builder, pre-populates fields, status dropdown, deactivate button, two-phase update (config + environments).
+
+Both modals have real API integration, error handling, loading states. Environment assignment with wildcard support (empty = all). Async submission with feedback.
+
+Remaining for Phase 8: Real Ed25519 keypair generation in WASM (currently placeholder). Phase 9 (metrics dashboard) still TODO.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
