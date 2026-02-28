@@ -649,6 +649,7 @@ dependencies = [
  "ed25519-dalek",
  "envy",
  "futures",
+ "hex",
  "hostname",
  "humantime-serde",
  "hyper 1.8.1",

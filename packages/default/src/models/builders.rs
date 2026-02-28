@@ -141,7 +141,7 @@ pub struct BuilderMetrics {
 }
 
 /// Request to report builder metrics (via heartbeat)
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ReportMetricsRequest {
     pub cpu_usage_percent: f64,
     pub memory_usage_mb: i64,
