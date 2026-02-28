@@ -924,3 +924,128 @@ pub struct ApiError {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Builder Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Builder status
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuilderStatus {
+    Active,
+    Inactive,
+    Offline,
+}
+
+impl BuilderStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Inactive => "Inactive",
+            Self::Offline => "Offline",
+        }
+    }
+
+    pub fn color_class(&self) -> &'static str {
+        match self {
+            Self::Active => "text-emerald-400",
+            Self::Inactive => "text-slate-400",
+            Self::Offline => "text-red-400",
+        }
+    }
+
+    pub fn bg_class(&self) -> &'static str {
+        match self {
+            Self::Active => "bg-emerald-500/10",
+            Self::Inactive => "bg-slate-500/10",
+            Self::Offline => "bg-red-500/10",
+        }
+    }
+
+    pub fn dot_class(&self) -> &'static str {
+        match self {
+            Self::Active => "bg-emerald-400",
+            Self::Inactive => "bg-slate-400",
+            Self::Offline => "bg-red-400",
+        }
+    }
+}
+
+/// Builder summary for list view
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub status: BuilderStatus,
+    pub max_cpu_cores: Option<i32>,
+    pub max_memory_mb: Option<i32>,
+    pub max_concurrent_jobs: i32,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub assigned_environment_count: i32,
+}
+
+/// Full builder details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderDetail {
+    pub id: Uuid,
+    pub name: String,
+    pub public_key: String,
+    pub status: BuilderStatus,
+    pub max_cpu_cores: Option<i32>,
+    pub max_memory_mb: Option<i32>,
+    pub max_concurrent_jobs: i32,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub assigned_environment_ids: Vec<Uuid>,
+}
+
+/// Create builder request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBuilderRequest {
+    pub name: String,
+    pub public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cpu_cores: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_jobs: Option<i32>,
+    #[serde(default)]
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Update builder request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<BuilderStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cpu_cores: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_jobs: Option<i32>,
+}
+
+/// Update builder environments request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderEnvironmentsRequest {
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Builder metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderMetrics {
+    pub id: i64,
+    pub builder_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub cpu_usage_percent: f64,
+    pub memory_usage_mb: i64,
+    pub system_cpu_usage_percent: Option<f64>,
+    pub system_memory_total_mb: Option<i64>,
+    pub system_memory_used_mb: Option<i64>,
+}
