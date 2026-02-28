@@ -580,6 +580,65 @@ pub async fn get_build_job_by_id(pool: &PgPool, job_id: &Uuid) -> Result<Option<
     Ok(job)
 }
 
+/// Mark a job as failed with retry logic
+/// If retry_count < max_retries, re-queue the job with incremented retry_count
+/// Otherwise, mark as permanently failed
+pub async fn mark_job_failed_with_retry(
+    pool: &PgPool,
+    job_id: &Uuid,
+    error_message: Option<&str>,
+) -> Result<BuildJob> {
+    // First, get the current job state
+    let job = get_build_job_by_id(pool, job_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Job not found"))?;
+
+    if job.retry_count < job.max_retries {
+        // Re-queue the job with incremented retry count
+        // Slightly reduce priority weight on retry (newer commits stay higher priority)
+        let new_priority = job.priority_weight * 0.95;
+        
+        let updated_job = sqlx::query_as::<_, BuildJob>(
+            r#"
+            UPDATE build_jobs
+            SET status = 'queued',
+                retry_count = retry_count + 1,
+                priority_weight = $2,
+                builder_id = NULL,
+                started_at = NULL,
+                updated_at = now()
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(job_id)
+        .bind(new_priority)
+        .fetch_one(pool)
+        .await
+        .context("Failed to re-queue job for retry")?;
+
+        Ok(updated_job)
+    } else {
+        // Permanently failed - exceeded max retries
+        let failed_job = sqlx::query_as::<_, BuildJob>(
+            r#"
+            UPDATE build_jobs
+            SET status = 'failed',
+                completed_at = now(),
+                updated_at = now()
+            WHERE id = $1
+            RETURNING *
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(pool)
+        .await
+        .context("Failed to mark job as permanently failed")?;
+
+        Ok(failed_job)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

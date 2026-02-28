@@ -383,6 +383,10 @@ pub async fn complete_job(
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/fail - Mark job as failed
+/// 
+/// Implements retry logic:
+/// - If retry_count < max_retries: increment retry_count, re-queue job, reduce priority
+/// - If retry_count >= max_retries: mark as permanently failed
 pub async fn fail_job(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
@@ -397,13 +401,34 @@ pub async fn fail_job(
     }
 
     // Parse failure details
-    let _request: JobStatusRequest =
+    let request: JobStatusRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // TODO: Implement job failure logic with retry (Phase 5)
-    // Increment retry_count, re-queue if under max_retries, adjust priority
+    // Verify the job is assigned to this builder
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
-    Ok(StatusCode::OK)
+    if job.builder_id != Some(builder_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Mark job as failed with retry logic
+    let updated_job = builders::mark_job_failed_with_retry(
+        &state.pool,
+        &job_id,
+        request.error_message.as_deref(),
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Return 200 for re-queued jobs, 202 for permanently failed jobs
+    if updated_job.status == "queued" {
+        Ok(StatusCode::OK) // Job re-queued for retry
+    } else {
+        Ok(StatusCode::ACCEPTED) // Job permanently failed
+    }
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/logs - Append build logs
