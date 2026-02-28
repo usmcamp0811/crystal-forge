@@ -76,6 +76,15 @@ pub async fn authenticate_builder_request_with_lookup<L: BuilderLookup>(
     body: Bytes,
     lookup: &L,
 ) -> Result<VerifiedBuilderRequest, StatusCode> {
+    authenticate_builder_request_with_lookup_options(headers, body, lookup, false).await
+}
+
+async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
+    headers: &HeaderMap,
+    body: Bytes,
+    lookup: &L,
+    allow_inactive: bool,
+) -> Result<VerifiedBuilderRequest, StatusCode> {
     // Extract builder ID from header
     let builder_id_str = headers
         .get("X-Builder-ID")
@@ -108,9 +117,13 @@ pub async fn authenticate_builder_request_with_lookup<L: BuilderLookup>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Only allow active builders to make API requests
-    // (Inactive builders are paused, offline builders have timed out)
-    if builder.status != crate::models::builders::BuilderStatus::Active {
+    let allowed = match builder.status {
+        crate::models::builders::BuilderStatus::Active => true,
+        crate::models::builders::BuilderStatus::Inactive => allow_inactive,
+        crate::models::builders::BuilderStatus::Offline => false,
+    };
+
+    if !allowed {
         warn!(
             builder_id = %builder.id,
             status = ?builder.status,
@@ -149,6 +162,16 @@ pub async fn authenticate_builder_request(
     pool: &PgPool,
 ) -> Result<VerifiedBuilderRequest, StatusCode> {
     authenticate_builder_request_with_lookup(headers, body, pool).await
+}
+
+/// Production entry point that allows inactive builders to authenticate.
+/// Intended only for bootstrap paths (e.g. first heartbeat).
+pub async fn authenticate_builder_request_allow_inactive(
+    headers: &HeaderMap,
+    body: Bytes,
+    pool: &PgPool,
+) -> Result<VerifiedBuilderRequest, StatusCode> {
+    authenticate_builder_request_with_lookup_options(headers, body, pool, true).await
 }
 
 #[cfg(test)]

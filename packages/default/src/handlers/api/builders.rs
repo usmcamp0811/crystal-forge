@@ -16,7 +16,10 @@ use uuid::Uuid;
 
 use crate::handlers::api::rbac::require_admin;
 use crate::handlers::agent_request::CFState;
-use crate::handlers::builder_request::{authenticate_builder_request, VerifiedBuilderRequest};
+use crate::handlers::builder_request::{
+    authenticate_builder_request, authenticate_builder_request_allow_inactive,
+    VerifiedBuilderRequest,
+};
 use crate::models::builders::{
     AppendLogsRequest, Builder, BuilderMetrics, BuilderSummary, BuilderWithEnvironments,
     CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderEnvironmentsRequest,
@@ -226,7 +229,7 @@ pub async fn builder_heartbeat(
     body: Bytes,
 ) -> Result<Json<HeartbeatResponse>, StatusCode> {
     // Authenticate builder request
-    let verified = authenticate_builder_request(&headers, body.clone(), &state.pool).await?;
+    let verified = authenticate_builder_request_allow_inactive(&headers, body.clone(), &state.pool).await?;
 
     // Verify the builder_id in the path matches the authenticated builder
     if verified.builder_id != builder_id {
