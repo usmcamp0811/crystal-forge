@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: In Progress
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 05:03'
+updated_date: '2026-02-28 05:08'
 labels:
   - backend
   - builder
@@ -218,7 +218,7 @@ poll_interval_seconds = 30
 - [ ] #1 Builder registration API endpoints implemented
 - [ ] #2 Builder work queue API endpoints implemented
 - [ ] #3 Public/private key authentication for builders
-- [ ] #4 Database schema for builders, assignments, metrics, and jobs
+- [x] #4 Database schema for builders, assignments, metrics, and jobs
 - [ ] #5 Builder management UI tab on Builds view
 - [ ] #6 Add/edit/delete builder functionality in UI
 - [ ] #7 Environment assignment UI (1:many relationship)
@@ -433,6 +433,36 @@ Beginning implementation of multi-builder API support with centralized managemen
 
 Worktree created: ~/code/crystal-forge/TASK-140-multi-builder-api
 Branch: TASK-140-multi-builder-api (based on dev)
+
+## Phase 1 Complete: Database Schema & Migrations (2026-02-28)
+
+✅ Created migration 0083_create_builders_infrastructure.sql
+
+**Tables Created:**
+- `builders` - Builder registration with resource limits (CPU, memory, concurrent jobs)
+- `builder_environment_assignments` - 1:many builder-to-environment mapping
+- `builder_metrics` - Resource usage tracking (CPU, memory, system stats)
+- `build_jobs` - Build queue with retry/priority logic
+- Extended `build_reservations` with builder_id FK
+
+**Key Features:**
+- UUID primary keys for builders
+- Status tracking (active/inactive/offline)
+- Resource limit configuration (nullable = unlimited)
+- Environment-based filtering support
+- Priority-weighted job queue
+- Configurable retry limits
+- Heartbeat timeout detection
+- Performance indexes for queue queries
+- Auto-updating timestamps via triggers
+
+**Migration Tested:**
+- Applied successfully to dev database
+- All tables verified with correct schema
+- Indexes created as specified
+- Foreign key constraints working
+
+Commit: 5a5d894a
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
