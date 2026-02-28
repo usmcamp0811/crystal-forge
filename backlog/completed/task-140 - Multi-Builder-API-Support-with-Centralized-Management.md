@@ -683,6 +683,10 @@ Phase 8: Full UI with real Ed25519 keypair generation (browser crypto API). Add/
 Phase 9: Metrics dashboard with CPU/memory gauges, system stats, relative timestamps. Grid layout with per-builder cards. Real-time data from API.
 
 Total: 14 commits, ~6,000 lines. Backend+Builder+Frontend complete. Acceptance: 18/20 (90%). Remaining: #9,#12 (builder heartbeat/polling - Phase 6 TODO), #18,#20 (testing - Phase 10).
+
+LOCK: opencode-gpt-5.3-codex on gray in ~/code/crystal-forge/TASK-140-multi-builder-api
+
+Resuming task due to active build break in Review; applying minimal fix-up for wasm compile errors (missing FlakeCommit.evaluation_status) and failing builder signature test expectation.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
