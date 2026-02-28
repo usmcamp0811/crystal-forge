@@ -4,12 +4,13 @@ title: Consolidate repeated web-ui inline styles into shared CSS classes
 status: To Do
 assignee: []
 created_date: '2026-02-28 18:05'
-updated_date: '2026-02-28 18:05'
+updated_date: '2026-02-28 18:16'
 labels:
   - web-ui
   - frontend
   - css
   - maintainability
+  - documentation
 dependencies: []
 priority: medium
 ---
@@ -18,36 +19,36 @@ priority: medium
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
-The web UI currently mixes Tailwind/theme classes with many repeated inline `style` fragments (especially repeated color badges, chip styles, and modal/layout snippets). This increases duplication and makes visual updates error-prone.
+The web UI currently mixes Tailwind/theme classes with many repeated inline `style` fragments (badges, chips, modal shells, gradients, and status colors). This duplication increases maintenance cost and causes visual-token drift.
 
 ## Goal
-Improve style maintainability by moving repeated **static** inline style declarations into shared CSS classes/tokens, while preserving runtime-calculated inline styles that are required for dynamic rendering.
+Perform an **exhaustive** pass across `packages/web-ui` to move repeated **static** inline styles into shared CSS classes/tokens, while preserving runtime-calculated inline styles that are required for dynamic rendering. Deliver as one large PR.
 
 ## Non-Goals
-- No visual redesign or theme change
-- No broad component refactor unrelated to styling duplication
-- No migration of truly dynamic computed styles (pixel-positioned timeline/layout math, computed colors) out of inline style attributes
-- No changes to API/domain logic
+- No visual redesign or intentional look-and-feel change
+- No migration of truly dynamic computed styles (pixel-positioned timeline/layout math, runtime color interpolation) out of inline style attributes
+- No API/domain/business-logic changes
 
 ## Architectural Constraints
-- Keep UI rendering behavior identical
-- Continue using existing design token approach (`theme.rs`) and shared stylesheet (`assets/app.css`)
-- Prefer semantic, reusable class names for extracted styles
-- Maintain clear separation of presentation from non-UI logic
+- Keep rendering behavior and UX equivalent to baseline
+- Continue using the existing design token approach (`theme.rs`) and shared stylesheet (`assets/app.css`)
+- Use semantic, reusable class names for extracted styles
+- Keep presentation concerns isolated from non-UI logic
 
 ## Verification Plan
-- Run web-ui formatting/lint checks already used by project
-- Build web-ui target in repository dev environment (`nix develop`)
-- Manually verify key views where styles are extracted (cards, badges, modals, build/flakes views) for no visual regressions
+- Run repository web-ui checks/build in the Nix dev environment
+- Manually verify representative screens/components touched by extraction for visual regressions
+- Record verification commands and outcomes in task notes
 
 ## Impact Areas
 - `packages/web-ui/src/views/*`
 - `packages/web-ui/src/components/*`
 - `packages/web-ui/assets/app.css`
-- Potentially `packages/web-ui/src/theme.rs` for token alignment
+- `packages/web-ui/src/theme.rs` (if token alignment is needed)
+- Repository coding standards documentation (update to codify this rule)
 
 ## Risk Level
-Medium: style extraction can introduce subtle regressions if selectors/classes are misapplied.
+Medium-High: large-scope style extraction can introduce subtle regressions if class mapping is inconsistent.
 
 ## Dependencies
 None.
@@ -55,9 +56,10 @@ None.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Repeated static inline styles used in multiple web-ui components are replaced with shared reusable classes and/or CSS variables.
-- [ ] #2 Dynamic inline styles that depend on runtime-calculated values remain inline and are documented in task notes as intentionally retained.
-- [ ] #3 All affected web-ui views/components render with no intentional visual changes compared to baseline.
-- [ ] #4 No application/domain logic changes are introduced; scope remains styling-maintainability only.
-- [ ] #5 Local verification (build/check + targeted manual UI checks) is completed and recorded in task notes.
+- [ ] #1 An exhaustive inventory of repeated static inline style fragments across `packages/web-ui/src` is completed and addressed in this task.
+- [ ] #2 Repeated static inline styles are replaced with shared reusable classes and/or CSS variables, with no intentional visual redesign.
+- [ ] #3 Dynamic inline styles that depend on runtime-calculated values remain inline and are documented in task notes as intentionally retained.
+- [ ] #4 Coding standards documentation is updated to require shared classes/tokens for repeated static styles and to define when inline styles are acceptable.
+- [ ] #5 All affected web-ui views/components render equivalently to baseline in local verification.
+- [ ] #6 Local verification (build/check + targeted manual UI checks) is completed and recorded in task notes.
 <!-- AC:END -->
