@@ -1,5 +1,6 @@
 pub mod agent_heartbeats;
 pub mod auth_identity;
+pub mod builders;
 pub mod commits;
 pub mod cve_scans;
 pub mod cves;

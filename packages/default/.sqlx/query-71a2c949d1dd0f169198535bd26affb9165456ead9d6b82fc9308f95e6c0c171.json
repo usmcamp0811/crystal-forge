@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO builders (name, public_key, max_cpu_cores, max_memory_mb, max_concurrent_jobs, status)\n        VALUES ($1, $2, $3, $4, $5, 'inactive')\n        RETURNING\n            id,\n            name,\n            public_key,\n            status as \"status: _\",\n            max_cpu_cores,\n            max_memory_mb,\n            max_concurrent_jobs,\n            last_heartbeat_at,\n            created_at,\n            updated_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "public_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "status: _",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_cpu_cores",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "max_memory_mb",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "max_concurrent_jobs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 7,
+        "name": "last_heartbeat_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "71a2c949d1dd0f169198535bd26affb9165456ead9d6b82fc9308f95e6c0c171"
+}

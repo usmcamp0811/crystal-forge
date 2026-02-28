@@ -126,30 +126,27 @@ COMMENT ON COLUMN build_jobs.priority_weight IS 'Higher weight = higher priority
 COMMENT ON COLUMN build_jobs.logs IS 'Build logs streamed from builder';
 
 -- =============================================================================
--- 5. CREATE BUILD RESERVATIONS TABLE
+-- 5. EXTEND BUILD RESERVATIONS TABLE FOR API BUILDERS
 -- =============================================================================
--- This tracks which derivations are reserved by which builders
--- to prevent duplicate work
-CREATE TABLE IF NOT EXISTS build_reservations (
-    id SERIAL PRIMARY KEY,
-    worker_id TEXT NOT NULL,  -- For backward compatibility with existing builder
-    builder_id UUID REFERENCES builders(id) ON DELETE CASCADE,  -- New FK for API builders
-    derivation_id INTEGER NOT NULL REFERENCES derivations(id) ON DELETE CASCADE,
-    nixos_derivation_id INTEGER REFERENCES derivations(id) ON DELETE CASCADE,
-    reserved_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-    expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '30 minutes'),
-    UNIQUE(derivation_id)
-);
+-- The build_reservations table already exists (created in migration 0057)
+-- We extend it to support API-based builders alongside the existing worker_id system
+
+-- Add builder_id column for API-based builders (NULL for legacy workers)
+ALTER TABLE build_reservations
+    ADD COLUMN IF NOT EXISTS builder_id UUID REFERENCES builders(id) ON DELETE CASCADE;
+
+-- Add expires_at column for automatic cleanup
+ALTER TABLE build_reservations
+    ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ DEFAULT (now() + interval '30 minutes');
 
 -- Index for cleanup of expired reservations
-CREATE INDEX idx_build_reservations_expires ON build_reservations(expires_at);
+CREATE INDEX IF NOT EXISTS idx_build_reservations_expires ON build_reservations(expires_at);
 
 -- Index for builder lookup
-CREATE INDEX idx_build_reservations_builder ON build_reservations(builder_id);
+CREATE INDEX IF NOT EXISTS idx_build_reservations_builder ON build_reservations(builder_id);
 
-COMMENT ON TABLE build_reservations IS 'Tracks active build reservations to prevent duplicate work';
-COMMENT ON COLUMN build_reservations.worker_id IS 'Legacy worker identifier (for backward compatibility)';
-COMMENT ON COLUMN build_reservations.builder_id IS 'New builder UUID (for API-based builders)';
+COMMENT ON COLUMN build_reservations.builder_id IS 'New builder UUID (for API-based builders), NULL for legacy worker_id-based reservations';
+COMMENT ON COLUMN build_reservations.expires_at IS 'Expiration time for reservation (prevents stuck reservations)';
 
 -- =============================================================================
 -- 6. ADD TRIGGER FOR UPDATED_AT TIMESTAMPS

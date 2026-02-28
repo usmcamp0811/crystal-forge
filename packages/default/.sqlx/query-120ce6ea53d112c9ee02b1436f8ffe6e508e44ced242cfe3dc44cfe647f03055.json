@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            b.id,\n            b.name,\n            b.status as \"status: _\",\n            b.max_cpu_cores,\n            b.max_memory_mb,\n            b.max_concurrent_jobs,\n            b.last_heartbeat_at,\n            COALESCE(COUNT(bea.id), 0)::int as assigned_environment_count\n        FROM builders b\n        LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id\n        GROUP BY b.id, b.name, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.last_heartbeat_at\n        ORDER BY b.created_at DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "status: _",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "max_cpu_cores",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_memory_mb",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "max_concurrent_jobs",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_heartbeat_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "assigned_environment_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "120ce6ea53d112c9ee02b1436f8ffe6e508e44ced242cfe3dc44cfe647f03055"
+}

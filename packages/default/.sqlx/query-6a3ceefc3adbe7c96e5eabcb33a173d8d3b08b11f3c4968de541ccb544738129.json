@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM builder_environment_assignments\n        WHERE builder_id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6a3ceefc3adbe7c96e5eabcb33a173d8d3b08b11f3c4968de541ccb544738129"
+}
