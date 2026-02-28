@@ -12,9 +12,9 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
     let status_color = builder.status.color_class();
     let is_inactive = matches!(builder.status, crate::api::models::BuilderStatus::Inactive);
     let card_class = if is_inactive {
-        "{theme::presets::CARD} opacity-65 saturate-0"
+        "bg-gray-900/80 border border-gray-700 rounded-xl p-6 shadow-sm opacity-60 saturate-0"
     } else {
-        "{theme::presets::CARD}"
+        "bg-gray-900/80 border border-gray-700 rounded-xl p-6 shadow-sm"
     };
 
     let heartbeat_text = if let Some(heartbeat) = builder.last_heartbeat_at {
@@ -65,7 +65,7 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                     }
                 }
                 button {
-                    class: "px-2 py-1 rounded text-xs font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                    class: "min-w-20 h-8 px-3 rounded text-xs font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
                     onclick: move |_| on_edit.call(()),
                     "Edit"
                 }

@@ -180,6 +180,10 @@ async fn main() -> anyhow::Result<()> {
                 .delete(builders::deactivate_builder),
         )
         .route(
+            "/api/v1/builders/:id/permanent",
+            delete(builders::delete_builder_permanently),
+        )
+        .route(
             "/api/v1/builders/:id/public-key",
             put(builders::update_builder_public_key),
         )

@@ -1,6 +1,6 @@
 //! Database queries for builder management.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -227,6 +227,26 @@ pub async fn deactivate_builder(pool: &PgPool, builder_id: &Uuid) -> Result<Buil
     .context("Failed to deactivate builder")?;
 
     Ok(builder)
+}
+
+/// Permanently delete a builder (hard delete)
+pub async fn delete_builder(pool: &PgPool, builder_id: &Uuid) -> Result<()> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM builders
+        WHERE id = $1
+        "#,
+    )
+    .bind(builder_id)
+    .execute(pool)
+    .await
+    .context("Failed to delete builder")?;
+
+    if result.rows_affected() == 0 {
+        bail!("Builder not found");
+    }
+
+    Ok(())
 }
 
 /// Update builder heartbeat timestamp

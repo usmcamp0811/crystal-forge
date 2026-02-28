@@ -28,8 +28,8 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
     let mut is_initialized = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
     let mut error_message = use_signal(|| None::<String>);
-    let mut show_deactivate_confirm = use_signal(|| false);
-    let mut show_deactivate_final_confirm = use_signal(|| false);
+    let mut show_delete_confirm = use_signal(|| false);
+    let mut show_delete_final_confirm = use_signal(|| false);
 
     // Initialize form when builder data loads
     use_effect(move || {
@@ -97,7 +97,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
         }
     };
 
-    let deactivate_builder = move || async move {
+    let handle_deactivate = move |_| async move {
         if !is_submitting() {
             is_submitting.set(true);
             error_message.set(None);
@@ -114,9 +114,26 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
         }
     };
 
-    let handle_deactivate = move |_| {
+    let delete_builder = move || async move {
         if !is_submitting() {
-            show_deactivate_confirm.set(true);
+            is_submitting.set(true);
+            error_message.set(None);
+
+            match api::client::delete_builder_permanently(&builder_id).await {
+                Ok(_) => {
+                    on_success.call(());
+                }
+                Err(e) => {
+                    error_message.set(Some(format!("Failed to delete builder: {}", e)));
+                    is_submitting.set(false);
+                }
+            }
+        }
+    };
+
+    let handle_delete = move |_| {
+        if !is_submitting() {
+            show_delete_confirm.set(true);
         }
     };
 
@@ -327,11 +344,20 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                         // Footer buttons
                         div {
                             class: "flex justify-between mt-6 pt-4 border-t border-slate-700",
-                            button {
-                                class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
-                                onclick: handle_deactivate,
-                                disabled: is_submitting(),
-                                "Deactivate Builder"
+                            div {
+                                class: "flex gap-3",
+                                button {
+                                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
+                                    onclick: handle_deactivate,
+                                    disabled: is_submitting(),
+                                    "Deactivate Builder"
+                                }
+                                button {
+                                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
+                                    onclick: handle_delete,
+                                    disabled: is_submitting(),
+                                    "Delete Permanently"
+                                }
                             }
                             div {
                                 class: "flex gap-3",
@@ -375,31 +401,31 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
             }
         }
 
-        if show_deactivate_confirm() {
+        if show_delete_confirm() {
             ConfirmDialog {
-                title: "Deactivate builder?".to_string(),
-                description: "This will stop new work assignment for this builder. You will need to reactivate it manually.".to_string(),
+                title: "Delete builder permanently?".to_string(),
+                description: "This permanently removes the builder and cannot be undone.".to_string(),
                 confirm_label: "Continue".to_string(),
                 danger: true,
-                on_cancel: move |_| show_deactivate_confirm.set(false),
+                on_cancel: move |_| show_delete_confirm.set(false),
                 on_confirm: move |_| {
-                    show_deactivate_confirm.set(false);
-                    show_deactivate_final_confirm.set(true);
+                    show_delete_confirm.set(false);
+                    show_delete_final_confirm.set(true);
                 },
             }
         }
 
-        if show_deactivate_final_confirm() {
+        if show_delete_final_confirm() {
             ConfirmDialog {
-                title: "Confirm deactivation".to_string(),
-                description: "Final confirmation: deactivate this builder now?".to_string(),
-                confirm_label: "Deactivate".to_string(),
+                title: "Final confirmation required".to_string(),
+                description: "Delete this builder now? This action is irreversible.".to_string(),
+                confirm_label: "Delete Permanently".to_string(),
                 danger: true,
-                on_cancel: move |_| show_deactivate_final_confirm.set(false),
+                on_cancel: move |_| show_delete_final_confirm.set(false),
                 on_confirm: move |_| {
-                    show_deactivate_final_confirm.set(false);
+                    show_delete_final_confirm.set(false);
                     spawn(async move {
-                        deactivate_builder().await;
+                        delete_builder().await;
                     });
                 },
             }

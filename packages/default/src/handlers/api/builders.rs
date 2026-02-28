@@ -124,6 +124,24 @@ pub async fn deactivate_builder(
     Ok(Json(builder))
 }
 
+/// DELETE /api/v1/builders/:id/permanent - Permanently delete builder (admin-only)
+pub async fn delete_builder_permanently(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    // Verify admin authorization
+    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    builders::delete_builder(&state.pool, &builder_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// PUT /api/v1/builders/:id/public-key - Update builder public key (admin-only)
 pub async fn update_builder_public_key(
     State(state): State<CFState>,

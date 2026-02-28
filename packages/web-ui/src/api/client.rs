@@ -389,6 +389,12 @@ pub async fn deactivate_builder(id: &Uuid) -> Result<(), ApiClientError> {
     Ok(())
 }
 
+/// Permanently delete a builder (admin only)
+pub async fn delete_builder_permanently(id: &Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/builders/{}/permanent", base_url(), id);
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
 /// Update builder environment assignments (admin only)
 pub async fn update_builder_environments(
     id: &Uuid,
