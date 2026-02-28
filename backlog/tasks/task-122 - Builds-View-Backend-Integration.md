@@ -4,7 +4,7 @@ title: Builds View - Backend Integration
 status: Review
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-28 00:37'
+updated_date: '2026-02-28 04:03'
 labels:
   - backend
   - api
@@ -220,4 +220,26 @@ Acceptance Criteria Notes:
 - AC#10: 401/403 redirect to login implemented ✅
 - AC#11: 5xx/network errors fallback to mock data implemented ✅
 - AC#12: All verification commands pass (cargo check, cargo test, cargo fmt) ✅
+
+## Rebase Progress (2025-02-27)
+
+✅ Successfully rebased TASK-122 onto latest dev (73f90150)
+
+### Conflicts Resolved:
+1. **packages/default/src/bin/server.rs** - Merged builds and environments handler imports and routes
+2. **packages/web-ui/src/api/client.rs** - Kept both environments and builds API functions
+3. **packages/web-ui/src/main.rs** - Included both bootstrap and builds modules
+4. **packages/default/src/bin/server.rs** - Applied cargo fmt style (builds on same line)
+5. **packages/web-ui/src/dashboard/adapter.rs** - Applied cargo fmt pattern match style
+
+### Verification:
+- ✅ Web-UI package compiles (minor unused import warnings)
+- ⚠️  Backend compile check requires DB (expected for sqlx)
+- ✅ Force-pushed to origin: 7ad0b13f
+
+### Next Steps:
+1. Start dev database to run full verification
+2. Run cargo clippy and cargo test
+3. Consider running nix flake check if needed
+4. Ready for review once verification passes
 <!-- SECTION:NOTES:END -->
