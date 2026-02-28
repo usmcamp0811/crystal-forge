@@ -111,7 +111,10 @@ pub fn deterministic_mock_timestamp() -> chrono::DateTime<chrono::Utc> {
 fn should_redirect_to_login(error: &ApiClientError) -> bool {
     matches!(
         error,
-        ApiClientError::Status { code, .. } if *code == 401 || *code == 403
+        ApiClientError::Status {
+            code: 401 | 403,
+            ..
+        }
     )
 }
 

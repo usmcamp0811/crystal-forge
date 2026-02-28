@@ -4,9 +4,7 @@ use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-use crate::api::models::{
-    BuildStatus, FlakeCommit, FlakeTimeline,
-};
+use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
     FleetHealthBreakdown, RecentDeploymentsList,

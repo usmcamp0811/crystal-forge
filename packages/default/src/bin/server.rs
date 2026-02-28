@@ -17,8 +17,8 @@ use crystal_forge::{
         agent::{heartbeat, state},
         agent_request::CFState,
         api::{
-            admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builds, dashboard, environments, flakes, systems,
+            admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami, builds,
+            dashboard, environments, flakes, systems,
         },
         status,
         webhook::webhook_handler,

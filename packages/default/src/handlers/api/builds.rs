@@ -18,17 +18,16 @@ use sqlx::PgPool;
 
 use crate::api::models::{ApiError, BuildQueueItem, BuildQueueSummary, BuildStatus};
 use crate::handlers::api::rbac::require_viewer_or_above;
-use crate::queries::build_reservations::{QueueStatus, get_queue_status, get_queue_status_for_system};
+use crate::queries::build_reservations::{
+    QueueStatus, get_queue_status, get_queue_status_for_system,
+};
 
 /// `GET /api/v1/builds`
 ///
 /// Returns the current build queue as a [`BuildQueueSummary`].
 ///
 /// Requires viewer-or-above authentication.
-pub async fn list_builds(
-    State(pool): State<PgPool>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+pub async fn list_builds(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
         return forbidden();
     }
@@ -39,8 +38,14 @@ pub async fn list_builds(
     };
 
     let items: Vec<BuildQueueItem> = rows.iter().map(queue_status_to_item).collect();
-    let building_count = items.iter().filter(|i| i.status == BuildStatus::Building).count() as i64;
-    let queued_count = items.iter().filter(|i| i.status == BuildStatus::Queued).count() as i64;
+    let building_count = items
+        .iter()
+        .filter(|i| i.status == BuildStatus::Building)
+        .count() as i64;
+    let queued_count = items
+        .iter()
+        .filter(|i| i.status == BuildStatus::Queued)
+        .count() as i64;
 
     let summary = BuildQueueSummary {
         building_count,
@@ -88,9 +93,9 @@ fn queue_status_to_item(row: &QueueStatus) -> BuildQueueItem {
     };
 
     // Elapsed seconds: difference between now and earliest_reservation if building.
-    let elapsed_secs = row.earliest_reservation.map(|reserved_at| {
-        (Utc::now() - reserved_at).num_seconds().max(0)
-    });
+    let elapsed_secs = row
+        .earliest_reservation
+        .map(|reserved_at| (Utc::now() - reserved_at).num_seconds().max(0));
 
     BuildQueueItem {
         hostname: row.system_name.clone(),

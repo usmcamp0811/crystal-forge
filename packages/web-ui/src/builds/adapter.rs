@@ -56,7 +56,9 @@ pub fn owned_to_build_item(item: OwnedBuildItem) -> BuildItem {
         branch: Box::leak(item.branch.into_boxed_str()),
         worker_id: Box::leak(item.worker_id.into_boxed_str()),
         queued_for: Box::leak(item.queued_for.into_boxed_str()),
-        runtime: item.runtime.map(|r| Box::leak(r.into_boxed_str()) as &'static str),
+        runtime: item
+            .runtime
+            .map(|r| Box::leak(r.into_boxed_str()) as &'static str),
         started_by: Box::leak(item.started_by.into_boxed_str()),
         status: item.status,
         summary: Box::leak(item.summary.into_boxed_str()),
@@ -218,7 +220,10 @@ fn api_item_to_owned(id: i32, item: crate::api::models::BuildQueueItem) -> Owned
 fn should_redirect_to_login(error: &ApiClientError) -> bool {
     matches!(
         error,
-        ApiClientError::Status { code: 401 | 403, .. }
+        ApiClientError::Status {
+            code: 401 | 403,
+            ..
+        }
     )
 }
 

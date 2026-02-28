@@ -44,11 +44,8 @@ pub fn BuildsView() -> Element {
                 return;
             }
 
-            let items: Vec<BuildItem> = result
-                .builds
-                .into_iter()
-                .map(owned_to_build_item)
-                .collect();
+            let items: Vec<BuildItem> =
+                result.builds.into_iter().map(owned_to_build_item).collect();
 
             // Auto-select the first build if there is one.
             if let Some(first) = items.first() {
