@@ -1,36 +1,16 @@
 ---
 id: TASK-132
 title: Add explicit branch field for flake registry entries
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-26 21:57'
-updated_date: '2026-02-27'
+updated_date: '2026-02-28 00:31'
 labels: []
 dependencies: []
 priority: high
+ordinal: 84000
 ---
 
-## Notes
-
-LOCK: claude-assistant on reckless in /home/mcamp/code/crystal-forge/TASK-132-explicit-flake-branch
-
-**MR:** https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/143
-
-### Verification Results (2026-02-27)
-
-**Implementation Complete:**
-- Database migration 0082 applied (adds branch column to flakes table)
-- SQLx metadata regenerated and committed
-- All acceptance criteria verified
-
-**Targeted Verification:**
-- ✅ `cargo check -p crystal-forge`: Passed
-- ✅ `cargo check -p crystal-forge-ui`: Passed  
-- ✅ `cargo test handlers::api::flakes::tests`: 4/4 tests passed
-- ✅ `cargo fmt -- --check`: Passed
-- ⚠️ `cargo clippy -- -D warnings`: Pre-existing failures in dev branch (not introduced by this task)
-
-**Note:** Clippy failures are inherited from dev branch baseline and unrelated to flake branch implementation.
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
@@ -67,6 +47,28 @@ Medium: API/schema contract and sync semantics change for flakes, but scope is c
 Dependencies:
 - None external; builds on TASK-130 behavior and existing flake sync endpoints.
 <!-- SECTION:DESCRIPTION:END -->
+
+## Notes
+
+LOCK: claude-assistant on reckless in /home/mcamp/code/crystal-forge/TASK-132-explicit-flake-branch
+
+**MR:** https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/143
+
+### Verification Results (2026-02-27)
+
+**Implementation Complete:**
+- Database migration 0082 applied (adds branch column to flakes table)
+- SQLx metadata regenerated and committed
+- All acceptance criteria verified
+
+**Targeted Verification:**
+- ✅ `cargo check -p crystal-forge`: Passed
+- ✅ `cargo check -p crystal-forge-ui`: Passed  
+- ✅ `cargo test handlers::api::flakes::tests`: 4/4 tests passed
+- ✅ `cargo fmt -- --check`: Passed
+- ⚠️ `cargo clippy -- -D warnings`: Pre-existing failures in dev branch (not introduced by this task)
+
+**Note:** Clippy failures are inherited from dev branch baseline and unrelated to flake branch implementation.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
