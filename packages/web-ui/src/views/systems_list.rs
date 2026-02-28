@@ -24,8 +24,8 @@ use crate::components::tables::SystemsTable;
 use crate::environments::adapter::load_environment_names_with_fallback;
 use crate::routes::Route;
 use crate::systems::adapter::{
-    create_system_via_api, deactivate_system_via_api, fallback_systems, load_systems_with_fallback,
-    update_system_public_key_via_api,
+    create_system_via_api, deactivate_system_via_api, fallback_flake_names, fallback_systems,
+    load_flake_names_with_fallback, load_systems_with_fallback, update_system_public_key_via_api,
 };
 use crate::theme;
 use chrono::Utc;
@@ -103,6 +103,8 @@ pub fn SystemsListView() -> Element {
 
     let environment_names_resource =
         use_resource(move || async move { load_environment_names_with_fallback().await });
+    let flake_names_resource =
+        use_resource(move || async move { load_flake_names_with_fallback().await });
 
     // Local mutable state for systems (allows client-side add/remove until backend supports it)
     let mut local_systems = use_signal(fallback_systems);
@@ -127,8 +129,13 @@ pub fn SystemsListView() -> Element {
     let should_redirect = systems_resource
         .read_unchecked()
         .as_ref()
-        .map(|r| r.redirect_to_login)
-        .unwrap_or(false)
+            .map(|r| r.redirect_to_login)
+            .unwrap_or(false)
+        || flake_names_resource
+            .read_unchecked()
+            .as_ref()
+            .map(|r| r.redirect_to_login)
+            .unwrap_or(false)
         || environment_names_resource
             .read_unchecked()
             .as_ref()
@@ -161,7 +168,11 @@ pub fn SystemsListView() -> Element {
         .as_ref()
         .map(|r| r.names.clone())
         .unwrap_or_else(|| environments.clone());
-    let registered_flakes = unique_registered_flakes();
+    let registered_flakes = flake_names_resource
+        .read_unchecked()
+        .as_ref()
+        .map(|r| r.names.clone())
+        .unwrap_or_else(fallback_flake_names);
 
     let filtered_systems: Vec<SystemSummary> = current_systems
         .into_iter()
@@ -187,6 +198,15 @@ pub fn SystemsListView() -> Element {
             }
 
             if let Some(result) = environment_names_resource.read_unchecked().as_ref() {
+                if let Some(ref notice) = result.notice {
+                    div {
+                        class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
+                        "{notice}"
+                    }
+                }
+            }
+
+            if let Some(result) = flake_names_resource.read_unchecked().as_ref() {
                 if let Some(ref notice) = result.notice {
                     div {
                         class: "rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 text-sm text-yellow-300",
@@ -510,15 +530,6 @@ fn unique_environments(systems: &[SystemSummary]) -> Vec<String> {
     envs.sort();
     envs.dedup();
     envs
-}
-
-fn unique_registered_flakes() -> Vec<String> {
-    // TODO: Fetch from API
-    vec![
-        "infrastructure".to_string(),
-        "workstations".to_string(),
-        "edge-nodes".to_string(),
-    ]
 }
 
 fn prefers_view_from_query() -> Option<ViewMode> {
