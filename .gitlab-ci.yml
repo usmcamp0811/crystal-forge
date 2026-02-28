@@ -32,7 +32,7 @@ codex-code-review:
       FILE_LIST="$(git ls-files | sed 's/^/- /')"
       PROMPT="${PROMPT}\nOnly report issues in these files:\n${FILE_LIST}"
       export PROMPT
-      nix shell nixpkgs#nodejs_24 nixpkgs#git nixpkgs#gnused nixpkgs#gawk nixpkgs#util-linux nixpkgs#bash --command bash -c '
+      nix shell nixpkgs#nodejs-24_x nixpkgs#git nixpkgs#gnused nixpkgs#gawk nixpkgs#util-linux nixpkgs#bash --command bash -c '
         set -euo pipefail
         npm -g i @openai/codex@latest
         codex --version
