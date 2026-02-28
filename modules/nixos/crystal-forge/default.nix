@@ -335,6 +335,12 @@ in {
               type = lib.types.bool;
               description = "Automatically poll for new commits";
             };
+            branch = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description =
+                "Git branch to track (defaults to 'main' if not specified)";
+            };
             initial_commit_depth = lib.mkOption {
               type = lib.types.int;
               default = 5;

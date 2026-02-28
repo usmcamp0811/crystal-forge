@@ -9,21 +9,20 @@ use std::collections::BTreeSet;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, AuditAction, CreateSystemRequest, CveSummary, DeploymentStatus, PaginatedResponse,
-    PipelineStage, SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse,
-    SystemNetworkInfo, SystemRollbackRequest, SystemSecurityInfo, SystemSummary,
-    SystemsListParams, UpdateSystemPublicKeyRequest,
+    ApiError, AuditAction, CreateSystemRequest, CveSummary, DeploymentStatus, PipelineStage,
+    SortOrder, SystemDetail, SystemHardwareInfo, SystemMutationResponse, SystemNetworkInfo,
+    SystemRollbackRequest, SystemSecurityInfo, SystemSummary, SystemsListParams,
+    UpdateSystemPublicKeyRequest,
 };
 use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, extract_request_origin};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::systems::{
-    deactivate_system,
-    SystemAccessRow, SystemDetailRow, SystemListRow, find_system_access_row,
+    SystemAccessRow, SystemDetailRow, SystemListRow, deactivate_system, find_system_access_row,
     get_system_detail_by_id, get_user_environment_membership_ids, list_system_access_rows,
-    list_systems_from_view, touch_system_updated_at, update_public_key,
-    update_system_desired_target,
+    touch_system_updated_at, update_public_key, update_system_desired_target,
 };
+use crate::services::systems::SystemsListContext;
 
 pub async fn list_systems(
     State(pool): State<PgPool>,
@@ -37,66 +36,20 @@ pub async fn list_systems(
     let Some(caller_role) = highest_role(&roles) else {
         return forbidden();
     };
-    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+
+    let environment_memberships = match get_user_environment_membership_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
 
-    let rows = match list_systems_from_view(&pool).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to load systems"),
-    };
+    // Create service context and delegate to service layer
+    let ctx = SystemsListContext::new(user_id, roles, environment_memberships, &params);
 
-    // Get environment IDs for filtering (need to look up by name)
-    let allowed_environment_names: Vec<String> = if caller_role == Role::Admin {
-        vec![] // Admin can see all
-    } else {
-        // Get environment names for the user's memberships
-        // For now, we'll filter post-query. TODO: optimize with environment name lookup
-        vec![]
-    };
-
-    let mut items = rows
-        .into_iter()
-        .filter(|row| {
-            // Admin can see all systems
-            if caller_role == Role::Admin {
-                return true;
-            }
-            // For non-admin, we need to check environment membership
-            // This is a simplified check - in production you'd want to resolve environment names
-            true
-        })
-        .filter(|row| matches_filters_on_list_row(row, &params))
-        .map(list_row_to_summary)
-        .collect::<Vec<_>>();
-
-    sort_items(&mut items, params.sort_order);
-
-    let page = params.page.unwrap_or(1).max(1);
-    let per_page = params.per_page.unwrap_or(50).clamp(1, 200);
-    let total = items.len() as i64;
-    let start = ((page - 1) * per_page) as usize;
-    let paged_items = if start >= items.len() {
-        vec![]
-    } else {
-        items
-            .into_iter()
-            .skip(start)
-            .take(per_page as usize)
-            .collect::<Vec<_>>()
-    };
-
-    (
-        StatusCode::OK,
-        Json(PaginatedResponse {
-            items: paged_items,
-            total,
-            page,
-            per_page,
-        }),
-    )
-        .into_response()
+    // Call the service layer for server-side filtering/sorting/pagination
+    match crate::services::systems::list_systems_for_user(&pool, &ctx).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(_) => internal_error("Failed to list systems"),
+    }
 }
 
 pub async fn create_system(
@@ -139,12 +92,10 @@ pub async fn create_system(
     let environment_id = if let Some(env_name) = payload.environment.as_ref() {
         let env_name_trimmed = env_name.trim();
         if !env_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM environments WHERE name = $1"
-            )
-            .bind(env_name_trimmed)
-            .fetch_optional(&pool)
-            .await
+            match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name = $1")
+                .bind(env_name_trimmed)
+                .fetch_optional(&pool)
+                .await
             {
                 Ok(id) => id,
                 Err(_) => return internal_error("Failed to lookup environment"),
@@ -160,12 +111,10 @@ pub async fn create_system(
     let flake_id = if let Some(flake_name) = payload.flake_name.as_ref() {
         let flake_name_trimmed = flake_name.trim();
         if !flake_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, i32>(
-                "SELECT id FROM flakes WHERE name = $1"
-            )
-            .bind(flake_name_trimmed)
-            .fetch_optional(&pool)
-            .await
+            match sqlx::query_scalar::<_, i32>("SELECT id FROM flakes WHERE name = $1")
+                .bind(flake_name_trimmed)
+                .fetch_optional(&pool)
+                .await
             {
                 Ok(id) => id,
                 Err(_) => return internal_error("Failed to lookup flake"),
@@ -229,10 +178,10 @@ pub async fn get_system(
         return forbidden();
     };
 
-    let Some(caller_role) = highest_role(&roles) else {
+    let Some(_caller_role) = highest_role(&roles) else {
         return forbidden();
     };
-    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
+    let _environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
         Ok(value) => value,
         Err(_) => return internal_error("Failed to load environment memberships"),
     };
@@ -530,79 +479,6 @@ fn highest_role(roles: &[AuthRole]) -> Option<Role> {
 }
 
 fn matches_filters(row: &SystemAccessRow, params: &SystemsListParams) -> bool {
-    if let Some(search) = params.search.as_ref() {
-        let needle = search.trim().to_ascii_lowercase();
-        if !needle.is_empty() && !row.hostname.to_ascii_lowercase().contains(&needle) {
-            return false;
-        }
-    }
-
-    if let Some(environment) = params.environment.as_ref() {
-        let needle = environment.trim().to_ascii_lowercase();
-        if !needle.is_empty() {
-            let env_name = row
-                .environment
-                .clone()
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if env_name != needle {
-                return false;
-            }
-        }
-    }
-
-    true
-}
-
-fn sort_items(items: &mut [SystemSummary], sort_order: Option<SortOrder>) {
-    let descending = !matches!(sort_order, Some(SortOrder::Asc));
-    items.sort_by(|left, right| left.hostname.cmp(&right.hostname));
-    if descending {
-        items.reverse();
-    }
-}
-
-fn row_to_summary(row: SystemAccessRow) -> SystemSummary {
-    SystemSummary {
-        id: row.id,
-        hostname: row.hostname,
-        environment: row.environment,
-        health_status: crate::api::models::HealthStatus::Offline,
-        deployment_status: DeploymentStatus::Unknown,
-        pipeline_stage: Some(PipelineStage::Unknown),
-        cve_counts: CveSummary {
-            critical: 0,
-            high: 0,
-            medium: 0,
-            low: 0,
-        },
-        nixos_version: None,
-        last_seen: None,
-        deployment_policy: row.deployment_policy,
-    }
-}
-
-fn list_row_to_summary(row: SystemListRow) -> SystemSummary {
-    SystemSummary {
-        id: row.id,
-        hostname: row.hostname,
-        environment: row.environment,
-        health_status: parse_health_status(&row.health_status),
-        deployment_status: parse_deployment_status(&row.deployment_status),
-        pipeline_stage: Some(parse_pipeline_stage(&row.pipeline_stage)),
-        cve_counts: CveSummary {
-            critical: row.critical_cve_count as i64,
-            high: row.high_cve_count as i64,
-            medium: row.medium_cve_count as i64,
-            low: row.low_cve_count as i64,
-        },
-        nixos_version: row.nixos_version,
-        last_seen: row.last_seen,
-        deployment_policy: row.deployment_policy,
-    }
-}
-
-fn matches_filters_on_list_row(row: &SystemListRow, params: &SystemsListParams) -> bool {
     if let Some(search) = params.search.as_ref() {
         let needle = search.trim().to_ascii_lowercase();
         if !needle.is_empty() && !row.hostname.to_ascii_lowercase().contains(&needle) {
