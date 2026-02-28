@@ -3,10 +3,19 @@ use crate::models::commits::Commit;
 use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
-use tokio::time::{Duration, timeout};
+use std::collections::HashMap;
+use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
 
+const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[derive(Debug, Clone)]
+pub struct GitCommitMetadata {
+    pub message: String,
+    pub author_name: String,
+    pub author_email: Option<String>,
+}
 
 /// Fetches the latest commit from a git repository and inserts it into the database
 pub async fn fetch_and_insert_latest_commit(
@@ -455,6 +464,134 @@ pub async fn fetch_and_insert_commits_since(
     Ok(inserted)
 }
 
+/// Resolve commit subject/author metadata for specific hashes.
+///
+/// Best effort: hashes that cannot be resolved are skipped.
+pub async fn get_commit_metadata(
+    repo_url: &str,
+    commit_hashes: &[String],
+) -> Result<HashMap<String, GitCommitMetadata>> {
+    if commit_hashes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
+    let clone_path = temp_dir.path();
+
+    let clone_output = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "200",
+                "--filter=blob:none",
+                &git_url,
+                ".",
+            ])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out cloning repo for metadata: {repo_url}"))?
+    .with_context(|| format!("Failed to clone repo for metadata: {repo_url}"))?;
+
+    if !clone_output.status.success() {
+        let stderr = String::from_utf8_lossy(&clone_output.stderr);
+        bail!("Git clone failed for {}: {}", repo_url, stderr.trim());
+    }
+
+    let prefetch = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["fetch", "--quiet", "--depth", "200", "origin"])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await;
+    match prefetch {
+        Ok(Ok(output)) if output.status.success() => {}
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(
+                "Best-effort metadata prefetch failed for {}: {}",
+                repo_url,
+                stderr.trim()
+            );
+        }
+        Ok(Err(err)) => {
+            warn!(
+                "Best-effort metadata prefetch failed for {}: {}",
+                repo_url, err
+            );
+        }
+        Err(_) => {
+            warn!("Best-effort metadata prefetch timed out for {}", repo_url);
+        }
+    }
+
+    let mut metadata = HashMap::new();
+    for hash in commit_hashes {
+        match load_commit_metadata(clone_path, hash).await {
+            Ok(value) => {
+                metadata.insert(hash.clone(), value);
+            }
+            Err(err) => {
+                warn!("Failed to load git metadata for {}: {}", hash, err);
+            }
+        }
+    }
+
+    Ok(metadata)
+}
+
+async fn load_commit_metadata(
+    clone_path: &std::path::Path,
+    commit_hash: &str,
+) -> Result<GitCommitMetadata> {
+    let output = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["show", "-s", "--format=%H%x1f%s%x1f%an%x1f%ae", commit_hash])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out loading metadata for commit {commit_hash}"))?
+    .with_context(|| format!("Failed to load metadata for commit {commit_hash}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git show failed for {}: {}", commit_hash, stderr.trim());
+    }
+
+    let stdout = String::from_utf8(output.stdout)?;
+    let line = stdout
+        .lines()
+        .find(|value| !value.trim().is_empty())
+        .context("git show returned empty output")?;
+
+    let mut parts = line.split('\u{1f}');
+    let _hash = parts.next().context("Missing hash")?;
+    let message = parts.next().context("Missing commit subject")?.trim();
+    let author_name = parts.next().context("Missing author name")?.trim();
+    let author_email = parts.next().unwrap_or("").trim();
+
+    Ok(GitCommitMetadata {
+        message: message.to_string(),
+        author_name: author_name.to_string(),
+        author_email: if author_email.is_empty() {
+            None
+        } else {
+            Some(author_email.to_string())
+        },
+    })
+}
+
+/// Get the git diff for a specific commit.
+/// Returns the full unified diff output from `git show`.
+/// Tries multiple common branch names if the specified branch doesn't work.
 /// Get the git diff for a specific commit.
 /// Returns the full unified diff output from `git show`.
 /// Tries multiple common branch names if the specified branch doesn't work.

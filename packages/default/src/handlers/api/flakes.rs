@@ -6,6 +6,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use sqlx::PgPool;
+use std::collections::HashMap;
 use tracing::error;
 
 use crate::api::models::{
@@ -14,13 +15,17 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
 use crate::flake::commits::{
-    branch_exists, get_commit_diff, infer_default_branch, sync_commits_for_repo,
+    branch_exists, get_commit_diff, get_commit_metadata, infer_default_branch,
+    sync_commits_for_repo, GitCommitMetadata,
 };
-use crate::handlers::api::rbac::require_viewer_or_above;
+use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id,
     get_flake_by_name, insert_flake, list_flake_registry, update_flake,
 };
+use crate::queries::users::get_by_email;
+
+const MAX_HYDRATION_COMMITS_PER_REQUEST: usize = 20;
 
 pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
@@ -57,7 +62,59 @@ pub async fn get_flake_timelines(
 
     // Fetch up to 10 most recent commits per flake
     match fetch_flake_timelines(&pool, 10).await {
-        Ok(timelines) => (StatusCode::OK, Json(timelines)).into_response(),
+        Ok(mut timelines) => {
+            let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;
+
+            for timeline in &mut timelines {
+                let hashes: Vec<String> = timeline
+                    .commits
+                    .iter()
+                    .filter(|commit| {
+                        commit.message.trim().is_empty() || commit.author.trim().is_empty()
+                    })
+                    .take(remaining_hydration_budget)
+                    .map(|commit| commit.hash.clone())
+                    .collect();
+                let metadata = if hashes.is_empty() {
+                    HashMap::new()
+                } else {
+                    remaining_hydration_budget =
+                        remaining_hydration_budget.saturating_sub(hashes.len());
+                    match get_commit_metadata(&timeline.repo_url, &hashes).await {
+                        Ok(data) => data,
+                        Err(err) => {
+                            error!(
+                                "Failed to hydrate commit metadata for flake {}: {:#}",
+                                timeline.flake_name, err
+                            );
+                            HashMap::new()
+                        }
+                    }
+                };
+
+                let mut user_lookup_cache: HashMap<String, Option<String>> = HashMap::new();
+                for commit in &mut timeline.commits {
+                    if let Some(detail) = metadata.get(&commit.hash) {
+                        if commit.message.trim().is_empty() {
+                            commit.message = detail.message.trim().to_string();
+                        }
+
+                        commit.author =
+                            resolve_timeline_author(&pool, detail, &mut user_lookup_cache).await;
+                    }
+
+                    if commit.message.trim().is_empty() {
+                        let short = commit.hash.chars().take(7).collect::<String>();
+                        commit.message = format!("Commit {short}");
+                    }
+                    if commit.author.trim().is_empty() {
+                        commit.author = "Unknown author".to_string();
+                    }
+                }
+            }
+
+            (StatusCode::OK, Json(timelines)).into_response()
+        }
         Err(e) => {
             error!("Failed to fetch flake timelines: {e:#}");
             (
@@ -70,6 +127,76 @@ pub async fn get_flake_timelines(
             )
                 .into_response()
         }
+    }
+}
+
+async fn resolve_timeline_author(
+    pool: &PgPool,
+    detail: &GitCommitMetadata,
+    user_lookup_cache: &mut HashMap<String, Option<String>>,
+) -> String {
+    if let Some(email) = detail
+        .author_email
+        .as_deref()
+        .and_then(normalize_author_email)
+    {
+        let key = email.to_ascii_lowercase();
+        let username = if let Some(value) = user_lookup_cache.get(&key) {
+            value.clone()
+        } else {
+            let resolved = match get_by_email(pool, &email).await {
+                Ok(Some(user)) => Some(user.username),
+                Ok(None) => None,
+                Err(err) => {
+                    error!(
+                        "Failed to resolve user for commit email {}: {:#}",
+                        email, err
+                    );
+                    None
+                }
+            };
+            user_lookup_cache.insert(key.clone(), resolved.clone());
+            resolved
+        };
+
+        if let Some(username) = username {
+            let author_name = detail.author_name.trim();
+            if author_name.is_empty() || author_name.eq_ignore_ascii_case(&username) {
+                return format!("@{username}");
+            }
+            return format!("@{username} ({author_name})");
+        }
+    }
+
+    let author_name = detail.author_name.trim();
+    if !author_name.is_empty() {
+        return author_name.to_string();
+    }
+
+    if let Some(email) = detail
+        .author_email
+        .as_deref()
+        .and_then(normalize_author_email)
+    {
+        return email.to_string();
+    }
+
+    "Unknown author".to_string()
+}
+
+fn normalize_author_email(email: &str) -> Option<String> {
+    let trimmed = email.trim();
+    let without_brackets = trimmed
+        .strip_prefix('<')
+        .unwrap_or(trimmed)
+        .strip_suffix('>')
+        .unwrap_or(trimmed)
+        .trim();
+
+    if without_brackets.is_empty() {
+        None
+    } else {
+        Some(without_brackets.to_string())
     }
 }
 
@@ -629,4 +756,19 @@ mod tests {
         };
         assert!(validate_create_payload(&payload).is_ok());
     }
+
+    #[test]
+    fn normalize_author_email_trims_and_strips_brackets() {
+        assert_eq!(
+            normalize_author_email(" <dev@example.com> "),
+            Some("dev@example.com".to_string())
+        );
+        assert_eq!(normalize_author_email(""), None);
+        assert_eq!(normalize_author_email("   "), None);
+    }
+
+    // NOTE: Authorization tests for create_flake, delete_flake moved to extractor-level tests
+    // in auth/extractors.rs. These handlers now use RequireOperator and RequireAdmin extractors
+    // which enforce authorization before the handler is called, so unit tests at this level
+    // cannot test authorization behavior. Integration tests should test the full request path.
 }
