@@ -119,6 +119,7 @@ in mkShell {
     python3
     python3Packages.pytest
     run-scenario
+    pkgs.crystal-forge.devScripts.startBuilderApi
 
     # UI development tooling (Dioxus web target)
     dioxus-cli # dx CLI for Dioxus 0.7 (dev server, hot reload, bundling)
@@ -180,7 +181,7 @@ in mkShell {
     echo "  simulate-push      → Simulate a webook push event"
     echo "  sqlx-refresh       → Drop DB and re-run sqlx prepare"
     echo "  sqlx-prepare       → Just re-run sqlx prepare"
-    echo "  run-db-test        → Run database tests against dev database (must run `server-stak up`)"
+      echo "  run-db-test        → Run database tests against dev database (must run server-stack up)"
     echo ""
       echo "🌐 UI Development:"
       echo ""
