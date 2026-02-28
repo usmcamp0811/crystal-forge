@@ -1,10 +1,10 @@
 ---
 id: TASK-140
 title: Multi-Builder API Support with Centralized Management
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 04:56'
+updated_date: '2026-02-28 05:03'
 labels:
   - backend
   - builder
@@ -424,6 +424,12 @@ poll_interval_seconds = 30
 - Admin-only builder management prevents unauthorized builder registration
 - Signed requests prevent impersonation attacks
 - Environment assignments provide isolation between builder pools
+
+## Starting TASK-140 (2026-02-28)
+
+LOCK: claude-sonnet-4-5 on gray
+
+Beginning implementation of multi-builder API support with centralized management.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
