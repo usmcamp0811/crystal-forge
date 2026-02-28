@@ -1,10 +1,10 @@
 ---
 id: TASK-133
 title: Improve flake timeline cards with commit message + better author display
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-26 22:12'
-updated_date: '2026-02-27 05:10'
+updated_date: '2026-02-28 00:30'
 labels: []
 dependencies: []
 priority: high
@@ -98,4 +98,6 @@ Commit: 8b5e05b
 Follow-up perf hardening commit: 101541a
 
 Addressed review blocker by adding git metadata timeouts, removing per-commit fetch, and capping request-time hydration to missing fields only.
+
+2026-02-27: MR !139 merged into dev. Merge conflicts with dev resolved (imports in flakes.rs handler and backlog task metadata). Task complete.
 <!-- SECTION:NOTES:END -->
