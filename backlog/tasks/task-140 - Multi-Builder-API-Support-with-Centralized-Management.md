@@ -430,6 +430,9 @@ poll_interval_seconds = 30
 LOCK: claude-sonnet-4-5 on gray
 
 Beginning implementation of multi-builder API support with centralized management.
+
+Worktree created: ~/code/crystal-forge/TASK-140-multi-builder-api
+Branch: TASK-140-multi-builder-api (based on dev)
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
