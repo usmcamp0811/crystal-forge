@@ -1,9 +1,10 @@
 ---
 id: TASK-141
 title: Consolidate repeated web-ui inline styles into shared CSS classes
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-28 18:05'
+updated_date: '2026-02-28 18:05'
 labels:
   - web-ui
   - frontend
