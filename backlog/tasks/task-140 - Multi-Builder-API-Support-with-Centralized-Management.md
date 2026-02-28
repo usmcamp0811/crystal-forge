@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: Review
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 14:47'
+updated_date: '2026-02-28 15:09'
 labels:
   - backend
   - builder
@@ -658,6 +658,14 @@ Config: builder.enable_api_mode, builder_id, private_key_path, server_url, poll/
 Metrics: CPU via /proc/stat, memory via /proc/meminfo, active jobs. API mode spawns heartbeat task (30s) and job polling task (5s). Job execution integration is TODO (placeholder fails jobs for now).
 
 Verification: cargo check --offline PASS, cargo fmt PASS. Enables distributed builders without DB access.
+
+## Phase 8 In Progress (Commits: dbd8d36e, 4e84a0ff)
+
+Frontend builder management UI partially complete. Created BuildersView route (/builders) with real API integration. BuildersList fetches data, BuilderCard shows status/resources/heartbeat. Add/Edit modals are placeholders.
+
+Seed script created: scripts/seed_builders.sh generates 3 demo builders with 24h metrics. API client functions complete: fetch/create/update/deactivate builders.
+
+Remaining: Full add/edit modal forms with keypair generation, environment assignment multi-select, metrics dashboard (Phase 9).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
