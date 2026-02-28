@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: Review
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 14:38'
+updated_date: '2026-02-28 14:47'
 labels:
   - backend
   - builder
@@ -648,6 +648,16 @@ Created comprehensive API documentation in docs/multi-builder-api.md:
 Commit: fa9aa8d2
 
 Acceptance criteria #19 complete.
+
+## Phase 6 Complete (Commit: 22894781)
+
+Builder binary now supports API mode as alternative to direct DB access. Created api_client.rs (320L), metrics.rs (189L), config/builder.rs. Modified builder.rs to support dual mode (legacy DB vs API HTTP).
+
+Config: builder.enable_api_mode, builder_id, private_key_path, server_url, poll/heartbeat intervals. API client uses Ed25519 signatures (X-Builder-ID + X-Signature). Endpoints: heartbeat, get_next_job, start, complete, fail, append_logs.
+
+Metrics: CPU via /proc/stat, memory via /proc/meminfo, active jobs. API mode spawns heartbeat task (30s) and job polling task (5s). Job execution integration is TODO (placeholder fails jobs for now).
+
+Verification: cargo check --offline PASS, cargo fmt PASS. Enables distributed builders without DB access.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
