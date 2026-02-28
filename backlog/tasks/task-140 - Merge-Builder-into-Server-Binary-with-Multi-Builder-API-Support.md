@@ -1,10 +1,10 @@
 ---
 id: TASK-140
 title: Merge Builder into Server Binary with Multi-Builder API Support
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 04:53'
+updated_date: '2026-02-28 04:54'
 labels:
   - backend
   - builder
