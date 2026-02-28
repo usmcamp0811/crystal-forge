@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: In Progress
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 05:08'
+updated_date: '2026-02-28 05:15'
 labels:
   - backend
   - builder
@@ -217,7 +217,7 @@ poll_interval_seconds = 30
 <!-- AC:BEGIN -->
 - [ ] #1 Builder registration API endpoints implemented
 - [ ] #2 Builder work queue API endpoints implemented
-- [ ] #3 Public/private key authentication for builders
+- [x] #3 Public/private key authentication for builders
 - [x] #4 Database schema for builders, assignments, metrics, and jobs
 - [ ] #5 Builder management UI tab on Builds view
 - [ ] #6 Add/edit/delete builder functionality in UI
@@ -463,6 +463,47 @@ Branch: TASK-140-multi-builder-api (based on dev)
 - Foreign key constraints working
 
 Commit: 5a5d894a
+
+## Phase 2 Progress: Builder Authentication & Registration (2026-02-28)
+
+✅ Created builder models and authentication infrastructure
+
+**Models Created:**
+- `Builder` - Core builder entity with UUID, public key, resource limits
+- `BuilderStatus` enum - Active/Inactive/Offline states
+- `BuilderSummary` - List view with environment count
+- `BuilderWithEnvironments` - Detail view with assignments
+- Request/Response DTOs for CRUD operations
+- `BuilderMetrics` model for resource tracking
+
+**Queries Implemented:**
+- `create_builder` - Register new builder with public key validation
+- `get_builder_by_id`, `list_builders` - Retrieval operations
+- `update_builder`, `update_builder_public_key` - Modification
+- `deactivate_builder` - Soft delete
+- `update_builder_heartbeat` - Updates timestamp and marks active
+- `record_builder_metrics` - Store CPU/memory metrics
+- Environment assignment CRUD (assign, remove, update_all)
+- `mark_stale_builders_offline` - Heartbeat timeout detection
+
+**Authentication Middleware:**
+- Ed25519 signature verification (mirrors agent auth pattern)
+- Headers: `X-Builder-ID` (UUID), `X-Signature` (base64)
+- Only active builders can authenticate
+- BuilderLookup trait for testability
+- Comprehensive test coverage
+
+**Technical Notes:**
+- Using `query_as` instead of `query_as!` for PublicKey fields
+- Generated sqlx offline metadata
+- Some queries still need conversion from macro syntax
+
+Commit: e0421fa8
+
+**Next Steps:**
+- Convert remaining query! macros to non-macro versions
+- Create API endpoint handlers for builder management
+- Add admin authorization middleware
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
