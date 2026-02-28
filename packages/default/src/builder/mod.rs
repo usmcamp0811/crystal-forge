@@ -1,3 +1,6 @@
+pub mod api_client;
+pub mod metrics;
+
 use crate::config::CacheType;
 use crate::config::{BuildConfig, CacheConfig, CrystalForgeConfig};
 use crate::derivations::{Derivation, DerivationType};
