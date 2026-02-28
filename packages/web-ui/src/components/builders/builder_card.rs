@@ -10,6 +10,12 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
     let status_label = builder.status.label();
     let status_dot = builder.status.dot_class();
     let status_color = builder.status.color_class();
+    let is_inactive = matches!(builder.status, crate::api::models::BuilderStatus::Inactive);
+    let card_class = if is_inactive {
+        "{theme::presets::CARD} opacity-65 saturate-0"
+    } else {
+        "{theme::presets::CARD}"
+    };
 
     let heartbeat_text = if let Some(heartbeat) = builder.last_heartbeat_at {
         let now = chrono::Utc::now();
@@ -30,7 +36,7 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
 
     rsx! {
         div {
-            class: "border border-slate-700 bg-slate-800/50 rounded-lg p-4 hover:border-slate-600 transition-colors",
+            class: "{card_class} transition-colors",
 
             // Header
             div {
@@ -38,7 +44,7 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                 div {
                     class: "flex-1",
                     h3 {
-                        class: "font-semibold text-white mb-1",
+                        class: "font-semibold {theme::text::PRIMARY} mb-1",
                         "{builder.name}"
                     }
                     div {
@@ -49,17 +55,17 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                             "{status_label}"
                         }
                         span {
-                            class: "text-slate-500",
+                            class: "{theme::text::MUTED}",
                             "•"
                         }
                         span {
-                            class: "text-slate-400",
+                            class: "{theme::text::SECONDARY}",
                             "Heartbeat: {heartbeat_text}"
                         }
                     }
                 }
                 button {
-                    class: "px-2 py-1 text-xs text-blue-400 hover:text-blue-300 hover:bg-blue-500/10 rounded transition-colors",
+                    class: "px-2 py-1 rounded text-xs font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
                     onclick: move |_| on_edit.call(()),
                     "Edit"
                 }
@@ -73,10 +79,12 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                     span { "CPU Cores:" }
                     span {
                         class: "text-white",
-                        if let Some(cores) = builder.max_cpu_cores {
-                            "{cores}"
-                        } else {
-                            "Unlimited"
+                        {
+                            if let Some(cores) = builder.max_cpu_cores {
+                                cores.to_string()
+                            } else {
+                                "Unlimited".to_string()
+                            }
                         }
                     }
                 }

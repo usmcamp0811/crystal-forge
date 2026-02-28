@@ -19,6 +19,7 @@ use crate::models::public_key::PublicKey;
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::Type, PartialEq)]
 #[sqlx(type_name = "text")]
 #[sqlx(rename_all = "lowercase")]
+#[serde(rename_all = "lowercase")]
 pub enum BuilderStatus {
     #[sqlx(rename = "active")]
     Active,

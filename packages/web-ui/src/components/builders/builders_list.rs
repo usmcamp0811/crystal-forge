@@ -2,18 +2,21 @@
 
 use dioxus::prelude::*;
 
-use crate::api::{self, models::BuilderSummary};
+use crate::api;
 use crate::components::builders::{AddBuilderModal, BuilderCard, EditBuilderModal};
 use crate::components::loading::LoadingSpinner;
 use crate::theme;
 
 #[component]
 pub fn BuildersList() -> Element {
-    let builders = use_resource(|| async move { api::client::fetch_builders().await });
-    
     let mut show_add_modal = use_signal(|| false);
     let mut edit_builder_id = use_signal(|| None::<uuid::Uuid>);
     let mut refresh_trigger = use_signal(|| 0);
+
+    let builders = use_resource(move || async move {
+        let _ = refresh_trigger();
+        api::client::fetch_builders().await
+    });
 
     // Trigger refresh when modals close
     let mut on_builder_added = move || {

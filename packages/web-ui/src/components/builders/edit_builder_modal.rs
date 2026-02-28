@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::api::{self, models::{BuilderStatus, UpdateBuilderRequest, UpdateBuilderEnvironmentsRequest}};
 use crate::components::loading::LoadingSpinner;
+use crate::components::modals::ConfirmDialog;
 use crate::theme;
 
 #[component]
@@ -27,6 +28,8 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
     let mut is_initialized = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
     let mut error_message = use_signal(|| None::<String>);
+    let mut show_deactivate_confirm = use_signal(|| false);
+    let mut show_deactivate_final_confirm = use_signal(|| false);
 
     // Initialize form when builder data loads
     use_effect(move || {
@@ -94,7 +97,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
         }
     };
 
-    let handle_deactivate = move |_| async move {
+    let deactivate_builder = move || async move {
         if !is_submitting() {
             is_submitting.set(true);
             error_message.set(None);
@@ -108,6 +111,12 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                     is_submitting.set(false);
                 }
             }
+        }
+    };
+
+    let handle_deactivate = move |_| {
+        if !is_submitting() {
+            show_deactivate_confirm.set(true);
         }
     };
 
@@ -363,6 +372,36 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                         LoadingSpinner {}
                     },
                 }
+            }
+        }
+
+        if show_deactivate_confirm() {
+            ConfirmDialog {
+                title: "Deactivate builder?".to_string(),
+                description: "This will stop new work assignment for this builder. You will need to reactivate it manually.".to_string(),
+                confirm_label: "Continue".to_string(),
+                danger: true,
+                on_cancel: move |_| show_deactivate_confirm.set(false),
+                on_confirm: move |_| {
+                    show_deactivate_confirm.set(false);
+                    show_deactivate_final_confirm.set(true);
+                },
+            }
+        }
+
+        if show_deactivate_final_confirm() {
+            ConfirmDialog {
+                title: "Confirm deactivation".to_string(),
+                description: "Final confirmation: deactivate this builder now?".to_string(),
+                confirm_label: "Deactivate".to_string(),
+                danger: true,
+                on_cancel: move |_| show_deactivate_final_confirm.set(false),
+                on_confirm: move |_| {
+                    show_deactivate_final_confirm.set(false);
+                    spawn(async move {
+                        deactivate_builder().await;
+                    });
+                },
             }
         }
     }
