@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: In Progress
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 05:31'
+updated_date: '2026-02-28 05:41'
 labels:
   - backend
   - builder
@@ -227,9 +227,9 @@ poll_interval_seconds = 30
 - [ ] #10 Metrics view showing CPU/memory usage per builder
 - [ ] #11 Metrics view showing system-wide resource usage
 - [ ] #12 Builder polling loop for job retrieval
-- [ ] #13 Job status reporting (start, complete, fail) via API
-- [ ] #14 Build log streaming via API
-- [ ] #15 Environment-based job filtering (builders only get assigned env jobs)
+- [x] #13 Job status reporting (start, complete, fail) via API
+- [x] #14 Build log streaming via API
+- [x] #15 Environment-based job filtering (builders only get assigned env jobs)
 - [ ] #16 Authorization: admin required for builder management
 - [ ] #17 Authorization: signed requests for builder API calls
 - [ ] #18 Migration preserves existing builder functionality
@@ -536,6 +536,34 @@ Implementation Details:
 - Job queue endpoints stubbed for Phase 4-5 implementation
 
 Commit: c093d3ac
+
+Phase 4 Complete: Job Assignment Logic (2026-02-28)
+
+Implemented core work queue operations for builder job assignment:
+
+Build Job Query Functions (queries/builders.rs):
+- count_active_jobs_for_builder() - Check concurrent job limit
+- get_builder_environment_ids() - Get environment assignments (updated to non-macro)
+- get_next_queued_job() - Find highest priority job with environment filtering
+- assign_job_to_builder() - Mark job as building and assign to builder
+- mark_job_complete() - Update job status to success
+- append_job_logs() - Append logs to build_jobs.logs field
+- get_build_job_by_id() - Retrieve job by ID
+
+Job Assignment Logic (handlers/api/builders.rs):
+- get_next_job: Full assignment flow with concurrency limit check, environment filtering, atomic assignment
+- start_job: Verify job ownership (no-op since get_next_job already marks building)
+- complete_job: Mark job as success
+- append_job_logs: Append log chunks
+
+Key Features:
+- Environment-based filtering with wildcard support
+- Concurrent job limit enforcement
+- Priority-weighted job queue
+- Atomic assignment with FOR UPDATE SKIP LOCKED
+- Job ownership verification
+
+Commit: 11c6951a
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
