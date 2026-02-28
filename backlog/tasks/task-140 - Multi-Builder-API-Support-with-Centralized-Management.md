@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: In Progress
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 05:15'
+updated_date: '2026-02-28 05:31'
 labels:
   - backend
   - builder
@@ -215,8 +215,8 @@ poll_interval_seconds = 30
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Builder registration API endpoints implemented
-- [ ] #2 Builder work queue API endpoints implemented
+- [x] #1 Builder registration API endpoints implemented
+- [x] #2 Builder work queue API endpoints implemented
 - [x] #3 Public/private key authentication for builders
 - [x] #4 Database schema for builders, assignments, metrics, and jobs
 - [ ] #5 Builder management UI tab on Builds view
@@ -504,6 +504,38 @@ Commit: e0421fa8
 - Convert remaining query! macros to non-macro versions
 - Create API endpoint handlers for builder management
 - Add admin authorization middleware
+
+Phase 3 Complete: Builder API Endpoints (2026-02-28)
+
+Created comprehensive REST API for builder management and work queue
+
+Admin Endpoints (require require_admin() authorization):
+- POST /api/v1/builders - Create new builder
+- GET /api/v1/builders - List all builders with summary info
+- GET /api/v1/builders/:id - Get builder details with environment assignments
+- PATCH /api/v1/builders/:id - Update builder configuration
+- DELETE /api/v1/builders/:id - Deactivate builder (soft delete)
+- PUT /api/v1/builders/:id/public-key - Update builder public key
+- PATCH /api/v1/builders/:id/environments - Update environment assignments
+- GET /api/v1/builders/:id/metrics - Get builder metrics history
+
+Builder-Authenticated Endpoints (Ed25519 signature verification):
+- POST /api/v1/builders/:id/heartbeat - Report metrics and update last_heartbeat_at
+- GET /api/v1/builders/:id/next-job - Poll for next build job (TODO: Phase 4)
+- POST /api/v1/builders/:id/jobs/:job_id/start - Mark job started (TODO: Phase 4)
+- POST /api/v1/builders/:id/jobs/:job_id/complete - Mark job complete (TODO: Phase 4)
+- POST /api/v1/builders/:id/jobs/:job_id/fail - Report job failure with retry (TODO: Phase 5)
+- POST /api/v1/builders/:id/jobs/:job_id/logs - Append build logs (TODO: Phase 4)
+
+Implementation Details:
+- Created handlers/api/builders.rs with all endpoint handlers
+- Wired routes in bin/server.rs under /api/v1/builders/*
+- Added FromRow derive to Builder and BuilderSummary models
+- Converted query_as! to query_as for PublicKey compatibility
+- Updated sqlx query cache (.sqlx/ metadata)
+- Job queue endpoints stubbed for Phase 4-5 implementation
+
+Commit: c093d3ac
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
