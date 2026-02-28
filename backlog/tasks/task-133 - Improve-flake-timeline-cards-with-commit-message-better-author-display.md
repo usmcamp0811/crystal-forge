@@ -4,10 +4,11 @@ title: Improve flake timeline cards with commit message + better author display
 status: Review
 assignee: []
 created_date: '2026-02-26 22:12'
-updated_date: '2026-02-27 02:07'
+updated_date: '2026-02-27 05:10'
 labels: []
 dependencies: []
 priority: high
+ordinal: 81000
 ---
 
 ## Description

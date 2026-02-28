@@ -14,19 +14,21 @@ use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
-use web_sys::{Node, window};
+use web_sys::{window, Node};
 
 use crate::api::client::{
     create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,
-    request_sync_all_flakes, request_sync_flake,
+    request_sync_all_flakes, request_sync_flake, update_flake,
 };
-use crate::api::models::{CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline};
+use crate::api::models::{
+    CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
+};
 use crate::components::layout::Card;
 use crate::theme;
 use crate::views::systems_mock::mock_system_details;
 
 const VIEW_PREF_KEY: &str = "crystal_forge.flakes.view";
-const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE)";
+const FLAKE_TABLE_SCHEMA_NOTE: &str = "flakes(name, repo_url UNIQUE, branch)";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FlakesViewMode {
@@ -126,6 +128,7 @@ struct FlakeListItem {
     id: i32,
     name: String,
     repo_url: String,
+    branch: String,
     latest_commit: Option<String>,
     system_count: usize,
     environments: Vec<String>,
@@ -138,6 +141,7 @@ impl FlakeListItem {
             id: item.id,
             name: item.name,
             repo_url: item.repo_url,
+            branch: item.branch,
             latest_commit: None,
             system_count: item.system_count.max(0) as usize,
             environments: Vec::new(),
@@ -180,6 +184,7 @@ struct RenderedDiffLine {
 struct NewFlakeDraft {
     name: String,
     repo_url: String,
+    branch: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -187,6 +192,7 @@ struct EditFlakeDraft {
     id: i32,
     name: String,
     repo_url: String,
+    branch: String,
 }
 
 /// Flakes list with toggles and filters.
@@ -256,6 +262,7 @@ pub fn FlakesListView() -> Element {
     let mut draft = use_signal(|| NewFlakeDraft {
         name: String::new(),
         repo_url: String::new(),
+        branch: String::new(),
     });
     let mut pending_remove = use_signal(|| None::<FlakeListItem>);
     let mut editing_flake = use_signal(|| None::<EditFlakeDraft>);
@@ -352,7 +359,7 @@ pub fn FlakesListView() -> Element {
                 div {
                     class: "flex items-center gap-3",
                     button {
-                        class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
+                        class: "px-3 py-2 rounded-lg text-sm font-medium border border-blue-500/50 text-blue-200 hover:text-white hover:bg-blue-500/20 transition-colors",
                         onclick: move |_| {
                             let selected_flake_id = *selected_history_flake.read();
                             let mut flakes_signal = flakes.clone();
@@ -479,6 +486,7 @@ pub fn FlakesListView() -> Element {
                         draft.set(NewFlakeDraft {
                             name: String::new(),
                             repo_url: String::new(),
+                            branch: String::new(),
                         });
                         add_error.set(None);
                         show_add_form.set(false);
@@ -499,6 +507,7 @@ pub fn FlakesListView() -> Element {
                             let request = CreateFlakeRequest {
                                 name: next.name.trim().to_string(),
                                 repo_url: next.repo_url.trim().to_string(),
+                                branch: normalize_optional_branch(&next.branch),
                             };
 
                             match create_flake(&request).await {
@@ -511,6 +520,7 @@ pub fn FlakesListView() -> Element {
                                     draft.set(NewFlakeDraft {
                                         name: String::new(),
                                         repo_url: String::new(),
+                                        branch: String::new(),
                                     });
                                     add_error.set(None);
                                     server_notice.set(None);
@@ -603,15 +613,38 @@ pub fn FlakesListView() -> Element {
                             return;
                         }
 
-                        let mut values = flakes.read().clone();
-                        if let Some(target) = values.iter_mut().find(|item| item.id == next.id) {
-                            target.name = next.name.trim().to_string();
-                            target.repo_url = next.repo_url.trim().to_string();
-                        }
-                        values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        flakes.set(values);
-                        editing_flake.set(None);
-                        edit_error.set(None);
+                        let mut flakes = flakes.clone();
+                        let mut editing_flake = editing_flake.clone();
+                        let mut edit_error = edit_error.clone();
+                        let mut server_notice = server_notice.clone();
+                        spawn(async move {
+                            let request = UpdateFlakeRequest {
+                                name: next.name.trim().to_string(),
+                                repo_url: next.repo_url.trim().to_string(),
+                                branch: normalize_optional_branch(&next.branch),
+                            };
+
+                            match update_flake(next.id, &request).await {
+                                Ok(updated) => {
+                                    let mut values = flakes.read().clone();
+                                    if let Some(target) = values.iter_mut().find(|item| item.id == updated.id)
+                                    {
+                                        target.name = updated.name;
+                                        target.repo_url = updated.repo_url;
+                                        target.branch = updated.branch;
+                                        target.system_count = updated.system_count.max(0) as usize;
+                                    }
+                                    values.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                                    flakes.set(values);
+                                    editing_flake.set(None);
+                                    edit_error.set(None);
+                                    server_notice.set(None);
+                                }
+                                Err(error) => {
+                                    edit_error.set(Some(error.to_string()));
+                                }
+                            }
+                        });
                     }
                 }
             }
@@ -821,7 +854,14 @@ fn FlakesTable(
                                         },
                                         onclick: move |_| on_select_history_flake.call(flake.id),
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-white", "{flake.name}" }
-                                        td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{flake.repo_url}" }
+                                        td {
+                                            class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300",
+                                            div {
+                                                class: "space-y-1",
+                                                p { class: "font-mono", "{flake.repo_url}" }
+                                                p { class: "text-[11px] text-sky-300 font-mono", "branch: {flake.branch}" }
+                                            }
+                                        }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-200", "{flake.system_count}" }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::SECONDARY}", "{environments_label(&flake)}" }
                                         td { class: "{theme::spacing::TABLE_CELL} text-sm text-gray-300 font-mono", "{latest_commit_label(&flake)}" }
@@ -891,6 +931,7 @@ fn FlakeCard(
                 div {
                     h3 { class: "text-lg font-semibold text-white", "{flake.name}" }
                     p { class: "text-xs text-gray-300 mt-1 font-mono", "{flake.repo_url}" }
+                    p { class: "text-[11px] text-sky-300 mt-1 font-mono", "branch: {flake.branch}" }
                 }
             }
             div {
@@ -1487,7 +1528,7 @@ fn AddFlakeForm(
                         "Schema context: {FLAKE_TABLE_SCHEMA_NOTE}."
                     }
                     div {
-                        class: "grid grid-cols-1 md:grid-cols-2 gap-4",
+                        class: "grid grid-cols-1 md:grid-cols-3 gap-4",
                         label {
                             class: "space-y-2",
                             span { class: "text-xs uppercase tracking-wide text-gray-500", "Flake Name" }
@@ -1512,6 +1553,20 @@ fn AddFlakeForm(
                                 oninput: move |evt| {
                                     let mut next = draft.read().clone();
                                     next.repo_url = evt.value();
+                                    draft.set(next);
+                                },
+                            }
+                        }
+                        label {
+                            class: "space-y-2",
+                            span { class: "text-xs uppercase tracking-wide text-gray-500", "Branch (optional)" }
+                            input {
+                                class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                                value: "{draft.read().branch}",
+                                placeholder: "main",
+                                oninput: move |evt| {
+                                    let mut next = draft.read().clone();
+                                    next.branch = evt.value();
                                     draft.set(next);
                                 },
                             }
@@ -1600,6 +1655,7 @@ fn EditFlakeDialog(
 ) -> Element {
     let draft_for_name = draft.clone();
     let draft_for_repo = draft.clone();
+    let draft_for_branch = draft.clone();
 
     rsx! {
         div {
@@ -1642,6 +1698,20 @@ fn EditFlakeDialog(
                             oninput: move |evt| {
                                 let mut next = draft_for_repo.clone();
                                 next.repo_url = evt.value();
+                                on_change.call(next);
+                            }
+                        }
+                    }
+                    label {
+                        class: "space-y-2 block",
+                        span { class: "text-xs uppercase tracking-wide text-gray-500", "Branch (optional)" }
+                        input {
+                            class: "w-full rounded-lg px-3 py-2 text-sm font-mono {theme::interactive::INPUT} {theme::interactive::FOCUS_RING} {theme::text::SECONDARY}",
+                            value: "{draft.branch}",
+                            placeholder: "main",
+                            oninput: move |evt| {
+                                let mut next = draft_for_branch.clone();
+                                next.branch = evt.value();
                                 on_change.call(next);
                             }
                         }
@@ -1699,6 +1769,7 @@ fn start_edit_flake(
             id: flake.id,
             name: flake.name,
             repo_url: flake.repo_url,
+            branch: flake.branch,
         }));
         edit_error.set(None);
     }
@@ -1707,6 +1778,7 @@ fn start_edit_flake(
 fn validate_new_flake(draft: &NewFlakeDraft, existing: &[FlakeListItem]) -> Result<(), String> {
     let name = draft.name.trim();
     let repo_url = draft.repo_url.trim();
+    let branch = draft.branch.trim();
 
     if name.is_empty() {
         return Err("Flake name is required.".to_string());
@@ -1723,6 +1795,9 @@ fn validate_new_flake(draft: &NewFlakeDraft, existing: &[FlakeListItem]) -> Resu
     {
         return Err("Repository URL already exists in the registry.".to_string());
     }
+    if !branch.is_empty() && branch.contains(char::is_whitespace) {
+        return Err("Branch must not contain whitespace.".to_string());
+    }
 
     Ok(())
 }
@@ -1730,6 +1805,7 @@ fn validate_new_flake(draft: &NewFlakeDraft, existing: &[FlakeListItem]) -> Resu
 fn validate_flake_edit(draft: &EditFlakeDraft, existing: &[FlakeListItem]) -> Result<(), String> {
     let name = draft.name.trim();
     let repo_url = draft.repo_url.trim();
+    let branch = draft.branch.trim();
 
     if name.is_empty() {
         return Err("Flake name is required.".to_string());
@@ -1746,6 +1822,9 @@ fn validate_flake_edit(draft: &EditFlakeDraft, existing: &[FlakeListItem]) -> Re
     {
         return Err("Repository URL already exists in the registry.".to_string());
     }
+    if !branch.is_empty() && branch.contains(char::is_whitespace) {
+        return Err("Branch must not contain whitespace.".to_string());
+    }
 
     Ok(())
 }
@@ -1757,6 +1836,15 @@ fn looks_like_repo_url(value: &str) -> bool {
         || lower.starts_with("git@")
         || lower.starts_with("ssh://")
         || lower.starts_with("github:")
+}
+
+fn normalize_optional_branch(value: &str) -> Option<String> {
+    let branch = value.trim();
+    if branch.is_empty() {
+        None
+    } else {
+        Some(branch.to_string())
+    }
 }
 
 #[component]
@@ -2157,6 +2245,7 @@ fn mock_flakes() -> Vec<FlakeListItem> {
             id: flake.id,
             name: flake.name.clone(),
             repo_url: flake.repo_url.clone(),
+            branch: "main".to_string(),
             latest_commit: flake.latest_commit.clone(),
             system_count: 0,
             environments: Vec::new(),
@@ -2272,7 +2361,6 @@ fn sync_single_flake_registry(
     flake.last_synced_at = now;
     changed
 }
-
 fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHistoryCommit>> {
     let mut history = HashMap::new();
 

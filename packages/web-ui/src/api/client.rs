@@ -139,8 +139,8 @@ pub async fn fetch_environment_policies(
 }
 
 /// Fetch required policy assignments for visible environments.
-pub async fn fetch_environment_policies_map()
--> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
+pub async fn fetch_environment_policies_map(
+) -> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
     let url = format!("{}/environments/policies-map", base_url());
     fetch_json(&url).await
 }
@@ -202,6 +202,15 @@ pub async fn create_flake(
     send_json("POST", &url, Some(request)).await
 }
 
+/// Update an existing flake registry entry.
+pub async fn update_flake(
+    id: i32,
+    request: &UpdateFlakeRequest,
+) -> Result<FlakeRegistryItem, ApiClientError> {
+    let url = format!("{}/flakes/{id}", base_url());
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
 /// Remove a flake by id.
 pub async fn delete_flake(id: i32) -> Result<(), ApiClientError> {
     let url = format!("{}/flakes/{id}", base_url());
@@ -214,15 +223,15 @@ pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientErro
     fetch_json(&url).await
 }
 
-/// Trigger sync for all flakes from source.
+/// Trigger sync for all flakes.
 pub async fn request_sync_all_flakes() -> Result<SystemMutationResponse, ApiClientError> {
     let url = format!("{}/flakes/sync", base_url());
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
-/// Trigger sync for a single flake from source.
+/// Trigger sync for a specific flake.
 pub async fn request_sync_flake(id: i32) -> Result<SystemMutationResponse, ApiClientError> {
-    let url = format!("{}/flakes/{}/sync", base_url(), id);
+    let url = format!("{}/flakes/{id}/sync", base_url());
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 

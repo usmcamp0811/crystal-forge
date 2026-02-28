@@ -33,7 +33,7 @@ use crate::queries::systems::insert_system;
 use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::env;
 use std::time::Duration;
 use tokio_postgres::NoTls;
@@ -260,9 +260,14 @@ impl CrystalForgeConfig {
                 let id = match get_flake_id_by_repo_url(pool, &watched_flake.repo_url).await? {
                     Some(id) => id,
                     None => {
-                        insert_flake(pool, &watched_flake.name, &watched_flake.repo_url)
-                            .await?
-                            .id
+                        insert_flake(
+                            pool,
+                            &watched_flake.name,
+                            &watched_flake.repo_url,
+                            &watched_flake.branch(),
+                        )
+                        .await?
+                        .id
                     }
                 };
                 Some(id)

@@ -1,16 +1,17 @@
 ---
 id: TASK-130
 title: Implement Flake Sync From Source Button Behavior
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-26 08:45'
-updated_date: '2026-02-27 01:48'
+updated_date: '2026-02-27 22:13'
 labels:
   - ui
   - flakes
   - sync
 dependencies: []
 priority: high
+ordinal: 80000
 ---
 
 ## Problem
