@@ -4,6 +4,7 @@ use dioxus::prelude::*;
 use uuid::Uuid;
 
 use crate::api::{self, models::CreateBuilderRequest};
+use crate::components::builders::generate_ed25519_keypair;
 use crate::theme;
 
 #[component]
@@ -26,23 +27,15 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
     });
 
     let generate_keypair = move |_| {
-        // Generate Ed25519 keypair using web-sys crypto
-        // For now, we'll use a placeholder - real implementation needs ed25519-dalek in WASM
-        
-        // TODO: Implement real Ed25519 keypair generation
-        // This requires ed25519-dalek compiled for wasm32
-        
-        let placeholder_private = "0000000000000000000000000000000000000000000000000000000000000000";
-        let placeholder_public = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-        
-        private_key.set(placeholder_private.to_string());
-        public_key.set(placeholder_public.to_string());
-        
-        // In production:
-        // 1. Generate random 32 bytes for private key
-        // 2. Derive public key from private key
-        // 3. Encode private key as hex
-        // 4. Encode public key as base64
+        match generate_ed25519_keypair() {
+            Ok((priv_hex, pub_b64)) => {
+                private_key.set(priv_hex);
+                public_key.set(pub_b64);
+            }
+            Err(e) => {
+                error_message.set(Some(format!("Failed to generate keypair: {}", e)));
+            }
+        }
     };
 
     let toggle_environment = move |env_id: Uuid| {
