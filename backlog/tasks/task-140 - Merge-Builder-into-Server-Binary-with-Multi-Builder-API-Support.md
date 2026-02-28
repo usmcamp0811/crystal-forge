@@ -4,6 +4,7 @@ title: Merge Builder into Server Binary with Multi-Builder API Support
 status: Backlog
 assignee: []
 created_date: '2026-02-28 04:41'
+updated_date: '2026-02-28 04:53'
 labels:
   - backend
   - builder
@@ -235,6 +236,193 @@ poll_interval_seconds = 30
 - [ ] #19 Migration preserves existing builder functionality
 - [ ] #20 Documentation for builder deployment and configuration
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+### Phase 1: Database Schema & Migrations
+1. Create `builders` table with resource limits and status tracking
+2. Create `builder_environment_assignments` table (1:many)
+3. Create `builder_metrics` table with configurable retention
+4. Extend `build_jobs` table to track builder assignment and retry count
+5. Add indexes for performance (builder_id, environment_id, status queries)
+
+### Phase 2: Builder Authentication & Registration
+1. Implement Ed25519 keypair generation for builders
+2. Add builder authentication middleware (verify signed requests)
+3. Implement POST /api/v1/builders (admin creates builder in UI first)
+4. Store builder public key, validate on first connection
+5. Add builder registration verification on builder startup
+
+### Phase 3: Builder API Endpoints
+1. POST /api/v1/builders/:id/heartbeat (resource metrics + capacity reporting)
+2. GET /api/v1/builders/:id/next-job (load-balanced job assignment)
+3. POST /api/v1/builders/:id/jobs/:job_id/start
+4. POST /api/v1/builders/:id/jobs/:job_id/complete  
+5. POST /api/v1/builders/:id/jobs/:job_id/fail (marks for retry, re-queues)
+6. POST /api/v1/builders/:id/jobs/:job_id/logs (append to build_jobs.logs)
+
+### Phase 4: Job Assignment Logic
+1. Implement environment-based job filtering
+2. Implement load-based builder selection (least busy wins)
+3. Add wildcard support (builders with no env assignments get all jobs)
+4. Implement builder self-throttling (stops polling when at capacity)
+5. Add heartbeat timeout detection (mark offline after N seconds)
+6. Implement job reassignment (requeue in-progress jobs from offline builders)
+
+### Phase 5: Retry & Queue Priority Logic
+1. Add retry counter to build_jobs (max configurable per environment/global)
+2. Implement priority weighting (newer commits/jobs weighted higher)
+3. On failure: increment retry, re-queue with adjusted priority
+4. Implement "eager retry" strategy (fail X → build Y → retry X → build Z → retry X)
+5. Respect max retry limit (after limit, mark as permanently failed)
+
+### Phase 6: Builder Binary Role Support
+1. Extract existing builder logic into builder module
+2. Add --role server|builder|both CLI flag
+3. Implement builder polling loop (configurable interval)
+4. Implement builder resource metrics collection (CPU, memory, system stats)
+5. Add builder config section (builder_id, private_key_path, poll_interval)
+6. Support local mode (direct DB) and remote mode (API-only)
+
+### Phase 7: Concurrent Job Support
+1. Add max_concurrent_jobs field to builders table
+2. Track active jobs per builder in memory/DB
+3. Filter /next-job to respect concurrency limit
+4. Builder-side job executor supports parallel builds (configurable)
+
+### Phase 8: Frontend - Builder Management UI
+1. Add "Builders" tab to Builds view
+2. Implement builder list with status badges (active/inactive/offline)
+3. Add builder creation modal (name, pubkey, resource limits)
+4. Implement environment assignment multi-select
+5. Add edit builder functionality
+6. Add deactivate/delete builder functionality
+7. Display resource limits (CPU cores, memory MB, concurrent jobs)
+
+### Phase 9: Frontend - Metrics Dashboard
+1. Add "Metrics" tab to Builds view
+2. Implement per-builder resource usage cards
+3. Display CPU usage (builder process % + system %)
+4. Display memory usage (builder MB + system total/used)
+5. Add gauge visualizations for resource usage
+6. Implement system-wide metrics summary
+7. Add configurable metrics retention UI (admin setting)
+
+### Phase 10: Testing & Documentation
+1. Unit tests for builder authentication
+2. Integration tests for job assignment logic
+3. Test retry and priority weighting behavior
+4. Test heartbeat timeout and job reassignment
+5. Test environment filtering
+6. Test all three binary modes (server, builder, both)
+7. Document builder deployment process
+8. Document keypair generation and registration flow
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Architectural Decisions (2026-02-28)
+
+### Job Assignment Strategy
+**Decision**: Load-based assignment (least busy builder wins)
+- When multiple builders are assigned to same environment, server selects builder with lowest current CPU/memory usage
+- Prevents hot-spotting on single builder
+- Distributes work based on actual capacity
+
+### Builder Offline Detection
+**Decision**: Heartbeat timeout + job reassignment
+- If no heartbeat received within N seconds, mark builder offline
+- Automatically requeue any in-progress jobs from offline builder
+- Jobs return to queue with original priority + retry increment
+
+### Resource Limit Enforcement
+**Decision**: Builder self-throttles
+- Builder reports current resource usage in heartbeat
+- Builder stops polling /next-job when at/near configured limits
+- Allows builder to make intelligent local decisions about capacity
+- Server tracks builder capacity but trusts builder's self-reporting
+
+### Builder Registration Flow
+**Decision**: Admin creates in UI first
+1. Admin creates builder in UI (name, pubkey, resource limits, env assignments)
+2. Builder binary starts with matching builder_id and private_key
+3. Builder authenticates on first /heartbeat or /next-job request
+4. Server validates builder exists and pubkey matches
+5. Builder transitions from "inactive" to "active" status
+
+### Build Log Storage
+**Decision**: Database only (build_jobs.logs text field)
+- Logs stored directly in PostgreSQL
+- Simpler architecture (no filesystem coordination)
+- Logs remain with job record
+- Can migrate to file storage later if logs become too large
+
+### Environment Assignment Semantics
+**Decision**: Wildcard - no assignments = builds everything
+- Builder with zero environment assignments receives jobs from all environments
+- Useful for default/dev builder that handles everything
+- Production builders should have explicit assignments
+
+### Concurrent Job Limit
+**Decision**: Configurable concurrency limit per builder
+- `max_concurrent_jobs` field on builders table
+- Builder can run N jobs in parallel (default: 1)
+- Server filters /next-job to respect this limit
+- Allows high-capacity builders to maximize throughput
+
+### Builder Authentication
+**Decision**: Ed25519 signature per request (same as agents)
+- Builder signs request body with private key
+- Server verifies signature using stored public key
+- Stateless authentication (no sessions/tokens)
+- Matches existing agent authentication pattern
+
+### Failed Job Retry Logic
+**Decision**: Eager retry with priority weighting
+- Failed jobs marked for retry and re-queued immediately
+- Newer commits/jobs have slightly higher priority weight
+- Configurable max retries per job (default: 3)
+- Strategy: fail X → build Y → retry X → build Z → retry X (final attempt)
+- Ensures new commits don't wait behind long retry queue
+- After max retries exceeded, mark as permanently failed
+- **Note**: Original builder queue already implements most of this logic
+
+### Resource Metrics Configuration
+**Decision**: Configurable interval + retention (admin setting)
+- Metrics interval configurable (default: every heartbeat, ~30s)
+- Retention period configurable (default: 24 hours)
+- Optional: aggregate to hourly after 24h (future enhancement)
+- Admin can tune based on monitoring needs vs. DB size
+
+## Implementation Notes
+
+### Existing Code Reuse
+- Original builder queue logic already implements:
+  - Priority-weighted queue
+  - Retry tracking
+  - Eager build strategy
+- Task should preserve and migrate this logic to new API-based model
+
+### Migration Considerations
+- Existing derivations/build state must map to new build_jobs table
+- Existing builder (if running) should continue to work during migration
+- Support gradual rollout (some builders on old model, some on new)
+
+### Performance Considerations
+- Load-based assignment requires tracking active jobs per builder (cache in memory)
+- Heartbeat table can grow quickly (implement auto-pruning)
+- build_jobs.logs may become large (consider size limits or compression)
+
+### Security Considerations
+- Builder private keys must be protected (file permissions, secret management)
+- Admin-only builder management prevents unauthorized builder registration
+- Signed requests prevent impersonation attacks
+- Environment assignments provide isolation between builder pools
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
