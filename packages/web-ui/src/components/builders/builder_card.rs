@@ -85,10 +85,12 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                     span { "Memory:" }
                     span {
                         class: "text-white",
-                        if let Some(mem_mb) = builder.max_memory_mb {
-                            format!("{} GB", mem_mb / 1024)
-                        } else {
-                            "Unlimited".to_string()
+                        {
+                            if let Some(mem_mb) = builder.max_memory_mb {
+                                format!("{} GB", mem_mb / 1024)
+                            } else {
+                                "Unlimited".to_string()
+                            }
                         }
                     }
                 }
@@ -105,10 +107,12 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                     span { "Environments:" }
                     span {
                         class: "text-white",
-                        if builder.assigned_environment_count > 0 {
-                            format!("{}", builder.assigned_environment_count)
-                        } else {
-                            "All (wildcard)".to_string()
+                        {
+                            if builder.assigned_environment_count > 0 {
+                                format!("{}", builder.assigned_environment_count)
+                            } else {
+                                "All (wildcard)".to_string()
+                            }
                         }
                     }
                 }

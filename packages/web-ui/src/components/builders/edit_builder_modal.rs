@@ -43,7 +43,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
         }
     });
 
-    let toggle_environment = move |env_id: Uuid| {
+    let mut toggle_environment = move |env_id: Uuid| {
         let mut envs = selected_environments();
         if envs.contains(&env_id) {
             envs.retain(|id| *id != env_id);
@@ -259,50 +259,58 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                                     "Leave empty for wildcard (builder handles all environments)"
                                 }
                                 
-                                match &*environments.read_unchecked() {
-                                    Some(Ok(env_list)) => rsx! {
-                                        div {
-                                            class: "border border-slate-700 rounded p-3 space-y-2 max-h-48 overflow-y-auto",
-                                            if env_list.is_empty() {
-                                                p {
-                                                    class: "text-sm {theme::text::SECONDARY}",
-                                                    "No environments available"
-                                                }
-                                            } else {
-                                                for env in env_list {
-                                                    div {
-                                                        key: "{env.id}",
-                                                        class: "flex items-center gap-2",
-                                                        input {
-                                                            r#type: "checkbox",
-                                                            id: "env-edit-{env.id}",
-                                                            class: "rounded border-slate-600 text-blue-600 focus:ring-blue-500",
-                                                            checked: selected_environments().contains(&env.id),
-                                                            onchange: move |_| toggle_environment(env.id),
-                                                            disabled: is_submitting(),
-                                                        }
-                                                        label {
-                                                            r#for: "env-edit-{env.id}",
-                                                            class: "text-sm {theme::text::PRIMARY} cursor-pointer",
-                                                            "{env.name}"
+                                {
+                                    let env_data = environments.read();
+                                    match &*env_data {
+                                        Some(Ok(env_list)) => rsx! {
+                                            div {
+                                                class: "border border-slate-700 rounded p-3 space-y-2 max-h-48 overflow-y-auto",
+                                                if env_list.is_empty() {
+                                                    p {
+                                                        class: "text-sm {theme::text::SECONDARY}",
+                                                        "No environments available"
+                                                    }
+                                                } else {
+                                                    for env in env_list {
+                                                        {
+                                                            let env_id = env.id;
+                                                            rsx! {
+                                                                div {
+                                                                    key: "{env.id}",
+                                                                    class: "flex items-center gap-2",
+                                                                    input {
+                                                                        r#type: "checkbox",
+                                                                        id: "env-edit-{env.id}",
+                                                                        class: "rounded border-slate-600 text-blue-600 focus:ring-blue-500",
+                                                                        checked: selected_environments().contains(&env.id),
+                                                                        onchange: move |_| toggle_environment(env_id),
+                                                                        disabled: is_submitting(),
+                                                                    }
+                                                                    label {
+                                                                        r#for: "env-edit-{env.id}",
+                                                                        class: "text-sm {theme::text::PRIMARY} cursor-pointer",
+                                                                        "{env.name}"
+                                                                    }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
-                                        }
-                                    },
-                                    Some(Err(e)) => rsx! {
-                                        p {
-                                            class: "text-sm text-red-400",
-                                            "Failed to load environments: {e}"
-                                        }
-                                    },
-                                    None => rsx! {
-                                        p {
-                                            class: "text-sm {theme::text::SECONDARY}",
-                                            "Loading environments..."
-                                        }
-                                    },
+                                        },
+                                        Some(Err(e)) => rsx! {
+                                            p {
+                                                class: "text-sm text-red-400",
+                                                "Failed to load environments: {e}"
+                                            }
+                                        },
+                                        None => rsx! {
+                                            p {
+                                                class: "text-sm {theme::text::SECONDARY}",
+                                                "Loading environments..."
+                                            }
+                                        },
+                                    }
                                 }
                             }
                         }
@@ -352,9 +360,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                         }
                     },
                     None => rsx! {
-                        LoadingSpinner {
-                            message: "Loading builder..."
-                        }
+                        LoadingSpinner {}
                     },
                 }
             }

@@ -4,6 +4,7 @@
 //! All methods return deserialized DTOs from [`super::models`].
 
 use super::models::*;
+use uuid::Uuid;
 
 fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
     if !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081")) {

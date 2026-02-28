@@ -9,7 +9,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+pub use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Common Enums
@@ -973,7 +973,7 @@ impl BuilderStatus {
 }
 
 /// Builder summary for list view
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BuilderSummary {
     pub id: Uuid,
     pub name: String,

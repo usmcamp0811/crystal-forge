@@ -64,9 +64,7 @@ pub fn BuilderMetricsView() -> Element {
                     }
                 },
                 None => rsx! {
-                    LoadingSpinner {
-                        message: "Loading builders..."
-                    }
+                    LoadingSpinner {}
                 },
             }
         }
@@ -212,9 +210,7 @@ fn BuilderMetricsCard(builder_id: Uuid, builder_name: String) -> Element {
                 None => rsx! {
                     div {
                         class: "py-4",
-                        LoadingSpinner {
-                            message: "Loading metrics..."
-                        }
+                        LoadingSpinner {}
                     }
                 },
             }
