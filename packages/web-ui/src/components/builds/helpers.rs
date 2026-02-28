@@ -2,9 +2,9 @@
 
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 /// Worker status enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,8 +97,8 @@ pub enum BuildAction {
 /// Worker item struct.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkerItem {
-    pub id: &'static str,
-    pub name: &'static str,
+    pub id: String,
+    pub name: String,
     pub active_slots: usize,
     pub total_slots: usize,
     pub queue_depth: usize,
@@ -154,7 +154,7 @@ pub struct BuildArtifact {
 pub enum PendingAction {
     Queue(QueueAction),
     Worker {
-        worker_id: &'static str,
+        worker_id: String,
         action: WorkerAction,
     },
     Build {
@@ -324,16 +324,16 @@ pub fn selected_build_data(selected_id: Option<i32>, builds: &[BuildItem]) -> Op
 pub fn mock_workers() -> Vec<WorkerItem> {
     vec![
         WorkerItem {
-            id: "worker-a",
-            name: "worker-a",
+            id: "worker-a".to_string(),
+            name: "worker-a".to_string(),
             active_slots: 2,
             total_slots: 4,
             queue_depth: 6,
             status: WorkerStatus::Running,
         },
         WorkerItem {
-            id: "worker-b",
-            name: "worker-b",
+            id: "worker-b".to_string(),
+            name: "worker-b".to_string(),
             active_slots: 3,
             total_slots: 4,
             queue_depth: 4,

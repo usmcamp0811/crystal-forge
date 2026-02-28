@@ -2,18 +2,46 @@
 
 use dioxus::prelude::*;
 
+use crate::api::{self, models::BuilderStatus};
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
-    WorkerStatus, WorkerStrip, apply_action, mock_builds, mock_workers, selected_build_data,
+    WorkerStatus, WorkerStrip, apply_action, mock_builds, selected_build_data,
 };
 use crate::theme;
 
 /// Builds control center page.
 #[component]
 pub fn BuildsView() -> Element {
-    let mut workers = use_signal(mock_workers);
+    let mut workers = use_signal(Vec::<WorkerItem>::new);
     let mut builds = use_signal(mock_builds);
+    let refresh_trigger = use_signal(|| 0_u64);
+    let builders = use_resource(move || async move {
+        let _ = refresh_trigger();
+        api::client::fetch_builders().await
+    });
+
+    use_effect(move || {
+        if let Some(Ok(builder_list)) = &*builders.read() {
+            let mapped = builder_list
+                .iter()
+                .map(|builder| WorkerItem {
+                    id: builder.id.to_string(),
+                    name: builder.name.clone(),
+                    active_slots: 0,
+                    total_slots: builder.max_concurrent_jobs.max(1) as usize,
+                    queue_depth: 0,
+                    status: match builder.status {
+                        BuilderStatus::Active => WorkerStatus::Running,
+                        BuilderStatus::Inactive => WorkerStatus::Paused,
+                        BuilderStatus::Offline => WorkerStatus::Draining,
+                    },
+                })
+                .collect::<Vec<_>>();
+            workers.set(mapped);
+        }
+    });
+
     let mut selected_build = use_signal(|| Some(1_i32));
     let mut active_tab = use_signal(|| DetailTab::Logs);
 
@@ -24,6 +52,7 @@ pub fn BuildsView() -> Element {
 
     let mut pending_action = use_signal(|| None::<PendingAction>);
     let mut last_action_note = use_signal(|| None::<String>);
+    let mut action_error = use_signal(|| None::<String>);
 
     let queue_data = builds.read().clone();
     let worker_data = workers.read().clone();
@@ -85,6 +114,14 @@ pub fn BuildsView() -> Element {
                 }
             }
 
+            if let Some(err) = action_error.read().clone() {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-red-100",
+                    style: "background-color: #4A252D; border-color: #7A3D48;",
+                    "{err}"
+                }
+            }
+
             div {
                 class: "cf-builds-split",
                 div {
@@ -116,7 +153,83 @@ pub fn BuildsView() -> Element {
                     on_cancel: move |_| pending_action.set(None),
                     on_confirm: move |_| {
                         if let Some(next_action) = pending_action.read().clone() {
-                            apply_action(next_action, &mut workers, &mut builds, &mut selected_build, &mut last_action_note);
+                            match next_action.clone() {
+                                PendingAction::Queue(queue_action) => {
+                                    let builders_snapshot = workers.read().clone();
+                                    let mut last_action_note = last_action_note;
+                                    let mut action_error = action_error;
+                                    let mut refresh_trigger = refresh_trigger;
+                                    spawn(async move {
+                                        let target_status = match queue_action {
+                                            QueueAction::StartAll => BuilderStatus::Active,
+                                            QueueAction::PauseAll | QueueAction::DrainAll => BuilderStatus::Inactive,
+                                        };
+
+                                        for worker in builders_snapshot {
+                                            let request = crate::api::models::UpdateBuilderRequest {
+                                                name: None,
+                                                status: Some(target_status.clone()),
+                                                max_cpu_cores: None,
+                                                max_memory_mb: None,
+                                                max_concurrent_jobs: None,
+                                            };
+
+                                            let builder_id = match uuid::Uuid::parse_str(&worker.id) {
+                                                Ok(id) => id,
+                                                Err(_) => continue,
+                                            };
+
+                                            if let Err(e) = api::client::update_builder(&builder_id, &request).await {
+                                                action_error.set(Some(format!("Failed applying {}: {}", queue_action.label(), e)));
+                                                return;
+                                            }
+                                        }
+
+                                        action_error.set(None);
+                                        last_action_note.set(Some(format!("Applied {}", queue_action.label())));
+                                        refresh_trigger.set(refresh_trigger() + 1);
+                                    });
+                                }
+                                PendingAction::Worker { worker_id, action } => {
+                                    let mut last_action_note = last_action_note;
+                                    let mut action_error = action_error;
+                                    let mut refresh_trigger = refresh_trigger;
+                                    spawn(async move {
+                                        let target_status = match action {
+                                            WorkerAction::Start => BuilderStatus::Active,
+                                            WorkerAction::Pause | WorkerAction::Drain => BuilderStatus::Inactive,
+                                        };
+
+                                        let builder_id = match uuid::Uuid::parse_str(&worker_id) {
+                                            Ok(id) => id,
+                                            Err(_) => {
+                                                action_error.set(Some(format!("Invalid worker id: {}", worker_id)));
+                                                return;
+                                            }
+                                        };
+
+                                        let request = crate::api::models::UpdateBuilderRequest {
+                                            name: None,
+                                            status: Some(target_status),
+                                            max_cpu_cores: None,
+                                            max_memory_mb: None,
+                                            max_concurrent_jobs: None,
+                                        };
+
+                                        match api::client::update_builder(&builder_id, &request).await {
+                                            Ok(_) => {
+                                                action_error.set(None);
+                                                last_action_note.set(Some(format!("Applied {} on {}", action.label(), worker_id)));
+                                                refresh_trigger.set(refresh_trigger() + 1);
+                                            }
+                                            Err(e) => action_error.set(Some(format!("Failed applying {} on {}: {}", action.label(), worker_id, e))),
+                                        }
+                                    });
+                                }
+                                PendingAction::Build { .. } => {
+                                    apply_action(next_action, &mut workers, &mut builds, &mut selected_build, &mut last_action_note);
+                                }
+                            }
                         }
                         pending_action.set(None);
                     }
