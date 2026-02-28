@@ -3,7 +3,14 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use crate::api::{self, models::{BuilderStatus, UpdateBuilderRequest, UpdateBuilderEnvironmentsRequest}};
+use crate::api::{
+    self,
+    models::{
+        BuilderStatus, UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest,
+        UpdateBuilderRequest,
+    },
+};
+use crate::components::builders::generate_ed25519_keypair;
 use crate::components::loading::LoadingSpinner;
 use crate::components::modals::ConfirmDialog;
 use crate::theme;
@@ -24,6 +31,9 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
     let mut max_memory_mb = use_signal(|| String::new());
     let mut max_concurrent_jobs = use_signal(|| String::new());
     let mut selected_environments = use_signal(|| Vec::<Uuid>::new());
+    let mut rotated_public_key = use_signal(|| String::new());
+    let mut rotated_private_key = use_signal(|| String::new());
+    let mut show_rotated_private_key = use_signal(|| false);
     
     let mut is_initialized = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
@@ -92,6 +102,49 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
             }
             Err(e) => {
                 error_message.set(Some(format!("Failed to update builder: {}", e)));
+                is_submitting.set(false);
+            }
+        }
+    };
+
+    let handle_generate_keypair = move |_| {
+        match generate_ed25519_keypair() {
+            Ok((priv_hex, pub_b64)) => {
+                rotated_private_key.set(priv_hex);
+                rotated_public_key.set(pub_b64);
+                show_rotated_private_key.set(false);
+                error_message.set(None);
+            }
+            Err(e) => {
+                error_message.set(Some(format!("Failed to generate keypair: {}", e)));
+            }
+        }
+    };
+
+    let handle_update_public_key = move |_| async move {
+        if is_submitting() {
+            return;
+        }
+
+        let next_public_key = rotated_public_key().trim().to_string();
+        if next_public_key.is_empty() {
+            error_message.set(Some("Generate a keypair first before updating the builder key.".to_string()));
+            return;
+        }
+
+        is_submitting.set(true);
+        error_message.set(None);
+
+        let request = UpdateBuilderPublicKeyRequest {
+            public_key: next_public_key,
+        };
+
+        match api::client::update_builder_public_key(&builder_id, &request).await {
+            Ok(_) => {
+                on_success.call(());
+            }
+            Err(e) => {
+                error_message.set(Some(format!("Failed to update builder key: {}", e)));
                 is_submitting.set(false);
             }
         }
@@ -336,6 +389,86 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                                                 "Loading environments..."
                                             }
                                         },
+                                    }
+                                }
+                            }
+
+                            // Key rotation
+                            div {
+                                class: "border border-slate-700 rounded p-4 space-y-3",
+                                div {
+                                    class: "flex items-center justify-between",
+                                    h3 {
+                                        class: "text-sm font-medium {theme::text::PRIMARY}",
+                                        "Rotate Builder Keypair"
+                                    }
+                                    button {
+                                        class: "px-3 py-1 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                                        onclick: handle_generate_keypair,
+                                        disabled: is_submitting(),
+                                        "🔑 Generate New Keypair"
+                                    }
+                                }
+                                p {
+                                    class: "text-xs {theme::text::SECONDARY}",
+                                    "Generate a new keypair, save the private key securely, then apply the public key update."
+                                }
+
+                                if !rotated_public_key().is_empty() {
+                                    div {
+                                        label {
+                                            class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
+                                            "New Public Key"
+                                        }
+                                        textarea {
+                                            class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white font-mono text-xs",
+                                            rows: "2",
+                                            readonly: true,
+                                            value: "{rotated_public_key}",
+                                        }
+                                    }
+
+                                    div {
+                                        div {
+                                            class: "flex items-center justify-between mb-1",
+                                            label {
+                                                class: "block text-sm font-medium text-amber-400",
+                                                "New Private Key"
+                                                span { class: "text-xs {theme::text::SECONDARY} ml-2", "(save this securely)" }
+                                            }
+                                            button {
+                                                class: "text-xs text-blue-400 hover:text-blue-300",
+                                                onclick: move |_| show_rotated_private_key.set(!show_rotated_private_key()),
+                                                if show_rotated_private_key() { "Hide" } else { "Show" }
+                                            }
+                                        }
+                                        if show_rotated_private_key() {
+                                            textarea {
+                                                class: "w-full px-3 py-2 bg-amber-900/20 border border-amber-700/50 rounded text-amber-200 font-mono text-xs",
+                                                rows: "2",
+                                                readonly: true,
+                                                value: "{rotated_private_key}",
+                                            }
+                                        } else {
+                                            div {
+                                                class: "px-3 py-2 bg-slate-900 border border-slate-700 rounded text-slate-500 font-mono text-xs",
+                                                "••••••••••••••••••••••••••••••••"
+                                            }
+                                        }
+                                    }
+
+                                    div {
+                                        class: "pt-1",
+                                        button {
+                                            class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
+                                            onclick: handle_update_public_key,
+                                            disabled: is_submitting(),
+                                            if is_submitting() {
+                                                "Applying..."
+                                            } else {
+                                                "Apply Public Key Update"
+                                            }
+                                        }
                                     }
                                 }
                             }

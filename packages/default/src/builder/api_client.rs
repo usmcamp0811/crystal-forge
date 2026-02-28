@@ -69,7 +69,10 @@ impl BuilderApiClient {
     
     /// Send heartbeat and metrics to server
     pub async fn send_heartbeat(&self, metrics: &ReportMetricsRequest) -> Result<()> {
-        let url = format!("{}/api/v1/builders/heartbeat", self.server_url);
+        let url = format!(
+            "{}/api/v1/builders/{}/heartbeat",
+            self.server_url, self.builder_id
+        );
         let body = serde_json::to_vec(metrics)?;
         let (builder_id, signature) = self.sign_request(&body);
         
@@ -95,7 +98,10 @@ impl BuilderApiClient {
     
     /// Get the next available job from the server
     pub async fn get_next_job(&self) -> Result<Option<BuildJob>> {
-        let url = format!("{}/api/v1/builders/jobs/next", self.server_url);
+        let url = format!(
+            "{}/api/v1/builders/{}/next-job",
+            self.server_url, self.builder_id
+        );
         let body = Vec::new(); // Empty body for GET
         let (builder_id, signature) = self.sign_request(&body);
         
@@ -126,7 +132,10 @@ impl BuilderApiClient {
     
     /// Start a job (mark it as in-progress)
     pub async fn start_job(&self, job_id: uuid::Uuid) -> Result<()> {
-        let url = format!("{}/api/v1/builders/jobs/{}/start", self.server_url, job_id);
+        let url = format!(
+            "{}/api/v1/builders/{}/jobs/{}/start",
+            self.server_url, self.builder_id, job_id
+        );
         let body = Vec::new();
         let (builder_id, signature) = self.sign_request(&body);
         
@@ -155,7 +164,10 @@ impl BuilderApiClient {
             output_path: String,
         }
         
-        let url = format!("{}/api/v1/builders/jobs/{}/complete", self.server_url, job_id);
+        let url = format!(
+            "{}/api/v1/builders/{}/jobs/{}/complete",
+            self.server_url, self.builder_id, job_id
+        );
         let request = CompleteRequest {
             output_path: output_path.to_string(),
         };
@@ -189,7 +201,10 @@ impl BuilderApiClient {
             error_message: String,
         }
         
-        let url = format!("{}/api/v1/builders/jobs/{}/fail", self.server_url, job_id);
+        let url = format!(
+            "{}/api/v1/builders/{}/jobs/{}/fail",
+            self.server_url, self.builder_id, job_id
+        );
         let request = FailRequest {
             error_message: error_message.to_string(),
         };
@@ -223,7 +238,10 @@ impl BuilderApiClient {
             logs: String,
         }
         
-        let url = format!("{}/api/v1/builders/jobs/{}/logs", self.server_url, job_id);
+        let url = format!(
+            "{}/api/v1/builders/{}/jobs/{}/logs",
+            self.server_url, self.builder_id, job_id
+        );
         let request = LogRequest {
             logs: log_lines.to_string(),
         };

@@ -382,6 +382,15 @@ pub async fn update_builder(
     send_json_with_csrf("PATCH", &url, Some(request)).await
 }
 
+/// Update a builder's public key (admin only)
+pub async fn update_builder_public_key(
+    id: &Uuid,
+    request: &UpdateBuilderPublicKeyRequest,
+) -> Result<BuilderDetail, ApiClientError> {
+    let url = format!("{}/builders/{}/public-key", base_url(), id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
 /// Deactivate a builder (admin only)
 pub async fn deactivate_builder(id: &Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/builders/{}", base_url(), id);

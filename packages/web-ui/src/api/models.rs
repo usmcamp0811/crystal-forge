@@ -1041,6 +1041,12 @@ pub struct UpdateBuilderEnvironmentsRequest {
     pub environment_ids: Vec<Uuid>,
 }
 
+/// Update builder public key request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderPublicKeyRequest {
+    pub public_key: String,
+}
+
 /// Builder metrics
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuilderMetrics {
