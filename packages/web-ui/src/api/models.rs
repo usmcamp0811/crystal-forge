@@ -933,8 +933,11 @@ pub struct ApiError {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BuilderStatus {
+    #[serde(alias = "Active")]
     Active,
+    #[serde(alias = "Inactive")]
     Inactive,
+    #[serde(alias = "Offline")]
     Offline,
 }
 

@@ -113,7 +113,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 flex items-center justify-center bg-black/50",
+            class: "fixed inset-0 z-[60] bg-black/60 flex items-center justify-center p-4 overflow-y-auto",
             onclick: move |_| {
                 if !is_submitting() {
                     on_close.call(())
@@ -121,7 +121,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
             },
             
             div {
-                class: "bg-slate-800 border border-slate-700 rounded-lg p-6 max-w-2xl w-full mx-4 max-h-[90vh] overflow-y-auto",
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl my-auto",
                 onclick: move |e| e.stop_propagation(),
                 
                 match &*builder.read_unchecked() {
