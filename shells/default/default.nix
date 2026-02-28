@@ -146,6 +146,7 @@ in mkShell {
     alias db-only='nix run $PROJECT_ROOT#devScripts.db-only --'
     alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
     alias run-agent='nix run $PROJECT_ROOT#devScripts.runAgent --'
+    alias start-builder-api='nix run $PROJECT_ROOT#devScripts.startBuilderApi --'
     alias simulate-push='nix run $PROJECT_ROOT#devScripts.simulatePush --'
     alias test-agent='nix run $PROJECT_ROOT#test-agent --'
     alias run-db-test='nix run .#cf-test-suite.runTests --'
@@ -175,6 +176,7 @@ in mkShell {
     echo "🛠  Helpful Commands:"
     echo ""
     echo "  run-server         → Run server directly (uses packaged binary unless --dev)"
+    echo "  start-builder-api  → Prompt for builder credentials and launch API builder"
     echo "  simulate-push      → Simulate a webook push event"
     echo "  sqlx-refresh       → Drop DB and re-run sqlx prepare"
     echo "  sqlx-prepare       → Just re-run sqlx prepare"
