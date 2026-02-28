@@ -600,6 +600,34 @@ pub async fn get_build_job_by_id(pool: &PgPool, job_id: &Uuid) -> Result<Option<
     Ok(job)
 }
 
+/// Increase priority of a queued build job so it runs next.
+pub async fn prioritize_build_job(pool: &PgPool, job_id: &Uuid) -> Result<()> {
+    let result = sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET
+            priority_weight = (
+                SELECT COALESCE(MAX(priority_weight), 1.0) + 1.0
+                FROM build_jobs
+                WHERE status = 'queued'
+            ),
+            updated_at = now()
+        WHERE id = $1
+          AND status = 'queued'
+        "#,
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await
+    .context("Failed to prioritize build job")?;
+
+    if result.rows_affected() == 0 {
+        bail!("Queued build job not found");
+    }
+
+    Ok(())
+}
+
 /// Mark a job as failed with retry logic
 /// If retry_count < max_retries, re-queue the job with incremented retry_count
 /// Otherwise, mark as permanently failed

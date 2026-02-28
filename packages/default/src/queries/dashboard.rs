@@ -6,9 +6,11 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::api::models::{
-    CveSummary, DeploymentStatus, DeploymentStatusSummary, FleetHealthSummary, RecentDeployment,
+    BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DeploymentStatus,
+    DeploymentStatusSummary, FleetHealthSummary, RecentDeployment,
 };
 
 /// Query `view_fleet_health_status` for system counts by health category.
@@ -146,4 +148,114 @@ pub async fn fetch_recent_deployments(pool: &PgPool) -> Result<Vec<RecentDeploym
         .collect();
 
     Ok(deployments)
+}
+
+/// Fetch the active build queue (building + queued) from build_jobs.
+pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSummary> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            DateTime<Utc>,
+            Option<DateTime<Utc>>,
+            Option<i64>,
+        ),
+    >(
+        r#"
+        SELECT
+            bj.id AS job_id,
+            s.id AS system_id,
+            COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
+            f.name AS flake_name,
+            c.git_commit_hash AS commit_hash,
+            NULL::TEXT AS commit_message,
+            bj.status,
+            b.name AS builder_name,
+            bj.created_at AS queued_at,
+            bj.started_at,
+            CASE
+                WHEN bj.started_at IS NULL THEN NULL
+                ELSE EXTRACT(EPOCH FROM (now() - bj.started_at))::BIGINT
+            END AS elapsed_secs
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        LEFT JOIN commits c ON c.id = d.commit_id
+        LEFT JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN systems s ON s.hostname = d.derivation_target
+        LEFT JOIN builders b ON b.id = bj.builder_id
+        WHERE bj.status IN ('queued', 'building')
+        ORDER BY
+            CASE WHEN bj.status = 'building' THEN 0 ELSE 1 END,
+            bj.priority_weight DESC,
+            bj.created_at ASC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    let items = rows
+        .into_iter()
+        .map(
+            |(
+                job_id,
+                system_id,
+                hostname,
+                flake_name,
+                commit_hash,
+                commit_message,
+                status,
+                builder_name,
+                queued_at,
+                started_at,
+                elapsed_secs,
+            )| {
+                let status = match status.as_str() {
+                    "queued" => BuildStatus::Queued,
+                    "building" => BuildStatus::Building,
+                    "failed" => BuildStatus::Failed,
+                    "success" => BuildStatus::Complete,
+                    _ => BuildStatus::Idle,
+                };
+
+                BuildQueueItem {
+                    job_id,
+                    system_id,
+                    hostname: hostname.unwrap_or_else(|| "unknown".to_string()),
+                    flake_name: flake_name.unwrap_or_else(|| "unknown".to_string()),
+                    commit_hash: commit_hash.unwrap_or_else(|| "unknown".to_string()),
+                    commit_message,
+                    status,
+                    builder_name,
+                    queued_at,
+                    started_at,
+                    elapsed_secs,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+
+    let building_count = items
+        .iter()
+        .filter(|item| item.status == BuildStatus::Building)
+        .count() as i64;
+    let queued_count = items
+        .iter()
+        .filter(|item| item.status == BuildStatus::Queued)
+        .count() as i64;
+
+    Ok(BuildQueueSummary {
+        building_count,
+        queued_count,
+        items,
+        timestamp: Utc::now(),
+    })
 }

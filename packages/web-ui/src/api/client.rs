@@ -111,6 +111,12 @@ pub async fn request_system_sync(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Move a queued build job to the front of the queue (admin/operator).
+pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/build-jobs/{}/prioritize", base_url(), job_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
+}
+
 pub async fn request_system_rollback(
     id: &uuid::Uuid,
     request: &SystemRollbackRequest,

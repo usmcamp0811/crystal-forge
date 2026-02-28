@@ -1,12 +1,13 @@
 //! Builds control center view.
 
 use dioxus::prelude::*;
+use chrono::Utc;
 
-use crate::api::{self, models::BuilderStatus};
+use crate::api::{self, models::{BuildStatus as ApiBuildStatus, BuilderStatus}};
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
-    WorkerStatus, WorkerStrip, apply_action, mock_builds, selected_build_data,
+    WorkerStatus, WorkerStrip, selected_build_data,
 };
 use crate::theme;
 
@@ -14,11 +15,15 @@ use crate::theme;
 #[component]
 pub fn BuildsView() -> Element {
     let mut workers = use_signal(Vec::<WorkerItem>::new);
-    let mut builds = use_signal(mock_builds);
+    let mut builds = use_signal(Vec::<BuildItem>::new);
     let refresh_trigger = use_signal(|| 0_u64);
     let builders = use_resource(move || async move {
         let _ = refresh_trigger();
         api::client::fetch_builders().await
+    });
+    let dashboard = use_resource(move || async move {
+        let _ = refresh_trigger();
+        api::client::fetch_dashboard().await
     });
 
     use_effect(move || {
@@ -39,6 +44,58 @@ pub fn BuildsView() -> Element {
                 })
                 .collect::<Vec<_>>();
             workers.set(mapped);
+        }
+    });
+
+    use_effect(move || {
+        if let Some(Ok(summary)) = &*dashboard.read() {
+            if let Some(queue) = &summary.build_queue {
+                let mapped = queue
+                    .items
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, item)| {
+                        let queued_for = if item.status == ApiBuildStatus::Building {
+                            format!(
+                                "running {}s",
+                                item.elapsed_secs.unwrap_or(0)
+                            )
+                        } else {
+                            let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
+                            format!("queued {}s ago", ago)
+                        };
+
+                        BuildItem {
+                            id: (idx + 1) as i32,
+                            job_id: item.job_id,
+                            system_id: item.system_id,
+                            hostname: item.hostname.clone(),
+                            flake: item.flake_name.clone(),
+                            commit: item.commit_hash.clone(),
+                            branch: "main".to_string(),
+                            worker_id: item
+                                .builder_name
+                                .clone()
+                                .unwrap_or_else(|| "unassigned".to_string()),
+                            queued_for,
+                            runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+                            started_by: "scheduler".to_string(),
+                            status: match item.status {
+                                ApiBuildStatus::Queued => BuildStatus::Queued,
+                                ApiBuildStatus::Building => BuildStatus::Building,
+                                ApiBuildStatus::Failed => BuildStatus::Failed,
+                                ApiBuildStatus::Complete => BuildStatus::Complete,
+                                ApiBuildStatus::Idle => BuildStatus::Queued,
+                            },
+                            summary: item
+                                .commit_message
+                                .clone()
+                                .unwrap_or_else(|| format!("job {}", item.job_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".to_string()))),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                builds.set(mapped);
+            }
         }
     });
 
@@ -226,8 +283,58 @@ pub fn BuildsView() -> Element {
                                         }
                                     });
                                 }
-                                PendingAction::Build { .. } => {
-                                    apply_action(next_action, &mut workers, &mut builds, &mut selected_build, &mut last_action_note);
+                                PendingAction::Build { build_id, action } => {
+                                    let queue_snapshot = builds.read().clone();
+                                    let mut action_error = action_error;
+                                    let mut last_action_note = last_action_note;
+                                    let mut refresh_trigger = refresh_trigger;
+                                    spawn(async move {
+                                        let selected = queue_snapshot.iter().find(|b| b.id == build_id);
+                                        let Some(selected) = selected else {
+                                            action_error.set(Some(format!("Build row #{} not found", build_id)));
+                                            return;
+                                        };
+
+                                        match action {
+                                            BuildAction::RunNext => {
+                                                let Some(job_id) = selected.job_id else {
+                                                    action_error.set(Some("Queue item has no job id; cannot prioritize".to_string()));
+                                                    return;
+                                                };
+
+                                                match api::client::prioritize_build_job(&job_id).await {
+                                                    Ok(_) => {
+                                                        action_error.set(None);
+                                                        last_action_note.set(Some(format!("Prioritized job {}", job_id)));
+                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                    }
+                                                    Err(e) => {
+                                                        action_error.set(Some(format!("Failed to prioritize: {}", e)));
+                                                    }
+                                                }
+                                            }
+                                            BuildAction::Restart => {
+                                                let Some(system_id) = selected.system_id else {
+                                                    action_error.set(Some("Queue item has no system id; cannot trigger build".to_string()));
+                                                    return;
+                                                };
+
+                                                match api::client::request_system_sync(&system_id).await {
+                                                    Ok(_) => {
+                                                        action_error.set(None);
+                                                        last_action_note.set(Some(format!("Triggered build sync for system {}", system_id)));
+                                                        refresh_trigger.set(refresh_trigger() + 1);
+                                                    }
+                                                    Err(e) => {
+                                                        action_error.set(Some(format!("Failed to trigger build: {}", e)));
+                                                    }
+                                                }
+                                            }
+                                            BuildAction::Stop => {
+                                                action_error.set(Some("Stop build is not implemented by API yet".to_string()));
+                                            }
+                                        }
+                                    });
                                 }
                             }
                         }

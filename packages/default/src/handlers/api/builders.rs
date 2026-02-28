@@ -172,6 +172,24 @@ pub async fn update_builder_public_key(
     Ok(Json(builder))
 }
 
+/// POST /api/v1/build-jobs/:id/prioritize - Move queued build job to front (admin-only)
+pub async fn prioritize_build_job(
+    State(state): State<CFState>,
+    Path(job_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<StatusCode, StatusCode> {
+    // Verify admin authorization
+    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    builders::prioritize_build_job(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok(StatusCode::OK)
+}
+
 /// PATCH /api/v1/builders/:id/environments - Update environment assignments (admin-only)
 pub async fn update_builder_environments(
     State(state): State<CFState>,

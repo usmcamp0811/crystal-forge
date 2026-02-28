@@ -195,6 +195,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/builders/:id/metrics",
             get(builders::get_builder_metrics),
         )
+        .route(
+            "/api/v1/build-jobs/:id/prioritize",
+            post(builders::prioritize_build_job),
+        )
         // Builder-authenticated endpoints
         .route(
             "/api/v1/builders/:id/heartbeat",

@@ -549,6 +549,10 @@ pub struct BuildQueueSummary {
 /// A single item in the build queue.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuildQueueItem {
+    #[serde(default)]
+    pub job_id: Option<Uuid>,
+    #[serde(default)]
+    pub system_id: Option<Uuid>,
     /// The hostname/system being built.
     pub hostname: String,
     /// The flake name this build belongs to.
@@ -559,6 +563,8 @@ pub struct BuildQueueItem {
     pub commit_message: Option<String>,
     /// Current status (Queued or Building).
     pub status: BuildStatus,
+    #[serde(default)]
+    pub builder_name: Option<String>,
     /// When the build was queued.
     pub queued_at: DateTime<Utc>,
     /// When the build started (None if still queued).
