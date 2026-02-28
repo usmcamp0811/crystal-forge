@@ -637,6 +637,10 @@ async fn send_request(
 }
 
 fn decode_api_error_message(body: &str) -> String {
+    if body.trim().is_empty() {
+        return "Internal server error".to_string();
+    }
+
     serde_json::from_str::<ApiError>(body)
         .map(|error| error.message)
         .unwrap_or_else(|_| body.to_string())

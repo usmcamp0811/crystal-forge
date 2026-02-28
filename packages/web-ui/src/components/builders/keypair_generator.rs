@@ -3,25 +3,20 @@
 //! Uses web-sys crypto.getRandomValues for secure random bytes.
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use ed25519_dalek::SigningKey;
 
 /// Generate an Ed25519 keypair using browser crypto API.
 ///
 /// Returns (private_key_hex, public_key_base64)
 pub fn generate_ed25519_keypair() -> Result<(String, String), String> {
-    // Get 32 random bytes for the private key using browser crypto
+    // Generate a 32-byte private key and derive its public key.
     let private_key_bytes = generate_random_bytes(32)?;
-
-    // For Ed25519, we need to derive the public key from the private key
-    // Since we can't use ed25519-dalek in WASM easily, we'll use a simplified approach:
-    // 1. Generate random private key (32 bytes)
-    // 2. Generate random public key (32 bytes) - NOTE: This is NOT cryptographically correct!
-    //    In production, you MUST derive the public key from the private key using ed25519-dalek
-
-    // TEMPORARY IMPLEMENTATION - REPLACE WITH REAL ED25519
-    // This generates two independent random values, which is WRONG for Ed25519
-    // but allows the UI to work while we wait for proper ed25519-dalek WASM support
-
-    let public_key_bytes = generate_random_bytes(32)?;
+    let private_key_array: [u8; 32] = private_key_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "Failed to convert private key bytes")?;
+    let signing_key = SigningKey::from_bytes(&private_key_array);
+    let public_key_bytes = signing_key.verifying_key().to_bytes();
 
     // Encode private key as hex
     let private_key_hex = hex::encode(&private_key_bytes);
@@ -34,14 +29,10 @@ pub fn generate_ed25519_keypair() -> Result<(String, String), String> {
 
 /// Generate cryptographically secure random bytes using browser's crypto API.
 fn generate_random_bytes(length: usize) -> Result<Vec<u8>, String> {
-    use wasm_bindgen::JsCast;
-
     let window = web_sys::window().ok_or("No window object")?;
     let crypto = window.crypto().map_err(|_| "No crypto object")?;
 
     let mut bytes = vec![0u8; length];
-    let array = js_sys::Uint8Array::new_with_length(length as u32);
-
     crypto
         .get_random_values_with_u8_array(&mut bytes)
         .map_err(|_| "Failed to generate random values")?;

@@ -42,7 +42,7 @@ pub fn BuildersList() -> Element {
                     "Registered Builders"
                 }
                 button {
-                    class: "px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors",
+                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
                     onclick: move |_| show_add_modal.set(true),
                     "➕ Add Builder"
                 }

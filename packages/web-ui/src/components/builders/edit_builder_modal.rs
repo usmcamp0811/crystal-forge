@@ -319,7 +319,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                         div {
                             class: "flex justify-between mt-6 pt-4 border-t border-slate-700",
                             button {
-                                class: "px-4 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-600/50 rounded transition-colors disabled:opacity-50",
+                                class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
                                 onclick: handle_deactivate,
                                 disabled: is_submitting(),
                                 "Deactivate Builder"
@@ -333,7 +333,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                                     "Cancel"
                                 }
                                 button {
-                                    class: "px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors disabled:opacity-50",
+                                    class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
                                     onclick: handle_submit,
                                     disabled: is_submitting(),
                                     if is_submitting() {
