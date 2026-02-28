@@ -1,10 +1,10 @@
 ---
 id: TASK-122
 title: Builds View - Backend Integration
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-25 00:55'
+updated_date: '2026-02-28 00:31'
 labels:
   - backend
   - api
@@ -13,7 +13,7 @@ labels:
 milestone: m-11
 dependencies: []
 priority: high
-ordinal: 77000
+ordinal: 1000
 ---
 
 ## Description
