@@ -4,7 +4,7 @@ title: Consolidate repeated web-ui inline styles into shared CSS classes
 status: In Progress
 assignee: []
 created_date: '2026-02-28 18:05'
-updated_date: '2026-02-28 18:53'
+updated_date: '2026-02-28 19:14'
 labels:
   - web-ui
   - frontend
@@ -71,4 +71,14 @@ None.
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode-gpt-5.3-codex on gray in /home/mcamp/code/crystal-forge/TASK-141-themeable-web-ui-css-extraction
+
+Implementation inventory (completed): extracted repeated static inline styles for modal overlays/panels, status badges/chips, action text, auth gradients/logo scale, and build queue/detail status styling into `packages/web-ui/assets/app.css` semantic classes backed by theme tokens.
+
+Intentionally retained inline styles (runtime-calculated): timeline geometry/positions in `packages/web-ui/src/components/flake/flake_timeline.rs`, system deployment graph connectors in `packages/web-ui/src/views/system_detail.rs`, env-card header gradient using runtime env color in `packages/web-ui/src/components/environments/environment_card.rs`, and grid/segment geometry in chart/widget components where values are data-driven.
+
+Theme-token layer added: dark + light variable maps in `packages/web-ui/assets/app.css` (`:root, :root[data-theme="dark"]`, `:root[data-theme="light"]`) with semantic class indirection to support future custom themes via additional `:root[data-theme="<name>"]` blocks.
+
+Coding standards doc added: `docs/web-ui-coding-standards.md` with explicit rules for shared class/token usage vs allowed inline style usage.
+
+Verification executed: `nix develop -c cargo check` from `packages/web-ui` (pass, warnings only). `nix develop -c cargo fmt -- --check` reported existing formatting diffs in crate; not auto-formatted to avoid unrelated broad churn.
 <!-- SECTION:NOTES:END -->
