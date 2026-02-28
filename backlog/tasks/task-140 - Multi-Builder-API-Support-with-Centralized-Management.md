@@ -4,7 +4,7 @@ title: Multi-Builder API Support with Centralized Management
 status: To Do
 assignee: []
 created_date: '2026-02-28 04:41'
-updated_date: '2026-02-28 04:55'
+updated_date: '2026-02-28 04:56'
 labels:
   - backend
   - builder
@@ -256,7 +256,7 @@ poll_interval_seconds = 30
 4. Store builder public key, validate on first connection
 5. Add builder registration verification on builder startup
 
-### Phase 3: Builder API Endpoints
+### Phase 3: Builder API Endpoints (Server-Side)
 1. POST /api/v1/builders/:id/heartbeat (resource metrics + capacity reporting)
 2. GET /api/v1/builders/:id/next-job (load-balanced job assignment)
 3. POST /api/v1/builders/:id/jobs/:job_id/start
@@ -279,13 +279,14 @@ poll_interval_seconds = 30
 4. Implement "eager retry" strategy (fail X → build Y → retry X → build Z → retry X)
 5. Respect max retry limit (after limit, mark as permanently failed)
 
-### Phase 6: Builder Binary Role Support
-1. Extract existing builder logic into builder module
-2. Add --role server|builder|both CLI flag
-3. Implement builder polling loop (configurable interval)
-4. Implement builder resource metrics collection (CPU, memory, system stats)
-5. Add builder config section (builder_id, private_key_path, poll_interval)
-6. Support local mode (direct DB) and remote mode (API-only)
+### Phase 6: Builder Binary Updates
+1. Keep existing builder binary structure (separate from server)
+2. Add API client module for server communication
+3. Implement builder polling loop with configurable interval
+4. Implement resource metrics collection (CPU, memory, system stats)
+5. Add builder config (builder_id, private_key_path, server_url, poll_interval)
+6. Replace direct DB access with API calls
+7. Support backward compatibility during migration
 
 ### Phase 7: Concurrent Job Support
 1. Add max_concurrent_jobs field to builders table
@@ -317,9 +318,10 @@ poll_interval_seconds = 30
 3. Test retry and priority weighting behavior
 4. Test heartbeat timeout and job reassignment
 5. Test environment filtering
-6. Test all three binary modes (server, builder, both)
-7. Document builder deployment process
-8. Document keypair generation and registration flow
+6. Test builder binary with API-only mode
+7. Test backward compatibility with direct DB mode (during migration)
+8. Document builder deployment process
+9. Document keypair generation and registration flow
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -433,10 +435,10 @@ poll_interval_seconds = 30
 - [ ] #5 Resource metrics collection tested
 - [ ] #6 Migration scripts tested on dev database
 - [ ] #7 Builder binary can successfully poll and execute jobs via API
-- [ ] #8 Local builder mode (direct DB) still works
-- [ ] #9 Remote builder mode (API-only) works
-- [ ] #10 Combined mode (server + builder in one process) works
-- [ ] #11 UI displays accurate real-time metrics
-- [ ] #12 cargo fmt and cargo clippy pass
-- [ ] #13 Verification tier determined and executed
+- [ ] #8 UI displays accurate real-time metrics
+- [ ] #9 cargo fmt and cargo clippy pass
+- [ ] #10 Verification tier determined and executed
+- [ ] #11 Builder binary successfully communicates with server via API only
+- [ ] #12 Backward compatibility maintained during migration (optional direct DB fallback)
+- [ ] #13 UI accurately displays real-time builder metrics
 <!-- DOD:END -->
