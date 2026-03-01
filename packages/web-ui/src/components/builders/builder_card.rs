@@ -57,10 +57,10 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
         div {
             class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm {inactive_classes}",
 
-            // Header section with purple gradient background
+            // Header section with purple gradient background (matches flakes color)
             div {
                 class: "flex items-center justify-between px-6 py-4 border-b border-gray-800",
-                style: "background: linear-gradient(135deg, rgba(147, 51, 234, 0.42) 0%, rgba(17, 24, 39, 0.92) 100%);",
+                style: "background: linear-gradient(135deg, rgba(130, 105, 155, 0.42) 0%, rgba(17, 24, 39, 0.92) 100%);",
                 div {
                     class: "flex-1",
                     h3 {
