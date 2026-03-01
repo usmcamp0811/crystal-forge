@@ -558,6 +558,110 @@ pub async fn get_next_queued_job(
     Ok(job)
 }
 
+/// Atomically claim the next job for a builder (race-free concurrency enforcement)
+///
+/// This function ensures concurrency limits are enforced correctly by:
+/// 1. Starting a transaction
+/// 2. Counting active jobs WITH row-level lock
+/// 3. Checking against max_concurrent_jobs limit
+/// 4. Claiming next available job (if under limit)
+/// 5. Committing transaction (making count+claim atomic)
+///
+/// This prevents race conditions where multiple concurrent claim attempts
+/// could exceed the builder's max_concurrent_jobs limit.
+///
+/// TASK-147: Make builder concurrency limit enforcement race-free
+pub async fn claim_next_job_atomic(
+    pool: &PgPool,
+    builder_id: &Uuid,
+    max_concurrent_jobs: i32,
+    environment_ids: &[Uuid],
+) -> Result<Option<BuildJob>> {
+    // Start transaction for atomic count + claim
+    let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    // 1. Count active jobs for this builder WITH row-level lock
+    // FOR UPDATE locks the rows to prevent concurrent modifications during transaction
+    let active_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+        FROM build_jobs
+        WHERE builder_id = $1 AND status = 'building'
+        FOR UPDATE
+        "#,
+    )
+    .bind(builder_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to count active jobs in transaction")?;
+
+    // 2. Check limit BEFORE querying for next job
+    if active_count >= max_concurrent_jobs as i64 {
+        // Builder at capacity - rollback and return None
+        tx.rollback().await.context("Failed to rollback transaction")?;
+        return Ok(None);
+    }
+
+    // 3. Claim next available job with FOR UPDATE SKIP LOCKED
+    // This atomically finds and locks the next job in priority order
+    let job = if environment_ids.is_empty() {
+        // Wildcard: builder can claim jobs from any environment
+        sqlx::query_as::<_, BuildJob>(
+            r#"
+            UPDATE build_jobs
+            SET builder_id = $1,
+                status = 'building',
+                started_at = NOW(),
+                updated_at = NOW()
+            WHERE id = (
+                SELECT id
+                FROM build_jobs
+                WHERE status = 'queued'
+                ORDER BY priority_weight DESC, created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(builder_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to claim job (wildcard) in transaction")?
+    } else {
+        // Filtered: only jobs matching builder's environment assignments
+        sqlx::query_as::<_, BuildJob>(
+            r#"
+            UPDATE build_jobs
+            SET builder_id = $1,
+                status = 'building',
+                started_at = NOW(),
+                updated_at = NOW()
+            WHERE id = (
+                SELECT id
+                FROM build_jobs
+                WHERE status = 'queued'
+                  AND (environment_id = ANY($2) OR environment_id IS NULL)
+                ORDER BY priority_weight DESC, created_at ASC
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING *
+            "#,
+        )
+        .bind(builder_id)
+        .bind(environment_ids)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to claim job (filtered) in transaction")?
+    };
+
+    // 4. Commit transaction (makes count check + job assignment atomic)
+    tx.commit().await.context("Failed to commit transaction")?;
+
+    Ok(job)
+}
+
 /// Assign a job to a builder and mark it as building
 pub async fn assign_job_to_builder(
     pool: &PgPool,

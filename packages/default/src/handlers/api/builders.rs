@@ -396,47 +396,40 @@ pub async fn get_next_job(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Check current active jobs vs limit
-    let active_count = builders::count_active_jobs_for_builder(&state.pool, &builder_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    if active_count >= builder.max_concurrent_jobs as i64 {
-        // Builder at capacity
-        return Ok(Json(NextJobResponse {
-            job_id: None,
-            derivation_id: None,
-            message: "Builder at max concurrent job limit".to_string(),
-        }));
-    }
-
     // Get builder's environment assignments (empty = wildcard)
     let environment_ids = builders::get_builder_environment_ids(&state.pool, &builder_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Get next queued job
-    let job = builders::get_next_queued_job(&state.pool, &environment_ids)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // TASK-147: Atomically claim next job with race-free concurrency enforcement
+    // This single transaction ensures count check + job assignment are atomic,
+    // preventing multiple builders from exceeding their max_concurrent_jobs limit
+    let job = builders::claim_next_job_atomic(
+        &state.pool,
+        &builder_id,
+        builder.max_concurrent_jobs,
+        &environment_ids,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to claim job atomically: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if let Some(job) = job {
-        // Assign job to builder
-        let assigned_job = builders::assign_job_to_builder(&state.pool, &job.id, &builder_id)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
+        // Job successfully claimed (already marked as 'building')
         Ok(Json(NextJobResponse {
-            job_id: Some(assigned_job.id),
-            derivation_id: Some(assigned_job.derivation_id),
+            job_id: Some(job.id),
+            derivation_id: Some(job.derivation_id),
             message: "Job assigned".to_string(),
         }))
     } else {
-        // No jobs available
+        // Either no jobs available OR builder at capacity
+        // (atomic function returns None in both cases)
         Ok(Json(NextJobResponse {
             job_id: None,
             derivation_id: None,
-            message: "No jobs available".to_string(),
+            message: "No jobs available or builder at capacity".to_string(),
         }))
     }
 }
