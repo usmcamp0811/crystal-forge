@@ -3,13 +3,14 @@ id: TASK-127
 title: >-
   Refactor backend/UI boundaries for long-term maintainability (services +
   query-level filtering + UI bootstrap split)
-status: To Do
+status: Review
 assignee: []
 created_date: '2026-02-24 13:46'
-updated_date: '2026-02-25 00:35'
+updated_date: '2026-03-01 13:53'
 labels: []
 dependencies: []
 priority: high
+ordinal: 1000
 ---
 
 ## Description
@@ -221,12 +222,7 @@ Definition of done (Part D): `main.rs` is mostly wiring, not logic.
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-### Guardrails
-
-- Keep changes incremental: do systems end-to-end; don’t refactor other endpoints unless required for compilation.
-- Avoid renaming public API fields or changing response structures.
-- Prefer small pure structs/enums for filter/sort/pagination types; don’t overengineer.
-- If the list endpoint needs joins/derived fields, implement those in the query layer, not in handlers.
+LOCK: agent on dev in ~/code/crystal-forge/TASK-127-refactor-backend-ui-boundaries\nMR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/136
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
