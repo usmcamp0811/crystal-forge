@@ -161,6 +161,20 @@ let
     '';
   };
 
+  runBuilder = pkgs.writeShellApplication {
+    name = "run-builder";
+    runtimeInputs = [ pkgs.nix ];
+    text = ''
+      CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
+      export CRYSTAL_FORGE_CONFIG
+      if [[ "''${1:-}" == "--dev" ]]; then
+        exec nix run .#builder
+      else
+        exec ${pkgs.crystal-forge.default.builder}/bin/builder
+      fi
+    '';
+  };
+
   startBuilderApi = pkgs.writeShellApplication {
     name = "start-builder-api";
     runtimeInputs = with pkgs; [ nix python3 coreutils ];
@@ -334,6 +348,15 @@ let
     };
   };
 
+  builder-module = {
+    settings.processes.builder = {
+      inherit namespace;
+      command = runBuilder;
+      depends_on."db".condition = "process_healthy";
+      disabled = false;
+    };
+  };
+
   server-module = {
     settings.processes.server = {
       inherit namespace;
@@ -401,6 +424,7 @@ let
     modules = [
       inputs.services-flake.processComposeModules.default
       server-module
+      builder-module
       db-module
     ];
   };
@@ -419,7 +443,7 @@ let
     ];
   };
 in full-stack.config.outputs.package // {
-  inherit runServer runAgent simulatePush startBuilderApi envExports;
+  inherit runServer runAgent runBuilder simulatePush startBuilderApi envExports;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   oidc-stack = oidc-stack.config.outputs.package;
