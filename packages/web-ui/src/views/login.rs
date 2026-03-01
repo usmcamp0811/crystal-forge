@@ -115,8 +115,7 @@ pub fn LoginView() -> Element {
 
     rsx! {
         div {
-            class: "relative min-h-screen flex items-center justify-center p-6 overflow-hidden",
-            style: "background: radial-gradient(circle at 20% 20%, rgba(139,92,246,0.15) 0%, rgba(15,23,42,0) 45%), radial-gradient(circle at 80% 80%, rgba(168,85,247,0.12) 0%, rgba(15,23,42,0) 40%), linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);",
+            class: "relative min-h-screen flex items-center justify-center p-6 overflow-hidden cf-auth-bg-ambient",
 
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
@@ -154,8 +153,7 @@ pub fn LoginView() -> Element {
                     div {
                         class: "flex items-center gap-3 mb-8",
                         img {
-                            class: "h-8 w-8",
-                            style: "transform: scale(1.67);",
+                            class: "h-8 w-8 cf-logo-scale",
                             src: asset!("assets/crystal-forge-icon.png"),
                             alt: "Crystal Forge"
                         }

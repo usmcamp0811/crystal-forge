@@ -5,9 +5,9 @@
 //!
 //! # Color System
 //!
-//! All colors target a **dark theme** (gray-950 background, gray-100 text).
-//! Status/severity colors use Tailwind's palette at specific shades chosen
-//! for good contrast on dark backgrounds.
+//! Tailwind class fragments in this module provide stable semantic tokens.
+//! Shared CSS in `assets/app.css` provides theme-variable mappings for
+//! dark/light/custom themes where component-specific styling is required.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Health Status Colors

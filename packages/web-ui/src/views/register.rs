@@ -258,8 +258,7 @@ pub fn RegisterView() -> Element {
     if !status_checked() {
         return rsx! {
             div {
-                class: "min-h-screen flex items-center justify-center",
-                style: "background: linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);",
+                class: "min-h-screen flex items-center justify-center cf-auth-bg-base",
                 p {
                     class: "text-gray-400",
                     "Loading..."
@@ -273,8 +272,7 @@ pub fn RegisterView() -> Element {
     if !registration_allowed() {
         return rsx! {
             div {
-                class: "min-h-screen flex items-center justify-center",
-                style: "background: linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);",
+                class: "min-h-screen flex items-center justify-center cf-auth-bg-base",
                 p {
                     class: "text-gray-400",
                     "Redirecting..."
@@ -285,8 +283,7 @@ pub fn RegisterView() -> Element {
 
     rsx! {
         div {
-            class: "relative min-h-screen flex items-center justify-center p-6 overflow-hidden",
-            style: "background: radial-gradient(circle at 20% 20%, rgba(139,92,246,0.15) 0%, rgba(15,23,42,0) 45%), radial-gradient(circle at 80% 80%, rgba(168,85,247,0.12) 0%, rgba(15,23,42,0) 40%), linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);",
+            class: "relative min-h-screen flex items-center justify-center p-6 overflow-hidden cf-auth-bg-ambient",
 
             // Faded Crystal Forge logo backdrop (inspired by slide styling)
             div {
@@ -313,8 +310,7 @@ pub fn RegisterView() -> Element {
                 // First-run banner (only shown for initial admin setup)
                 if is_first_run() {
                     div {
-                        class: "mb-6 p-4 rounded-lg border border-violet-400/50",
-                        style: "background: linear-gradient(135deg, rgba(139, 92, 246, 0.9) 0%, rgba(124, 58, 237, 0.9) 100%);",
+                        class: "mb-6 p-4 rounded-lg border border-violet-400/50 cf-first-run-banner",
                         h3 {
                             class: "text-sm font-semibold text-white mb-1",
                             "⚡ First-Time Setup"
@@ -339,8 +335,7 @@ pub fn RegisterView() -> Element {
                     div {
                         class: "flex items-center gap-3 mb-6",
                         img {
-                            class: "h-8 w-8",
-                            style: "transform: scale(1.67);",
+                            class: "h-8 w-8 cf-logo-scale",
                             src: asset!("assets/crystal-forge-icon.png"),
                             alt: "Crystal Forge"
                         }

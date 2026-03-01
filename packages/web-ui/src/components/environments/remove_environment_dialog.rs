@@ -20,12 +20,10 @@ pub fn RemoveEnvironmentDialog(props: RemoveEnvironmentDialogProps) -> Element {
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| props.on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 30rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-30",
                 onclick: |evt| evt.stop_propagation(),
                 h3 { class: "text-lg font-semibold text-white mb-2", "Remove environment {env_name}?" }
                 p {

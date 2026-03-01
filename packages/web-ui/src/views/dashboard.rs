@@ -414,16 +414,14 @@ pub fn DashboardView() -> Element {
             // Top stats row
             if *loading_dashboard.read() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
                     "Loading dashboard data..."
                 }
             }
 
             if let Some(message) = dashboard_notice.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
-                    style: "background-color: #493E26; border-color: #8C7041;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
             }
@@ -454,16 +452,14 @@ pub fn DashboardView() -> Element {
             // Flake Commit Timeline with multi-select filter
             if *loading_timelines.read() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
                     "Loading flake timelines..."
                 }
             }
 
             if let Some(message) = timelines_notice.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
-                    style: "background-color: #493E26; border-color: #8C7041;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
             }

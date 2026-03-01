@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 
 use crate::theme;
 
-use super::helpers::{worker_status_style, WorkerAction, WorkerItem};
+use super::helpers::{worker_status_class, WorkerAction, WorkerItem};
 
 /// Worker strip showing all build workers and their status.
 #[component]
@@ -23,15 +23,13 @@ pub fn WorkerStrip(
                             key: "{worker.id}",
                             class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm",
                             div {
-                                class: "px-4 py-3 border-b border-gray-800 flex items-center justify-between",
-                                style: "background: linear-gradient(135deg, rgba(130, 105, 155, 0.34) 0%, rgba(17, 24, 39, 0.92) 100%);",
+                                class: "px-4 py-3 border-b border-gray-800 flex items-center justify-between cf-worker-header-gradient",
                                 div {
                                     p { class: "text-sm text-white font-semibold", "{worker.name}" }
                                     p { class: "text-xs {theme::text::SECONDARY}", "{worker.active_slots}/{worker.total_slots} active slots" }
                                 }
                                 span {
-                                    class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border",
-                                    style: "{worker_status_style(worker.status)}",
+                                    class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {worker_status_class(worker.status)}",
                                     "{worker.status_label()}"
                                 }
                             }
@@ -73,8 +71,7 @@ pub fn WorkerStrip(
 fn WorkerTextAction(label: &'static str, on_click: EventHandler<MouseEvent>) -> Element {
     rsx! {
         button {
-            class: "text-xs px-2 py-1 rounded transition-colors",
-            style: "color: #D6C3E8;",
+            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
             onclick: move |evt| on_click.call(evt),
             "{label}"
         }

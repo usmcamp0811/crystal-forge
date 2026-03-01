@@ -16,14 +16,12 @@ pub fn SyncConfirmDialog(
     rsx! {
         // Backdrop
         div {
-            class: "bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 60; backdrop-filter: blur(6px);",
+            class: "bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
 
             // Dialog
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 30rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-30",
                 onclick: |evt| evt.stop_propagation(),
 
                 // Icon

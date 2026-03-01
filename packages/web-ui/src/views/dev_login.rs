@@ -48,8 +48,7 @@ pub fn DevLoginView() -> Element {
 
     rsx! {
         div {
-            class: "min-h-screen flex items-center justify-center p-6",
-            style: "background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);",
+            class: "min-h-screen flex items-center justify-center p-6 cf-dev-login-bg",
 
             div {
                 class: "w-full max-w-md",

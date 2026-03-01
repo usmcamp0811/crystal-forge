@@ -1,8 +1,80 @@
-:root {
-  --cf-brand-purple: #82699B;
+:root,
+:root[data-theme="dark"] {
+  --cf-brand-purple: #82699b;
   --cf-brand-purple-hover: #8616e0;
   --cf-danger-berry: #6f1649;
-  --cf-danger-berry-hover: #A3748E;
+  --cf-danger-berry-hover: #a3748e;
+
+  --cf-modal-blur: blur(6px);
+  --cf-action-text: #d6c3e8;
+
+  --cf-chip-info-bg: #23354b;
+  --cf-chip-info-border: #406084;
+  --cf-chip-warning-bg: #493e26;
+  --cf-chip-warning-border: #8c7041;
+  --cf-chip-olive-bg: #3b2f00;
+  --cf-chip-olive-border: #7a6000;
+
+  --cf-chip-slate-bg: #2b303b;
+  --cf-chip-slate-border: #495264;
+  --cf-chip-teal-bg: #23363a;
+  --cf-chip-teal-border: #3d6870;
+  --cf-chip-blue-bg: #253449;
+  --cf-chip-blue-border: #3e5b82;
+
+  --cf-chip-violet-bg: rgba(130, 105, 155, 0.22);
+  --cf-chip-violet-border: #82699b;
+  --cf-chip-violet-text: #e5d8f3;
+
+  --cf-policy-selected-bg: #1f2e42;
+  --cf-policy-selected-border: #3e5b82;
+
+  --cf-auth-bg-base: linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);
+  --cf-auth-bg-ambient:
+    radial-gradient(circle at 20% 20%, rgba(139, 92, 246, 0.15) 0%, rgba(15, 23, 42, 0) 45%),
+    radial-gradient(circle at 80% 80%, rgba(168, 85, 247, 0.12) 0%, rgba(15, 23, 42, 0) 40%),
+    linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);
+  --cf-dev-login-bg: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  --cf-history-timeline-bg: linear-gradient(180deg, #131b29 0%, #0f141d 100%);
+}
+
+:root[data-theme="light"] {
+  --cf-brand-purple: #654a84;
+  --cf-brand-purple-hover: #573f72;
+  --cf-danger-berry: #9d2f67;
+  --cf-danger-berry-hover: #7f2551;
+
+  --cf-modal-blur: blur(6px);
+  --cf-action-text: #6f4f89;
+
+  --cf-chip-info-bg: #e8f2ff;
+  --cf-chip-info-border: #95b6de;
+  --cf-chip-warning-bg: #fff3df;
+  --cf-chip-warning-border: #d3ad6e;
+  --cf-chip-olive-bg: #f8f2d8;
+  --cf-chip-olive-border: #cfbe76;
+
+  --cf-chip-slate-bg: #eef2f7;
+  --cf-chip-slate-border: #bcc8d8;
+  --cf-chip-teal-bg: #e5f5f6;
+  --cf-chip-teal-border: #89c3ca;
+  --cf-chip-blue-bg: #e8f0ff;
+  --cf-chip-blue-border: #90acda;
+
+  --cf-chip-violet-bg: rgba(130, 105, 155, 0.16);
+  --cf-chip-violet-border: #82699b;
+  --cf-chip-violet-text: #503868;
+
+  --cf-policy-selected-bg: #dfeeff;
+  --cf-policy-selected-border: #89a9d6;
+
+  --cf-auth-bg-base: linear-gradient(135deg, #f7f8fb 0%, #e8edf8 55%, #dee6f5 100%);
+  --cf-auth-bg-ambient:
+    radial-gradient(circle at 20% 20%, rgba(130, 105, 155, 0.16) 0%, rgba(255, 255, 255, 0) 45%),
+    radial-gradient(circle at 80% 80%, rgba(115, 139, 180, 0.14) 0%, rgba(255, 255, 255, 0) 40%),
+    linear-gradient(135deg, #f7f8fb 0%, #e8edf8 55%, #dee6f5 100%);
+  --cf-dev-login-bg: linear-gradient(135deg, #eef2fc 0%, #e0e8f8 100%);
+  --cf-history-timeline-bg: linear-gradient(180deg, #edf3fb 0%, #e6edf8 100%);
 }
 
 .cf-primary-btn {
@@ -19,6 +91,242 @@
 
 .cf-danger-btn:hover {
   background-color: var(--cf-danger-berry-hover);
+}
+
+.cf-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  width: 100vw;
+  height: 100vh;
+  backdrop-filter: var(--cf-modal-blur);
+}
+
+.cf-modal-overlay-z50 {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  width: 100vw;
+  height: 100vh;
+  backdrop-filter: var(--cf-modal-blur);
+}
+
+.cf-modal-panel-28 {
+  width: 100%;
+  max-width: 28rem;
+}
+
+.cf-modal-panel-30 {
+  width: 100%;
+  max-width: 30rem;
+}
+
+.cf-modal-panel-32 {
+  width: 100%;
+  max-width: 32rem;
+}
+
+.cf-modal-panel-34 {
+  width: 100%;
+  max-width: 34rem;
+}
+
+.cf-modal-panel-44 {
+  width: 100%;
+  max-width: 44rem;
+}
+
+.cf-modal-panel-wide {
+  width: 85vw;
+  max-width: 64rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.cf-modal-panel-xl {
+  height: 70vh;
+  width: 80vw;
+  max-width: 72rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+
+.cf-chip-info {
+  background-color: var(--cf-chip-info-bg);
+  border-color: var(--cf-chip-info-border);
+}
+
+.cf-chip-warning {
+  background-color: var(--cf-chip-warning-bg);
+  border-color: var(--cf-chip-warning-border);
+}
+
+.cf-chip-olive {
+  background-color: var(--cf-chip-olive-bg);
+  border-color: var(--cf-chip-olive-border);
+}
+
+.cf-chip-slate {
+  background-color: var(--cf-chip-slate-bg);
+  border-color: var(--cf-chip-slate-border);
+}
+
+.cf-chip-teal {
+  background-color: var(--cf-chip-teal-bg);
+  border-color: var(--cf-chip-teal-border);
+}
+
+.cf-chip-blue {
+  background-color: var(--cf-chip-blue-bg);
+  border-color: var(--cf-chip-blue-border);
+}
+
+.cf-chip-violet {
+  background-color: var(--cf-chip-violet-bg);
+  border-color: var(--cf-chip-violet-border);
+  color: var(--cf-chip-violet-text);
+}
+
+.cf-policy-selected {
+  background-color: var(--cf-policy-selected-bg);
+  border-color: var(--cf-policy-selected-border);
+}
+
+.cf-action-link {
+  color: var(--cf-action-text);
+}
+
+.cf-auth-bg-base {
+  background: var(--cf-auth-bg-base);
+}
+
+.cf-auth-bg-ambient {
+  background: var(--cf-auth-bg-ambient);
+}
+
+.cf-dev-login-bg {
+  background: var(--cf-dev-login-bg);
+}
+
+.cf-history-timeline-bg {
+  background: var(--cf-history-timeline-bg);
+}
+
+.cf-first-run-banner {
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.9) 0%, rgba(124, 58, 237, 0.9) 100%);
+}
+
+.cf-logo-scale {
+  transform: scale(1.67);
+}
+
+.cf-spinner-accent {
+  border-color: var(--cf-brand-purple);
+}
+
+.cf-worker-header-gradient {
+  background: linear-gradient(135deg, rgba(130, 105, 155, 0.34) 0%, rgba(17, 24, 39, 0.92) 100%);
+}
+
+.cf-worker-status-running,
+.cf-build-status-complete,
+.cf-event-level-info,
+.cf-metric-workers {
+  background-color: #1e3a2e;
+  border-color: #2f6b4a;
+  color: #d8fbe8;
+}
+
+.cf-worker-status-paused,
+.cf-build-status-canceled,
+.cf-event-level-default {
+  background-color: #2b303b;
+  border-color: #495264;
+  color: #e5e7eb;
+}
+
+.cf-worker-status-draining,
+.cf-build-status-stopping,
+.cf-event-level-warn,
+.cf-metric-warning {
+  background-color: #4a3b22;
+  border-color: #8c6a2f;
+  color: #fde8c6;
+}
+
+.cf-build-status-queued,
+.cf-metric-queued {
+  background-color: #2e2e3f;
+  border-color: #4d4d72;
+  color: #d9d9ff;
+}
+
+.cf-build-status-building,
+.cf-metric-building {
+  background-color: #23363a;
+  border-color: #3d6870;
+  color: #d9f6f9;
+}
+
+.cf-build-status-restarting {
+  background-color: #2e2a49;
+  border-color: #675cad;
+  color: #e4dfff;
+}
+
+.cf-build-status-failed,
+.cf-event-level-error,
+.cf-metric-failed {
+  background-color: #44262a;
+  border-color: #7a3d48;
+  color: #ffdce1;
+}
+
+.cf-toggle-active {
+  background-color: #253449;
+  border-color: #3e5b82;
+  color: #e2ebf7;
+}
+
+.cf-toggle-inactive {
+  background-color: #212733;
+  border-color: #394557;
+  color: #9ca3af;
+}
+
+.cf-queue-row {
+  border-color: #374151;
+}
+
+.cf-queue-row-selected {
+  border-color: #6d8fba;
+}
+
+.cf-queue-row-building,
+.cf-queue-row-restarting {
+  background-color: #1c2b3e;
+}
+
+.cf-queue-row-queued {
+  background-color: #242c3a;
+}
+
+.cf-queue-row-stopping {
+  background-color: #3c2f20;
+}
+
+.cf-queue-row-failed {
+  background-color: #3b232a;
+}
+
+.cf-queue-row-complete {
+  background-color: #1e362e;
+}
+
+.cf-queue-row-canceled {
+  background-color: #2c313a;
 }
 
 .cf-builds-split {

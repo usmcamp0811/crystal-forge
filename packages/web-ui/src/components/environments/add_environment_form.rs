@@ -129,8 +129,7 @@ pub fn AddEnvironmentForm(props: AddEnvironmentFormProps) -> Element {
                             class: "flex flex-wrap gap-2",
                             for name in required_policy_names(&draft.read().required_policy_ids, &props.policy_library) {
                                 span {
-                                    class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100",
-                                    style: "background-color: #253449; border-color: #3E5B82;",
+                                    class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100 cf-chip-blue",
                                     "{name}"
                                 }
                             }

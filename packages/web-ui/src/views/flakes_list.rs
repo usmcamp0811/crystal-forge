@@ -461,8 +461,7 @@ pub fn FlakesListView() -> Element {
 
             if let Some(note) = sync_note.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
                     "{note}"
                 }
             } else if let Some(sync_ts) = sync_timestamp {
@@ -474,8 +473,7 @@ pub fn FlakesListView() -> Element {
 
             if let Some(message) = server_notice.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
-                    style: "background-color: #493E26; border-color: #8C7041;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
             }
@@ -872,8 +870,7 @@ fn FlakesTable(
                                             div {
                                                 class: "inline-flex items-center gap-2",
                                                 button {
-                                                    class: "text-xs px-2 py-1 rounded transition-colors",
-                                                    style: "color: #D6C3E8;",
+                                                    class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
                                                     onclick: move |evt| {
                                                         evt.stop_propagation();
                                                         on_edit.call(flake.id)
@@ -941,13 +938,11 @@ fn FlakeCard(
                 div {
                     class: "flex flex-wrap items-center gap-2 text-xs",
                     span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100",
-                        style: "background-color: #2B303B; border-color: #495264;",
+                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-slate",
                         "{flake.system_count} systems"
                     }
                     span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100",
-                        style: "background-color: #23363A; border-color: #3D6870;",
+                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-teal",
                         "{flake.environments.len()} environments"
                     }
                 }
@@ -962,8 +957,7 @@ fn FlakeCard(
                     } else {
                         for env in flake.environments.clone() {
                             span {
-                                class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100",
-                                style: "background-color: #253449; border-color: #3E5B82;",
+                                class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100 cf-chip-blue",
                                 "{env}"
                             }
                         }
@@ -981,8 +975,7 @@ fn FlakeCard(
                     div {
                         class: "inline-flex items-center gap-2",
                         button {
-                            class: "text-xs px-2 py-1 rounded transition-colors",
-                            style: "color: #D6C3E8;",
+                            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
                             onclick: move |evt| {
                                 evt.stop_propagation();
                                 on_edit.call(flake.id)
@@ -998,8 +991,7 @@ fn FlakeCard(
                     div {
                         class: "inline-flex items-center gap-2",
                         button {
-                            class: "text-xs px-2 py-1 rounded transition-colors",
-                            style: "color: #D6C3E8;",
+                            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
                             onclick: move |evt| {
                                 evt.stop_propagation();
                                 on_edit.call(flake.id)
@@ -1171,8 +1163,7 @@ fn FlakeHistoryExplorer(
                     div {
                         class: "cf-flakes-history-split",
                         div {
-                            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden",
-                            style: "background: linear-gradient(180deg, #131B29 0%, #0F141D 100%);",
+                            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden cf-history-timeline-bg",
                             div {
                                 class: "px-3 py-2 border-b {theme::surface::CARD_BORDER} text-xs uppercase tracking-wide text-gray-400",
                                 "Timeline"
@@ -1273,13 +1264,11 @@ fn FlakeHistoryExplorer(
                                                                 div {
                                                                     class: "mt-2 flex flex-wrap items-center gap-2 text-[10px]",
                                                                     span {
-                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border font-mono leading-none",
-                                                                        style: "background-color: rgba(130, 105, 155, 0.22); border-color: #82699B; color: #E5D8F3;",
+                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border font-mono leading-none cf-chip-violet",
                                                                         "{short_hash}"
                                                                     }
                                                                     span {
-                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border text-gray-100 leading-none",
-                                                                        style: "background-color: #2B303B; border-color: #495264;",
+                                                                        class: "inline-flex items-center px-2.5 py-1 rounded border text-gray-100 leading-none cf-chip-slate",
                                                                         "{commit.author}"
                                                                     }
                                                                     span {
@@ -1325,8 +1314,7 @@ fn FlakeHistoryExplorer(
                                             div {
                                                 class: "flex flex-wrap items-center gap-2 text-xs",
                                                 span {
-                                                    class: "font-mono px-2.5 py-1 rounded border",
-                                                    style: "background-color: rgba(130, 105, 155, 0.22); border-color: #82699B; color: #E5D8F3;",
+                                                    class: "font-mono px-2.5 py-1 rounded border cf-chip-violet",
                                                     "{commit.hash}"
                                                 }
                                                 span { class: "px-2.5 py-1 rounded bg-gray-800 text-gray-300", "{commit.author}" }
@@ -1645,12 +1633,10 @@ fn RemoveFlakeDialog(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 30rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-30",
                 onclick: |evt| evt.stop_propagation(),
                 h3 {
                     class: "text-lg font-semibold text-white mb-2",
@@ -1694,12 +1680,10 @@ fn EditFlakeDialog(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 34rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-34",
                 onclick: |evt| evt.stop_propagation(),
                 h3 {
                     class: "text-lg font-semibold text-white mb-2",

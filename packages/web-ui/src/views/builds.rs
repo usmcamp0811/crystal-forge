@@ -6,8 +6,8 @@ use chrono::Utc;
 use crate::api::{self, models::{BuildStatus as ApiBuildStatus, BuilderStatus}};
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
-    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
-    WorkerStatus, WorkerStrip, selected_build_data,
+    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction,
+    WorkerItem, WorkerStatus, WorkerStrip, selected_build_data,
 };
 use crate::theme;
 
@@ -131,8 +131,7 @@ pub fn BuildsView() -> Element {
                 div {
                     class: "flex flex-wrap items-center gap-2",
                     span {
-                        class: "inline-flex items-center px-2 py-1 text-xs rounded border text-emerald-100",
-                        style: "background-color: #1E3A2E; border-color: #2F6B4A;",
+                        class: "inline-flex items-center px-2 py-1 text-xs rounded border text-emerald-100 cf-worker-status-running",
                         span { class: "w-2 h-2 rounded-full bg-emerald-300 mr-2 animate-pulse", }
                         "Live"
                     }
@@ -165,8 +164,7 @@ pub fn BuildsView() -> Element {
 
             if let Some(note) = last_action_note.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
                     "{note}"
                 }
             }

@@ -1369,11 +1369,9 @@ fn PolicyEditorModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
-            style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6 cf-modal-overlay-z50",
             div {
-                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6",
-                style: "width: 85vw; max-width: 64rem; display: flex; flex-direction: column; gap: 1.5rem; overflow: visible; align-items: stretch;",
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6 cf-modal-panel-wide overflow-visible items-stretch",
                 div {
                     class: "flex items-center justify-between",
                     div {
@@ -1523,11 +1521,9 @@ fn PolicyEditorModal(
 fn CombinedPolicyModal(text: String, on_close: EventHandler<()>) -> Element {
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
-            style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6 cf-modal-overlay-z50",
             div {
-                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6",
-                style: "height: 70vh; width: 80vw; max-width: 72rem; display: flex; flex-direction: column; gap: 1.5rem;",
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-2xl p-6 cf-modal-panel-xl",
                 div {
                     class: "flex items-center justify-between",
                     div {
