@@ -4,9 +4,9 @@ use dioxus::prelude::*;
 use gloo_storage::{LocalStorage, Storage};
 use std::rc::Rc;
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 use crate::api::models::{
     CveSummary, DeploymentStatus, HealthStatus, PipelineStage, SystemSummary, SystemsListParams,
@@ -14,10 +14,10 @@ use crate::api::models::{
 use crate::components::filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, ViewMode, ViewToggle,
 };
-use crate::components::forms::{validate_new_system, AddSystemForm, NewSystemDraft};
+use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::layout::Card;
 use crate::components::modals::{
-    generate_key_pair, GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal,
+    GeneratedKeyPair, KeyPairModal, RemoveSystemDialog, UpdatePublicKeyModal, generate_key_pair,
 };
 use crate::components::system::SystemCard;
 use crate::components::tables::SystemsTable;
@@ -110,7 +110,7 @@ pub fn SystemsListView() -> Element {
     let mut local_systems = use_signal(fallback_systems);
     let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
-    
+
     // Sync local_systems with fetched systems when resource loads
     // This effect runs when systems_resource changes
     use_effect(move || {
@@ -129,8 +129,8 @@ pub fn SystemsListView() -> Element {
     let should_redirect = systems_resource
         .read_unchecked()
         .as_ref()
-            .map(|r| r.redirect_to_login)
-            .unwrap_or(false)
+        .map(|r| r.redirect_to_login)
+        .unwrap_or(false)
         || flake_names_resource
             .read_unchecked()
             .as_ref()
@@ -160,7 +160,7 @@ pub fn SystemsListView() -> Element {
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
-    
+
     let current_systems = local_systems.read().clone();
     let environments = unique_environments(&current_systems);
     let dropdown_environments = environment_names_resource

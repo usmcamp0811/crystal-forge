@@ -8,13 +8,13 @@ use gloo_storage::{LocalStorage, Storage};
 #[cfg(target_arch = "wasm32")]
 use js_sys::Object;
 use uuid::Uuid;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::Closure;
 #[cfg(target_arch = "wasm32")]
 use web_sys::console;
-use web_sys::{window, Node};
+use web_sys::{Node, window};
 
 use crate::api::client::{
     create_flake, delete_flake, fetch_commit_diff, fetch_flake_timelines, fetch_flakes,

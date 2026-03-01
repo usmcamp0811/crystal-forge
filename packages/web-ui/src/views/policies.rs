@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use crate::components::layout::Card;
 use crate::components::policy::{
-    PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat, POLICY_TOML_SAMPLE,
+    POLICY_TOML_SAMPLE, PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat,
 };
 use crate::theme;
 

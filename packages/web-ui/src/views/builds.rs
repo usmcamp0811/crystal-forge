@@ -1,13 +1,16 @@
 //! Builds control center view.
 
-use dioxus::prelude::*;
 use chrono::Utc;
+use dioxus::prelude::*;
 
-use crate::api::{self, models::{BuildStatus as ApiBuildStatus, BuilderStatus}};
+use crate::api::{
+    self,
+    models::{BuildStatus as ApiBuildStatus, BuilderStatus},
+};
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
-    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction,
-    WorkerItem, WorkerStatus, WorkerStrip, selected_build_data,
+    DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
+    WorkerStatus, WorkerStrip, selected_build_data,
 };
 use crate::theme;
 
@@ -56,10 +59,7 @@ pub fn BuildsView() -> Element {
                     .enumerate()
                     .map(|(idx, item)| {
                         let queued_for = if item.status == ApiBuildStatus::Building {
-                            format!(
-                                "running {}s",
-                                item.elapsed_secs.unwrap_or(0)
-                            )
+                            format!("running {}s", item.elapsed_secs.unwrap_or(0))
                         } else {
                             let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
                             format!("queued {}s ago", ago)
@@ -87,10 +87,14 @@ pub fn BuildsView() -> Element {
                                 ApiBuildStatus::Complete => BuildStatus::Complete,
                                 ApiBuildStatus::Idle => BuildStatus::Queued,
                             },
-                            summary: item
-                                .commit_message
-                                .clone()
-                                .unwrap_or_else(|| format!("job {}", item.job_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".to_string()))),
+                            summary: item.commit_message.clone().unwrap_or_else(|| {
+                                format!(
+                                    "job {}",
+                                    item.job_id
+                                        .map(|id| id.to_string())
+                                        .unwrap_or_else(|| "unknown".to_string())
+                                )
+                            }),
                         }
                     })
                     .collect::<Vec<_>>();

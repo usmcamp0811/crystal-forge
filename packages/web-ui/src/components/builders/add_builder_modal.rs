@@ -16,25 +16,21 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
     let mut max_memory_mb = use_signal(|| String::new());
     let mut max_concurrent_jobs = use_signal(|| String::from("1"));
     let mut selected_environments = use_signal(|| Vec::<Uuid>::new());
-    
+
     let mut show_private_key = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
     let mut error_message = use_signal(|| None::<String>);
 
     // Fetch environments for multi-select
-    let environments = use_resource(|| async move {
-        api::client::fetch_environments().await
-    });
+    let environments = use_resource(|| async move { api::client::fetch_environments().await });
 
-    let generate_keypair = move |_| {
-        match generate_ed25519_keypair() {
-            Ok((priv_hex, pub_b64)) => {
-                private_key.set(priv_hex);
-                public_key.set(pub_b64);
-            }
-            Err(e) => {
-                error_message.set(Some(format!("Failed to generate keypair: {}", e)));
-            }
+    let generate_keypair = move |_| match generate_ed25519_keypair() {
+        Ok((priv_hex, pub_b64)) => {
+            private_key.set(priv_hex);
+            public_key.set(pub_b64);
+        }
+        Err(e) => {
+            error_message.set(Some(format!("Failed to generate keypair: {}", e)));
         }
     };
 
@@ -92,11 +88,11 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
                     on_close.call(())
                 }
             },
-            
+
             div {
                 class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl my-auto",
                 onclick: move |e| e.stop_propagation(),
-                
+
                 // Header
                 div {
                     class: "flex items-center justify-between mb-6",
@@ -273,7 +269,7 @@ pub fn AddBuilderModal(on_close: EventHandler<()>, on_success: EventHandler<()>)
                             class: "text-xs {theme::text::SECONDARY} mb-2",
                             "Leave empty for wildcard (builder handles all environments)"
                         }
-                        
+
                         {
                             let env_data = environments.read();
                             match &*env_data {

@@ -18,7 +18,7 @@ use dioxus::prelude::*;
 
 use routes::Route;
 use state::app_state::provide_app_state;
-use state::theme::{apply as apply_theme, persist as persist_theme, UiTheme};
+use state::theme::{UiTheme, apply as apply_theme, persist as persist_theme};
 
 fn main() {
     dioxus::launch(app);

@@ -12,8 +12,8 @@
 //! Views MUST NOT call [`crate::api::client`] directly.
 //! All HTTP interactions go through the functions in this module.
 
-use uuid::Uuid;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 use crate::api::client::{
     ApiClientError, create_environment, delete_environment, fetch_environment_policies,
@@ -21,7 +21,9 @@ use crate::api::client::{
     update_environment_policies,
 };
 use crate::api::models::{CreateEnvironmentRequest, EnvironmentSummary, UpdateEnvironmentRequest};
-use crate::components::environments::{EnvironmentItem, PolicyOption, policy_library as fallback_policy_library};
+use crate::components::environments::{
+    EnvironmentItem, PolicyOption, policy_library as fallback_policy_library,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Result Types
@@ -63,7 +65,10 @@ pub struct PoliciesLoadResult {
 pub async fn load_environments_with_fallback(
     default_required_policy: Uuid,
 ) -> EnvironmentsLoadResult {
-    match (fetch_environments().await, fetch_environment_policies_map().await) {
+    match (
+        fetch_environments().await,
+        fetch_environment_policies_map().await,
+    ) {
         (Ok(items), Ok(policy_map_entries)) => {
             let policy_map: HashMap<Uuid, Vec<Uuid>> = policy_map_entries
                 .into_iter()
@@ -73,10 +78,7 @@ pub async fn load_environments_with_fallback(
             let environments = items
                 .into_iter()
                 .map(|env| {
-                    let required_policy_ids = policy_map
-                        .get(&env.id)
-                        .cloned()
-                        .unwrap_or_default();
+                    let required_policy_ids = policy_map.get(&env.id).cloned().unwrap_or_default();
                     api_to_environment_item(env, required_policy_ids)
                 })
                 .collect();
@@ -87,11 +89,13 @@ pub async fn load_environments_with_fallback(
                 redirect_to_login: false,
             }
         }
-        (Err(error), _) | (_, Err(error)) if should_redirect_to_login(&error) => EnvironmentsLoadResult {
-            environments: Vec::new(),
-            notice: None,
-            redirect_to_login: true,
-        },
+        (Err(error), _) | (_, Err(error)) if should_redirect_to_login(&error) => {
+            EnvironmentsLoadResult {
+                environments: Vec::new(),
+                notice: None,
+                redirect_to_login: true,
+            }
+        }
         (Err(error), _) | (_, Err(error)) => EnvironmentsLoadResult {
             environments: fallback_environments(default_required_policy),
             notice: Some(format!(
@@ -254,9 +258,9 @@ pub async fn create_environment_via_api(
 
     match create_environment(&request).await {
         Ok(env) => Ok(api_to_environment_item(env, vec![default_required_policy])),
-        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
-            Err("Authentication required. Please log in.".to_string())
-        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
@@ -267,9 +271,9 @@ pub async fn create_environment_via_api(
 pub async fn delete_environment_via_api(environment_id: Uuid) -> Result<(), String> {
     match delete_environment(&environment_id).await {
         Ok(()) => Ok(()),
-        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
-            Err("Authentication required. Please log in.".to_string())
-        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
@@ -298,9 +302,9 @@ pub async fn update_environment_via_api(
             };
             Ok(api_to_environment_item(env, required_policy_ids))
         }
-        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
-            Err("Authentication required. Please log in.".to_string())
-        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
@@ -314,9 +318,9 @@ pub async fn update_environment_policies_via_api(
 ) -> Result<(), String> {
     match update_environment_policies(&environment_id, &required_policy_ids).await {
         Ok(_response) => Ok(()),
-        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
-            Err("Authentication required. Please log in.".to_string())
-        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {msg}")),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {msg}")),
@@ -330,7 +334,10 @@ pub async fn update_environment_policies_via_api(
 fn should_redirect_to_login(error: &ApiClientError) -> bool {
     matches!(
         error,
-        ApiClientError::Status { code: 401 | 403, .. }
+        ApiClientError::Status {
+            code: 401 | 403,
+            ..
+        }
     )
 }
 

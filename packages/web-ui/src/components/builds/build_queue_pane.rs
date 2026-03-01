@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_class, queue_row_style, queue_sort_rank, short_commit, BuildAction,
-    BuildItem, BuildStatus,
+    BuildAction, BuildItem, BuildStatus, build_status_badge_class, queue_row_style,
+    queue_sort_rank, short_commit,
 };
 
 /// Build queue pane showing all queued and active builds.

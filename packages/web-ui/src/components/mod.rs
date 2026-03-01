@@ -22,8 +22,8 @@
 //! - `policy` - Policy management components
 
 // Domain-specific component modules
-pub mod builds;
 pub mod builders;
+pub mod builds;
 pub mod charts;
 pub mod cve;
 pub mod dashboard;

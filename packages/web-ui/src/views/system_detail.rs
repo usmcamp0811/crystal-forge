@@ -132,20 +132,16 @@ pub fn SystemDetailView(id: String) -> Element {
     });
 
     // Derive state from resource result
-    let (system, api_notice, redirect_to_login, not_found) = match &*detail_resource.read_unchecked() {
-        Some(result) => (
-            result.system.clone().unwrap_or_else(fallback_system_detail),
-            result.notice.clone(),
-            result.redirect_to_login,
-            result.system.is_none() && !result.redirect_to_login,
-        ),
-        None => (
-            fallback_system_detail(),
-            None,
-            false,
-            false,
-        ),
-    };
+    let (system, api_notice, redirect_to_login, not_found) =
+        match &*detail_resource.read_unchecked() {
+            Some(result) => (
+                result.system.clone().unwrap_or_else(fallback_system_detail),
+                result.notice.clone(),
+                result.redirect_to_login,
+                result.system.is_none() && !result.redirect_to_login,
+            ),
+            None => (fallback_system_detail(), None, false, false),
+        };
 
     // Redirect to login (early return matching dashboard pattern).
     if redirect_to_login {

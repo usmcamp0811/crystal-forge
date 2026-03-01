@@ -370,8 +370,13 @@
 }
 
 /*
- * Light-theme compatibility bridge for remaining hardcoded Tailwind classes.
- * This keeps legacy dark utility usage readable while token migration continues.
+ * TEMPORARY: Light-theme compatibility bridge for remaining hardcoded
+ * Tailwind utility classes.
+ *
+ * Removal target:
+ * - Replace remaining legacy utility usage with token-backed semantic classes.
+ * - Remove this block once light theme no longer depends on global utility
+ *   overrides for readability.
  */
 :root[data-theme="light"] .text-white,
 :root[data-theme="light"] .text-gray-100,

@@ -10,9 +10,7 @@ use crate::theme;
 #[component]
 pub fn BuilderMetricsView() -> Element {
     // Fetch all builders
-    let builders = use_resource(|| async move {
-        api::client::fetch_builders().await
-    });
+    let builders = use_resource(|| async move { api::client::fetch_builders().await });
 
     rsx! {
         div {
@@ -73,9 +71,8 @@ pub fn BuilderMetricsView() -> Element {
 
 #[component]
 fn BuilderMetricsCard(builder_id: Uuid, builder_name: String) -> Element {
-    let metrics = use_resource(move || async move {
-        api::client::fetch_builder_metrics(&builder_id).await
-    });
+    let metrics =
+        use_resource(move || async move { api::client::fetch_builder_metrics(&builder_id).await });
 
     rsx! {
         div {
@@ -229,7 +226,7 @@ fn format_memory(mb: i64) -> String {
 fn format_timestamp(timestamp: &chrono::DateTime<chrono::Utc>) -> String {
     let now = chrono::Utc::now();
     let duration = now.signed_duration_since(*timestamp);
-    
+
     if duration.num_seconds() < 60 {
         format!("{}s ago", duration.num_seconds())
     } else if duration.num_minutes() < 60 {
