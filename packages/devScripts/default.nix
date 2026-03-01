@@ -39,13 +39,13 @@ let
       # Generate agent keys if they don't exist
       if [[ ! -f "$CF_KEY_DIR/agent.key" ]]; then
         echo "Generating agent keys..."
-        cf-keygen agent "$CF_KEY_DIR/agent"
+        cf-keygen -f "$CF_KEY_DIR/agent.key"
       fi
 
       # Generate builder keys if they don't exist
       if [[ ! -f "$CF_KEY_DIR/builder.key" ]]; then
         echo "Generating builder keys..."
-        cf-keygen builder "$CF_KEY_DIR/builder"
+        cf-keygen -f "$CF_KEY_DIR/builder.key"
       fi
 
       ACTUAL_HOSTNAME="$(hostname -s)"
