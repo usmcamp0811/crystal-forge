@@ -18,6 +18,7 @@ use dioxus::prelude::*;
 
 use routes::Route;
 use state::app_state::provide_app_state;
+use state::theme::{UiTheme, apply as apply_theme, persist as persist_theme};
 
 fn main() {
     dioxus::launch(app);
@@ -27,6 +28,13 @@ fn main() {
 #[component]
 fn app() -> Element {
     provide_app_state();
+    let theme = use_context_provider(|| Signal::new(UiTheme::load()));
+
+    use_effect(move || {
+        let current = theme();
+        apply_theme(current);
+        persist_theme(current);
+    });
 
     // Fetch auth context on app initialization
     let mut app_state = use_context::<Signal<state::app_state::AppState>>();

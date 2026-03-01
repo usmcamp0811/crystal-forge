@@ -98,8 +98,7 @@ pub fn EnvironmentsListView() -> Element {
             // API fallback notice banner
             if let Some(notice) = api_notice.read().clone() {
                 div {
-                    class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm",
-                    style: "background-color: #3B2F00; border-color: #7A6000;",
+                    class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm cf-chip-olive",
                     span { class: "shrink-0", "⚠" }
                     span { "{notice}" }
                 }
@@ -128,8 +127,7 @@ pub fn EnvironmentsListView() -> Element {
                     div {
                         class: "flex flex-col items-center gap-3",
                         div {
-                            class: "animate-spin rounded-full h-10 w-10 border-b-2",
-                            style: "border-color: #82699B;",
+                            class: "animate-spin rounded-full h-10 w-10 border-b-2 cf-spinner-accent",
                         }
                         p {
                             class: "text-sm {theme::text::SECONDARY}",

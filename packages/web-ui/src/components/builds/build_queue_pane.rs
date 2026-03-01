@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_style, queue_row_style, queue_sort_rank, short_commit, BuildAction,
-    BuildItem, BuildStatus,
+    BuildAction, BuildItem, BuildStatus, build_status_badge_class, queue_row_style,
+    queue_sort_rank, short_commit,
 };
 
 /// Build queue pane showing all queued and active builds.
@@ -54,8 +54,7 @@ pub fn BuildQueuePane(
                         for build in filtered {
                             button {
                                 key: "{build.id}",
-                                class: "w-full rounded-xl border px-4 py-3 text-left transition",
-                                style: "{queue_row_style(*selected_id.read() == Some(build.id), build.status)}",
+                                class: "w-full rounded-xl border px-4 py-3 text-left transition {queue_row_style(*selected_id.read() == Some(build.id), build.status)}",
                                 onclick: move |_| selected_id.set(Some(build.id)),
                                 div {
                                     class: "flex items-start justify-between gap-3",
@@ -64,8 +63,7 @@ pub fn BuildQueuePane(
                                             class: "flex items-center gap-2",
                                             p { class: "text-sm text-white font-semibold", "{build.hostname}" }
                                             span {
-                                                class: "inline-flex px-2 py-0.5 text-[10px] rounded border text-blue-100",
-                                                style: "background-color: #253449; border-color: #3E5B82;",
+                                                class: "inline-flex px-2 py-0.5 text-[10px] rounded border text-blue-100 cf-chip-blue",
                                                 "{build.flake}"
                                             }
                                         }
@@ -74,8 +72,7 @@ pub fn BuildQueuePane(
                                     div {
                                         class: "text-right",
                                         span {
-                                            class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border",
-                                            style: "{build_status_badge_style(build.status)}",
+                                            class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
                                             "{build.status_label()}"
                                         }
                                         p { class: "text-[10px] text-gray-400 mt-1", "{build.queued_for}" }
@@ -92,14 +89,12 @@ pub fn BuildQueuePane(
                                     div {
                                         class: "inline-flex items-center gap-2 text-[10px]",
                                         span {
-                                            class: "inline-flex px-2 py-1 rounded border text-gray-100",
-                                            style: "background-color: #2B303B; border-color: #495264;",
+                                            class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-slate",
                                             "worker {build.worker_id}"
                                         }
                                         if let Some(runtime) = build.runtime {
                                             span {
-                                                class: "inline-flex px-2 py-1 rounded border text-gray-100",
-                                                style: "background-color: #23363A; border-color: #3D6870;",
+                                                class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-teal",
                                                 "runtime {runtime}"
                                             }
                                         }
@@ -117,8 +112,7 @@ pub fn BuildQueuePane(
                                             }
                                         }
                                         button {
-                                            class: "text-xs px-2 py-1 rounded transition-colors",
-                                            style: "color: #D6C3E8;",
+                                            class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
                                             onclick: move |evt| {
                                                 evt.stop_propagation();
                                                 on_build_action.call((build.id, BuildAction::Restart));

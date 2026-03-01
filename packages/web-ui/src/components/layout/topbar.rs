@@ -5,12 +5,14 @@ use dioxus::prelude::*;
 use crate::api::client;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::theme::UiTheme;
 use crate::theme;
 
 /// Header bar displaying the current page title and optional actions.
 #[component]
 pub fn TopBar(title: String) -> Element {
     let mut app_state = use_context::<Signal<AppState>>();
+    let mut ui_theme = use_context::<Signal<UiTheme>>();
     let mut show_user_menu = use_signal(|| false);
     let auth_context = app_state.read().auth.clone();
     let nav = navigator();
@@ -39,7 +41,6 @@ pub fn TopBar(title: String) -> Element {
             div {
                 class: "flex items-center gap-4",
 
-                // Search (hidden on small screens)
                 div {
                     class: "hidden md:block",
                     input {
@@ -86,11 +87,12 @@ pub fn TopBar(title: String) -> Element {
                         if show_user_menu() {
                             div {
                                 "data-testid": "user-menu-dropdown",
-                                class: "absolute right-0 mt-2 w-56 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
+                                class: "absolute top-full mt-2 w-25 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
+                                style: "right: 0; min-width: 16rem;",
 
                                 // User info section
                                 div {
-                                    class: "px-4 py-3 border-b {theme::surface::CARD_BORDER}",
+                                    class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} text-right",
                                     if let Some(full_name) = auth::user_display_name(&auth_context) {
                                         p {
                                             class: "{theme::text::PRIMARY} text-sm font-semibold",
@@ -100,14 +102,14 @@ pub fn TopBar(title: String) -> Element {
                                     if let Some(ctx) = &auth_context {
                                         if let Some(user) = &ctx.user {
                                             p {
-                                                class: "{theme::text::SECONDARY} text-xs",
+                                                class: "{theme::text::SECONDARY} text-xs break-all",
                                                 "{user.email}"
                                             }
                                         }
                                         // Show roles
                                         if !ctx.roles.is_empty() {
                                             div {
-                                                class: "mt-2 flex flex-wrap gap-1",
+                                                class: "mt-2 flex flex-wrap gap-1 justify-end",
                                                 for role in &ctx.roles {
                                                     span {
                                                         class: "px-2 py-0.5 rounded text-xs bg-violet-500/20 text-violet-300",
@@ -124,7 +126,46 @@ pub fn TopBar(title: String) -> Element {
                                     class: "py-2",
 
                                     button {
-                                        class: "w-full text-left px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors",
+                                        class: "w-full text-right px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors flex items-center justify-end gap-2",
+                                        onclick: move |_| {
+                                            let next = ui_theme().toggle();
+                                            ui_theme.set(next);
+                                        },
+                                        if ui_theme() == UiTheme::Dark {
+                                            // Moon icon - currently dark, click to switch to light
+                                            svg {
+                                                class: "w-4 h-4 shrink-0",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                view_box: "0 0 24 24",
+                                                path {
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    stroke_width: "2",
+                                                    d: "M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"
+                                                }
+                                            }
+                                            span { "Dark Mode" }
+                                        } else {
+                                            // Sun icon - currently light, click to switch to dark
+                                            svg {
+                                                class: "w-4 h-4 shrink-0",
+                                                fill: "none",
+                                                stroke: "currentColor",
+                                                view_box: "0 0 24 24",
+                                                path {
+                                                    stroke_linecap: "round",
+                                                    stroke_linejoin: "round",
+                                                    stroke_width: "2",
+                                                    d: "M12 3v2m0 14v2m9-9h-2M5 12H3m15.364 6.364l-1.414-1.414M7.05 7.05 5.636 5.636m12.728 0-1.414 1.414M7.05 16.95l-1.414 1.414M12 8a4 4 0 100 8 4 4 0 000-8z"
+                                                }
+                                            }
+                                            span { "Light Mode" }
+                                        }
+                                    }
+
+                                    button {
+                                        class: "w-full text-right px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors",
                                         onclick: handle_logout,
                                         "Sign Out"
                                     }

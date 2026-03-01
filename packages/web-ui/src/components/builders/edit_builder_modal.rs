@@ -16,14 +16,15 @@ use crate::components::modals::ConfirmDialog;
 use crate::theme;
 
 #[component]
-pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success: EventHandler<()>) -> Element {
-    let builder = use_resource(move || async move {
-        api::client::fetch_builder(&builder_id).await
-    });
+pub fn EditBuilderModal(
+    builder_id: Uuid,
+    on_close: EventHandler<()>,
+    on_success: EventHandler<()>,
+) -> Element {
+    let builder =
+        use_resource(move || async move { api::client::fetch_builder(&builder_id).await });
 
-    let environments = use_resource(|| async move {
-        api::client::fetch_environments().await
-    });
+    let environments = use_resource(|| async move { api::client::fetch_environments().await });
 
     let mut name = use_signal(|| String::new());
     let mut status = use_signal(|| BuilderStatus::Active);
@@ -34,7 +35,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
     let mut rotated_public_key = use_signal(|| String::new());
     let mut rotated_private_key = use_signal(|| String::new());
     let mut show_rotated_private_key = use_signal(|| false);
-    
+
     let mut is_initialized = use_signal(|| false);
     let mut is_submitting = use_signal(|| false);
     let mut error_message = use_signal(|| None::<String>);
@@ -47,8 +48,18 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
             if !is_initialized() {
                 name.set(builder_data.name.clone());
                 status.set(builder_data.status.clone());
-                max_cpu_cores.set(builder_data.max_cpu_cores.map(|n| n.to_string()).unwrap_or_default());
-                max_memory_mb.set(builder_data.max_memory_mb.map(|n| n.to_string()).unwrap_or_default());
+                max_cpu_cores.set(
+                    builder_data
+                        .max_cpu_cores
+                        .map(|n| n.to_string())
+                        .unwrap_or_default(),
+                );
+                max_memory_mb.set(
+                    builder_data
+                        .max_memory_mb
+                        .map(|n| n.to_string())
+                        .unwrap_or_default(),
+                );
                 max_concurrent_jobs.set(builder_data.max_concurrent_jobs.to_string());
                 selected_environments.set(builder_data.assigned_environment_ids.clone());
                 rotated_public_key.set(builder_data.public_key.clone());
@@ -90,7 +101,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                 let env_request = UpdateBuilderEnvironmentsRequest {
                     environment_ids: selected_environments(),
                 };
-                
+
                 match api::client::update_builder_environments(&builder_id, &env_request).await {
                     Ok(_) => {
                         on_success.call(());
@@ -108,17 +119,15 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
         }
     };
 
-    let handle_generate_keypair = move |_| {
-        match generate_ed25519_keypair() {
-            Ok((priv_hex, pub_b64)) => {
-                rotated_private_key.set(priv_hex);
-                rotated_public_key.set(pub_b64);
-                show_rotated_private_key.set(false);
-                error_message.set(None);
-            }
-            Err(e) => {
-                error_message.set(Some(format!("Failed to generate keypair: {}", e)));
-            }
+    let handle_generate_keypair = move |_| match generate_ed25519_keypair() {
+        Ok((priv_hex, pub_b64)) => {
+            rotated_private_key.set(priv_hex);
+            rotated_public_key.set(pub_b64);
+            show_rotated_private_key.set(false);
+            error_message.set(None);
+        }
+        Err(e) => {
+            error_message.set(Some(format!("Failed to generate keypair: {}", e)));
         }
     };
 
@@ -129,7 +138,9 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
 
         let next_public_key = rotated_public_key().trim().to_string();
         if next_public_key.is_empty() {
-            error_message.set(Some("Generate a keypair first before updating the builder key.".to_string()));
+            error_message.set(Some(
+                "Generate a keypair first before updating the builder key.".to_string(),
+            ));
             return;
         }
 
@@ -199,11 +210,11 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                     on_close.call(())
                 }
             },
-            
+
             div {
                 class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-6 w-full max-w-2xl max-h-[90vh] overflow-y-auto shadow-2xl my-auto",
                 onclick: move |e| e.stop_propagation(),
-                
+
                 match &*builder.read_unchecked() {
                     Some(Ok(builder_data)) => rsx! {
                         // Header
@@ -338,7 +349,7 @@ pub fn EditBuilderModal(builder_id: Uuid, on_close: EventHandler<()>, on_success
                                     class: "text-xs {theme::text::SECONDARY} mb-2",
                                     "Leave empty for wildcard (builder handles all environments)"
                                 }
-                                
+
                                 {
                                     let env_data = environments.read();
                                     match &*env_data {

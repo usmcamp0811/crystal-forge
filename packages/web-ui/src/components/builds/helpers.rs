@@ -2,9 +2,9 @@
 
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::prelude::Closure;
 use wasm_bindgen::JsCast;
-use web_sys::{window, Node};
+use wasm_bindgen::prelude::Closure;
+use web_sys::{Node, window};
 
 /// Worker status enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,45 +167,32 @@ pub enum PendingAction {
 
 // Styling helper functions
 
-pub fn worker_status_style(status: WorkerStatus) -> &'static str {
+pub fn worker_status_class(status: WorkerStatus) -> &'static str {
     match status {
-        WorkerStatus::Running => {
-            "background-color: #1E3A2E; border-color: #2F6B4A; color: #D8FBE8;"
-        }
-        WorkerStatus::Paused => "background-color: #2B303B; border-color: #495264; color: #E5E7EB;",
-        WorkerStatus::Draining => {
-            "background-color: #4A3B22; border-color: #8C6A2F; color: #FDE8C6;"
-        }
+        WorkerStatus::Running => "cf-worker-status-running",
+        WorkerStatus::Paused => "cf-worker-status-paused",
+        WorkerStatus::Draining => "cf-worker-status-draining",
     }
 }
 
-pub fn build_status_badge_style(status: BuildStatus) -> &'static str {
+pub fn build_status_badge_class(status: BuildStatus) -> &'static str {
     match status {
-        BuildStatus::Queued => "background-color: #2E2E3F; border-color: #4D4D72; color: #D9D9FF;",
-        BuildStatus::Building => {
-            "background-color: #23363A; border-color: #3D6870; color: #D9F6F9;"
-        }
-        BuildStatus::Stopping => {
-            "background-color: #4A3B22; border-color: #8C6A2F; color: #FDE8C6;"
-        }
-        BuildStatus::Restarting => {
-            "background-color: #2E2A49; border-color: #675CAD; color: #E4DFFF;"
-        }
-        BuildStatus::Failed => "background-color: #44262A; border-color: #7A3D48; color: #FFDCE1;",
-        BuildStatus::Complete => {
-            "background-color: #1E3A2E; border-color: #2F6B4A; color: #D8FBE8;"
-        }
-        BuildStatus::Canceled => {
-            "background-color: #2B303B; border-color: #495264; color: #E5E7EB;"
-        }
+        BuildStatus::Queued => "cf-build-status-queued",
+        BuildStatus::Building => "cf-build-status-building",
+        BuildStatus::Stopping => "cf-build-status-stopping",
+        BuildStatus::Restarting => "cf-build-status-restarting",
+        BuildStatus::Failed => "cf-build-status-failed",
+        BuildStatus::Complete => "cf-build-status-complete",
+        BuildStatus::Canceled => "cf-build-status-canceled",
     }
 }
 
-pub fn event_level_style(level: &str) -> &'static str {
+pub fn event_level_class(level: &str) -> &'static str {
     match level {
-        "error" => "background-color: #44262A; border-color: #7A3D48; color: #FFDCE1;",
-        "warn" => "background-color: #4A3B22; border-color: #8C6A2F; color: #FDE8C6;",
-        _ => "background-color: #2B303B; border-color: #495264; color: #E5E7EB;",
+        "error" => "cf-event-level-error",
+        "warn" => "cf-event-level-warn",
+        "info" => "cf-event-level-info",
+        _ => "cf-event-level-default",
     }
 }
 
@@ -225,17 +212,21 @@ pub fn short_commit(commit: &str) -> String {
 }
 
 pub fn queue_row_style(selected: bool, status: BuildStatus) -> String {
-    let border = if selected { "#6D8FBA" } else { "#374151" };
-    let bg = match status {
-        BuildStatus::Building | BuildStatus::Restarting => "#1C2B3E",
-        BuildStatus::Queued => "#242C3A",
-        BuildStatus::Stopping => "#3C2F20",
-        BuildStatus::Failed => "#3B232A",
-        BuildStatus::Complete => "#1E362E",
-        BuildStatus::Canceled => "#2C313A",
+    let row_status = match status {
+        BuildStatus::Building => "cf-queue-row-building",
+        BuildStatus::Restarting => "cf-queue-row-restarting",
+        BuildStatus::Queued => "cf-queue-row-queued",
+        BuildStatus::Stopping => "cf-queue-row-stopping",
+        BuildStatus::Failed => "cf-queue-row-failed",
+        BuildStatus::Complete => "cf-queue-row-complete",
+        BuildStatus::Canceled => "cf-queue-row-canceled",
     };
-
-    format!("background-color: {bg}; border-color: {border};")
+    let selected_class = if selected {
+        "cf-queue-row-selected"
+    } else {
+        "cf-queue-row"
+    };
+    format!("{selected_class} {row_status}")
 }
 
 // Action application functions

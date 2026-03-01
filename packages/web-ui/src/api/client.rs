@@ -146,8 +146,8 @@ pub async fn fetch_environment_policies(
 }
 
 /// Fetch required policy assignments for visible environments.
-pub async fn fetch_environment_policies_map(
-) -> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
+pub async fn fetch_environment_policies_map()
+-> Result<Vec<EnvironmentPolicyMapEntry>, ApiClientError> {
     let url = format!("{}/environments/policies-map", base_url());
     fetch_json(&url).await
 }
@@ -380,7 +380,9 @@ pub async fn fetch_builder(id: &Uuid) -> Result<BuilderDetail, ApiClientError> {
 }
 
 /// Create a new builder (admin only)
-pub async fn create_builder(request: &CreateBuilderRequest) -> Result<BuilderDetail, ApiClientError> {
+pub async fn create_builder(
+    request: &CreateBuilderRequest,
+) -> Result<BuilderDetail, ApiClientError> {
     let url = format!("{}/builders", base_url());
     send_json_with_csrf("POST", &url, Some(request)).await
 }

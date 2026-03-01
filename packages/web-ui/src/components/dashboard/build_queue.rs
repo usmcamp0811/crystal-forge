@@ -79,17 +79,17 @@ pub fn BuildQueuePanel(
             div {
                 class: "flex items-center justify-between mb-3",
                 div {
-                    class: "text-xs text-gray-400 uppercase tracking-wide",
+                    class: "text-xs {theme::text::SECONDARY} uppercase tracking-wide",
                     "Build queue"
                 }
                 div {
-                    class: "text-[10px] text-gray-500",
+                    class: "text-[10px] {theme::text::MUTED}",
                     "Ordered by next build"
                 }
             }
 
             if ordered_rows.is_empty() {
-                p { class: "text-sm text-gray-400", "No builds running or queued." }
+                p { class: "text-sm {theme::text::SECONDARY}", "No builds running or queued." }
             } else {
                 div {
                     class: "flex-1 min-h-0 overflow-hidden space-y-2",
@@ -99,7 +99,7 @@ pub fn BuildQueuePanel(
                 }
                 if remaining_count > 0 {
                     p {
-                        class: "text-[10px] text-gray-500 mt-2",
+                        class: "text-[10px] {theme::text::MUTED} mt-2",
                         "+{remaining_count} more builds queued"
                     }
                 }
@@ -134,7 +134,7 @@ pub fn BuildQueueRow(
 
     rsx! {
         Link {
-            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition hover:bg-gray-800/80 hover:border hover:border-gray-600",
+            class: "flex items-center justify-between p-3 rounded-lg {theme::surface::SUBTLE_BG} transition {theme::interactive::HOVER_BG} hover:border {theme::surface::CARD_BORDER}",
             to: crate::routes::Route::BuildsView {},
             div {
                 class: "flex items-center gap-3 min-w-0 flex-1",
@@ -147,18 +147,18 @@ pub fn BuildQueueRow(
                     class: "min-w-0 flex-1",
                     div {
                         class: "flex items-center gap-2",
-                        span { class: "text-white text-sm font-medium truncate", "{item.hostname}" }
-                        span { class: "text-[10px] font-mono text-gray-500", "{short_hash}" }
+                        span { class: "{theme::text::PRIMARY} text-sm font-medium truncate", "{item.hostname}" }
+                        span { class: "text-[10px] font-mono {theme::text::MUTED}", "{short_hash}" }
                     }
                     if let Some(ref msg) = item.commit_message {
-                        p { class: "text-xs text-gray-400 truncate", "{msg}" }
+                        p { class: "text-xs {theme::text::SECONDARY} truncate", "{msg}" }
                     }
                 }
             }
             div {
                 class: "text-right shrink-0 ml-3",
                 if let Some(ref elapsed) = elapsed {
-                    p { class: "text-xs text-white font-semibold tabular-nums", "{elapsed}" }
+                    p { class: "text-xs {theme::text::PRIMARY} font-semibold tabular-nums", "{elapsed}" }
                 }
                 if let Some(ref label) = position_label {
                     p { class: "text-[10px] uppercase tracking-wide {status_class}", "{label}" }

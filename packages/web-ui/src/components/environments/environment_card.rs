@@ -3,7 +3,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
-use super::{required_policy_names, with_alpha, EnvironmentItem, PolicyOption};
+use super::{EnvironmentItem, PolicyOption, required_policy_names, with_alpha};
 use crate::theme;
 
 /// Props for the environment card.
@@ -53,13 +53,11 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                 div {
                     class: "flex flex-wrap items-center gap-2 text-xs",
                     span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100",
-                        style: "background-color: #2B303B; border-color: #495264;",
+                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-slate",
                         "{env.system_count} systems"
                     }
                     span {
-                        class: "inline-flex px-2 py-1 rounded border text-gray-100",
-                        style: "background-color: #23363A; border-color: #3D6870;",
+                        class: "inline-flex px-2 py-1 rounded border text-gray-100 cf-chip-teal",
                         "{required_count} required"
                     }
                 }
@@ -76,8 +74,7 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                     class: "flex flex-wrap gap-2",
                     for policy_name in visible_chips {
                         span {
-                            class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100",
-                            style: "background-color: #253449; border-color: #3E5B82;",
+                            class: "inline-flex px-2 py-1 text-xs rounded border text-blue-100 cf-chip-blue",
                             "{policy_name}"
                         }
                     }
@@ -92,14 +89,12 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                 div {
                     class: "flex items-center gap-2",
                     button {
-                        class: "text-xs px-2 py-1 rounded transition-colors",
-                        style: "color: #D6C3E8;",
+                        class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
                         onclick: move |_| props.on_edit_meta.call(env_for_edit_meta.clone()),
                         "Edit Environment"
                     }
                     button {
-                        class: "text-xs px-2 py-1 rounded transition-colors",
-                        style: "color: #D6C3E8;",
+                        class: "text-xs px-2 py-1 rounded transition-colors cf-action-link",
                         onclick: {
                             let id = env.id;
                             let ids = env.required_policy_ids.clone();

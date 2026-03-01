@@ -1,10 +1,10 @@
 ---
 id: TASK-141
 title: Add UI-based Binary Cache Management with Environment Scoping
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-01 14:01'
-updated_date: '2026-03-01 14:30'
+updated_date: '2026-03-01 18:52'
 labels:
   - backend
   - builder
@@ -293,6 +293,32 @@ nix develop -c crystal-forge-admin import-cache \
 - [ ] #18 Integration test: environment without DB cache uses TOML config
 - [ ] #19 Documentation explains TOML vs DB precedence and migration path
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Adjust TopLayout user dropdown container width so it is slightly wider and unaffected by ineffective w-100 utility; prefer explicit min-width while preserving existing menu layout.
+
+Verify the class update in topbar component compiles and does not alter unrelated layout behavior.
+
+Run targeted web-ui check/tests under nix develop for confidence before continuing merge prep.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: gpt-5.3-codex on gray in ~/code/crystal-forge/TASK-141-themeable-web-ui-css-extraction
+
+Adjusted TopLayout user dropdown width by replacing `w-100` with `min-w-[240px]` in `packages/web-ui/src/components/layout/topbar.rs` so menu can grow wider than trigger width.
+
+Verification: `nix develop -c cargo check` (in `packages/web-ui`) passed; `nix develop -c cargo test` (in `packages/web-ui`) passed (36 passed, 0 failed, 1 ignored).
+
+Initial `nix develop -c cargo check -p web-ui` from repo root failed because no root Cargo.toml; reran from `packages/web-ui` successfully.
+
+User reported first width adjustment had no visible effect. Updated dropdown to use a standard utility plus inline style fallback (`w-64` and `min-width: 16rem`) in `packages/web-ui/src/components/layout/topbar.rs` to avoid CSS extraction misses for arbitrary utility classes.
+
+Re-verified build with `nix develop -c cargo check` in `packages/web-ui` (passes with existing unrelated warnings).
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->

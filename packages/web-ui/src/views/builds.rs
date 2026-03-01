@@ -1,9 +1,12 @@
 //! Builds control center view.
 
-use dioxus::prelude::*;
 use chrono::Utc;
+use dioxus::prelude::*;
 
-use crate::api::{self, models::{BuildStatus as ApiBuildStatus, BuilderStatus}};
+use crate::api::{
+    self,
+    models::{BuildStatus as ApiBuildStatus, BuilderStatus},
+};
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
@@ -56,10 +59,7 @@ pub fn BuildsView() -> Element {
                     .enumerate()
                     .map(|(idx, item)| {
                         let queued_for = if item.status == ApiBuildStatus::Building {
-                            format!(
-                                "running {}s",
-                                item.elapsed_secs.unwrap_or(0)
-                            )
+                            format!("running {}s", item.elapsed_secs.unwrap_or(0))
                         } else {
                             let ago = (Utc::now() - item.queued_at).num_seconds().max(0);
                             format!("queued {}s ago", ago)
@@ -87,10 +87,14 @@ pub fn BuildsView() -> Element {
                                 ApiBuildStatus::Complete => BuildStatus::Complete,
                                 ApiBuildStatus::Idle => BuildStatus::Queued,
                             },
-                            summary: item
-                                .commit_message
-                                .clone()
-                                .unwrap_or_else(|| format!("job {}", item.job_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".to_string()))),
+                            summary: item.commit_message.clone().unwrap_or_else(|| {
+                                format!(
+                                    "job {}",
+                                    item.job_id
+                                        .map(|id| id.to_string())
+                                        .unwrap_or_else(|| "unknown".to_string())
+                                )
+                            }),
                         }
                     })
                     .collect::<Vec<_>>();
@@ -131,8 +135,7 @@ pub fn BuildsView() -> Element {
                 div {
                     class: "flex flex-wrap items-center gap-2",
                     span {
-                        class: "inline-flex items-center px-2 py-1 text-xs rounded border text-emerald-100",
-                        style: "background-color: #1E3A2E; border-color: #2F6B4A;",
+                        class: "inline-flex items-center px-2 py-1 text-xs rounded border text-emerald-100 cf-worker-status-running",
                         span { class: "w-2 h-2 rounded-full bg-emerald-300 mr-2 animate-pulse", }
                         "Live"
                     }
@@ -165,8 +168,7 @@ pub fn BuildsView() -> Element {
 
             if let Some(note) = last_action_note.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
                     "{note}"
                 }
             }

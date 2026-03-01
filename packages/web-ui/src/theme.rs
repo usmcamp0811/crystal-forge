@@ -5,9 +5,9 @@
 //!
 //! # Color System
 //!
-//! All colors target a **dark theme** (gray-950 background, gray-100 text).
-//! Status/severity colors use Tailwind's palette at specific shades chosen
-//! for good contrast on dark backgrounds.
+//! Tailwind class fragments in this module provide stable semantic tokens.
+//! Shared CSS in `assets/app.css` provides theme-variable mappings for
+//! dark/light/custom themes where component-specific styling is required.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Health Status Colors
@@ -105,17 +105,17 @@ pub mod pipeline {
 /// Color tokens for page surfaces, cards, and borders.
 pub mod surface {
     /// Page background.
-    pub const PAGE_BG: &str = "bg-gray-950";
+    pub const PAGE_BG: &str = "cf-page-bg";
     /// Sidebar / elevated surface.
-    pub const SIDEBAR_BG: &str = "bg-gray-900";
+    pub const SIDEBAR_BG: &str = "cf-sidebar-bg";
     /// Card background.
-    pub const CARD_BG: &str = "bg-gray-900";
+    pub const CARD_BG: &str = "cf-card-bg";
     /// Card border.
-    pub const CARD_BORDER: &str = "border-gray-800";
+    pub const CARD_BORDER: &str = "cf-card-border";
     /// Divider lines.
-    pub const DIVIDER: &str = "divide-gray-800";
+    pub const DIVIDER: &str = "cf-divider";
     /// Subtle surface (table header, hover).
-    pub const SUBTLE_BG: &str = "bg-gray-800/50";
+    pub const SUBTLE_BG: &str = "cf-subtle-bg";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -125,13 +125,13 @@ pub mod surface {
 /// Color tokens for text hierarchy.
 pub mod text {
     /// Primary text — headings, important values.
-    pub const PRIMARY: &str = "text-gray-100";
+    pub const PRIMARY: &str = "cf-text-primary";
     /// Secondary text — labels, descriptions.
-    pub const SECONDARY: &str = "text-gray-400";
+    pub const SECONDARY: &str = "cf-text-secondary";
     /// Muted text — timestamps, version numbers.
-    pub const MUTED: &str = "text-gray-500";
+    pub const MUTED: &str = "cf-text-muted";
     /// Disabled text.
-    pub const DISABLED: &str = "text-gray-600";
+    pub const DISABLED: &str = "cf-text-disabled";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -147,15 +147,15 @@ pub mod interactive {
     /// Danger action button.
     pub const DANGER_BTN: &str = "cf-danger-btn";
     /// Success action button.
-    pub const SUCCESS_BTN: &str = "bg-emerald-600 hover:bg-emerald-700";
+    pub const SUCCESS_BTN: &str = "cf-success-btn";
     /// Ghost / subtle button.
-    pub const GHOST_BTN: &str = "hover:bg-gray-800";
+    pub const GHOST_BTN: &str = "cf-hover-bg";
     /// Hover background for interactive elements.
-    pub const HOVER_BG: &str = "hover:bg-gray-800/50";
+    pub const HOVER_BG: &str = "cf-hover-bg";
     /// Focus ring.
-    pub const FOCUS_RING: &str = "focus:outline-none focus:ring-2 focus:ring-blue-500/50";
+    pub const FOCUS_RING: &str = "cf-focus-ring";
     /// Input field.
-    pub const INPUT: &str = "bg-gray-900 border-gray-700 focus:border-blue-500";
+    pub const INPUT: &str = "cf-input";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -170,15 +170,15 @@ pub mod typography {
     /// Section title (h2).
     pub const SECTION_TITLE: &str = "text-lg font-semibold";
     /// Card label / stat label.
-    pub const LABEL: &str = "text-sm text-gray-400";
+    pub const LABEL: &str = "text-sm cf-text-secondary";
     /// Large numeric value (stat cards).
     pub const STAT_VALUE: &str = "text-3xl font-bold";
     /// Table header.
-    pub const TABLE_HEADER: &str = "text-xs font-medium text-gray-400 uppercase tracking-wider";
+    pub const TABLE_HEADER: &str = "text-xs font-medium cf-text-secondary uppercase tracking-wider";
     /// Monospace for hashes, paths, versions.
     pub const MONO: &str = "font-mono text-sm";
     /// Small caption text.
-    pub const CAPTION: &str = "text-xs text-gray-500";
+    pub const CAPTION: &str = "text-xs cf-text-muted";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -206,13 +206,12 @@ pub mod spacing {
 /// Pre-composed class strings for common component patterns.
 pub mod presets {
     /// Standard card container.
-    pub const CARD: &str = "bg-gray-900 border border-gray-800 rounded-xl p-6";
+    pub const CARD: &str = "cf-card-bg border cf-card-border rounded-xl p-6";
     /// Badge (pill) base.
     pub const BADGE: &str =
         "inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium";
     /// Status dot (small circle indicator).
     pub const DOT: &str = "w-2 h-2 rounded-full";
     /// Table container.
-    pub const TABLE_CONTAINER: &str =
-        "bg-gray-900 border border-gray-800 rounded-xl overflow-hidden";
+    pub const TABLE_CONTAINER: &str = "cf-card-bg border cf-card-border rounded-xl overflow-hidden";
 }

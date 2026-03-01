@@ -20,14 +20,13 @@ pub fn SidebarNav() -> Element {
             div {
                 class: "p-6 flex items-center gap-3",
                 img {
-                    class: "h-8 w-8",
-                    style: "transform: scale(1.67);",
+                    class: "h-8 w-8 cf-logo-scale",
                     src: asset!("assets/crystal-forge-icon.png"),
                     alt: "Crystal Forge"
                 }
                 div {
                     h1 {
-                        class: "text-xl font-bold text-white",
+                        class: "text-xl font-bold {theme::text::PRIMARY}",
                         "Crystal Forge"
                     }
                     p {
@@ -214,7 +213,7 @@ fn NavLink(to: Route, label: &'static str, icon: Element) -> Element {
     rsx! {
         Link {
             to,
-            class: "flex items-center gap-3 px-3 py-2 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition-colors",
+            class: "flex items-center gap-3 px-3 py-2 rounded-lg {theme::text::SECONDARY} {theme::interactive::HOVER_BG} cf-hover-text-primary transition-colors",
             {icon}
             span { "{label}" }
         }

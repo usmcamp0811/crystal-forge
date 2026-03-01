@@ -32,13 +32,11 @@ pub fn PolicyEditorModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6",
-            style: "position: fixed; inset: 0; z-index: 50; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6 cf-modal-overlay-z50",
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "{theme::surface::CARD_BG} border border-violet-500/30 rounded-2xl p-6 shadow-xl shadow-violet-900/20",
-                style: "width: 85vw; max-width: 64rem; display: flex; flex-direction: column; gap: 1.5rem;",
+                class: "{theme::surface::CARD_BG} border border-violet-500/30 rounded-2xl p-6 shadow-xl shadow-violet-900/20 cf-modal-panel-wide",
                 onclick: |evt| evt.stop_propagation(),
 
                 // Header

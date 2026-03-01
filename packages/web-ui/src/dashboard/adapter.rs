@@ -3,7 +3,7 @@ use chrono::{Duration, TimeZone, Utc};
 use crate::api::client::{ApiClientError, fetch_dashboard, fetch_dashboard_flake_timelines};
 use crate::api::models::{
     BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary, DeploymentStatus,
-    DeploymentStatusSummary, FleetHealthSummary, FlakeTimeline, RecentDeployment,
+    DeploymentStatusSummary, FlakeTimeline, FleetHealthSummary, RecentDeployment,
 };
 
 #[derive(Debug, Clone)]
@@ -140,9 +140,7 @@ pub async fn load_flake_timelines_with_fallback() -> FlakeTimelinesLoadResult {
             // Return empty instead of mock data
             FlakeTimelinesLoadResult {
                 timelines: vec![],
-                notice: Some(format!(
-                    "Flake timelines API unavailable: {error}"
-                )),
+                notice: Some(format!("Flake timelines API unavailable: {error}")),
                 redirect_to_login: false,
             }
         }

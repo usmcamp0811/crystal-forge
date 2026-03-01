@@ -4,9 +4,7 @@ use chrono::Duration;
 use dioxus::prelude::*;
 use std::collections::HashSet;
 
-use crate::api::models::{
-    BuildStatus, FlakeCommit, FlakeTimeline,
-};
+use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
 use crate::components::dashboard::{
     BuildQueuePanel, BuildSummaryPanel, CveSummaryPanel, DeploymentStatusBreakdown,
     FleetHealthBreakdown, RecentDeploymentsList,
@@ -414,16 +412,14 @@ pub fn DashboardView() -> Element {
             // Top stats row
             if *loading_dashboard.read() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
                     "Loading dashboard data..."
                 }
             }
 
             if let Some(message) = dashboard_notice.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
-                    style: "background-color: #493E26; border-color: #8C7041;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
             }
@@ -454,16 +450,14 @@ pub fn DashboardView() -> Element {
             // Flake Commit Timeline with multi-select filter
             if *loading_timelines.read() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100",
-                    style: "background-color: #23354B; border-color: #406084;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-blue-100 cf-chip-info",
                     "Loading flake timelines..."
                 }
             }
 
             if let Some(message) = timelines_notice.read().clone() {
                 p {
-                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
-                    style: "background-color: #493E26; border-color: #8C7041;",
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100 cf-chip-warning",
                     "{message}"
                 }
             }
@@ -495,11 +489,11 @@ pub fn DashboardView() -> Element {
             div {
                 class: "flex items-center justify-between",
                 h2 {
-                    class: "text-lg font-semibold text-white",
+                    class: "text-lg font-semibold {theme::text::PRIMARY}",
                     "Dashboard Widgets"
                 }
                 button {
-                    class: "px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg transition-colors",
+                    class: "px-3 py-1.5 text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::surface::SUBTLE_BG} border {theme::surface::CARD_BORDER} rounded-lg transition-colors",
                     onclick: move |_| {
                         widget_positions.set(default_widget_positions());
                     },

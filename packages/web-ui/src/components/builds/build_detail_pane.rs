@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_style, event_level_style, mock_artifacts, mock_events, mock_logs,
-    BuildAction, BuildItem, BuildStatus, PendingAction,
+    BuildAction, BuildItem, PendingAction, build_status_badge_class, event_level_class,
+    mock_artifacts, mock_events, mock_logs,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,11 +68,10 @@ pub fn BuildDetailPane(
                                 p { class: "text-xs text-gray-400", "{build.flake} · {build.branch} · {short_commit(&build.commit)}" }
                                 p { class: "text-xs text-gray-500 mt-1", "Queued by {build.started_by} · worker {build.worker_id}" }
                             }
-                            span {
-                                class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border",
-                                style: "{build_status_badge_style(build.status)}",
-                                "{build.status_label()}"
-                            }
+                                span {
+                                    class: "inline-flex px-2 py-1 text-[10px] uppercase rounded border {build_status_badge_class(build.status)}",
+                                    "{build.status_label()}"
+                                }
                         }
                     }
 
@@ -138,8 +137,7 @@ pub fn BuildDetailPane(
                                         class: "flex items-center justify-between gap-2",
                                         p { class: "text-xs text-gray-400", "{event.ts}" }
                                         span {
-                                            class: "text-[10px] uppercase px-2 py-1 rounded border",
-                                            style: "{event_level_style(event.level)}",
+                                            class: "text-[10px] uppercase px-2 py-1 rounded border {event_level_class(event.level)}",
                                             "{event.level}"
                                         }
                                     }
@@ -196,11 +194,7 @@ fn TogglePill(label: &'static str, value: Signal<bool>) -> Element {
     rsx! {
         button {
             class: "text-xs rounded border px-2 py-1 transition",
-            style: if *value.read() {
-                "background-color: #253449; border-color: #3E5B82; color: #E2EBF7;"
-            } else {
-                "background-color: #212733; border-color: #394557; color: #9CA3AF;"
-            },
+            class: if *value.read() { "cf-toggle-active" } else { "cf-toggle-inactive" },
             onclick: move |_| {
                 let next = !*value.read();
                 value.set(next);
@@ -233,12 +227,10 @@ pub fn ConfirmActionModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4",
-            style: "position: fixed; inset: 0; z-index: 60; width: 100vw; height: 100vh; backdrop-filter: blur(6px);",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
             onclick: move |_| on_cancel.call(()),
             div {
-                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6",
-                style: "width: 100%; max-width: 30rem;",
+                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-30",
                 onclick: |evt| evt.stop_propagation(),
                 h3 { class: "text-lg font-semibold text-white mb-2", "{title}" }
                 p { class: "text-sm {theme::text::SECONDARY} mb-6", "{description}" }

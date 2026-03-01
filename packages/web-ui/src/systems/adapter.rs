@@ -20,8 +20,8 @@ use crate::api::client::{
     update_system_public_key,
 };
 use crate::api::models::{
-    CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PipelineStage,
-    PaginatedResponse, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
+    CreateSystemRequest, CveSummary, DeploymentStatus, HealthStatus, PaginatedResponse,
+    PipelineStage, SystemDetail, SystemHardwareInfo, SystemNetworkInfo, SystemSecurityInfo,
     SystemSummary, SystemsListParams, UpdateSystemPublicKeyRequest,
 };
 use crate::views::systems_mock::mock_system_detail_by_id;
@@ -178,9 +178,9 @@ pub async fn create_system_via_api(
 
     match create_system(&request).await {
         Ok(detail) => Ok(detail),
-        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
-            Err("Authentication required. Please log in.".to_string())
-        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
@@ -198,9 +198,9 @@ pub async fn update_system_public_key_via_api(
 
     match update_system_public_key(&system_id, &request).await {
         Ok(response) => Ok(response.message),
-        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
-            Err("Authentication required. Please log in.".to_string())
-        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
@@ -211,9 +211,9 @@ pub async fn update_system_public_key_via_api(
 pub async fn deactivate_system_via_api(system_id: Uuid) -> Result<String, String> {
     match deactivate_system(&system_id).await {
         Ok(response) => Ok(response.message),
-        Err(ApiClientError::Status { code: 401 | 403, .. }) => {
-            Err("Authentication required. Please log in.".to_string())
-        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => Err("Authentication required. Please log in.".to_string()),
         Err(ApiClientError::Status { body, .. }) => Err(body),
         Err(ApiClientError::Network(msg)) => Err(format!("Network error: {}", msg)),
         Err(ApiClientError::Deserialize(msg)) => Err(format!("Invalid response: {}", msg)),
@@ -238,7 +238,12 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             health_status: HealthStatus::Healthy,
             deployment_status: DeploymentStatus::UpToDate,
             pipeline_stage: Some(PipelineStage::BuildComplete),
-            cve_counts: CveSummary { critical: 0, high: 2, medium: 5, low: 12 },
+            cve_counts: CveSummary {
+                critical: 0,
+                high: 2,
+                medium: 5,
+                low: 12,
+            },
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::minutes(5)),
             deployment_policy: "auto_latest".to_string(),
@@ -251,7 +256,12 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             health_status: HealthStatus::Healthy,
             deployment_status: DeploymentStatus::Behind,
             pipeline_stage: Some(PipelineStage::ReadyForDeploy),
-            cve_counts: CveSummary { critical: 1, high: 3, medium: 8, low: 15 },
+            cve_counts: CveSummary {
+                critical: 1,
+                high: 3,
+                medium: 8,
+                low: 15,
+            },
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::minutes(10)),
             deployment_policy: "manual".to_string(),
@@ -264,7 +274,12 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             health_status: HealthStatus::Warning,
             deployment_status: DeploymentStatus::Behind,
             pipeline_stage: Some(PipelineStage::ReadyForDeploy),
-            cve_counts: CveSummary { critical: 0, high: 0, medium: 2, low: 5 },
+            cve_counts: CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 2,
+                low: 5,
+            },
             nixos_version: Some("24.11".to_string()),
             last_seen: Some(now - Duration::hours(1)),
             deployment_policy: "manual".to_string(),
@@ -277,7 +292,12 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             health_status: HealthStatus::Offline,
             deployment_status: DeploymentStatus::NeverDeployed,
             pipeline_stage: Some(PipelineStage::ReadyForBuild),
-            cve_counts: CveSummary { critical: 0, high: 0, medium: 0, low: 0 },
+            cve_counts: CveSummary {
+                critical: 0,
+                high: 0,
+                medium: 0,
+                low: 0,
+            },
             nixos_version: None,
             last_seen: Some(now - Duration::days(3)),
             deployment_policy: "manual".to_string(),
@@ -328,7 +348,12 @@ pub fn fallback_system_detail() -> SystemDetail {
             fips_mode: None,
             selinux_status: None,
         },
-        cve_counts: CveSummary { critical: 0, high: 0, medium: 0, low: 0 },
+        cve_counts: CveSummary {
+            critical: 0,
+            high: 0,
+            medium: 0,
+            low: 0,
+        },
         flake: None,
         last_seen: None,
         created_at: now,
@@ -343,7 +368,10 @@ pub fn fallback_system_detail() -> SystemDetail {
 fn should_redirect_to_login(error: &ApiClientError) -> bool {
     matches!(
         error,
-        ApiClientError::Status { code: 401 | 403, .. }
+        ApiClientError::Status {
+            code: 401 | 403,
+            ..
+        }
     )
 }
 
