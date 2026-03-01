@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-04 20:15'
-updated_date: '2026-03-01 14:48'
+updated_date: '2026-03-01 14:57'
 labels:
   - refactoring
   - architecture
@@ -45,4 +45,6 @@ Implementation complete - builder/mod.rs refactored into focused submodules. All
 MR created: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/145
 
 MR updated to target dev branch: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/146 (closed incorrect MR !145 that targeted main)
+
+CI Failure Investigation: The builder check failed due to a pre-existing flaky test in handlers/api/auth_whoami.rs (detect_auth_mode_recognizes_dev). This test was NOT modified by our refactoring - we only touched builder/* files. The test has environment variable isolation issues.
 <!-- SECTION:NOTES:END -->
