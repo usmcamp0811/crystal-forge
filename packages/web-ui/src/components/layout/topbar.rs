@@ -83,11 +83,11 @@ pub fn TopBar(title: String) -> Element {
                             }
                         }
 
-                        // Dropdown menu
+                        // Dropdown menu - shift left with transform to stay in viewport
                         if show_user_menu() {
                             div {
                                 "data-testid": "user-menu-dropdown",
-                                style: "margin-right: -1rem;",
+                                style: "transform: translateX(-1rem);",
                                 class: "absolute right-0 mt-2 w-56 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
 
                                 // User info section
