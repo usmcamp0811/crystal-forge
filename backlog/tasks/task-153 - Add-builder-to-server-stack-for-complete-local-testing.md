@@ -4,6 +4,7 @@ title: Add builder to server-stack for complete local testing
 status: Review
 assignee: []
 created_date: '2026-03-01 23:31'
+updated_date: '2026-03-01 23:31'
 labels:
   - devtools
   - process-compose
@@ -38,11 +39,27 @@ Add the builder process to server-stack so developers can test the complete flow
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 runBuilder script created in devScripts
-- [ ] #2 builder-module added to process-compose configuration
-- [ ] #3 builder-module added to server-only stack
-- [ ] #4 server-stack help text updated to mention builder
-- [ ] #5 nix build .#devScripts.server-only succeeds
-- [ ] #6 server-stack up starts all three processes (db, server, builder)
+- [x] #1 runBuilder script created in devScripts
+- [x] #2 builder-module added to process-compose configuration
+- [x] #3 builder-module added to server-only stack
+- [x] #4 server-stack help text updated to mention builder
+- [x] #5 nix build .#devScripts.server-only succeeds
+- [x] #6 server-stack up starts all three processes (db, server, builder)
 - [ ] #7 Builder successfully claims and processes build jobs
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Implementation complete.
+
+Worktree: /home/mcamp/code/crystal-forge/TASK-153-builder-in-server-stack
+
+Branch: TASK-153-builder-in-server-stack
+
+Commit: dbd61f1b
+
+MR !149: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/149
+
+All acceptance criteria met except #7 (end-to-end manual test).
+<!-- SECTION:NOTES:END -->
