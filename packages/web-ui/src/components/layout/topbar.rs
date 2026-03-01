@@ -41,17 +41,6 @@ pub fn TopBar(title: String) -> Element {
             div {
                 class: "flex items-center gap-4",
 
-                // Search (hidden on small screens)
-                button {
-                    class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-700 text-xs font-medium text-gray-200 hover:bg-gray-700/70 transition-colors",
-                    onclick: move |_| {
-                        let next = ui_theme().toggle();
-                        ui_theme.set(next);
-                    },
-                    span { class: "text-gray-400", "Theme" }
-                    span { class: "text-white", "{ui_theme().label()}" }
-                }
-
                 div {
                     class: "hidden md:block",
                     input {
@@ -134,6 +123,71 @@ pub fn TopBar(title: String) -> Element {
                                 // Menu items
                                 div {
                                     class: "py-2",
+
+                                    button {
+                                        class: "w-full text-left px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors",
+                                        onclick: move |_| {
+                                            let next = ui_theme().toggle();
+                                            ui_theme.set(next);
+                                        },
+                                        div {
+                                            class: "flex items-center justify-between gap-3",
+                                            div {
+                                                class: "flex items-center gap-2",
+                                                if ui_theme() == UiTheme::Dark {
+                                                    svg {
+                                                        class: "w-4 h-4",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        view_box: "0 0 24 24",
+                                                        path {
+                                                            stroke_linecap: "round",
+                                                            stroke_linejoin: "round",
+                                                            stroke_width: "2",
+                                                            d: "M21 12.79A9 9 0 1111.21 3a7 7 0 009.79 9.79z"
+                                                        }
+                                                    }
+                                                } else {
+                                                    svg {
+                                                        class: "w-4 h-4",
+                                                        fill: "none",
+                                                        stroke: "currentColor",
+                                                        view_box: "0 0 24 24",
+                                                        path {
+                                                            stroke_linecap: "round",
+                                                            stroke_linejoin: "round",
+                                                            stroke_width: "2",
+                                                            d: "M12 3v2m0 14v2m9-9h-2M5 12H3m15.364 6.364l-1.414-1.414M7.05 7.05 5.636 5.636m12.728 0-1.414 1.414M7.05 16.95l-1.414 1.414M12 8a4 4 0 100 8 4 4 0 000-8z"
+                                                        }
+                                                    }
+                                                }
+                                                span { "Appearance" }
+                                            }
+                                            div {
+                                                class: "inline-flex items-center gap-2",
+                                                span {
+                                                    class: "text-xs {theme::text::SECONDARY}",
+                                                    "{ui_theme().label()}"
+                                                }
+                                                div {
+                                                    class: "relative inline-flex h-5 w-10 items-center rounded-full transition-colors",
+                                                    class: if ui_theme() == UiTheme::Dark {
+                                                        "bg-violet-600"
+                                                    } else {
+                                                        "bg-amber-400"
+                                                    },
+                                                    span {
+                                                        class: "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                                                        class: if ui_theme() == UiTheme::Dark {
+                                                            "translate-x-5"
+                                                        } else {
+                                                            "translate-x-1"
+                                                        },
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
 
                                     button {
                                         class: "w-full text-left px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors",
