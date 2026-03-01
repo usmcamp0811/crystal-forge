@@ -87,16 +87,9 @@ pub async fn create_builder(
     // Get environment IDs for response
     let assigned_environment_ids = request.environment_ids.clone();
     
-    // If keypair was generated server-side, private_key will be Some(...)
-    // This is returned ONCE and never stored
-    let private_key = private_key_option.unwrap_or_else(|| {
-        // Client provided public key - no private key to return
-        "".to_string()
-    });
-
     Ok(Json(BuilderCreatedResponse {
         builder,
-        private_key,
+        private_key: private_key_option,
         assigned_environment_ids,
     }))
 }
@@ -382,7 +375,7 @@ pub async fn get_next_job(
     body: Bytes,
 ) -> Result<Json<NextJobResponse>, StatusCode> {
     // Authenticate builder request with replay resistance
-    let path = format!("/api/v1/builders/{}/jobs/next", builder_id);
+    let path = format!("/api/v1/builders/{}/next-job", builder_id);
     let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
 
     // Verify the builder_id matches

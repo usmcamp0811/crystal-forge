@@ -28,6 +28,18 @@ pub struct VerifiedBuilderRequest {
     pub body: Bytes,
 }
 
+fn canonical_signature_payload(method: &str, path: &str, timestamp: &str, body: &[u8]) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(method.len() + path.len() + timestamp.len() + body.len() + 3);
+    payload.extend_from_slice(method.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(path.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(timestamp.as_bytes());
+    payload.push(b'\n');
+    payload.extend_from_slice(body);
+    payload
+}
+
 /// Trait for looking up builders by ID.
 ///
 /// This abstraction enables testing the authentication logic without a real database.
@@ -182,16 +194,16 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Construct signed payload: method\npath\ntimestamp\nbody
-    // This binds the signature to specific endpoint and prevents replay across endpoints
-    let body_str = std::str::from_utf8(&body).unwrap_or("");
-    let signed_payload = format!("{}\n{}\n{}\n{}", method, path, timestamp_str, body_str);
+    // Construct signed payload: method\npath\ntimestamp\nraw-body-bytes.
+    // This binds the signature to specific endpoint and prevents replay across endpoints,
+    // and avoids UTF-8 conversion ambiguity by signing exact bytes.
+    let signed_payload = canonical_signature_payload(method, path, timestamp_str, &body);
 
     // Verify the signature against the full signed payload
     if builder
         .public_key
         .verifying_key()
-        .verify(signed_payload.as_bytes(), &signature)
+        .verify(&signed_payload, &signature)
         .is_err()
     {
         warn!(
@@ -285,8 +297,8 @@ mod tests {
         // Create signature payload: {method}\n{path}\n{timestamp}\n{body}
         let method = "POST";
         let path = "/api/v1/test";
-        let signature_payload = format!("{}\n{}\n{}\n{}", method, path, timestamp, String::from_utf8_lossy(&body));
-        let signature = signing_key.sign(signature_payload.as_bytes());
+        let signature_payload = canonical_signature_payload(method, path, &timestamp, &body);
+        let signature = signing_key.sign(&signature_payload);
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         // Create headers
@@ -341,8 +353,8 @@ mod tests {
         let timestamp = chrono::Utc::now().to_rfc3339();
         let method = "POST";
         let path = "/api/v1/test";
-        let signature_payload = format!("{}\n{}\n{}\n{}", method, path, timestamp, String::from_utf8_lossy(&body));
-        let signature = signing_key.sign(signature_payload.as_bytes());
+        let signature_payload = canonical_signature_payload(method, path, &timestamp, &body);
+        let signature = signing_key.sign(&signature_payload);
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         let mut headers = HeaderMap::new();
@@ -398,11 +410,11 @@ mod tests {
         let timestamp = chrono::Utc::now().to_rfc3339();
         let method = "POST";
         let path = "/api/v1/test";
-        let signature_payload = format!("{}\n{}\n{}\n{}", method, path, timestamp, String::from_utf8_lossy(&body));
+        let signature_payload = canonical_signature_payload(method, path, &timestamp, &body);
 
         // Use a different key to sign (wrong signature)
         let wrong_signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let signature = wrong_signing_key.sign(signature_payload.as_bytes());
+        let signature = wrong_signing_key.sign(&signature_payload);
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         let mut headers = HeaderMap::new();

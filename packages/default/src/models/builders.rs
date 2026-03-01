@@ -241,7 +241,7 @@ pub struct BuilderCreatedResponse {
     pub builder: Builder,
     /// Base64-encoded Ed25519 private key (64 bytes)
     /// This is shown ONLY ONCE at creation time and NEVER stored server-side
-    pub private_key: String,
+    pub private_key: Option<String>,
     pub assigned_environment_ids: Vec<Uuid>,
 }
 

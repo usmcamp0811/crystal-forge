@@ -2,6 +2,7 @@ use crate::config::BuilderConfig;
 use crate::models::builders::{BuildJob, ReportMetricsRequest};
 use anyhow::{Context, Result};
 use base64::Engine;
+use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -58,13 +59,28 @@ impl BuilderApiClient {
         Ok(SigningKey::from_bytes(&key_bytes))
     }
     
-    /// Sign a request body and return signature headers
-    fn sign_request(&self, body: &[u8]) -> (String, String) {
-        let signature: Signature = self.signing_key.sign(body);
+    fn canonical_signature_payload(method: &str, path: &str, timestamp: &str, body: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(method.len() + path.len() + timestamp.len() + body.len() + 3);
+        payload.extend_from_slice(method.as_bytes());
+        payload.push(b'\n');
+        payload.extend_from_slice(path.as_bytes());
+        payload.push(b'\n');
+        payload.extend_from_slice(timestamp.as_bytes());
+        payload.push(b'\n');
+        payload.extend_from_slice(body);
+        payload
+    }
+
+    /// Sign canonical builder API payload and return auth headers values.
+    fn sign_request(&self, method: &str, path: &str, body: &[u8]) -> (String, String, String) {
+        let timestamp = Utc::now().to_rfc3339();
+        let payload = Self::canonical_signature_payload(method, path, &timestamp, body);
+        let signature: Signature = self.signing_key.sign(&payload);
 
         (
             self.builder_id.to_string(),
             base64::engine::general_purpose::STANDARD.encode(signature.to_bytes()),
+            timestamp,
         )
     }
 
@@ -75,18 +91,20 @@ impl BuilderApiClient {
     
     /// Send heartbeat and metrics to server
     pub async fn send_heartbeat(&self, metrics: &ReportMetricsRequest) -> Result<()> {
+        let path = format!("/api/v1/builders/{}/heartbeat", self.builder_id);
         let url = format!(
-            "{}/api/v1/builders/{}/heartbeat",
-            self.server_url, self.builder_id
+            "{}{}",
+            self.server_url, path
         );
         let body = serde_json::to_vec(metrics)?;
-        let (builder_id, signature) = self.sign_request(&body);
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
         
         let response = self.client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
             .body(body)
             .send()
             .await
@@ -104,17 +122,19 @@ impl BuilderApiClient {
     
     /// Get the next available job from the server
     pub async fn get_next_job(&self) -> Result<Option<BuildJob>> {
+        let path = format!("/api/v1/builders/{}/next-job", self.builder_id);
         let url = format!(
-            "{}/api/v1/builders/{}/next-job",
-            self.server_url, self.builder_id
+            "{}{}",
+            self.server_url, path
         );
         let body = Vec::new(); // Empty body for GET
-        let (builder_id, signature) = self.sign_request(&body);
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &body);
         
         let response = self.client
             .get(&url)
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
             .send()
             .await
             .context("Failed to request next job")?;
@@ -138,17 +158,19 @@ impl BuilderApiClient {
     
     /// Start a job (mark it as in-progress)
     pub async fn start_job(&self, job_id: uuid::Uuid) -> Result<()> {
+        let path = format!("/api/v1/builders/{}/jobs/{}/start", self.builder_id, job_id);
         let url = format!(
-            "{}/api/v1/builders/{}/jobs/{}/start",
-            self.server_url, self.builder_id, job_id
+            "{}{}",
+            self.server_url, path
         );
         let body = Vec::new();
-        let (builder_id, signature) = self.sign_request(&body);
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
         
         let response = self.client
             .post(&url)
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
             .send()
             .await
             .context("Failed to start job")?;
@@ -170,21 +192,23 @@ impl BuilderApiClient {
             output_path: String,
         }
         
+        let path = format!("/api/v1/builders/{}/jobs/{}/complete", self.builder_id, job_id);
         let url = format!(
-            "{}/api/v1/builders/{}/jobs/{}/complete",
-            self.server_url, self.builder_id, job_id
+            "{}{}",
+            self.server_url, path
         );
         let request = CompleteRequest {
             output_path: output_path.to_string(),
         };
         let body = serde_json::to_vec(&request)?;
-        let (builder_id, signature) = self.sign_request(&body);
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
         
         let response = self.client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
             .body(body)
             .send()
             .await
@@ -207,21 +231,23 @@ impl BuilderApiClient {
             error_message: String,
         }
         
+        let path = format!("/api/v1/builders/{}/jobs/{}/fail", self.builder_id, job_id);
         let url = format!(
-            "{}/api/v1/builders/{}/jobs/{}/fail",
-            self.server_url, self.builder_id, job_id
+            "{}{}",
+            self.server_url, path
         );
         let request = FailRequest {
             error_message: error_message.to_string(),
         };
         let body = serde_json::to_vec(&request)?;
-        let (builder_id, signature) = self.sign_request(&body);
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
         
         let response = self.client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
             .body(body)
             .send()
             .await
@@ -244,21 +270,23 @@ impl BuilderApiClient {
             logs: String,
         }
         
+        let path = format!("/api/v1/builders/{}/jobs/{}/logs", self.builder_id, job_id);
         let url = format!(
-            "{}/api/v1/builders/{}/jobs/{}/logs",
-            self.server_url, self.builder_id, job_id
+            "{}{}",
+            self.server_url, path
         );
         let request = LogRequest {
             logs: log_lines.to_string(),
         };
         let body = serde_json::to_vec(&request)?;
-        let (builder_id, signature) = self.sign_request(&body);
+        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
         
         let response = self.client
             .post(&url)
             .header("Content-Type", "application/json")
             .header("X-Builder-ID", builder_id)
             .header("X-Signature", signature)
+            .header("X-Timestamp", timestamp)
             .body(body)
             .send()
             .await
@@ -318,9 +346,10 @@ mod tests {
         };
         
         let body = b"test request body";
-        let (id, sig) = client.sign_request(body);
+        let (id, sig, ts) = client.sign_request("POST", "/api/v1/test", body);
         
         assert_eq!(id, builder_id.to_string());
         assert_eq!(sig.len(), 88); // 64 bytes Ed25519 signature as base64
+        assert!(!ts.is_empty());
     }
 }
