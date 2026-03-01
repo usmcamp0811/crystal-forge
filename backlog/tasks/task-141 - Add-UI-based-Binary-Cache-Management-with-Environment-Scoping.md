@@ -4,7 +4,7 @@ title: Add UI-based Binary Cache Management with Environment Scoping
 status: In Progress
 assignee: []
 created_date: '2026-03-01 14:01'
-updated_date: '2026-03-01 18:50'
+updated_date: '2026-03-01 18:52'
 labels:
   - backend
   - builder
@@ -314,6 +314,10 @@ Adjusted TopLayout user dropdown width by replacing `w-100` with `min-w-[240px]`
 Verification: `nix develop -c cargo check` (in `packages/web-ui`) passed; `nix develop -c cargo test` (in `packages/web-ui`) passed (36 passed, 0 failed, 1 ignored).
 
 Initial `nix develop -c cargo check -p web-ui` from repo root failed because no root Cargo.toml; reran from `packages/web-ui` successfully.
+
+User reported first width adjustment had no visible effect. Updated dropdown to use a standard utility plus inline style fallback (`w-64` and `min-width: 16rem`) in `packages/web-ui/src/components/layout/topbar.rs` to avoid CSS extraction misses for arbitrary utility classes.
+
+Re-verified build with `nix develop -c cargo check` in `packages/web-ui` (passes with existing unrelated warnings).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
