@@ -87,7 +87,7 @@ pub fn TopBar(title: String) -> Element {
                         if show_user_menu() {
                             div {
                                 "data-testid": "user-menu-dropdown",
-                                class: "absolute right-0 mt-2 w-64 max-w-[calc(100vw-1rem)] {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
+                                class: "absolute right-0 mt-2 w-56 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
 
                                 // User info section
                                 div {
@@ -131,7 +131,7 @@ pub fn TopBar(title: String) -> Element {
                                             ui_theme.set(next);
                                         },
                                         div {
-                                            class: "flex items-center justify-between gap-3",
+                                            class: "flex items-center justify-between gap-2",
                                             div {
                                                 class: "flex items-center gap-2 min-w-0",
                                                 if ui_theme() == UiTheme::Dark {
@@ -164,25 +164,12 @@ pub fn TopBar(title: String) -> Element {
                                                 span { class: "truncate", "Appearance" }
                                             }
                                             div {
-                                                class: "inline-flex items-center gap-2 shrink-0",
-                                                span {
-                                                    class: "text-xs {theme::text::SECONDARY}",
-                                                    "{ui_theme().label()}"
-                                                }
+                                                class: "inline-flex items-center shrink-0",
                                                 div {
-                                                    class: "relative inline-flex h-5 w-10 items-center rounded-full transition-colors",
-                                                    class: if ui_theme() == UiTheme::Dark {
-                                                        "bg-violet-600"
-                                                    } else {
-                                                        "bg-amber-400"
-                                                    },
+                                                    class: "inline-flex h-5 w-9 items-center rounded-full p-0.5 transition-colors",
+                                                    class: if ui_theme() == UiTheme::Dark { "bg-violet-600 justify-end" } else { "bg-amber-400 justify-start" },
                                                     span {
-                                                        class: "absolute h-4 w-4 rounded-full bg-white transition-all",
-                                                        class: if ui_theme() == UiTheme::Dark {
-                                                            "left-[1.125rem]"
-                                                        } else {
-                                                            "left-0.5"
-                                                        },
+                                                        class: "h-4 w-4 rounded-full bg-white",
                                                     }
                                                 }
                                             }
