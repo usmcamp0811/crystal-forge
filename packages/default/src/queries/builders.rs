@@ -3,6 +3,9 @@
 use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use uuid::Uuid;
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use rand::rngs::OsRng;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 use crate::models::builders::{
     BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus,
@@ -11,14 +14,51 @@ use crate::models::builders::{
 };
 use crate::models::public_key::PublicKey;
 
-/// Create a new builder
+/// Generate a cryptographically correct Ed25519 keypair
+/// Returns (public_key_base64, private_key_base64)
+/// 
+/// SECURITY: Public key is derived from private key (not generated independently)
+pub fn generate_ed25519_keypair() -> Result<(String, String)> {
+    // Generate signing (private) key from secure random source
+    let signing_key = SigningKey::generate(&mut OsRng);
+    
+    // CRITICAL: Derive verifying (public) key from signing key
+    // This ensures cryptographic correspondence between private and public keys
+    let verifying_key: VerifyingKey = signing_key.verifying_key();
+    
+    // Encode to base64 for storage/transport
+    let public_key_base64 = BASE64.encode(verifying_key.as_bytes());
+    let private_key_base64 = BASE64.encode(signing_key.to_bytes());
+    
+    Ok((public_key_base64, private_key_base64))
+}
+
+/// Create a new builder (returns builder and optionally generated private key)
+/// 
+/// If `public_key` is provided in request, it is validated and used.
+/// If `public_key` is None, a proper Ed25519 keypair is generated server-side.
+/// 
+/// Returns: (Builder, Option<private_key_base64>)
+/// - private_key is Some(...) only when generated server-side
+/// - private_key is returned ONCE and never stored
 pub async fn create_builder(
     pool: &PgPool,
     request: &CreateBuilderRequest,
-) -> Result<Builder> {
-    // Parse and validate the public key
-    let public_key = PublicKey::from_base64(&request.public_key, &request.name)
-        .context("Invalid public key format")?;
+) -> Result<(Builder, Option<String>)> {
+    let (public_key_str, private_key_option) = match &request.public_key {
+        Some(pk) => {
+            // Client provided public key - validate it
+            let public_key = PublicKey::from_base64(pk, &request.name)
+                .context("Invalid public key format")?;
+            (public_key.to_base64(), None)
+        }
+        None => {
+            // No public key provided - generate proper Ed25519 keypair server-side
+            let (public_key_base64, private_key_base64) = generate_ed25519_keypair()
+                .context("Failed to generate Ed25519 keypair")?;
+            (public_key_base64, Some(private_key_base64))
+        }
+    };
 
     let max_concurrent_jobs = request.max_concurrent_jobs.unwrap_or(1);
 
@@ -30,7 +70,7 @@ pub async fn create_builder(
         "#
     )
     .bind(&request.name)
-    .bind(public_key.to_base64())
+    .bind(public_key_str)
     .bind(request.max_cpu_cores)
     .bind(request.max_memory_mb)
     .bind(max_concurrent_jobs)
@@ -45,7 +85,7 @@ pub async fn create_builder(
         }
     }
 
-    Ok(builder)
+    Ok((builder, private_key_option))
 }
 
 /// Get a builder by ID

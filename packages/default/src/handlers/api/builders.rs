@@ -21,8 +21,8 @@ use crate::handlers::builder_request::{
     VerifiedBuilderRequest,
 };
 use crate::models::builders::{
-    AppendLogsRequest, Builder, BuilderMetrics, BuilderSummary, BuilderWithEnvironments,
-    CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderEnvironmentsRequest,
+    AppendLogsRequest, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary, 
+    BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderEnvironmentsRequest,
     UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
 };
 use crate::queries::builders;
@@ -32,22 +32,41 @@ use crate::queries::builders;
 // =============================================================================
 
 /// POST /api/v1/builders - Create a new builder (admin-only)
+/// 
+/// If `public_key` is not provided in request, server generates a proper Ed25519 keypair.
+/// Response includes the private key ONLY if generated server-side.
+/// 
+/// WARNING: Save the private key immediately - it's shown only once!
 pub async fn create_builder(
     State(state): State<CFState>,
     headers: axum::http::HeaderMap,
     Json(request): Json<CreateBuilderRequest>,
-) -> Result<Json<Builder>, StatusCode> {
+) -> Result<Json<BuilderCreatedResponse>, StatusCode> {
     // Verify admin authorization
     let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
         return Err(StatusCode::FORBIDDEN);
     };
 
-    // Create builder
-    let builder = builders::create_builder(&state.pool, &request)
+    // Create builder (may generate keypair server-side)
+    let (builder, private_key_option) = builders::create_builder(&state.pool, &request)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    
+    // Get environment IDs for response
+    let assigned_environment_ids = request.environment_ids.clone();
+    
+    // If keypair was generated server-side, private_key will be Some(...)
+    // This is returned ONCE and never stored
+    let private_key = private_key_option.unwrap_or_else(|| {
+        // Client provided public key - no private key to return
+        "".to_string()
+    });
 
-    Ok(Json(builder))
+    Ok(Json(BuilderCreatedResponse {
+        builder,
+        private_key,
+        assigned_environment_ids,
+    }))
 }
 
 /// GET /api/v1/builders - List all builders (admin-only)

@@ -99,7 +99,9 @@ pub struct BuilderEnvironmentAssignment {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CreateBuilderRequest {
     pub name: String,
-    pub public_key: String, // base64-encoded Ed25519 public key
+    /// Optional base64-encoded Ed25519 public key
+    /// If not provided, server will generate a proper Ed25519 keypair
+    pub public_key: Option<String>,
     pub max_cpu_cores: Option<i32>,
     pub max_memory_mb: Option<i32>,
     pub max_concurrent_jobs: Option<i32>,
@@ -230,4 +232,26 @@ pub struct BuildJob {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AppendLogsRequest {
     pub logs: String,
+}
+
+/// Response for builder creation with generated keypair
+/// WARNING: private_key is returned ONLY ONCE and never stored
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BuilderCreatedResponse {
+    pub builder: Builder,
+    /// Base64-encoded Ed25519 private key (64 bytes)
+    /// This is shown ONLY ONCE at creation time and NEVER stored server-side
+    pub private_key: String,
+    pub assigned_environment_ids: Vec<Uuid>,
+}
+
+/// Response for keypair regeneration
+/// WARNING: private_key is returned ONLY ONCE and never stored
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KeypairRegeneratedResponse {
+    /// Base64-encoded Ed25519 public key (32 bytes)
+    pub public_key: String,
+    /// Base64-encoded Ed25519 private key (64 bytes)
+    /// This is shown ONLY ONCE at creation time and NEVER stored server-side
+    pub private_key: String,
 }
