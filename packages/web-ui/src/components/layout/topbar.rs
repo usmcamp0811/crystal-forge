@@ -87,7 +87,7 @@ pub fn TopBar(title: String) -> Element {
                         if show_user_menu() {
                             div {
                                 "data-testid": "user-menu-dropdown",
-                                class: "absolute right-0 mt-2 w-56 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
+                                class: "absolute right-0 mt-2 w-56 overflow-hidden {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
 
                                 // User info section
                                 div {
@@ -101,7 +101,7 @@ pub fn TopBar(title: String) -> Element {
                                     if let Some(ctx) = &auth_context {
                                         if let Some(user) = &ctx.user {
                                             p {
-                                                class: "{theme::text::SECONDARY} text-xs",
+                                                class: "{theme::text::SECONDARY} text-xs break-all",
                                                 "{user.email}"
                                             }
                                         }
@@ -131,7 +131,7 @@ pub fn TopBar(title: String) -> Element {
                                             ui_theme.set(next);
                                         },
                                         div {
-                                            class: "flex items-center justify-between gap-2",
+                                            class: "flex items-center justify-between gap-2 overflow-hidden",
                                             div {
                                                 class: "flex items-center gap-2 min-w-0",
                                                 if ui_theme() == UiTheme::Dark {
