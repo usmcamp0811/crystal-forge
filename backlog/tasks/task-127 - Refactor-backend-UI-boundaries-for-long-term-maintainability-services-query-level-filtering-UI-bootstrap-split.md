@@ -3,10 +3,10 @@ id: TASK-127
 title: >-
   Refactor backend/UI boundaries for long-term maintainability (services +
   query-level filtering + UI bootstrap split)
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-24 13:46'
-updated_date: '2026-03-01 13:53'
+updated_date: '2026-03-01 13:55'
 labels: []
 dependencies: []
 priority: high
