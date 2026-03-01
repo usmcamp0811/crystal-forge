@@ -9,7 +9,7 @@ use tracing::{debug, info, warn};
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
-const NIX_CONFIG_EVAL_TIMEOUT: Duration = Duration::from_secs(20);
+const NIX_CONFIG_EVAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct GitCommitMetadata {
@@ -550,13 +550,25 @@ pub async fn get_commit_metadata(
 /// Resolve `nixosConfigurations` names for specific commit hashes.
 ///
 /// Best effort: commits that fail to evaluate are skipped.
+/// Processes commits sequentially to avoid overwhelming nix eval.
 pub async fn get_commit_nixos_configurations(
     repo_url: &str,
     commit_hashes: &[String],
 ) -> HashMap<String, Vec<String>> {
     let mut results = HashMap::new();
 
-    for hash in commit_hashes {
+    // Limit to first 5 commits to avoid timeout cascade
+    let limited_hashes = if commit_hashes.len() > 5 {
+        warn!(
+            "Limiting nixosConfigurations hydration to 5 commits (requested {})",
+            commit_hashes.len()
+        );
+        &commit_hashes[..5]
+    } else {
+        commit_hashes
+    };
+
+    for hash in limited_hashes {
         match load_commit_nixos_configurations(repo_url, hash).await {
             Ok(configs) => {
                 results.insert(hash.clone(), configs);
