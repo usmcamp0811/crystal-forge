@@ -3,10 +3,10 @@ use crate::models::commits::Commit;
 use crate::queries::commits::{
     flake_has_commits, flake_last_commit, insert_commit, insert_commit_with_metadata,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{Duration, sleep, timeout};
 use tracing::{debug, info, warn};
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
@@ -720,7 +720,10 @@ pub async fn get_commit_changed_files(
     Ok(changed)
 }
 
-async fn load_commit_nixos_configurations(repo_url: &str, commit_hash: &str) -> Result<Vec<String>> {
+async fn load_commit_nixos_configurations(
+    repo_url: &str,
+    commit_hash: &str,
+) -> Result<Vec<String>> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     let flake_target = format!("{flake_ref}#nixosConfigurations");
 
@@ -742,11 +745,7 @@ async fn load_commit_nixos_configurations(repo_url: &str, commit_hash: &str) -> 
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "nix eval failed for {}: {}",
-            commit_hash,
-            stderr.trim()
-        );
+        bail!("nix eval failed for {}: {}", commit_hash, stderr.trim());
     }
 
     let mut names: Vec<String> = serde_json::from_slice(&output.stdout)
@@ -769,7 +768,10 @@ fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
     }
 }
 
-async fn load_commit_changed_files(clone_path: &std::path::Path, commit_hash: &str) -> Result<Vec<String>> {
+async fn load_commit_changed_files(
+    clone_path: &std::path::Path,
+    commit_hash: &str,
+) -> Result<Vec<String>> {
     let output = timeout(
         GIT_METADATA_TIMEOUT,
         tokio::process::Command::new("git")
@@ -783,7 +785,11 @@ async fn load_commit_changed_files(clone_path: &std::path::Path, commit_hash: &s
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git show --name-only failed for {}: {}", commit_hash, stderr.trim());
+        bail!(
+            "git show --name-only failed for {}: {}",
+            commit_hash,
+            stderr.trim()
+        );
     }
 
     let mut files: Vec<String> = String::from_utf8(output.stdout)?

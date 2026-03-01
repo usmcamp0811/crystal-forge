@@ -1,43 +1,42 @@
 //! Database queries for builder management.
 
 use anyhow::{Context, Result, bail};
-use sqlx::PgPool;
-use uuid::Uuid;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use sqlx::PgPool;
+use uuid::Uuid;
 
 use crate::models::builders::{
-    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus,
-    BuilderSummary, BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest,
-    UpdateBuilderRequest,
+    BuildJob, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderStatus, BuilderSummary,
+    BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderRequest,
 };
 use crate::models::public_key::PublicKey;
 
 /// Generate a cryptographically correct Ed25519 keypair
 /// Returns (public_key_base64, private_key_base64)
-/// 
+///
 /// SECURITY: Public key is derived from private key (not generated independently)
 pub fn generate_ed25519_keypair() -> Result<(String, String)> {
     // Generate signing (private) key from secure random source
     let signing_key = SigningKey::generate(&mut OsRng);
-    
+
     // CRITICAL: Derive verifying (public) key from signing key
     // This ensures cryptographic correspondence between private and public keys
     let verifying_key: VerifyingKey = signing_key.verifying_key();
-    
+
     // Encode to base64 for storage/transport
     let public_key_base64 = BASE64.encode(verifying_key.as_bytes());
     let private_key_base64 = BASE64.encode(signing_key.to_bytes());
-    
+
     Ok((public_key_base64, private_key_base64))
 }
 
 /// Create a new builder (returns builder and optionally generated private key)
-/// 
+///
 /// If `public_key` is provided in request, it is validated and used.
 /// If `public_key` is None, a proper Ed25519 keypair is generated server-side.
-/// 
+///
 /// Returns: (Builder, Option<private_key_base64>)
 /// - private_key is Some(...) only when generated server-side
 /// - private_key is returned ONCE and never stored
@@ -48,14 +47,14 @@ pub async fn create_builder(
     let (public_key_str, private_key_option) = match &request.public_key {
         Some(pk) => {
             // Client provided public key - validate it
-            let public_key = PublicKey::from_base64(pk, &request.name)
-                .context("Invalid public key format")?;
+            let public_key =
+                PublicKey::from_base64(pk, &request.name).context("Invalid public key format")?;
             (public_key.to_base64(), None)
         }
         None => {
             // No public key provided - generate proper Ed25519 keypair server-side
-            let (public_key_base64, private_key_base64) = generate_ed25519_keypair()
-                .context("Failed to generate Ed25519 keypair")?;
+            let (public_key_base64, private_key_base64) =
+                generate_ed25519_keypair().context("Failed to generate Ed25519 keypair")?;
             (public_key_base64, Some(private_key_base64))
         }
     };
@@ -90,13 +89,11 @@ pub async fn create_builder(
 
 /// Get a builder by ID
 pub async fn get_builder_by_id(pool: &PgPool, builder_id: &Uuid) -> Result<Option<Builder>> {
-    let builder = sqlx::query_as::<_, Builder>(
-        "SELECT * FROM builders WHERE id = $1"
-    )
-    .bind(builder_id)
-    .fetch_optional(pool)
-    .await
-    .context("Failed to fetch builder by ID")?;
+    let builder = sqlx::query_as::<_, Builder>("SELECT * FROM builders WHERE id = $1")
+        .bind(builder_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch builder by ID")?;
 
     Ok(builder)
 }
@@ -598,7 +595,9 @@ pub async fn claim_next_job_atomic(
     // 2. Check limit BEFORE querying for next job
     if active_count >= max_concurrent_jobs as i64 {
         // Builder at capacity - rollback and return None
-        tx.rollback().await.context("Failed to rollback transaction")?;
+        tx.rollback()
+            .await
+            .context("Failed to rollback transaction")?;
         return Ok(None);
     }
 
@@ -815,7 +814,10 @@ pub async fn cleanup_expired_build_logs(
     .await
     .context("Failed to clean up failed build logs")?;
 
-    Ok((success_result.rows_affected(), failed_result.rows_affected()))
+    Ok((
+        success_result.rows_affected(),
+        failed_result.rows_affected(),
+    ))
 }
 
 /// Get a build job by ID
@@ -880,7 +882,7 @@ pub async fn mark_job_failed_with_retry(
         // Re-queue the job with incremented retry count
         // Slightly reduce priority weight on retry (newer commits stay higher priority)
         let new_priority = job.priority_weight * 0.95;
-        
+
         let updated_job = sqlx::query_as::<_, BuildJob>(
             r#"
             UPDATE build_jobs
@@ -936,8 +938,8 @@ mod tests {
         // Generate a test keypair
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
-        let public_key_base64 = base64::engine::general_purpose::STANDARD
-            .encode(verifying_key.to_bytes());
+        let public_key_base64 =
+            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
 
         let request = CreateBuilderRequest {
             name: "test-builder".to_string(),
@@ -974,8 +976,8 @@ mod tests {
 
         let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
         let verifying_key = signing_key.verifying_key();
-        let public_key_base64 = base64::engine::general_purpose::STANDARD
-            .encode(verifying_key.to_bytes());
+        let public_key_base64 =
+            base64::engine::general_purpose::STANDARD.encode(verifying_key.to_bytes());
 
         let request = CreateBuilderRequest {
             name: "heartbeat-test".to_string(),
@@ -1025,7 +1027,12 @@ mod tests {
 
         let result = create_builder(&pool, &request).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to decode base64"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to decode base64")
+        );
     }
 
     #[tokio::test]
@@ -1034,8 +1041,7 @@ mod tests {
         let pool = test_pool().await;
 
         // Valid base64 but wrong length (16 bytes instead of 32)
-        let wrong_length_key = base64::engine::general_purpose::STANDARD
-            .encode(vec![0u8; 16]);
+        let wrong_length_key = base64::engine::general_purpose::STANDARD.encode(vec![0u8; 16]);
 
         let request = CreateBuilderRequest {
             name: "wrong-length-builder".to_string(),
@@ -1048,7 +1054,12 @@ mod tests {
 
         let result = create_builder(&pool, &request).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must be exactly 32 bytes"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("must be exactly 32 bytes")
+        );
     }
 
     #[tokio::test]
@@ -1067,6 +1078,11 @@ mod tests {
 
         let result = create_builder(&pool, &request).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Public key cannot be empty"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Public key cannot be empty")
+        );
     }
 }

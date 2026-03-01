@@ -124,7 +124,10 @@ pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
         .context("Failed to check existing OIDC group mapping")?;
 
     if existing > 0 {
-        tracing::debug!("Bootstrap admin mapping already exists for: {}", admin_group);
+        tracing::debug!(
+            "Bootstrap admin mapping already exists for: {}",
+            admin_group
+        );
         return Ok(());
     }
 

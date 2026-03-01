@@ -29,7 +29,8 @@ pub struct VerifiedBuilderRequest {
 }
 
 fn canonical_signature_payload(method: &str, path: &str, timestamp: &str, body: &[u8]) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(method.len() + path.len() + timestamp.len() + body.len() + 3);
+    let mut payload =
+        Vec::with_capacity(method.len() + path.len() + timestamp.len() + body.len() + 3);
     payload.extend_from_slice(method.as_bytes());
     payload.push(b'\n');
     payload.extend_from_slice(path.as_bytes());
@@ -109,7 +110,8 @@ pub async fn authenticate_builder_request_with_lookup<L: BuilderLookup>(
     path: &str,
     lookup: &L,
 ) -> Result<VerifiedBuilderRequest, StatusCode> {
-    authenticate_builder_request_with_lookup_options(headers, body, method, path, lookup, false).await
+    authenticate_builder_request_with_lookup_options(headers, body, method, path, lookup, false)
+        .await
 }
 
 async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
@@ -126,8 +128,7 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    let builder_id = Uuid::parse_str(builder_id_str)
-        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let builder_id = Uuid::parse_str(builder_id_str).map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     // Extract timestamp from header (required for replay resistance)
     let timestamp_str = headers
@@ -284,9 +285,9 @@ mod tests {
         // Activate the builder (initial status is inactive)
         sqlx::query("UPDATE builders SET status = 'active' WHERE id = $1")
             .bind(builder.id)
-        .execute(&pool)
-        .await
-        .expect("Failed to activate builder");
+            .execute(&pool)
+            .await
+            .expect("Failed to activate builder");
 
         // Create a test request body
         let body = Bytes::from("test request body");
@@ -311,13 +312,11 @@ mod tests {
             "X-Signature",
             HeaderValue::from_str(&signature_base64).unwrap(),
         );
-        headers.insert(
-            "X-Timestamp",
-            HeaderValue::from_str(&timestamp).unwrap(),
-        );
+        headers.insert("X-Timestamp", HeaderValue::from_str(&timestamp).unwrap());
 
         // Authenticate
-        let result = authenticate_builder_request(&headers, body.clone(), method, path, &pool).await;
+        let result =
+            authenticate_builder_request(&headers, body.clone(), method, path, &pool).await;
 
         assert!(result.is_ok());
         let verified = result.unwrap();
@@ -366,10 +365,7 @@ mod tests {
             "X-Signature",
             HeaderValue::from_str(&signature_base64).unwrap(),
         );
-        headers.insert(
-            "X-Timestamp",
-            HeaderValue::from_str(&timestamp).unwrap(),
-        );
+        headers.insert("X-Timestamp", HeaderValue::from_str(&timestamp).unwrap());
 
         // Authenticate - should fail because builder is inactive
         let result = authenticate_builder_request(&headers, body, method, path, &pool).await;
@@ -402,9 +398,9 @@ mod tests {
 
         sqlx::query("UPDATE builders SET status = 'active' WHERE id = $1")
             .bind(builder.id)
-        .execute(&pool)
-        .await
-        .expect("Failed to activate builder");
+            .execute(&pool)
+            .await
+            .expect("Failed to activate builder");
 
         let body = Bytes::from("test request body");
         let timestamp = chrono::Utc::now().to_rfc3339();
@@ -426,10 +422,7 @@ mod tests {
             "X-Signature",
             HeaderValue::from_str(&signature_base64).unwrap(),
         );
-        headers.insert(
-            "X-Timestamp",
-            HeaderValue::from_str(&timestamp).unwrap(),
-        );
+        headers.insert("X-Timestamp", HeaderValue::from_str(&timestamp).unwrap());
 
         // Authenticate - should fail due to invalid signature
         let result = authenticate_builder_request(&headers, body, method, path, &pool).await;
@@ -447,7 +440,8 @@ mod tests {
 
         // Missing both headers
         let headers = HeaderMap::new();
-        let result = authenticate_builder_request(&headers, body.clone(), method, path, &pool).await;
+        let result =
+            authenticate_builder_request(&headers, body.clone(), method, path, &pool).await;
         assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
 
         // Missing signature

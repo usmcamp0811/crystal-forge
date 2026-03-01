@@ -17,12 +17,12 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
+use crate::queries::builders::cleanup_expired_build_logs;
 use crate::queries::commits::{
     get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
     mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
 use crate::queries::derivations::cleanup_partial_derivations;
-use crate::queries::builders::cleanup_expired_build_logs;
 
 pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     let flake_pool = pool.clone();
@@ -66,7 +66,8 @@ async fn run_build_log_retention_loop(
     let mut ticker = interval(Duration::from_secs(24 * 60 * 60));
 
     loop {
-        match cleanup_expired_build_logs(&pool, success_retention_days, failed_retention_days).await {
+        match cleanup_expired_build_logs(&pool, success_retention_days, failed_retention_days).await
+        {
             Ok((success_cleared, failed_cleared)) => {
                 if success_cleared > 0 || failed_cleared > 0 {
                     info!(
@@ -284,9 +285,12 @@ async fn run_commit_artifact_hydration_loop(pool: PgPool) {
                     );
 
                     // Try to get nixosConfigurations
-                    let configs = match get_commit_nixos_configurations(&repo_url, &[commit_hash.clone()])
-                        .await
-                        .remove(&commit_hash)
+                    let configs = match get_commit_nixos_configurations(
+                        &repo_url,
+                        &[commit_hash.clone()],
+                    )
+                    .await
+                    .remove(&commit_hash)
                     {
                         Some(configs) => configs,
                         None => {
@@ -332,7 +336,10 @@ async fn run_commit_artifact_hydration_loop(pool: PgPool) {
                 debug!("No commits need artifact hydration");
             }
             Err(err) => {
-                error!("❌ Failed to query commits needing artifact cache: {:#}", err);
+                error!(
+                    "❌ Failed to query commits needing artifact cache: {:#}",
+                    err
+                );
             }
         }
     }

@@ -1,10 +1,10 @@
 //! Flakes registry API handlers.
 
+use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::Json;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use tracing::{error, warn};
@@ -15,15 +15,15 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
 use crate::flake::commits::{
-    branch_exists, get_commit_changed_files, get_commit_diff, get_commit_metadata,
-    get_commit_nixos_configurations, infer_default_branch, sync_commits_for_repo,
-    GitCommitMetadata,
+    GitCommitMetadata, branch_exists, get_commit_changed_files, get_commit_diff,
+    get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
+    sync_commits_for_repo,
 };
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
-    fetch_flake_timelines, get_flake_by_id, get_flake_by_name, insert_flake,
-    list_flake_registry, update_flake,
+    fetch_flake_timelines, get_flake_by_id, get_flake_by_name, insert_flake, list_flake_registry,
+    update_flake,
 };
 use crate::queries::users::get_by_email;
 
@@ -65,7 +65,10 @@ pub async fn get_flake_timelines(
 
     // Dashboard view shows CF system deployment counts
     // Flakes view shows nixosConfigurations from cache
-    let use_dashboard_view = params.get("view").map(|v| v == "dashboard").unwrap_or(false);
+    let use_dashboard_view = params
+        .get("view")
+        .map(|v| v == "dashboard")
+        .unwrap_or(false);
 
     // Fetch up to 10 most recent commits per flake
     let fetch_result = if use_dashboard_view {
@@ -117,8 +120,11 @@ pub async fn get_flake_timelines(
                 };
 
                 let mut user_lookup_cache: HashMap<String, Option<String>> = HashMap::new();
-                let commit_hashes: Vec<String> =
-                    timeline.commits.iter().map(|commit| commit.hash.clone()).collect();
+                let commit_hashes: Vec<String> = timeline
+                    .commits
+                    .iter()
+                    .map(|commit| commit.hash.clone())
+                    .collect();
 
                 // Skip inline hydration for now - too slow for API requests
                 // TODO: Background job to populate commit_artifacts_cache
@@ -179,7 +185,10 @@ pub async fn get_flake_timelines(
                                 );
                             }
 
-                            let marked = mark_cf_system_matches(configs, cf_config_matches.get(&commit.hash));
+                            let marked = mark_cf_system_matches(
+                                configs,
+                                cf_config_matches.get(&commit.hash),
+                            );
                             commit.system_count = marked.len() as i64;
                             commit.systems = marked;
                         }

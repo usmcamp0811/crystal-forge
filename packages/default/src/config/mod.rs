@@ -35,7 +35,7 @@ use crate::queries::systems::insert_system;
 use anyhow::{Context, Result};
 use config::Config;
 use serde::Deserialize;
-use sqlx::{postgres::PgPoolOptions, PgPool};
+use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::env;
 use std::time::Duration;
 use tokio_postgres::NoTls;
