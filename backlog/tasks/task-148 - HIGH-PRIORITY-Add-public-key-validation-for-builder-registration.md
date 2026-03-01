@@ -1,9 +1,10 @@
 ---
 id: TASK-148
 title: 'HIGH PRIORITY: Add public key validation for builder registration'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-03-01 02:29'
+updated_date: '2026-03-01 16:11'
 labels:
   - security
   - high-priority
@@ -111,17 +112,17 @@ CHECK (LENGTH(public_key) <= 1000);
 ```
 
 ## Acceptance Criteria
-
-- [ ] Public key validated as valid base64 at registration
-- [ ] Public key decoded length validated (32 bytes for Ed25519)
-- [ ] Registration rejected with clear error for invalid base64
-- [ ] Registration rejected with clear error for wrong key length
-- [ ] Request body size limited (prevent huge payloads)
-- [ ] Database constraint prevents oversized keys
-- [ ] Test added: invalid base64 rejected with 400
-- [ ] Test added: wrong length key rejected with 400
-- [ ] Test added: oversized request body rejected with 413
-- [ ] Documentation updated with public key format requirements
+<!-- AC:BEGIN -->
+- [ ] #1 Public key validated as valid base64 at registration
+- [ ] #2 Public key decoded length validated (32 bytes for Ed25519)
+- [ ] #3 Registration rejected with clear error for invalid base64
+- [ ] #4 Registration rejected with clear error for wrong key length
+- [ ] #5 Request body size limited (prevent huge payloads)
+- [ ] #6 Database constraint prevents oversized keys
+- [ ] #7 Test added: invalid base64 rejected with 400
+- [ ] #8 Test added: wrong length key rejected with 400
+- [ ] #9 Test added: oversized request body rejected with 413
+- [ ] #10 Documentation updated with public key format requirements
 
 ## Implementation Locations
 
@@ -165,3 +166,23 @@ async fn test_invalid_public_key_rejected() {
 }
 ```
 <!-- SECTION:DESCRIPTION:END -->
+
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Reality check (2026-03-01): implemented and merged into dev.
+
+Added public-key base64/length/curve validation path, request validation improvements, DB constraints migration (0086), and invalid-key tests.
+
+Follow-up gap task created as TASK-150 for explicit oversized-body 413 test/docs parity against original acceptance text.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Implemented and merged: builder public key validation and DB guardrails.
+
+Registration now validates key format/size and rejects invalid key material with actionable errors.
+<!-- SECTION:FINAL_SUMMARY:END -->
