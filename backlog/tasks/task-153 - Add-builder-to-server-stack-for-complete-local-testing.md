@@ -1,10 +1,10 @@
 ---
 id: TASK-153
 title: Add builder to server-stack for complete local testing
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-01 23:31'
-updated_date: '2026-03-01 23:31'
+updated_date: '2026-03-01 23:34'
 labels:
   - devtools
   - process-compose
@@ -62,4 +62,8 @@ Commit: dbd61f1b
 MR !149: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/149
 
 All acceptance criteria met except #7 (end-to-end manual test).
+
+Merged into TASK-143 instead of being a separate task.
+
+Changes pushed to TASK-143 branch, MR !148.
 <!-- SECTION:NOTES:END -->
