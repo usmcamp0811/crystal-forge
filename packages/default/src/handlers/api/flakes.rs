@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::api::models::{
     ApiError, CommitDiffResponse, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
@@ -96,6 +96,12 @@ pub async fn get_flake_timelines(
                 let metadata = if hashes.is_empty() {
                     HashMap::new()
                 } else {
+                    // This fallback should rarely run now that metadata is cached in commits table
+                    warn!(
+                        "Falling back to git metadata hydration for {} commits in flake {} (likely old commits from before metadata caching)",
+                        hashes.len(),
+                        timeline.flake_name
+                    );
                     remaining_hydration_budget =
                         remaining_hydration_budget.saturating_sub(hashes.len());
                     match get_commit_metadata(&timeline.repo_url, &hashes).await {
