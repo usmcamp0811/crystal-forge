@@ -1,11 +1,11 @@
 ---
 id: TASK-3
 title: 'Phase 2: Decompose builder/mod.rs God Object (COMPLETE)'
-status: Review
+status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-04 20:15'
-updated_date: '2026-03-01 15:59'
+updated_date: '2026-03-01 16:00'
 labels:
   - refactoring
   - architecture
@@ -55,4 +55,6 @@ Commit 057cf81: Updated Cargo.lock to include serial_test dependency for Nix off
 Starting Phase 1: Refactoring queries/derivations.rs (2,012 lines) into focused modules: crud.rs, status.rs, build_queue.rs, cache.rs, lifecycle.rs, metadata.rs, and mod.rs.
 
 Phase 2 COMPLETE - Ready to merge. Created follow-up task TASK-143 for Phase 1 (queries refactoring). MR includes: builder module refactoring (7 focused modules), flaky test fixes, and dependency updates.
+
+MR !146 merged into dev branch. Phase 2 complete. Worktree cleanup in progress.
 <!-- SECTION:NOTES:END -->
