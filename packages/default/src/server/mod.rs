@@ -226,13 +226,13 @@ async fn run_commit_artifact_hydration_loop(pool: PgPool) {
     info!("🔁 Starting commit artifact hydration background task...");
 
     let pool = pool.clone();
-    let mut ticker = interval(Duration::from_secs(120)); // Check every 2 minutes
+    let mut ticker = interval(Duration::from_secs(30)); // Check every 30 seconds
 
     loop {
         ticker.tick().await;
 
-        // Process 1 commit at a time to avoid overwhelming nix eval
-        match get_commits_needing_artifact_cache(&pool, 1).await {
+        // Process up to 3 commits per cycle (sequential to avoid overwhelming nix eval)
+        match get_commits_needing_artifact_cache(&pool, 3).await {
             Ok(commits) if !commits.is_empty() => {
                 for (commit_id, commit_hash, repo_url) in commits {
                     info!(
