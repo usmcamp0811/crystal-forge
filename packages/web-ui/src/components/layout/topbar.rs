@@ -87,7 +87,7 @@ pub fn TopBar(title: String) -> Element {
                         if show_user_menu() {
                             div {
                                 "data-testid": "user-menu-dropdown",
-                                class: "absolute right-0 mt-2 min-w-[10rem] {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
+                                class: "absolute right-0 mt-2 w-52 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
 
                                 // User info section
                                 div {
