@@ -22,7 +22,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::{
-    ApiError, CreateEnvironmentRequest, DeploymentPolicySummary, EnvironmentSummary, 
+    ApiError, CreateEnvironmentRequest, DeploymentPolicySummary, EnvironmentSummary,
     UpdateEnvironmentPoliciesRequest, UpdateEnvironmentRequest,
 };
 use crate::auth::models::Role;
@@ -118,7 +118,11 @@ pub async fn create_environment(
         return bad_request("Environment name must be 50 characters or fewer");
     }
 
-    let description = payload.description.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let description = payload
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
     let color_hex = payload.color_hex.trim();
     if !looks_like_hex_color(color_hex) {
         return bad_request("Environment color must be a valid #RRGGBB value");
@@ -202,7 +206,11 @@ pub async fn update_environment_handler(
         return bad_request("Environment name must be 50 characters or fewer");
     }
 
-    let description = payload.description.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let description = payload
+        .description
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
     let color_hex = payload.color_hex.trim();
     if !looks_like_hex_color(color_hex) {
         return bad_request("Environment color must be a valid #RRGGBB value");
@@ -340,7 +348,7 @@ pub async fn update_environment_policies_handler(
                         environment_id,
                         payload.required_policy_ids
                     );
-                    
+
                     // Return the updated environment with policies
                     match get_environment_with_policies(&pool, environment_id).await {
                         Ok(Some(env_with_policies)) => {

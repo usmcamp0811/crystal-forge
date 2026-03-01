@@ -1,10 +1,10 @@
 ---
 id: TASK-141
 title: Add UI-based Binary Cache Management with Environment Scoping
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-01 14:01'
-updated_date: '2026-03-01 14:10'
+updated_date: '2026-03-01 14:30'
 labels:
   - backend
   - builder
@@ -18,6 +18,7 @@ priority: high
 
 ## Description
 
+<!-- SECTION:DESCRIPTION:BEGIN -->
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
@@ -268,6 +269,7 @@ nix develop -c crystal-forge-admin import-cache \
 - Credentials only decrypted for authenticated builders
 - Admin UI masks credentials after entry
 - Audit log records all credential access
+<!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->

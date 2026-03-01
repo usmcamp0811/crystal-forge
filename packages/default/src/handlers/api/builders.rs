@@ -5,25 +5,26 @@
 //! 2. Builder Work Queue (Builder-authenticated): Job polling and status updates
 
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::handlers::api::rbac::require_admin;
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::rbac::require_admin;
 use crate::handlers::builder_request::{
-    authenticate_builder_request, authenticate_builder_request_allow_inactive,
-    VerifiedBuilderRequest,
+    VerifiedBuilderRequest, authenticate_builder_request,
+    authenticate_builder_request_allow_inactive,
 };
 use crate::models::builders::{
-    AppendLogsRequest, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary, 
-    BuilderWithEnvironments, CreateBuilderRequest, KeypairRegeneratedResponse, ReportMetricsRequest, UpdateBuilderEnvironmentsRequest,
-    UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
+    AppendLogsRequest, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
+    BuilderWithEnvironments, CreateBuilderRequest, KeypairRegeneratedResponse,
+    ReportMetricsRequest, UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest,
+    UpdateBuilderRequest,
 };
 use crate::queries::builders;
 
@@ -32,10 +33,10 @@ use crate::queries::builders;
 // =============================================================================
 
 /// POST /api/v1/builders - Create a new builder (admin-only)
-/// 
+///
 /// If `public_key` is not provided in request, server generates a proper Ed25519 keypair.
 /// Response includes the private key ONLY if generated server-side.
-/// 
+///
 /// WARNING: Save the private key immediately - it's shown only once!
 pub async fn create_builder(
     State(state): State<CFState>,
@@ -49,19 +50,31 @@ pub async fn create_builder(
 
     // Validate request fields (input sanitization)
     if request.name.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "Builder name cannot be empty".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Builder name cannot be empty".to_string(),
+        ));
     }
     if request.name.len() > 255 {
-        return Err((StatusCode::BAD_REQUEST, "Builder name too long (max 255 characters)".to_string()));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Builder name too long (max 255 characters)".to_string(),
+        ));
     }
-    
+
     // Validate public key if provided (prevent DoS via oversized input)
     if let Some(ref pk) = request.public_key {
         if pk.is_empty() {
-            return Err((StatusCode::BAD_REQUEST, "Public key cannot be empty".to_string()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Public key cannot be empty".to_string(),
+            ));
         }
         if pk.len() > 1000 {
-            return Err((StatusCode::BAD_REQUEST, "Public key too long (max 1000 characters)".to_string()));
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Public key too long (max 1000 characters)".to_string(),
+            ));
         }
     }
 
@@ -75,18 +88,25 @@ pub async fn create_builder(
         .map_err(|e| {
             tracing::error!("Failed to create builder: {}", e);
             // Return validation errors as 400, others as 500
-            if e.to_string().contains("Invalid public key") || 
-               e.to_string().contains("must be exactly 32 bytes") ||
-               e.to_string().contains("Failed to decode base64") {
-                (StatusCode::BAD_REQUEST, format!("Invalid public key: {}", e))
+            if e.to_string().contains("Invalid public key")
+                || e.to_string().contains("must be exactly 32 bytes")
+                || e.to_string().contains("Failed to decode base64")
+            {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid public key: {}", e),
+                )
             } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create builder".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to create builder".to_string(),
+                )
             }
         })?;
-    
+
     // Get environment IDs for response
     let assigned_environment_ids = request.environment_ids.clone();
-    
+
     Ok(Json(BuilderCreatedResponse {
         builder,
         private_key: private_key_option,
@@ -208,10 +228,14 @@ pub async fn update_builder_public_key(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Update public key
-    let builder =
-        builders::update_builder_public_key(&state.pool, &builder_id, &request.public_key, &existing.name)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let builder = builders::update_builder_public_key(
+        &state.pool,
+        &builder_id,
+        &request.public_key,
+        &existing.name,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(builder))
 }
@@ -237,13 +261,18 @@ pub async fn regenerate_builder_keypair(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     // Generate new Ed25519 keypair
-    let (public_key_base64, private_key_base64) = builders::generate_ed25519_keypair()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (public_key_base64, private_key_base64) =
+        builders::generate_ed25519_keypair().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Update builder's public key
-    builders::update_builder_public_key(&state.pool, &builder_id, &public_key_base64, &existing.name)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    builders::update_builder_public_key(
+        &state.pool,
+        &builder_id,
+        &public_key_base64,
+        &existing.name,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Return keypair (private key shown ONLY ONCE)
     Ok(Json(KeypairRegeneratedResponse {
@@ -328,7 +357,14 @@ pub async fn builder_heartbeat(
 ) -> Result<Json<HeartbeatResponse>, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/heartbeat", builder_id);
-    let verified = authenticate_builder_request_allow_inactive(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    let verified = authenticate_builder_request_allow_inactive(
+        &headers,
+        body.clone(),
+        "POST",
+        &path,
+        &state.pool,
+    )
+    .await?;
 
     // Verify the builder_id in the path matches the authenticated builder
     if verified.builder_id != builder_id {
@@ -434,7 +470,7 @@ pub struct JobStatusRequest {
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/start - Mark job as started
-/// 
+///
 /// Note: This is a no-op since get_next_job already marks the job as building.
 /// Kept for API consistency and future extensibility.
 pub async fn start_job(
@@ -499,7 +535,7 @@ pub async fn complete_job(
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/fail - Mark job as failed
-/// 
+///
 /// Implements retry logic:
 /// - If retry_count < max_retries: increment retry_count, re-queue job, reduce priority
 /// - If retry_count >= max_retries: mark as permanently failed
@@ -511,7 +547,8 @@ pub async fn fail_job(
 ) -> Result<StatusCode, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/jobs/{}/fail", builder_id, job_id);
-    let verified = authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
 
     if verified.builder_id != builder_id {
         return Err(StatusCode::FORBIDDEN);
@@ -554,7 +591,7 @@ pub async fn append_job_logs(
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
     headers: axum::http::HeaderMap,
     body: Bytes,
- ) -> Result<(StatusCode, String), (StatusCode, String)> {
+) -> Result<(StatusCode, String), (StatusCode, String)> {
     let max_chunk_bytes = state.server_config.max_build_log_chunk_mb * 1024 * 1024;
     let max_total_bytes = state.server_config.max_build_log_size_mb * 1024 * 1024;
 
@@ -589,13 +626,12 @@ pub async fn append_job_logs(
     }
 
     // Parse log content
-    let request: AppendLogsRequest =
-        serde_json::from_slice(&body).map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                "Invalid log append payload: expected JSON with 'logs' string field".to_string(),
-            )
-        })?;
+    let request: AppendLogsRequest = serde_json::from_slice(&body).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Invalid log append payload: expected JSON with 'logs' string field".to_string(),
+        )
+    })?;
 
     if request.logs.len() > max_chunk_bytes {
         return Err((
@@ -648,10 +684,7 @@ pub async fn append_job_logs(
             if msg.contains("log_size_limit_exceeded") {
                 (
                     StatusCode::PAYLOAD_TOO_LARGE,
-                    format!(
-                        "Total job logs would exceed {} byte limit",
-                        max_total_bytes
-                    ),
+                    format!("Total job logs would exceed {} byte limit", max_total_bytes),
                 )
             } else if msg.contains("invalid_job_status") {
                 (

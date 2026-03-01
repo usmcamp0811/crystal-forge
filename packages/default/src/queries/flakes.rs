@@ -281,27 +281,37 @@ pub async fn fetch_dashboard_flake_timelines(
 
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
-            .map(|(hash, committed_at, system_count, systems, commits_behind, build_status, evaluation_status)| {
-                let build_status = build_status.as_deref().map(|status| match status {
-                    "queued" => BuildStatus::Queued,
-                    "building" => BuildStatus::Building,
-                    "failed" => BuildStatus::Failed,
-                    "complete" => BuildStatus::Complete,
-                    _ => BuildStatus::Idle,
-                });
+            .map(
+                |(
+                    hash,
+                    committed_at,
+                    system_count,
+                    systems,
+                    commits_behind,
+                    build_status,
+                    evaluation_status,
+                )| {
+                    let build_status = build_status.as_deref().map(|status| match status {
+                        "queued" => BuildStatus::Queued,
+                        "building" => BuildStatus::Building,
+                        "failed" => BuildStatus::Failed,
+                        "complete" => BuildStatus::Complete,
+                        _ => BuildStatus::Idle,
+                    });
 
-                FlakeCommit {
-                hash,
-                message: "".to_string(),
-                author: "".to_string(),
-                committed_at,
-                system_count,
-                commits_behind,
-                systems,
-                build_status,
-                evaluation_status,
-            }
-            })
+                    FlakeCommit {
+                        hash,
+                        message: "".to_string(),
+                        author: "".to_string(),
+                        committed_at,
+                        system_count,
+                        commits_behind,
+                        systems,
+                        build_status,
+                        evaluation_status,
+                    }
+                },
+            )
             .collect();
 
         timelines.push(FlakeTimeline {
@@ -402,27 +412,39 @@ pub async fn fetch_flake_timelines(
 
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
-            .map(|(hash, committed_at, message, author, system_count, systems, commits_behind, build_status, evaluation_status)| {
-                let build_status = build_status.as_deref().map(|status| match status {
-                    "queued" => BuildStatus::Queued,
-                    "building" => BuildStatus::Building,
-                    "failed" => BuildStatus::Failed,
-                    "complete" => BuildStatus::Complete,
-                    _ => BuildStatus::Idle,
-                });
+            .map(
+                |(
+                    hash,
+                    committed_at,
+                    message,
+                    author,
+                    system_count,
+                    systems,
+                    commits_behind,
+                    build_status,
+                    evaluation_status,
+                )| {
+                    let build_status = build_status.as_deref().map(|status| match status {
+                        "queued" => BuildStatus::Queued,
+                        "building" => BuildStatus::Building,
+                        "failed" => BuildStatus::Failed,
+                        "complete" => BuildStatus::Complete,
+                        _ => BuildStatus::Idle,
+                    });
 
-                FlakeCommit {
-                hash,
-                message: message.unwrap_or_default(),
-                author: author.unwrap_or_default(),
-                committed_at,
-                system_count,
-                commits_behind,
-                systems,
-                build_status,
-                evaluation_status,
-            }
-            })
+                    FlakeCommit {
+                        hash,
+                        message: message.unwrap_or_default(),
+                        author: author.unwrap_or_default(),
+                        committed_at,
+                        system_count,
+                        commits_behind,
+                        systems,
+                        build_status,
+                        evaluation_status,
+                    }
+                },
+            )
             .collect();
 
         timelines.push(FlakeTimeline {

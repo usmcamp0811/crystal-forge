@@ -3,9 +3,10 @@ id: TASK-142
 title: >-
   Add TOML-based Configuration for Systems, Builders, and Flakes with DB
   Override
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-01 14:16'
+updated_date: '2026-03-01 14:30'
 labels:
   - backend
   - infrastructure

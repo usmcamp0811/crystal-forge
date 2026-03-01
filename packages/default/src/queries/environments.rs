@@ -410,10 +410,12 @@ pub async fn list_environment_policy_map_for_user(
 
     Ok(rows
         .into_iter()
-        .map(|(environment_id, required_policy_ids)| EnvironmentPolicyMapEntry {
-            environment_id,
-            required_policy_ids,
-        })
+        .map(
+            |(environment_id, required_policy_ids)| EnvironmentPolicyMapEntry {
+                environment_id,
+                required_policy_ids,
+            },
+        )
         .collect())
 }
 
@@ -470,9 +472,12 @@ pub async fn set_environment_required_policies(
     user_id: Option<Uuid>,
 ) -> Result<Vec<Uuid>> {
     // Delete existing environment policies
-    sqlx::query!("DELETE FROM environment_policies WHERE environment_id = $1", environment_id)
-        .execute(pool)
-        .await?;
+    sqlx::query!(
+        "DELETE FROM environment_policies WHERE environment_id = $1",
+        environment_id
+    )
+    .execute(pool)
+    .await?;
 
     // Insert new policies
     for policy_id in policy_ids {
@@ -491,10 +496,7 @@ pub async fn set_environment_required_policies(
 
 /// Get system policies: includes both environment baseline AND system-specific additional policies.
 /// This represents the complete set of policies a system must satisfy.
-pub async fn get_system_effective_policy_ids(
-    pool: &PgPool,
-    system_id: Uuid,
-) -> Result<Vec<Uuid>> {
+pub async fn get_system_effective_policy_ids(pool: &PgPool, system_id: Uuid) -> Result<Vec<Uuid>> {
     // First get the environment for this system
     let environment_id: Option<Option<Uuid>> = sqlx::query_scalar!(
         "SELECT environment_id FROM systems WHERE id = $1",
@@ -587,11 +589,7 @@ pub async fn add_system_policy(
 
 /// Remove a policy from a system.
 /// Only removes system-specific additions, NOT environment baseline policies.
-pub async fn remove_system_policy(
-    pool: &PgPool,
-    system_id: Uuid,
-    policy_id: Uuid,
-) -> Result<bool> {
+pub async fn remove_system_policy(pool: &PgPool, system_id: Uuid, policy_id: Uuid) -> Result<bool> {
     // First check if this policy is required by the environment baseline
     let environment_id: Option<Option<Uuid>> = sqlx::query_scalar!(
         "SELECT environment_id FROM systems WHERE id = $1",

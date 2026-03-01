@@ -483,7 +483,7 @@ pub async fn count_oidc_group_mappings(
     group_name: &str,
 ) -> Result<i64, AuthRepositoryError> {
     let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM oidc_group_mappings WHERE group_name = $1"
+        "SELECT COUNT(*) FROM oidc_group_mappings WHERE group_name = $1",
     )
     .bind(group_name)
     .fetch_one(pool)
@@ -503,7 +503,7 @@ pub async fn create_oidc_group_mapping(
 ) -> Result<(), AuthRepositoryError> {
     sqlx::query(
         "INSERT INTO oidc_group_mappings (group_name, role, environments)
-         VALUES ($1, $2, $3)"
+         VALUES ($1, $2, $3)",
     )
     .bind(group_name)
     .bind(role)
