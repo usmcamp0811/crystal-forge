@@ -6,12 +6,46 @@ use crate::queries::commits::{
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tracing::{debug, info, warn};
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 const NIX_CONFIG_EVAL_TIMEOUT: Duration = Duration::from_secs(60);
+const INIT_COMMIT_RETRY_ATTEMPTS: usize = 5;
+const INIT_COMMIT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+async fn fetch_and_insert_recent_commits_with_retry(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+    limit: Option<usize>,
+) -> Result<Vec<String>> {
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 1..=INIT_COMMIT_RETRY_ATTEMPTS {
+        match fetch_and_insert_recent_commits(pool, repo_url, branch, limit).await {
+            Ok(commits) => return Ok(commits),
+            Err(err) => {
+                last_err = Some(err);
+
+                if attempt < INIT_COMMIT_RETRY_ATTEMPTS {
+                    warn!(
+                        "⚠️ Commit initialization attempt {}/{} failed for {} (branch {}), retrying in {:?}",
+                        attempt,
+                        INIT_COMMIT_RETRY_ATTEMPTS,
+                        repo_url,
+                        branch,
+                        INIT_COMMIT_RETRY_DELAY
+                    );
+                    sleep(INIT_COMMIT_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("commit initialization failed")))
+}
 
 #[derive(Debug, Clone)]
 pub struct GitCommitMetadata {
@@ -105,7 +139,7 @@ pub async fn initialize_flake_commits(
             }
         }
 
-        match fetch_and_insert_recent_commits(
+        match fetch_and_insert_recent_commits_with_retry(
             pool,
             &flake.repo_url,
             &flake.branch(),
@@ -191,7 +225,7 @@ pub async fn sync_all_watched_flakes_commits(
             Ok(false) => {
                 // No commits, initialize
                 info!("🔄 Initializing commits for flake: {}", flake.name);
-                match fetch_and_insert_recent_commits(
+                match fetch_and_insert_recent_commits_with_retry(
                     pool,
                     &flake.repo_url,
                     &flake.branch(),
