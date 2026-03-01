@@ -11,10 +11,11 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
     let status_dot = builder.status.dot_class();
     let status_color = builder.status.color_class();
     let is_inactive = matches!(builder.status, crate::api::models::BuilderStatus::Inactive);
-    let card_class = if is_inactive {
-        "bg-gray-900/80 border border-gray-700 rounded-xl p-6 shadow-sm opacity-60 saturate-0"
+
+    let inactive_classes = if is_inactive {
+        "opacity-60 saturate-0"
     } else {
-        "bg-gray-900/80 border border-gray-700 rounded-xl p-6 shadow-sm"
+        ""
     };
 
     let heartbeat_text = if let Some(heartbeat) = builder.last_heartbeat_at {
@@ -34,17 +35,35 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
         "Never".to_string()
     };
 
+    let cpu_cores_text = if let Some(cores) = builder.max_cpu_cores {
+        cores.to_string()
+    } else {
+        "Unlimited".to_string()
+    };
+
+    let memory_text = if let Some(mem_mb) = builder.max_memory_mb {
+        format!("{} GB", mem_mb / 1024)
+    } else {
+        "Unlimited".to_string()
+    };
+
+    let environments_text = if builder.assigned_environment_count > 0 {
+        builder.assigned_environment_count.to_string()
+    } else {
+        "All (wildcard)".to_string()
+    };
+
     rsx! {
         div {
-            class: "{card_class} transition-colors",
+            class: "rounded-xl border {theme::surface::CARD_BORDER} overflow-hidden shadow-sm {inactive_classes}",
 
-            // Header
+            // Header section
             div {
-                class: "flex items-start justify-between mb-3",
+                class: "flex items-center justify-between px-6 py-4 border-b border-gray-800",
                 div {
                     class: "flex-1",
                     h3 {
-                        class: "font-semibold {theme::text::PRIMARY} mb-1",
+                        class: "text-lg font-semibold text-white mb-1",
                         "{builder.name}"
                     }
                     div {
@@ -54,73 +73,58 @@ pub fn BuilderCard(builder: BuilderSummary, on_edit: EventHandler<()>) -> Elemen
                             span { class: "w-2 h-2 rounded-full {status_dot}" }
                             "{status_label}"
                         }
-                        span {
-                            class: "{theme::text::MUTED}",
-                            "•"
-                        }
-                        span {
-                            class: "{theme::text::SECONDARY}",
-                            "Heartbeat: {heartbeat_text}"
-                        }
                     }
                 }
                 button {
-                    class: "min-w-20 h-8 px-3 rounded text-xs font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                    class: "px-4 py-2 rounded text-xs font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
                     onclick: move |_| on_edit.call(()),
                     "Edit"
                 }
             }
 
-            // Resource Limits
+            // Status section
             div {
-                class: "space-y-2 text-sm",
+                class: "px-6 py-3 bg-gray-800/50",
+                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-2", "Status" }
                 div {
-                    class: "flex justify-between {theme::text::SECONDARY}",
-                    span { "CPU Cores:" }
-                    span {
-                        class: "text-white",
-                        {
-                            if let Some(cores) = builder.max_cpu_cores {
-                                cores.to_string()
-                            } else {
-                                "Unlimited".to_string()
-                            }
+                    class: "text-sm {theme::text::SECONDARY}",
+                    "Last heartbeat: "
+                    span { class: "text-white", "{heartbeat_text}" }
+                }
+            }
+
+            // Resource Limits section
+            div {
+                class: "px-6 py-3 bg-gray-900",
+                p { class: "text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-3", "Resource Limits" }
+                div {
+                    class: "grid grid-cols-2 gap-3 text-sm",
+                    div {
+                        span { class: "text-gray-500 text-xs block mb-0.5", "CPU Cores" }
+                        span {
+                            class: "text-gray-200",
+                            "{cpu_cores_text}"
                         }
                     }
-                }
-                div {
-                    class: "flex justify-between {theme::text::SECONDARY}",
-                    span { "Memory:" }
-                    span {
-                        class: "text-white",
-                        {
-                            if let Some(mem_mb) = builder.max_memory_mb {
-                                format!("{} GB", mem_mb / 1024)
-                            } else {
-                                "Unlimited".to_string()
-                            }
+                    div {
+                        span { class: "text-gray-500 text-xs block mb-0.5", "Memory" }
+                        span {
+                            class: "text-gray-200",
+                            "{memory_text}"
                         }
                     }
-                }
-                div {
-                    class: "flex justify-between {theme::text::SECONDARY}",
-                    span { "Max Jobs:" }
-                    span {
-                        class: "text-white",
-                        "{builder.max_concurrent_jobs}"
+                    div {
+                        span { class: "text-gray-500 text-xs block mb-0.5", "Max Concurrent Jobs" }
+                        span {
+                            class: "text-gray-200",
+                            "{builder.max_concurrent_jobs}"
+                        }
                     }
-                }
-                div {
-                    class: "flex justify-between {theme::text::SECONDARY}",
-                    span { "Environments:" }
-                    span {
-                        class: "text-white",
-                        {
-                            if builder.assigned_environment_count > 0 {
-                                format!("{}", builder.assigned_environment_count)
-                            } else {
-                                "All (wildcard)".to_string()
-                            }
+                    div {
+                        span { class: "text-gray-500 text-xs block mb-0.5", "Environments" }
+                        span {
+                            class: "text-gray-200",
+                            "{environments_text}"
                         }
                     }
                 }
