@@ -430,6 +430,56 @@
   --tw-ring-offset-color: var(--cf-page-bg) !important;
 }
 
+/*
+ * Button readability bridge in light mode.
+ * Keep neutral buttons light with dark text, and keep accent buttons high-contrast.
+ */
+:root[data-theme="light"] button.bg-gray-900,
+:root[data-theme="light"] button.bg-gray-800,
+:root[data-theme="light"] button.bg-gray-700,
+:root[data-theme="light"] a.bg-gray-900,
+:root[data-theme="light"] a.bg-gray-800,
+:root[data-theme="light"] a.bg-gray-700,
+:root[data-theme="light"] [class~="bg-gray-900/80"],
+:root[data-theme="light"] [class~="bg-gray-900/70"],
+:root[data-theme="light"] [class~="bg-gray-900/60"],
+:root[data-theme="light"] [class~="bg-gray-800/80"] {
+  background-color: #dde6f3 !important;
+  border-color: var(--cf-card-border) !important;
+  color: var(--cf-text-primary) !important;
+}
+
+:root[data-theme="light"] button.hover\:bg-gray-800:hover,
+:root[data-theme="light"] button.hover\:bg-gray-700:hover,
+:root[data-theme="light"] a.hover\:bg-gray-800:hover,
+:root[data-theme="light"] a.hover\:bg-gray-700:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-800/80"]:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-700/70"]:hover {
+  background-color: #cfdbea !important;
+  color: var(--cf-text-primary) !important;
+}
+
+:root[data-theme="light"] button.bg-blue-600,
+:root[data-theme="light"] button.bg-violet-600,
+:root[data-theme="light"] button.bg-red-500,
+:root[data-theme="light"] button.bg-emerald-600,
+:root[data-theme="light"] a.bg-blue-600,
+:root[data-theme="light"] a.bg-violet-600,
+:root[data-theme="light"] a.bg-red-500,
+:root[data-theme="light"] a.bg-emerald-600,
+:root[data-theme="light"] button.cf-primary-btn,
+:root[data-theme="light"] button.cf-danger-btn,
+:root[data-theme="light"] button.cf-success-btn {
+  color: #ffffff !important;
+}
+
+:root[data-theme="light"] button .text-gray-400,
+:root[data-theme="light"] button .text-gray-500,
+:root[data-theme="light"] a .text-gray-400,
+:root[data-theme="light"] a .text-gray-500 {
+  color: var(--cf-text-primary) !important;
+}
+
 .cf-worker-header-gradient {
   background: linear-gradient(135deg, rgba(130, 105, 155, 0.34) 0%, rgba(17, 24, 39, 0.92) 100%);
 }
