@@ -177,11 +177,11 @@ pub fn TopBar(title: String) -> Element {
                                                         "bg-amber-400"
                                                     },
                                                     span {
-                                                        class: "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                                                        class: "absolute h-4 w-4 rounded-full bg-white transition-all",
                                                         class: if ui_theme() == UiTheme::Dark {
-                                                            "translate-x-5"
+                                                            "left-[1.125rem]"
                                                         } else {
-                                                            "translate-x-1"
+                                                            "left-0.5"
                                                         },
                                                     }
                                                 }
