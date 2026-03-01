@@ -561,44 +561,90 @@ pub async fn append_job_logs(
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
+ ) -> Result<(StatusCode, String), (StatusCode, String)> {
     let max_chunk_bytes = state.server_config.max_build_log_chunk_mb * 1024 * 1024;
     let max_total_bytes = state.server_config.max_build_log_size_mb * 1024 * 1024;
 
     // Enforce per-request payload size limit before parsing JSON.
     if body.len() > max_chunk_bytes {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Log payload too large: {} bytes exceeds {} byte limit",
+                body.len(),
+                max_chunk_bytes
+            ),
+        ));
     }
 
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/jobs/{}/logs", builder_id, job_id);
-    let verified = authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    let verified = authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool)
+        .await
+        .map_err(|status| {
+            (
+                status,
+                "Builder authentication failed for log append request".to_string(),
+            )
+        })?;
 
     if verified.builder_id != builder_id {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Builder ID mismatch in log append request".to_string(),
+        ));
     }
 
     // Parse log content
     let request: AppendLogsRequest =
-        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+        serde_json::from_slice(&body).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Invalid log append payload: expected JSON with 'logs' string field".to_string(),
+            )
+        })?;
 
     if request.logs.len() > max_chunk_bytes {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!(
+                "Log chunk too large: {} bytes exceeds {} byte limit",
+                request.logs.len(),
+                max_chunk_bytes
+            ),
+        ));
     }
 
     // Verify the job is assigned to this builder
     let job = builders::get_build_job_by_id(&state.pool, &job_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .map_err(|_| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to load build job for log append".to_string(),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Build job not found for log append".to_string(),
+        ))?;
 
     if job.builder_id != Some(builder_id) {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Builder cannot append logs for a job assigned to another builder".to_string(),
+        ));
     }
 
     // Only queued/building jobs may receive log appends.
     if job.status != "queued" && job.status != "building" {
-        return Err(StatusCode::CONFLICT);
+        return Err((
+            StatusCode::CONFLICT,
+            format!(
+                "Cannot append logs for job in '{}' status; only 'queued' and 'building' are allowed",
+                job.status
+            ),
+        ));
     }
 
     // Append logs with per-job size cap enforcement.
@@ -607,15 +653,38 @@ pub async fn append_job_logs(
         .map_err(|e| {
             let msg = e.to_string();
             if msg.contains("log_size_limit_exceeded") {
-                StatusCode::PAYLOAD_TOO_LARGE
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    format!(
+                        "Total job logs would exceed {} byte limit",
+                        max_total_bytes
+                    ),
+                )
             } else if msg.contains("invalid_job_status") {
-                StatusCode::CONFLICT
+                (
+                    StatusCode::CONFLICT,
+                    "Cannot append logs for job in current status".to_string(),
+                )
             } else if msg.contains("job_not_found") {
-                StatusCode::NOT_FOUND
+                (
+                    StatusCode::NOT_FOUND,
+                    "Build job not found for log append".to_string(),
+                )
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to append logs due to internal server error".to_string(),
+                )
             }
         })?;
 
-    Ok(StatusCode::ACCEPTED)
+    Ok((
+        StatusCode::ACCEPTED,
+        format!(
+            "Log chunk accepted ({} bytes). Max per-chunk: {} bytes, max total per job: {} bytes",
+            request.logs.len(),
+            max_chunk_bytes,
+            max_total_bytes
+        ),
+    ))
 }
