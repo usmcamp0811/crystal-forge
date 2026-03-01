@@ -294,14 +294,6 @@ nix develop -c crystal-forge-admin import-cache \
 - [ ] #19 Documentation explains TOML vs DB precedence and migration path
 <!-- AC:END -->
 
-
-
-## Implementation Notes
-
-<!-- SECTION:NOTES:BEGIN -->
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/147
-<!-- SECTION:NOTES:END -->
-
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 All API endpoints tested (unit + integration)
