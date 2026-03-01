@@ -22,7 +22,7 @@ use crate::handlers::builder_request::{
 };
 use crate::models::builders::{
     AppendLogsRequest, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary, 
-    BuilderWithEnvironments, CreateBuilderRequest, ReportMetricsRequest, UpdateBuilderEnvironmentsRequest,
+    BuilderWithEnvironments, CreateBuilderRequest, KeypairRegeneratedResponse, ReportMetricsRequest, UpdateBuilderEnvironmentsRequest,
     UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
 };
 use crate::queries::builders;
@@ -189,6 +189,42 @@ pub async fn update_builder_public_key(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(builder))
+}
+
+/// POST /api/v1/builders/:id/regenerate-keypair - Generate new Ed25519 keypair for builder (admin-only)
+///
+/// Generates a cryptographically correct Ed25519 keypair and updates the builder's public key.
+/// Returns the new private key ONCE - save it immediately, it won't be shown again!
+pub async fn regenerate_builder_keypair(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: axum::http::HeaderMap,
+) -> Result<Json<KeypairRegeneratedResponse>, StatusCode> {
+    // Verify admin authorization
+    let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    // Check builder exists
+    let existing = builders::get_builder_by_id(&state.pool, &builder_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Generate new Ed25519 keypair
+    let (public_key_base64, private_key_base64) = builders::generate_ed25519_keypair()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Update builder's public key
+    builders::update_builder_public_key(&state.pool, &builder_id, &public_key_base64, &existing.name)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Return keypair (private key shown ONLY ONCE)
+    Ok(Json(KeypairRegeneratedResponse {
+        public_key: public_key_base64,
+        private_key: private_key_base64,
+    }))
 }
 
 /// POST /api/v1/build-jobs/:id/prioritize - Move queued build job to front (admin-only)

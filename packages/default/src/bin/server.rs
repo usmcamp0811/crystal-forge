@@ -188,6 +188,10 @@ async fn main() -> anyhow::Result<()> {
             put(builders::update_builder_public_key),
         )
         .route(
+            "/api/v1/builders/:id/regenerate-keypair",
+            post(builders::regenerate_builder_keypair),
+        )
+        .route(
             "/api/v1/builders/:id/environments",
             patch(builders::update_builder_environments),
         )
