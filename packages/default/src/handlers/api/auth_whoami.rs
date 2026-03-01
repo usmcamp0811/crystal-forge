@@ -108,8 +108,10 @@ fn detect_auth_mode() -> AuthMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn detect_auth_mode_defaults_to_oidc() {
         unsafe {
             std::env::remove_var("AUTH_MODE");
@@ -118,6 +120,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_auth_mode_recognizes_dev() {
         unsafe {
             std::env::set_var("AUTH_MODE", "dev");
@@ -129,6 +132,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn detect_auth_mode_recognizes_local() {
         unsafe {
             std::env::set_var("AUTH_MODE", "local");
