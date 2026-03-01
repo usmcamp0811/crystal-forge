@@ -119,7 +119,7 @@ pub fn AppShell() -> Element {
 
     rsx! {
         div {
-            class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex",
+            class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex overflow-x-hidden",
 
             SidebarNav {}
 
