@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 
 use crate::components::layout::AppShell;
 use crate::views::admin::AdminView;
+use crate::views::builders::BuildersView;
 use crate::views::builds::BuildsView;
 use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
@@ -45,6 +46,9 @@ pub enum Route {
     #[route("/builds")]
     BuildsView {},
 
+    #[route("/builders")]
+    BuildersView {},
+
     #[route("/cves")]
     CvesView {},
 
@@ -82,6 +86,7 @@ impl Route {
             Route::SystemDetailView { id } => format!("System: {id}"),
             Route::FlakesView { .. } => "Flakes".to_string(),
             Route::BuildsView { .. } => "Builds".to_string(),
+            Route::BuildersView { .. } => "Builders".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),

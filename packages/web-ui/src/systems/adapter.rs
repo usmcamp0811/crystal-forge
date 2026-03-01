@@ -16,7 +16,7 @@ use chrono::{Duration, Utc};
 use uuid::Uuid;
 
 use crate::api::client::{
-    ApiClientError, create_system, deactivate_system, fetch_system, fetch_systems,
+    ApiClientError, create_system, deactivate_system, fetch_flakes, fetch_system, fetch_systems,
     update_system_public_key,
 };
 use crate::api::models::{
@@ -49,6 +49,14 @@ pub struct SystemDetailLoadResult {
     /// Human-readable notice shown when using fallback data.
     pub notice: Option<String>,
     /// True when the API returned 401/403 — view should redirect to login.
+    pub redirect_to_login: bool,
+}
+
+/// Result of loading registered flake names for form dropdowns.
+#[derive(Debug, Clone)]
+pub struct FlakeNamesLoadResult {
+    pub names: Vec<String>,
+    pub notice: Option<String>,
     pub redirect_to_login: bool,
 }
 
@@ -121,6 +129,34 @@ pub async fn load_system_detail_with_fallback(id: &str) -> SystemDetailLoadResul
                 redirect_to_login: false,
             }
         }
+    }
+}
+
+/// Fetch flake names with deterministic fallback for forms.
+pub async fn load_flake_names_with_fallback() -> FlakeNamesLoadResult {
+    match fetch_flakes().await {
+        Ok(flakes) => {
+            let mut names = flakes.into_iter().map(|f| f.name).collect::<Vec<_>>();
+            names.sort();
+            names.dedup();
+            FlakeNamesLoadResult {
+                names,
+                notice: None,
+                redirect_to_login: false,
+            }
+        }
+        Err(error) if should_redirect_to_login(&error) => FlakeNamesLoadResult {
+            names: fallback_flake_names(),
+            notice: None,
+            redirect_to_login: true,
+        },
+        Err(error) => FlakeNamesLoadResult {
+            names: fallback_flake_names(),
+            notice: Some(format!(
+                "Flakes API unavailable, using fallback flake options: {error}"
+            )),
+            redirect_to_login: false,
+        },
     }
 }
 
@@ -246,6 +282,14 @@ pub fn fallback_systems() -> Vec<SystemSummary> {
             last_seen: Some(now - Duration::days(3)),
             deployment_policy: "manual".to_string(),
         },
+    ]
+}
+
+pub fn fallback_flake_names() -> Vec<String> {
+    vec![
+        "infrastructure".to_string(),
+        "workstations".to_string(),
+        "edge-nodes".to_string(),
     ]
 }
 

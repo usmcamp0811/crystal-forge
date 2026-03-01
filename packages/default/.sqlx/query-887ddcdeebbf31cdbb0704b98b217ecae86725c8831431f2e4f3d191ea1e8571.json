@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE builders\n        SET status = 'offline', updated_at = now()\n        WHERE status = 'active'\n          AND last_heartbeat_at < now() - ($1 || ' seconds')::interval\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "887ddcdeebbf31cdbb0704b98b217ecae86725c8831431f2e4f3d191ea1e8571"
+}

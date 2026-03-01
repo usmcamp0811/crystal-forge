@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, PendingAction, build_status_badge_style,
-    event_level_style, mock_artifacts, mock_events, mock_logs,
+    build_status_badge_style, event_level_style, mock_artifacts, mock_events, mock_logs,
+    BuildAction, BuildItem, BuildStatus, PendingAction,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +65,7 @@ pub fn BuildDetailPane(
                             class: "flex flex-col md:flex-row md:items-center md:justify-between gap-3",
                             div {
                                 p { class: "text-sm text-white font-semibold", "{build.hostname}" }
-                                p { class: "text-xs text-gray-400", "{build.flake} · {build.branch} · {short_commit(build.commit)}" }
+                                p { class: "text-xs text-gray-400", "{build.flake} · {build.branch} · {short_commit(&build.commit)}" }
                                 p { class: "text-xs text-gray-500 mt-1", "Queued by {build.started_by} · worker {build.worker_id}" }
                             }
                             span {

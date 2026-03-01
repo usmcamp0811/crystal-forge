@@ -5,6 +5,7 @@ pub mod auth_oidc;
 pub mod auth_session;
 pub mod auth_status;
 pub mod auth_whoami;
+pub mod builders;
 pub mod dashboard;
 pub mod environments;
 pub mod flakes;

@@ -1,14 +1,51 @@
 use crate::config;
 use crate::models::commits::Commit;
-use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
+use crate::queries::commits::{
+    flake_has_commits, flake_last_commit, insert_commit, insert_commit_with_metadata,
+};
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use tracing::{debug, info, warn};
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const NIX_CONFIG_EVAL_TIMEOUT: Duration = Duration::from_secs(60);
+const INIT_COMMIT_RETRY_ATTEMPTS: usize = 5;
+const INIT_COMMIT_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+async fn fetch_and_insert_recent_commits_with_retry(
+    pool: &PgPool,
+    repo_url: &str,
+    branch: &str,
+    limit: Option<usize>,
+) -> Result<Vec<String>> {
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for attempt in 1..=INIT_COMMIT_RETRY_ATTEMPTS {
+        match fetch_and_insert_recent_commits(pool, repo_url, branch, limit).await {
+            Ok(commits) => return Ok(commits),
+            Err(err) => {
+                last_err = Some(err);
+
+                if attempt < INIT_COMMIT_RETRY_ATTEMPTS {
+                    warn!(
+                        "⚠️ Commit initialization attempt {}/{} failed for {} (branch {}), retrying in {:?}",
+                        attempt,
+                        INIT_COMMIT_RETRY_ATTEMPTS,
+                        repo_url,
+                        branch,
+                        INIT_COMMIT_RETRY_DELAY
+                    );
+                    sleep(INIT_COMMIT_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("commit initialization failed")))
+}
 
 #[derive(Debug, Clone)]
 pub struct GitCommitMetadata {
@@ -46,14 +83,23 @@ pub async fn fetch_and_insert_recent_commits(
     branch: &str,
     limit: Option<usize>,
 ) -> Result<Vec<String>> {
-    let commits = get_commits_with_timestamps(repo_url, branch, limit, None).await?;
+    let commits = get_commits_with_full_metadata(repo_url, branch, limit, None).await?;
 
     let mut inserted = Vec::new();
-    for (hash, timestamp) in commits {
-        if let Err(e) = insert_commit(pool, &hash, repo_url, timestamp).await {
-            warn!("Failed to insert commit {}: {}", hash, e);
+    for commit_data in commits {
+        if let Err(e) = insert_commit_with_metadata(
+            pool,
+            &commit_data.hash,
+            repo_url,
+            commit_data.timestamp,
+            Some(&commit_data.message),
+            Some(&commit_data.author),
+        )
+        .await
+        {
+            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
         } else {
-            inserted.push(hash);
+            inserted.push(commit_data.hash);
         }
     }
 
@@ -93,7 +139,7 @@ pub async fn initialize_flake_commits(
             }
         }
 
-        match fetch_and_insert_recent_commits(
+        match fetch_and_insert_recent_commits_with_retry(
             pool,
             &flake.repo_url,
             &flake.branch(),
@@ -179,7 +225,7 @@ pub async fn sync_all_watched_flakes_commits(
             Ok(false) => {
                 // No commits, initialize
                 info!("🔄 Initializing commits for flake: {}", flake.name);
-                match fetch_and_insert_recent_commits(
+                match fetch_and_insert_recent_commits_with_retry(
                     pool,
                     &flake.repo_url,
                     &flake.branch(),
@@ -316,12 +362,21 @@ fn normalize_repo_url_for_git(repo_url: &str) -> String {
 }
 
 /// Get commits with timestamps, optionally since a specific commit
-async fn get_commits_with_timestamps(
+/// Commit data fetched from git log
+#[derive(Debug, Clone)]
+struct CommitData {
+    hash: String,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    message: String,
+    author: String,
+}
+
+async fn get_commits_with_full_metadata(
     repo_url: &str,
     branch: &str,
     limit: Option<usize>,
     since_commit: Option<&str>,
-) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+) -> Result<Vec<CommitData>> {
     let git_url = normalize_repo_url_for_git(repo_url);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
@@ -348,8 +403,9 @@ async fn get_commits_with_timestamps(
         bail!("Git clone failed for {}: {}", repo_url, stderr);
     }
 
-    // Build git log args
-    let mut args = vec!["log", "--format=%H|%cI"];
+    // Build git log args with format: hash|timestamp|subject|author
+    // Using %x1E as field separator (ASCII record separator) to handle multi-line messages
+    let mut args = vec!["log", "--format=%H%x1E%cI%x1E%s%x1E%aN"];
 
     // Add range if since_commit provided
     let range;
@@ -407,19 +463,37 @@ async fn get_commits_with_timestamps(
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() != 2 {
-                bail!("Invalid git log format: {}", line);
+            let parts: Vec<&str> = line.split('\x1E').collect();
+            if parts.len() != 4 {
+                bail!("Invalid git log format (expected 4 fields): {}", line);
             }
             let hash = parts[0].trim().to_string();
             let timestamp = chrono::DateTime::parse_from_rfc3339(parts[1].trim())
                 .context("Failed to parse timestamp")?
                 .with_timezone(&chrono::Utc);
-            Ok((hash, timestamp))
+            let message = parts[2].trim().to_string();
+            let author = parts[3].trim().to_string();
+            Ok(CommitData {
+                hash,
+                timestamp,
+                message,
+                author,
+            })
         })
         .collect();
 
     commits
+}
+
+/// Legacy function for backward compatibility - returns only hash and timestamp
+async fn get_commits_with_timestamps(
+    repo_url: &str,
+    branch: &str,
+    limit: Option<usize>,
+    since_commit: Option<&str>,
+) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+    let commits = get_commits_with_full_metadata(repo_url, branch, limit, since_commit).await?;
+    Ok(commits.into_iter().map(|c| (c.hash, c.timestamp)).collect())
 }
 
 /// Fetch and insert all new commits since a given commit hash
@@ -429,7 +503,7 @@ pub async fn fetch_and_insert_commits_since(
     branch: &str,
     since_commit: &Commit,
 ) -> Result<Vec<String>> {
-    let commits = get_commits_with_timestamps(
+    let commits = get_commits_with_full_metadata(
         repo_url,
         branch,
         Some(50),
@@ -447,12 +521,21 @@ pub async fn fetch_and_insert_commits_since(
 
     let mut inserted = Vec::new();
     // Insert in reverse (oldest first) for chronological order
-    for (hash, timestamp) in commits.into_iter().rev() {
-        if let Err(e) = insert_commit(pool, &hash, repo_url, timestamp).await {
-            warn!("Failed to insert commit {}: {}", hash, e);
+    for commit_data in commits.into_iter().rev() {
+        if let Err(e) = insert_commit_with_metadata(
+            pool,
+            &commit_data.hash,
+            repo_url,
+            commit_data.timestamp,
+            Some(&commit_data.message),
+            Some(&commit_data.author),
+        )
+        .await
+        {
+            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
         } else {
-            debug!("✅ Inserted commit {} for {}", hash, repo_url);
-            inserted.push(hash);
+            debug!("✅ Inserted commit {} for {}", commit_data.hash, repo_url);
+            inserted.push(commit_data.hash);
         }
     }
 
@@ -544,6 +627,174 @@ pub async fn get_commit_metadata(
     }
 
     Ok(metadata)
+}
+
+/// Resolve `nixosConfigurations` names for specific commit hashes.
+///
+/// Best effort: commits that fail to evaluate are skipped.
+/// Processes commits sequentially to avoid overwhelming nix eval.
+pub async fn get_commit_nixos_configurations(
+    repo_url: &str,
+    commit_hashes: &[String],
+) -> HashMap<String, Vec<String>> {
+    let mut results = HashMap::new();
+
+    // Limit to first 5 commits to avoid timeout cascade
+    let limited_hashes = if commit_hashes.len() > 5 {
+        warn!(
+            "Limiting nixosConfigurations hydration to 5 commits (requested {})",
+            commit_hashes.len()
+        );
+        &commit_hashes[..5]
+    } else {
+        commit_hashes
+    };
+
+    for hash in limited_hashes {
+        match load_commit_nixos_configurations(repo_url, hash).await {
+            Ok(configs) => {
+                results.insert(hash.clone(), configs);
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to resolve nixosConfigurations for {} @ {}: {}",
+                    repo_url, hash, err
+                );
+            }
+        }
+    }
+
+    results
+}
+
+/// Resolve changed file paths for specific commit hashes.
+///
+/// Best effort: commits that cannot be resolved are skipped.
+pub async fn get_commit_changed_files(
+    repo_url: &str,
+    commit_hashes: &[String],
+) -> Result<HashMap<String, Vec<String>>> {
+    if commit_hashes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
+    let clone_path = temp_dir.path();
+
+    let clone_output = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "200",
+                "--filter=blob:none",
+                &git_url,
+                ".",
+            ])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out cloning repo for changed files: {repo_url}"))?
+    .with_context(|| format!("Failed to clone repo for changed files: {repo_url}"))?;
+
+    if !clone_output.status.success() {
+        let stderr = String::from_utf8_lossy(&clone_output.stderr);
+        bail!("Git clone failed for {}: {}", repo_url, stderr.trim());
+    }
+
+    let mut changed = HashMap::new();
+    for hash in commit_hashes {
+        match load_commit_changed_files(clone_path, hash).await {
+            Ok(files) => {
+                changed.insert(hash.clone(), files);
+            }
+            Err(err) => {
+                warn!("Failed to load changed files for {}: {}", hash, err);
+            }
+        }
+    }
+
+    Ok(changed)
+}
+
+async fn load_commit_nixos_configurations(repo_url: &str, commit_hash: &str) -> Result<Vec<String>> {
+    let flake_ref = build_flake_reference(repo_url, commit_hash);
+    let flake_target = format!("{flake_ref}#nixosConfigurations");
+
+    let output = timeout(
+        NIX_CONFIG_EVAL_TIMEOUT,
+        tokio::process::Command::new("nix")
+            .args([
+                "eval",
+                "--json",
+                "--apply",
+                "builtins.attrNames",
+                flake_target.as_str(),
+            ])
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out evaluating nixosConfigurations for {commit_hash}"))?
+    .with_context(|| format!("Failed to evaluate nixosConfigurations for {commit_hash}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "nix eval failed for {}: {}",
+            commit_hash,
+            stderr.trim()
+        );
+    }
+
+    let mut names: Vec<String> = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("Failed to parse nixosConfigurations JSON for {commit_hash}"))?;
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
+    if repo_url.starts_with("git+") {
+        if repo_url.contains("?rev=") {
+            repo_url.to_string()
+        } else {
+            format!("{}?rev={}", repo_url, commit_hash)
+        }
+    } else {
+        let separator = if repo_url.contains('?') { "&" } else { "?" };
+        format!("git+{}{separator}rev={}", repo_url, commit_hash)
+    }
+}
+
+async fn load_commit_changed_files(clone_path: &std::path::Path, commit_hash: &str) -> Result<Vec<String>> {
+    let output = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["show", "--pretty=format:", "--name-only", commit_hash])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out loading changed files for commit {commit_hash}"))?
+    .with_context(|| format!("Failed to load changed files for commit {commit_hash}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git show --name-only failed for {}: {}", commit_hash, stderr.trim());
+    }
+
+    let mut files: Vec<String> = String::from_utf8(output.stdout)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 async fn load_commit_metadata(

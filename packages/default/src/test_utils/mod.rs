@@ -26,3 +26,4 @@
 pub mod assertions;
 pub mod builders;
 pub mod crypto;
+pub mod db;

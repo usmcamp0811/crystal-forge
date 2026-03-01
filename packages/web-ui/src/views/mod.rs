@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod builds;
+pub mod builders;
 pub mod cves;
 pub mod dashboard;
 pub mod dev_login;

@@ -566,6 +566,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "atlas-05".to_string(),
                     ],
                     build_status: Some(BuildStatus::Building),
+                    evaluation_status: None,
                 },
                 FlakeCommit {
                     hash: "b2c3d4e5f6789012345678ab".to_string(),
@@ -576,6 +577,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     commits_behind: 1,
                     systems: vec!["luna-01".to_string(), "luna-02".to_string()],
                     build_status: Some(BuildStatus::Queued),
+                    evaluation_status: None,
                 },
                 FlakeCommit {
                     hash: "c3d4e5f6789012345678abcd".to_string(),
@@ -586,6 +588,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     commits_behind: 2,
                     systems: vec!["orion-01".to_string()],
                     build_status: Some(BuildStatus::Idle),
+                    evaluation_status: None,
                 },
             ],
         },
@@ -612,6 +615,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                         "ws-008".to_string(),
                     ],
                     build_status: Some(BuildStatus::Queued),
+                    evaluation_status: None,
                 },
                 FlakeCommit {
                     hash: "a2b3c4d5e6f78901234567ab".to_string(),
@@ -622,6 +626,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     commits_behind: 1,
                     systems: vec!["ws-009".to_string(), "ws-010".to_string()],
                     build_status: Some(BuildStatus::Queued),
+                    evaluation_status: None,
                 },
             ],
         },
@@ -649,6 +654,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     "edge-us-north".to_string(),
                 ],
                 build_status: Some(BuildStatus::Queued),
+                evaluation_status: None,
             }],
         },
     ]

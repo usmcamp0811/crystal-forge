@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE builders\n        SET last_heartbeat_at = now(), status = 'active', updated_at = now()\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "68d8a1b9d49e9b6270222ee132da6ad16e329d2112740baa162da75e270b1fad"
+}

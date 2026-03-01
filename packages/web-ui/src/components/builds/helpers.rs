@@ -2,9 +2,9 @@
 
 use dioxus::prelude::*;
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::Closure;
-use web_sys::{Node, window};
+use wasm_bindgen::JsCast;
+use web_sys::{window, Node};
 
 /// Worker status enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,8 +97,8 @@ pub enum BuildAction {
 /// Worker item struct.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkerItem {
-    pub id: &'static str,
-    pub name: &'static str,
+    pub id: String,
+    pub name: String,
     pub active_slots: usize,
     pub total_slots: usize,
     pub queue_depth: usize,
@@ -115,16 +115,18 @@ impl WorkerItem {
 #[derive(Clone, Debug, PartialEq)]
 pub struct BuildItem {
     pub id: i32,
-    pub hostname: &'static str,
-    pub flake: &'static str,
-    pub commit: &'static str,
-    pub branch: &'static str,
-    pub worker_id: &'static str,
-    pub queued_for: &'static str,
-    pub runtime: Option<&'static str>,
-    pub started_by: &'static str,
+    pub job_id: Option<uuid::Uuid>,
+    pub system_id: Option<uuid::Uuid>,
+    pub hostname: String,
+    pub flake: String,
+    pub commit: String,
+    pub branch: String,
+    pub worker_id: String,
+    pub queued_for: String,
+    pub runtime: Option<String>,
+    pub started_by: String,
     pub status: BuildStatus,
-    pub summary: &'static str,
+    pub summary: String,
 }
 
 impl BuildItem {
@@ -154,7 +156,7 @@ pub struct BuildArtifact {
 pub enum PendingAction {
     Queue(QueueAction),
     Worker {
-        worker_id: &'static str,
+        worker_id: String,
         action: WorkerAction,
     },
     Build {
@@ -285,8 +287,8 @@ pub fn apply_action(
                 BuildAction::Restart => {
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
                         target.status = BuildStatus::Restarting;
-                        target.runtime = Some("00:00");
-                        target.queued_for = "restarting";
+                        target.runtime = Some("00:00".to_string());
+                        target.queued_for = "restarting".to_string();
                     }
                     if let Some(target) = next_builds.iter_mut().find(|b| b.id == build_id) {
                         target.status = BuildStatus::Building;
@@ -324,16 +326,16 @@ pub fn selected_build_data(selected_id: Option<i32>, builds: &[BuildItem]) -> Op
 pub fn mock_workers() -> Vec<WorkerItem> {
     vec![
         WorkerItem {
-            id: "worker-a",
-            name: "worker-a",
+            id: "worker-a".to_string(),
+            name: "worker-a".to_string(),
             active_slots: 2,
             total_slots: 4,
             queue_depth: 6,
             status: WorkerStatus::Running,
         },
         WorkerItem {
-            id: "worker-b",
-            name: "worker-b",
+            id: "worker-b".to_string(),
+            name: "worker-b".to_string(),
             active_slots: 3,
             total_slots: 4,
             queue_depth: 4,
@@ -346,55 +348,64 @@ pub fn mock_builds() -> Vec<BuildItem> {
     vec![
         BuildItem {
             id: 1,
-            hostname: "atlas-01",
-            flake: "campground",
-            commit: "a38f45fba91d4b0a5d80840c09b0910c70fa013e",
-            branch: "main",
-            worker_id: "worker-a",
-            queued_for: "queued 00:58 ago",
-            runtime: Some("02:13"),
-            started_by: "mcamp",
+            job_id: None,
+            system_id: None,
+            hostname: "atlas-01".to_string(),
+            flake: "campground".to_string(),
+            commit: "a38f45fba91d4b0a5d80840c09b0910c70fa013e".to_string(),
+            branch: "main".to_string(),
+            worker_id: "worker-a".to_string(),
+            queued_for: "queued 00:58 ago".to_string(),
+            runtime: Some("02:13".to_string()),
+            started_by: "mcamp".to_string(),
             status: BuildStatus::Building,
-            summary: "nix build .#nixosConfigurations.atlas-01.config.system.build.toplevel",
+            summary: "nix build .#nixosConfigurations.atlas-01.config.system.build.toplevel"
+                .to_string(),
         },
         BuildItem {
             id: 2,
-            hostname: "luna-02",
-            flake: "campground",
-            commit: "75c2fbf719ac2654af9f1dc4b773f502f9db515e",
-            branch: "main",
-            worker_id: "worker-b",
-            queued_for: "queued 01:32 ago",
+            job_id: None,
+            system_id: None,
+            hostname: "luna-02".to_string(),
+            flake: "campground".to_string(),
+            commit: "75c2fbf719ac2654af9f1dc4b773f502f9db515e".to_string(),
+            branch: "main".to_string(),
+            worker_id: "worker-b".to_string(),
+            queued_for: "queued 01:32 ago".to_string(),
             runtime: None,
-            started_by: "scheduler",
+            started_by: "scheduler".to_string(),
             status: BuildStatus::Queued,
-            summary: "waiting for free worker slot",
+            summary: "waiting for free worker slot".to_string(),
         },
         BuildItem {
             id: 3,
-            hostname: "gray",
-            flake: "campground",
-            commit: "4144fdc0312734c62bc5f4f9f48f5a87e4b3a85f",
-            branch: "main",
-            worker_id: "worker-a",
-            queued_for: "queued 00:29 ago",
+            job_id: None,
+            system_id: None,
+            hostname: "gray".to_string(),
+            flake: "campground".to_string(),
+            commit: "4144fdc0312734c62bc5f4f9f48f5a87e4b3a85f".to_string(),
+            branch: "main".to_string(),
+            worker_id: "worker-a".to_string(),
+            queued_for: "queued 00:29 ago".to_string(),
             runtime: None,
-            started_by: "scheduler",
+            started_by: "scheduler".to_string(),
             status: BuildStatus::Queued,
-            summary: "waiting for free worker slot",
+            summary: "waiting for free worker slot".to_string(),
         },
         BuildItem {
             id: 4,
-            hostname: "reckless",
-            flake: "campground",
-            commit: "9cc53a8f1792043b1f7868ecf5ff312ad67553de",
-            branch: "release/2026-02",
-            worker_id: "worker-b",
-            queued_for: "queued 06:11 ago",
-            runtime: Some("04:22"),
-            started_by: "mcamp",
+            job_id: None,
+            system_id: None,
+            hostname: "reckless".to_string(),
+            flake: "campground".to_string(),
+            commit: "9cc53a8f1792043b1f7868ecf5ff312ad67553de".to_string(),
+            branch: "release/2026-02".to_string(),
+            worker_id: "worker-b".to_string(),
+            queued_for: "queued 06:11 ago".to_string(),
+            runtime: Some("04:22".to_string()),
+            started_by: "mcamp".to_string(),
             status: BuildStatus::Failed,
-            summary: "dependency graph diverged on nixpkgs input",
+            summary: "dependency graph diverged on nixpkgs input".to_string(),
         },
     ]
 }

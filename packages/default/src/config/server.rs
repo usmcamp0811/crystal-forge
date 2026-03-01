@@ -35,6 +35,28 @@ pub struct ServerConfig {
     /// Default: false
     #[serde(default)]
     pub allow_registration: bool,
+
+    /// Maximum total log size stored per build job in MB.
+    /// Default: 10 MB.
+    #[serde(default = "default_max_build_log_size_mb")]
+    pub max_build_log_size_mb: usize,
+
+    /// Maximum size per append logs request payload in MB.
+    /// Default: 1 MB.
+    #[serde(default = "default_max_build_log_chunk_mb")]
+    pub max_build_log_chunk_mb: usize,
+
+    /// Retention period for successful build job logs in days.
+    /// Older logs are cleared by background retention task.
+    /// Default: 30 days.
+    #[serde(default = "default_build_log_retention_days")]
+    pub build_log_retention_days: i32,
+
+    /// Retention period for failed build job logs in days.
+    /// Older logs are cleared by background retention task.
+    /// Default: 90 days.
+    #[serde(default = "default_failed_build_log_retention_days")]
+    pub failed_build_log_retention_days: i32,
 }
 
 // Default value functions for serde
@@ -54,6 +76,22 @@ fn default_auth_mode() -> String {
     std::env::var("AUTH_MODE").unwrap_or_else(|_| "oidc".to_string())
 }
 
+fn default_max_build_log_size_mb() -> usize {
+    10
+}
+
+fn default_max_build_log_chunk_mb() -> usize {
+    1
+}
+
+fn default_build_log_retention_days() -> i32 {
+    30
+}
+
+fn default_failed_build_log_retention_days() -> i32 {
+    90
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -64,6 +102,10 @@ impl Default for ServerConfig {
             eval_check_cache: default_eval_check_cache(),
             auth_mode: default_auth_mode(),
             allow_registration: false,
+            max_build_log_size_mb: default_max_build_log_size_mb(),
+            max_build_log_chunk_mb: default_max_build_log_chunk_mb(),
+            build_log_retention_days: default_build_log_retention_days(),
+            failed_build_log_retention_days: default_failed_build_log_retention_days(),
         }
     }
 }
@@ -113,6 +155,21 @@ impl ServerConfig {
                  Consider reducing to 4-8 for most systems.",
                 self.eval_workers
             );
+        }
+
+        if self.max_build_log_chunk_mb == 0 {
+            return Err("max_build_log_chunk_mb must be greater than 0".to_string());
+        }
+
+        if self.max_build_log_size_mb < self.max_build_log_chunk_mb {
+            return Err(format!(
+                "max_build_log_size_mb ({}) must be >= max_build_log_chunk_mb ({})",
+                self.max_build_log_size_mb, self.max_build_log_chunk_mb
+            ));
+        }
+
+        if self.build_log_retention_days <= 0 || self.failed_build_log_retention_days <= 0 {
+            return Err("build log retention days must be greater than 0".to_string());
         }
 
         Ok(())

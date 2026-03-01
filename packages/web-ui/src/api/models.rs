@@ -9,7 +9,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+pub use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Common Enums
@@ -522,11 +522,17 @@ pub struct FlakeCommit {
     pub system_count: i64,
     /// How many commits behind the latest this is (0 = latest).
     pub commits_behind: i64,
-    /// Hostnames of systems at this commit (for tooltip/expansion).
+    /// nixosConfigurations discovered at this commit.
+    ///
+    /// Entries may include the suffix " [CF system]" when the configuration
+    /// name matches a Crystal Forge system deployed at this commit.
     pub systems: Vec<String>,
     /// Current build status for this commit (if any build is in progress).
     #[serde(default)]
     pub build_status: Option<BuildStatus>,
+    /// Dry-run/evaluation status for this commit.
+    #[serde(default)]
+    pub evaluation_status: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -549,6 +555,10 @@ pub struct BuildQueueSummary {
 /// A single item in the build queue.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BuildQueueItem {
+    #[serde(default)]
+    pub job_id: Option<Uuid>,
+    #[serde(default)]
+    pub system_id: Option<Uuid>,
     /// The hostname/system being built.
     pub hostname: String,
     /// The flake name this build belongs to.
@@ -559,6 +569,8 @@ pub struct BuildQueueItem {
     pub commit_message: Option<String>,
     /// Current status (Queued or Building).
     pub status: BuildStatus,
+    #[serde(default)]
+    pub builder_name: Option<String>,
     /// When the build was queued.
     pub queued_at: DateTime<Utc>,
     /// When the build started (None if still queued).
@@ -923,4 +935,139 @@ pub struct ApiError {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<serde_json::Value>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Builder Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Builder status
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BuilderStatus {
+    #[serde(alias = "Active")]
+    Active,
+    #[serde(alias = "Inactive")]
+    Inactive,
+    #[serde(alias = "Offline")]
+    Offline,
+}
+
+impl BuilderStatus {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Active => "Active",
+            Self::Inactive => "Inactive",
+            Self::Offline => "Offline",
+        }
+    }
+
+    pub fn color_class(&self) -> &'static str {
+        match self {
+            Self::Active => "text-emerald-400",
+            Self::Inactive => "text-slate-400",
+            Self::Offline => "text-red-400",
+        }
+    }
+
+    pub fn bg_class(&self) -> &'static str {
+        match self {
+            Self::Active => "bg-emerald-500/10",
+            Self::Inactive => "bg-slate-500/10",
+            Self::Offline => "bg-red-500/10",
+        }
+    }
+
+    pub fn dot_class(&self) -> &'static str {
+        match self {
+            Self::Active => "bg-emerald-400",
+            Self::Inactive => "bg-slate-400",
+            Self::Offline => "bg-red-400",
+        }
+    }
+}
+
+/// Builder summary for list view
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BuilderSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub status: BuilderStatus,
+    pub max_cpu_cores: Option<i32>,
+    pub max_memory_mb: Option<i32>,
+    pub max_concurrent_jobs: i32,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub assigned_environment_count: i32,
+}
+
+/// Full builder details
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderDetail {
+    pub id: Uuid,
+    pub name: String,
+    pub public_key: String,
+    pub status: BuilderStatus,
+    pub max_cpu_cores: Option<i32>,
+    pub max_memory_mb: Option<i32>,
+    pub max_concurrent_jobs: i32,
+    pub last_heartbeat_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(default)]
+    pub assigned_environment_ids: Vec<Uuid>,
+}
+
+/// Create builder request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateBuilderRequest {
+    pub name: String,
+    pub public_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cpu_cores: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_jobs: Option<i32>,
+    #[serde(default)]
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Update builder request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<BuilderStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_cpu_cores: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_concurrent_jobs: Option<i32>,
+}
+
+/// Update builder environments request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderEnvironmentsRequest {
+    pub environment_ids: Vec<Uuid>,
+}
+
+/// Update builder public key request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateBuilderPublicKeyRequest {
+    pub public_key: String,
+}
+
+/// Builder metrics
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuilderMetrics {
+    pub id: i64,
+    pub builder_id: Uuid,
+    pub timestamp: DateTime<Utc>,
+    pub cpu_usage_percent: f64,
+    pub memory_usage_mb: i64,
+    pub system_cpu_usage_percent: Option<f64>,
+    pub system_memory_total_mb: Option<i64>,
+    pub system_memory_used_mb: Option<i64>,
 }

@@ -4,6 +4,7 @@
 //! All methods return deserialized DTOs from [`super::models`].
 
 use super::models::*;
+use uuid::Uuid;
 
 fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
     if !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081")) {
@@ -108,6 +109,12 @@ pub async fn request_system_sync(
 ) -> Result<SystemMutationResponse, ApiClientError> {
     let url = format!("{}/systems/{}/sync", base_url(), id);
     send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Move a queued build job to the front of the queue (admin/operator).
+pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/build-jobs/{}/prioritize", base_url(), job_id);
+    send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
 pub async fn request_system_rollback(
@@ -220,6 +227,12 @@ pub async fn delete_flake(id: i32) -> Result<(), ApiClientError> {
 /// Fetch flake timelines with recent commits for dashboard.
 pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
     let url = format!("{}/flakes/timelines", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch flake timelines for dashboard (CF system deployment counts).
+pub async fn fetch_dashboard_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
+    let url = format!("{}/flakes/timelines?view=dashboard", base_url());
     fetch_json(&url).await
 }
 
@@ -350,6 +363,74 @@ pub async fn delete_admin_oidc_mapping(mapping_id: &str) -> Result<(), ApiClient
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Builder Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Fetch all builders with summary info
+pub async fn fetch_builders() -> Result<Vec<BuilderSummary>, ApiClientError> {
+    let url = format!("{}/builders", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetch a single builder's details
+pub async fn fetch_builder(id: &Uuid) -> Result<BuilderDetail, ApiClientError> {
+    let url = format!("{}/builders/{}", base_url(), id);
+    fetch_json(&url).await
+}
+
+/// Create a new builder (admin only)
+pub async fn create_builder(request: &CreateBuilderRequest) -> Result<BuilderDetail, ApiClientError> {
+    let url = format!("{}/builders", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Update a builder's configuration (admin only)
+pub async fn update_builder(
+    id: &Uuid,
+    request: &UpdateBuilderRequest,
+) -> Result<BuilderDetail, ApiClientError> {
+    let url = format!("{}/builders/{}", base_url(), id);
+    send_json_with_csrf("PATCH", &url, Some(request)).await
+}
+
+/// Update a builder's public key (admin only)
+pub async fn update_builder_public_key(
+    id: &Uuid,
+    request: &UpdateBuilderPublicKeyRequest,
+) -> Result<BuilderDetail, ApiClientError> {
+    let url = format!("{}/builders/{}/public-key", base_url(), id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+/// Deactivate a builder (admin only)
+pub async fn deactivate_builder(id: &Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/builders/{}", base_url(), id);
+    let _deleted: serde_json::Value = send_json_with_csrf("DELETE", &url, None::<&()>).await?;
+    Ok(())
+}
+
+/// Permanently delete a builder (admin only)
+pub async fn delete_builder_permanently(id: &Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/builders/{}/permanent", base_url(), id);
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+/// Update builder environment assignments (admin only)
+pub async fn update_builder_environments(
+    id: &Uuid,
+    request: &UpdateBuilderEnvironmentsRequest,
+) -> Result<(), ApiClientError> {
+    let url = format!("{}/builders/{}/environments", base_url(), id);
+    send_empty_with_csrf("PATCH", &url, Some(request)).await
+}
+
+/// Fetch builder metrics history
+pub async fn fetch_builder_metrics(id: &Uuid) -> Result<Vec<BuilderMetrics>, ApiClientError> {
+    let url = format!("{}/builders/{}/metrics", base_url(), id);
+    fetch_json(&url).await
+}
+
 /// Send JSON request with CSRF token from cookie.
 async fn send_json_with_csrf<T: serde::de::DeserializeOwned, B: serde::Serialize>(
     method: &str,
@@ -379,6 +460,30 @@ async fn send_json_with_csrf<T: serde::de::DeserializeOwned, B: serde::Serialize
     }
 
     serde_json::from_str(&text).map_err(|e| ApiClientError::Deserialize(e.to_string()))
+}
+
+async fn send_empty_with_csrf<B: serde::Serialize>(
+    method: &str,
+    url: &str,
+    body: Option<&B>,
+) -> Result<(), ApiClientError> {
+    let payload = match body {
+        Some(value) => Some(
+            serde_json::to_string(value).map_err(|e| ApiClientError::Deserialize(e.to_string()))?,
+        ),
+        None => None,
+    };
+
+    let (status, text) = send_request_with_csrf(method, url, payload.as_deref()).await?;
+
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&text),
+        });
+    }
+
+    Ok(())
 }
 
 async fn send_request_with_csrf(
@@ -583,6 +688,10 @@ async fn send_request(
 }
 
 fn decode_api_error_message(body: &str) -> String {
+    if body.trim().is_empty() {
+        return "Internal server error".to_string();
+    }
+
     serde_json::from_str::<ApiError>(body)
         .map(|error| error.message)
         .unwrap_or_else(|_| body.to_string())

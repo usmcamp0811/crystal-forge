@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, build_status_badge_style, queue_row_style,
-    queue_sort_rank, short_commit,
+    build_status_badge_style, queue_row_style, queue_sort_rank, short_commit, BuildAction,
+    BuildItem, BuildStatus,
 };
 
 /// Build queue pane showing all queued and active builds.
@@ -69,7 +69,7 @@ pub fn BuildQueuePane(
                                                 "{build.flake}"
                                             }
                                         }
-                                        p { class: "text-xs text-gray-300 mt-1", "{build.branch} · {short_commit(build.commit)}" }
+                                        p { class: "text-xs text-gray-300 mt-1", "{build.branch} · {short_commit(&build.commit)}" }
                                     }
                                     div {
                                         class: "text-right",

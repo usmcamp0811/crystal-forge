@@ -17,11 +17,11 @@ use sqlx::PgPool;
 use tracing::error;
 
 use crate::api::models::ApiError;
-use crate::api::models::{BuildQueueSummary, DashboardSummary};
+use crate::api::models::DashboardSummary;
 use crate::handlers::api::rbac::require_viewer_or_above;
 use crate::queries::dashboard::{
-    fetch_active_builds, fetch_cve_summary, fetch_deployment_status, fetch_fleet_health,
-    fetch_recent_deployments, fetch_total_systems,
+    fetch_active_builds, fetch_build_queue, fetch_cve_summary, fetch_deployment_status,
+    fetch_fleet_health, fetch_recent_deployments, fetch_total_systems,
 };
 
 /// `GET /api/v1/dashboard/summary`
@@ -75,6 +75,7 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         cve_summary,
         total_systems,
         active_builds,
+        build_queue,
         recent_deployments,
     ) = tokio::try_join!(
         fetch_fleet_health(pool),
@@ -82,6 +83,7 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         fetch_cve_summary(pool),
         fetch_total_systems(pool),
         fetch_active_builds(pool),
+        fetch_build_queue(pool, 100),
         fetch_recent_deployments(pool),
     )?;
 
@@ -91,12 +93,7 @@ async fn build_dashboard_summary(pool: &PgPool) -> anyhow::Result<DashboardSumma
         cve_summary,
         total_systems,
         active_builds,
-        build_queue: Some(BuildQueueSummary {
-            building_count: active_builds,
-            queued_count: 0,
-            items: vec![],
-            timestamp: Utc::now(),
-        }),
+        build_queue: Some(build_queue),
         recent_deployments,
         timestamp: Utc::now(),
     })

@@ -23,6 +23,7 @@
 
 // Domain-specific component modules
 pub mod builds;
+pub mod builders;
 pub mod charts;
 pub mod cve;
 pub mod dashboard;

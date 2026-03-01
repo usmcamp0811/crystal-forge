@@ -18,7 +18,7 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            dashboard, environments, flakes, systems,
+            builders, dashboard, environments, flakes, systems,
         },
         status,
         webhook::webhook_handler,
@@ -167,6 +167,66 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/flakes/:id/commits/:hash/diff",
             get(flakes::get_commit_diff_handler),
+        )
+        // Builder management (admin endpoints)
+        .route(
+            "/api/v1/builders",
+            get(builders::list_builders).post(builders::create_builder),
+        )
+        .route(
+            "/api/v1/builders/:id",
+            get(builders::get_builder)
+                .patch(builders::update_builder)
+                .delete(builders::deactivate_builder),
+        )
+        .route(
+            "/api/v1/builders/:id/permanent",
+            delete(builders::delete_builder_permanently),
+        )
+        .route(
+            "/api/v1/builders/:id/public-key",
+            put(builders::update_builder_public_key),
+        )
+        .route(
+            "/api/v1/builders/:id/regenerate-keypair",
+            post(builders::regenerate_builder_keypair),
+        )
+        .route(
+            "/api/v1/builders/:id/environments",
+            patch(builders::update_builder_environments),
+        )
+        .route(
+            "/api/v1/builders/:id/metrics",
+            get(builders::get_builder_metrics),
+        )
+        .route(
+            "/api/v1/build-jobs/:id/prioritize",
+            post(builders::prioritize_build_job),
+        )
+        // Builder-authenticated endpoints
+        .route(
+            "/api/v1/builders/:id/heartbeat",
+            post(builders::builder_heartbeat),
+        )
+        .route(
+            "/api/v1/builders/:id/next-job",
+            get(builders::get_next_job),
+        )
+        .route(
+            "/api/v1/builders/:id/jobs/:job_id/start",
+            post(builders::start_job),
+        )
+        .route(
+            "/api/v1/builders/:id/jobs/:job_id/complete",
+            post(builders::complete_job),
+        )
+        .route(
+            "/api/v1/builders/:id/jobs/:job_id/fail",
+            post(builders::fail_job),
+        )
+        .route(
+            "/api/v1/builders/:id/jobs/:job_id/logs",
+            post(builders::append_job_logs),
         )
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))
