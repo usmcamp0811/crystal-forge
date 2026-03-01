@@ -4,7 +4,7 @@ title: Add UI-based Binary Cache Management with Environment Scoping
 status: In Progress
 assignee: []
 created_date: '2026-03-01 14:01'
-updated_date: '2026-03-01 18:49'
+updated_date: '2026-03-01 18:50'
 labels:
   - backend
   - builder
@@ -308,6 +308,12 @@ Run targeted web-ui check/tests under nix develop for confidence before continui
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: gpt-5.3-codex on gray in ~/code/crystal-forge/TASK-141-themeable-web-ui-css-extraction
+
+Adjusted TopLayout user dropdown width by replacing `w-100` with `min-w-[240px]` in `packages/web-ui/src/components/layout/topbar.rs` so menu can grow wider than trigger width.
+
+Verification: `nix develop -c cargo check` (in `packages/web-ui`) passed; `nix develop -c cargo test` (in `packages/web-ui`) passed (36 passed, 0 failed, 1 ignored).
+
+Initial `nix develop -c cargo check -p web-ui` from repo root failed because no root Cargo.toml; reran from `packages/web-ui` successfully.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
