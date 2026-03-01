@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-04 20:15'
-updated_date: '2026-03-01 15:06'
+updated_date: '2026-03-01 15:11'
 labels:
   - refactoring
   - architecture
@@ -49,4 +49,6 @@ MR updated to target dev branch: https://gitlab.com/crystal-forge/crystal-forge/
 CI Failure Investigation: The builder check failed due to a pre-existing flaky test in handlers/api/auth_whoami.rs (detect_auth_mode_recognizes_dev). This test was NOT modified by our refactoring - we only touched builder/* files. The test has environment variable isolation issues.
 
 Fixed flaky test in commit 9e7f8e6: Added serial_test dependency and #[serial] attributes to auth_whoami tests to prevent race conditions from parallel execution modifying shared environment variables.
+
+Commit 057cf81: Updated Cargo.lock to include serial_test dependency for Nix offline builds. This allows the vendored dependencies to include the new test dependency.
 <!-- SECTION:NOTES:END -->
