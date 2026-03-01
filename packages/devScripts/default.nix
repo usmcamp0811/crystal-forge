@@ -25,11 +25,29 @@ let
 
   generateConfig = pkgs.writeShellApplication {
     name = "generate-config";
-    runtimeInputs = with pkgs; [ hostname coreutils ];
+    runtimeInputs = with pkgs; [
+      hostname
+      coreutils
+      pkgs.crystal-forge.default.cf-keygen
+    ];
     text = ''
       set -euo pipefail
 
       CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      mkdir -p "$CF_KEY_DIR"
+
+      # Generate agent keys if they don't exist
+      if [[ ! -f "$CF_KEY_DIR/agent.key" ]]; then
+        echo "Generating agent keys..."
+        cf-keygen agent "$CF_KEY_DIR/agent"
+      fi
+
+      # Generate builder keys if they don't exist
+      if [[ ! -f "$CF_KEY_DIR/builder.key" ]]; then
+        echo "Generating builder keys..."
+        cf-keygen builder "$CF_KEY_DIR/builder"
+      fi
+
       ACTUAL_HOSTNAME="$(hostname -s)"
       ACTUAL_PUBKEY="$(cat "$CF_KEY_DIR/agent.pub")"
 
@@ -40,6 +58,7 @@ let
       sed \
         -e "s/HOSTNAME_PLACEHOLDER/$ACTUAL_HOSTNAME/g" \
         -e "s|PUBLIC_KEY_PLACEHOLDER|$ACTUAL_PUBKEY|g" \
+        -e "s|BUILDER_KEY_PATH_PLACEHOLDER|$CF_KEY_DIR/builder.key|g" \
         ${configTemplate} > "$CONFIG_FILE"
 
       echo "$CONFIG_FILE"
@@ -65,6 +84,15 @@ let
       cores = 7;
       max_jobs = 1;
       poll_interval = "1m";
+    };
+    builder = {
+      enable_api_mode = true;
+      builder_id = "00000000-0000-0000-0000-000000000001";
+      private_key_path = "BUILDER_KEY_PATH_PLACEHOLDER";
+      server_url = "http://127.0.0.1:${toString cf_port}";
+      poll_interval = "5s";
+      heartbeat_interval = "30s";
+      max_concurrent_jobs = 1;
     };
     client = {
       server_host = "127.0.0.1";
@@ -161,12 +189,62 @@ let
     '';
   };
 
+  bootstrapDevBuilder = pkgs.writeShellApplication {
+    name = "bootstrap-dev-builder";
+    runtimeInputs = with pkgs; [
+      postgresql
+      pkgs.crystal-forge.default.cf-keygen
+    ];
+    text = ''
+      set -euo pipefail
+
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+
+      # Ensure builder keys exist
+      if [[ ! -f "$CF_KEY_DIR/builder.pub" ]]; then
+        echo "Error: Builder keys not found. Run 'generate-config' first."
+        exit 1
+      fi
+
+      BUILDER_PUBKEY="$(cat "$CF_KEY_DIR/builder.pub")"
+      BUILDER_UUID="00000000-0000-0000-0000-000000000001"
+
+      echo "Bootstrapping dev builder..."
+      echo "  Builder ID: $BUILDER_UUID"
+      echo "  Public Key: $BUILDER_PUBKEY"
+
+      # Insert or update the dev builder
+      psql -h 127.0.0.1 -p ${
+        toString db_port
+      } -U crystal_forge -d crystal_forge <<SQL
+        INSERT INTO builders (id, name, public_key, status, max_concurrent_jobs)
+        VALUES (
+          '$BUILDER_UUID'::uuid,
+          'dev-builder',
+          '$BUILDER_PUBKEY',
+          'active',
+          1
+        )
+        ON CONFLICT (id) DO UPDATE SET
+          public_key = EXCLUDED.public_key,
+          status = 'active',
+          updated_at = now();
+      SQL
+
+      echo "✅ Dev builder registered successfully"
+    '';
+  };
+
   runBuilder = pkgs.writeShellApplication {
     name = "run-builder";
     runtimeInputs = [ pkgs.nix ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
+
+      # Bootstrap the dev builder in the database before starting
+      ${bootstrapDevBuilder}/bin/bootstrap-dev-builder
+
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#builder
       else
@@ -443,7 +521,8 @@ let
     ];
   };
 in full-stack.config.outputs.package // {
-  inherit runServer runAgent runBuilder simulatePush startBuilderApi envExports;
+  inherit runServer runAgent runBuilder simulatePush startBuilderApi
+    bootstrapDevBuilder envExports;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   oidc-stack = oidc-stack.config.outputs.package;
