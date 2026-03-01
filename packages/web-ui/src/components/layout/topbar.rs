@@ -87,12 +87,12 @@ pub fn TopBar(title: String) -> Element {
                         if show_user_menu() {
                             div {
                                 "data-testid": "user-menu-dropdown",
-                                class: "absolute top-full mt-2 w-100 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
-                                style: "right: 0;",
+                                class: "absolute top-full mt-2 w-25 {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-lg shadow-xl z-50",
+                                style: "right: 0; min-width: 16rem;",
 
                                 // User info section
                                 div {
-                                    class: "px-4 py-3 border-b {theme::surface::CARD_BORDER}",
+                                    class: "px-4 py-3 border-b {theme::surface::CARD_BORDER} text-right",
                                     if let Some(full_name) = auth::user_display_name(&auth_context) {
                                         p {
                                             class: "{theme::text::PRIMARY} text-sm font-semibold",
@@ -109,7 +109,7 @@ pub fn TopBar(title: String) -> Element {
                                         // Show roles
                                         if !ctx.roles.is_empty() {
                                             div {
-                                                class: "mt-2 flex flex-wrap gap-1",
+                                                class: "mt-2 flex flex-wrap gap-1 justify-end",
                                                 for role in &ctx.roles {
                                                     span {
                                                         class: "px-2 py-0.5 rounded text-xs bg-violet-500/20 text-violet-300",
@@ -126,7 +126,7 @@ pub fn TopBar(title: String) -> Element {
                                     class: "py-2",
 
                                     button {
-                                        class: "w-full text-left px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors flex items-center gap-2",
+                                        class: "w-full text-right px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors flex items-center justify-end gap-2",
                                         onclick: move |_| {
                                             let next = ui_theme().toggle();
                                             ui_theme.set(next);
@@ -165,7 +165,7 @@ pub fn TopBar(title: String) -> Element {
                                     }
 
                                     button {
-                                        class: "w-full text-left px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors",
+                                        class: "w-full text-right px-4 py-2 text-sm {theme::text::PRIMARY} {theme::interactive::HOVER_BG} transition-colors",
                                         onclick: handle_logout,
                                         "Sign Out"
                                     }
