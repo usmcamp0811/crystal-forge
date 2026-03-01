@@ -76,6 +76,11 @@ pub async fn get_flake_timelines(
 
     match fetch_result {
         Ok(mut timelines) => {
+            // Dashboard view doesn't need git metadata (message/author), skip hydration
+            if use_dashboard_view {
+                return (StatusCode::OK, Json(timelines)).into_response();
+            }
+
             let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;
 
             for timeline in &mut timelines {
