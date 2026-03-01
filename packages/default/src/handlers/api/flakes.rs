@@ -97,30 +97,10 @@ pub async fn get_flake_timelines(
                 let commit_hashes: Vec<String> =
                     timeline.commits.iter().map(|commit| commit.hash.clone()).collect();
 
-                let missing_config_hashes: Vec<String> = timeline
-                    .commits
-                    .iter()
-                    .filter(|commit| commit.systems.is_empty())
-                    .map(|commit| commit.hash.clone())
-                    .collect();
-                let hydrated_configs = if missing_config_hashes.is_empty() {
-                    HashMap::new()
-                } else {
-                    get_commit_nixos_configurations(&timeline.repo_url, &missing_config_hashes).await
-                };
-                let hydrated_changed_files = if missing_config_hashes.is_empty() {
-                    HashMap::new()
-                } else {
-                    get_commit_changed_files(&timeline.repo_url, &missing_config_hashes)
-                        .await
-                        .unwrap_or_else(|err| {
-                            error!(
-                                "Failed to hydrate changed files for {}: {:#}",
-                                timeline.flake_name, err
-                            );
-                            HashMap::new()
-                        })
-                };
+                // Skip inline hydration for now - too slow for API requests
+                // TODO: Background job to populate commit_artifacts_cache
+                let hydrated_configs: HashMap<String, Vec<String>> = HashMap::new();
+                let hydrated_changed_files: HashMap<String, Vec<String>> = HashMap::new();
 
                 let cf_config_matches = if commit_hashes.is_empty() {
                     HashMap::new()
