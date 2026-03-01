@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tracing::error;
 
 use crate::api::models::{
@@ -15,8 +15,9 @@ use crate::api::models::{
 };
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
 use crate::flake::commits::{
-    branch_exists, get_commit_diff, get_commit_metadata, infer_default_branch,
-    sync_commits_for_repo, GitCommitMetadata,
+    branch_exists, get_commit_changed_files, get_commit_diff, get_commit_metadata,
+    get_commit_nixos_configurations, infer_default_branch, sync_commits_for_repo,
+    GitCommitMetadata,
 };
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
@@ -93,6 +94,48 @@ pub async fn get_flake_timelines(
                 };
 
                 let mut user_lookup_cache: HashMap<String, Option<String>> = HashMap::new();
+                let commit_hashes: Vec<String> =
+                    timeline.commits.iter().map(|commit| commit.hash.clone()).collect();
+
+                let missing_config_hashes: Vec<String> = timeline
+                    .commits
+                    .iter()
+                    .filter(|commit| commit.systems.is_empty())
+                    .map(|commit| commit.hash.clone())
+                    .collect();
+                let hydrated_configs = if missing_config_hashes.is_empty() {
+                    HashMap::new()
+                } else {
+                    get_commit_nixos_configurations(&timeline.repo_url, &missing_config_hashes).await
+                };
+                let hydrated_changed_files = if missing_config_hashes.is_empty() {
+                    HashMap::new()
+                } else {
+                    get_commit_changed_files(&timeline.repo_url, &missing_config_hashes)
+                        .await
+                        .unwrap_or_else(|err| {
+                            error!(
+                                "Failed to hydrate changed files for {}: {:#}",
+                                timeline.flake_name, err
+                            );
+                            HashMap::new()
+                        })
+                };
+
+                let cf_config_matches = if commit_hashes.is_empty() {
+                    HashMap::new()
+                } else {
+                    fetch_cf_system_matches(&pool, &commit_hashes)
+                        .await
+                        .unwrap_or_else(|err| {
+                            error!(
+                                "Failed to fetch CF-system commit matches for {}: {:#}",
+                                timeline.flake_name, err
+                            );
+                            HashMap::new()
+                        })
+                };
+
                 for commit in &mut timeline.commits {
                     if let Some(detail) = metadata.get(&commit.hash) {
                         if commit.message.trim().is_empty() {
@@ -109,6 +152,41 @@ pub async fn get_flake_timelines(
                     }
                     if commit.author.trim().is_empty() {
                         commit.author = "Unknown author".to_string();
+                    }
+
+                    if commit.systems.is_empty() {
+                        if let Some(configs) = hydrated_configs.get(&commit.hash) {
+                            let changed_files = hydrated_changed_files
+                                .get(&commit.hash)
+                                .cloned()
+                                .unwrap_or_default();
+
+                            if let Err(err) = upsert_commit_artifacts_cache(
+                                &pool,
+                                timeline.flake_id,
+                                &commit.hash,
+                                configs,
+                                &changed_files,
+                            )
+                            .await
+                            {
+                                error!(
+                                    "Failed to persist commit artifacts for {}@{}: {:#}",
+                                    timeline.flake_name, commit.hash, err
+                                );
+                            }
+
+                            let marked = mark_cf_system_matches(configs, cf_config_matches.get(&commit.hash));
+                            commit.system_count = marked.len() as i64;
+                            commit.systems = marked;
+                        }
+                    } else {
+                        let marked = mark_cf_system_matches(
+                            &commit.systems,
+                            cf_config_matches.get(&commit.hash),
+                        );
+                        commit.system_count = marked.len() as i64;
+                        commit.systems = marked;
                     }
                 }
             }
@@ -128,6 +206,90 @@ pub async fn get_flake_timelines(
                 .into_response()
         }
     }
+}
+
+async fn upsert_commit_artifacts_cache(
+    pool: &PgPool,
+    flake_id: i32,
+    commit_hash: &str,
+    nixos_configurations: &[String],
+    changed_files: &[String],
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO commit_artifacts_cache (commit_id, nixos_configurations, changed_files, populated_at)
+        SELECT c.id, $3, $4, NOW()
+        FROM commits c
+        WHERE c.flake_id = $1
+          AND c.git_commit_hash = $2
+        ON CONFLICT (commit_id) DO UPDATE
+        SET nixos_configurations = EXCLUDED.nixos_configurations,
+            changed_files = EXCLUDED.changed_files,
+            populated_at = NOW()
+        "#,
+    )
+    .bind(flake_id)
+    .bind(commit_hash)
+    .bind(nixos_configurations)
+    .bind(changed_files)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn fetch_cf_system_matches(
+    pool: &PgPool,
+    commit_hashes: &[String],
+) -> anyhow::Result<HashMap<String, HashSet<String>>> {
+    if commit_hashes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let rows = sqlx::query_as::<_, (String, Option<Vec<String>>)>(
+        r#"
+        SELECT
+            s.current_commit_hash,
+            ARRAY_AGG(DISTINCT s.hostname ORDER BY s.hostname) AS hostnames
+        FROM view_system_deployment_status s
+        WHERE s.current_commit_hash = ANY($1)
+        GROUP BY s.current_commit_hash
+        "#,
+    )
+    .bind(commit_hashes)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = HashMap::new();
+    for (hash, hostnames) in rows {
+        out.insert(
+            hash,
+            hostnames
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<HashSet<_>>(),
+        );
+    }
+
+    Ok(out)
+}
+
+fn mark_cf_system_matches(configs: &[String], cf_matches: Option<&HashSet<String>>) -> Vec<String> {
+    let Some(cf_matches) = cf_matches else {
+        return configs.to_vec();
+    };
+
+    configs
+        .iter()
+        .map(|name| {
+            let bare_name = name.strip_suffix(" [CF system]").unwrap_or(name);
+            if cf_matches.contains(bare_name) {
+                format!("{} [CF system]", bare_name)
+            } else {
+                bare_name.to_string()
+            }
+        })
+        .collect()
 }
 
 async fn resolve_timeline_author(

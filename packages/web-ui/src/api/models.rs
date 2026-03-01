@@ -522,11 +522,17 @@ pub struct FlakeCommit {
     pub system_count: i64,
     /// How many commits behind the latest this is (0 = latest).
     pub commits_behind: i64,
-    /// Hostnames of systems at this commit (for tooltip/expansion).
+    /// nixosConfigurations discovered at this commit.
+    ///
+    /// Entries may include the suffix " [CF system]" when the configuration
+    /// name matches a Crystal Forge system deployed at this commit.
     pub systems: Vec<String>,
     /// Current build status for this commit (if any build is in progress).
     #[serde(default)]
     pub build_status: Option<BuildStatus>,
+    /// Dry-run/evaluation status for this commit.
+    #[serde(default)]
+    pub evaluation_status: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

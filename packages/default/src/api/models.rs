@@ -433,8 +433,14 @@ pub struct FlakeCommit {
     pub committed_at: DateTime<Utc>,
     pub system_count: i64,
     pub commits_behind: i64,
+    /// nixosConfigurations discovered at this commit.
+    ///
+    /// Entries may include the suffix " [CF system]" when the configuration
+    /// name matches a Crystal Forge system deployed at this commit.
     pub systems: Vec<String>,
     pub build_status: Option<BuildStatus>,
+    #[serde(default)]
+    pub evaluation_status: Option<String>,
 }
 
 /// Response containing the git diff for a specific commit.

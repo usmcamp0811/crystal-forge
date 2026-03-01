@@ -9,6 +9,7 @@ use tracing::{debug, info, warn};
 
 const GIT_METADATA_TIMEOUT: Duration = Duration::from_secs(10);
 const GIT_PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const NIX_CONFIG_EVAL_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Debug, Clone)]
 pub struct GitCommitMetadata {
@@ -544,6 +545,162 @@ pub async fn get_commit_metadata(
     }
 
     Ok(metadata)
+}
+
+/// Resolve `nixosConfigurations` names for specific commit hashes.
+///
+/// Best effort: commits that fail to evaluate are skipped.
+pub async fn get_commit_nixos_configurations(
+    repo_url: &str,
+    commit_hashes: &[String],
+) -> HashMap<String, Vec<String>> {
+    let mut results = HashMap::new();
+
+    for hash in commit_hashes {
+        match load_commit_nixos_configurations(repo_url, hash).await {
+            Ok(configs) => {
+                results.insert(hash.clone(), configs);
+            }
+            Err(err) => {
+                warn!(
+                    "Failed to resolve nixosConfigurations for {} @ {}: {}",
+                    repo_url, hash, err
+                );
+            }
+        }
+    }
+
+    results
+}
+
+/// Resolve changed file paths for specific commit hashes.
+///
+/// Best effort: commits that cannot be resolved are skipped.
+pub async fn get_commit_changed_files(
+    repo_url: &str,
+    commit_hashes: &[String],
+) -> Result<HashMap<String, Vec<String>>> {
+    if commit_hashes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let git_url = normalize_repo_url_for_git(repo_url);
+    let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
+    let clone_path = temp_dir.path();
+
+    let clone_output = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args([
+                "clone",
+                "--depth",
+                "200",
+                "--filter=blob:none",
+                &git_url,
+                ".",
+            ])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out cloning repo for changed files: {repo_url}"))?
+    .with_context(|| format!("Failed to clone repo for changed files: {repo_url}"))?;
+
+    if !clone_output.status.success() {
+        let stderr = String::from_utf8_lossy(&clone_output.stderr);
+        bail!("Git clone failed for {}: {}", repo_url, stderr.trim());
+    }
+
+    let mut changed = HashMap::new();
+    for hash in commit_hashes {
+        match load_commit_changed_files(clone_path, hash).await {
+            Ok(files) => {
+                changed.insert(hash.clone(), files);
+            }
+            Err(err) => {
+                warn!("Failed to load changed files for {}: {}", hash, err);
+            }
+        }
+    }
+
+    Ok(changed)
+}
+
+async fn load_commit_nixos_configurations(repo_url: &str, commit_hash: &str) -> Result<Vec<String>> {
+    let flake_ref = build_flake_reference(repo_url, commit_hash);
+    let flake_target = format!("{flake_ref}#nixosConfigurations");
+
+    let output = timeout(
+        NIX_CONFIG_EVAL_TIMEOUT,
+        tokio::process::Command::new("nix")
+            .args([
+                "eval",
+                "--json",
+                "--apply",
+                "builtins.attrNames",
+                flake_target.as_str(),
+            ])
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out evaluating nixosConfigurations for {commit_hash}"))?
+    .with_context(|| format!("Failed to evaluate nixosConfigurations for {commit_hash}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "nix eval failed for {}: {}",
+            commit_hash,
+            stderr.trim()
+        );
+    }
+
+    let mut names: Vec<String> = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("Failed to parse nixosConfigurations JSON for {commit_hash}"))?;
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
+    if repo_url.starts_with("git+") {
+        if repo_url.contains("?rev=") {
+            repo_url.to_string()
+        } else {
+            format!("{}?rev={}", repo_url, commit_hash)
+        }
+    } else {
+        let separator = if repo_url.contains('?') { "&" } else { "?" };
+        format!("git+{}{separator}rev={}", repo_url, commit_hash)
+    }
+}
+
+async fn load_commit_changed_files(clone_path: &std::path::Path, commit_hash: &str) -> Result<Vec<String>> {
+    let output = timeout(
+        GIT_METADATA_TIMEOUT,
+        tokio::process::Command::new("git")
+            .args(["show", "--pretty=format:", "--name-only", commit_hash])
+            .current_dir(clone_path)
+            .output(),
+    )
+    .await
+    .with_context(|| format!("Timed out loading changed files for commit {commit_hash}"))?
+    .with_context(|| format!("Failed to load changed files for commit {commit_hash}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git show --name-only failed for {}: {}", commit_hash, stderr.trim());
+    }
+
+    let mut files: Vec<String> = String::from_utf8(output.stdout)?
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    files.sort();
+    files.dedup();
+    Ok(files)
 }
 
 async fn load_commit_metadata(

@@ -160,6 +160,8 @@ struct FlakeHistoryCommit {
     insertions: usize,
     deletions: usize,
     diff: String,
+    systems: Vec<String>,
+    evaluation_status: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -338,8 +340,8 @@ pub fn FlakesListView() -> Element {
                         flake_timelines.set(timelines);
                     }
                     Err(_error) => {
-                        // Fall back to mock timelines on error
-                        flake_timelines.set(crate::views::dashboard::mock_flake_timelines());
+                        // Keep empty instead of fallback to mock data
+                        flake_timelines.set(Vec::new());
                     }
                 }
             });
@@ -1284,6 +1286,11 @@ fn FlakeHistoryExplorer(
                                                                         class: "text-[10px] text-gray-400",
                                                                         "{commit_time}"
                                                                     }
+                                                                    span {
+                                                                        class: "px-2 py-1 rounded border text-[10px]",
+                                                                        style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
+                                                                        "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -1330,7 +1337,35 @@ fn FlakeHistoryExplorer(
                                                 span { class: "px-2 py-1 rounded bg-blue-500/20 text-blue-200", "{commit.files_changed} files" }
                                                 span { class: "px-2 py-1 rounded bg-emerald-500/20 text-emerald-200", "+{commit.insertions}" }
                                                 span { class: "px-2 py-1 rounded bg-red-500/20 text-red-200", "-{commit.deletions}" }
+                                                span {
+                                                    class: "px-2 py-1 rounded border",
+                                                    style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
+                                                    "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
+                                                }
+                                                span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.systems.len()} configs" }
                                             }
+                                        }
+                                    }
+                                }
+                                div {
+                                    class: "px-4 pb-4 space-y-2",
+                                    p { class: "text-xs uppercase tracking-wide text-gray-400", "nixosConfigurations at this commit" }
+                                    if commit.systems.is_empty() {
+                                        p { class: "text-sm text-gray-500", "No nixosConfigurations discovered for this commit." }
+                                    } else {
+                                        div {
+                                            class: "flex flex-wrap gap-2",
+                                            for hostname in commit.systems.iter() {
+                                                span {
+                                                    key: "{hostname}",
+                                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-800/60 text-slate-200 text-xs font-mono",
+                                                    "{hostname}"
+                                                }
+                                            }
+                                        }
+                                        p {
+                                            class: "text-xs text-slate-400",
+                                            "[CF system] means this config name matches a Crystal Forge system deployed at this commit."
                                         }
                                     }
                                 }
@@ -2379,6 +2414,8 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
                     insertions: 0,
                     deletions: 0,
                     diff: String::new(),
+                    systems: commit.systems.clone(),
+                    evaluation_status: commit.evaluation_status.clone(),
                 }
             })
             .collect();
@@ -2387,6 +2424,26 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
     }
 
     history
+}
+
+fn eval_badge_label(status: Option<&str>) -> &'static str {
+    match status {
+        Some("running") => "running",
+        Some("queued") => "queued",
+        Some("failed") => "failed",
+        Some("complete") => "complete",
+        _ => "idle",
+    }
+}
+
+fn eval_badge_style(status: Option<&str>) -> &'static str {
+    match status {
+        Some("running") => "background-color: #1f3d52; border-color: #3b82f6; color: #dbeafe;",
+        Some("queued") => "background-color: #3a3120; border-color: #d97706; color: #fef3c7;",
+        Some("failed") => "background-color: #472726; border-color: #ef4444; color: #fee2e2;",
+        Some("complete") => "background-color: #1f3a2f; border-color: #22c55e; color: #dcfce7;",
+        _ => "background-color: #2b303b; border-color: #495264; color: #cbd5e1;",
+    }
 }
 
 fn normalize_commit_message(message: &str, short_hash: &str) -> String {

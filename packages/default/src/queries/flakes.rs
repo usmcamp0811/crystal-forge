@@ -206,53 +206,91 @@ pub async fn fetch_flake_timelines(
     let mut timelines = Vec::new();
 
     for (flake_id, flake_name, repo_url) in flakes {
-        // Get the latest commit timestamp for this flake to calculate commits_behind
-        let latest_commit_ts = sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(
-            "SELECT commit_timestamp FROM commits WHERE flake_id = $1 ORDER BY commit_timestamp DESC LIMIT 1"
-        )
-        .bind(flake_id)
-        .fetch_optional(pool)
-        .await?
-        .flatten();
-
-        // Fetch recent commits for this flake
-        // TODO: Add system counts when we have proper commit->system tracking
-        let commits_rows = sqlx::query!(
+        // Fetch recent commits for this flake, including systems at commit,
+        // build queue status, and dry-run/eval status.
+        let commits_rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                chrono::DateTime<chrono::Utc>,
+                i64,
+                Vec<String>,
+                i64,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
             r#"
-            SELECT 
+            SELECT
                 c.git_commit_hash,
                 c.commit_timestamp,
-                0::bigint as system_count,
-                ARRAY[]::text[] as "systems!",
+                COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
+                COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
                 (
                     SELECT COUNT(*)::bigint
                     FROM commits c2
                     WHERE c2.flake_id = c.flake_id
                     AND c2.commit_timestamp > c.commit_timestamp
-                ) as "commits_behind!"
+                ) AS commits_behind,
+                (
+                    SELECT
+                        CASE
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
+                            ELSE NULL
+                        END
+                    FROM build_jobs bj
+                    JOIN derivations d ON d.id = bj.derivation_id
+                    WHERE d.commit_id = c.id
+                ) AS build_status,
+                (
+                    SELECT
+                        CASE
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 4) > 0 THEN 'running'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 3) > 0 THEN 'queued'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 6) > 0 THEN 'failed'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 5) > 0 THEN 'complete'
+                            ELSE 'idle'
+                        END
+                    FROM derivations d
+                    WHERE d.commit_id = c.id
+                ) AS evaluation_status
             FROM commits c
+            LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
             WHERE c.flake_id = $1
-            GROUP BY c.id, c.git_commit_hash, c.commit_timestamp, c.flake_id
             ORDER BY c.commit_timestamp DESC
             LIMIT $2
             "#,
-            flake_id,
-            max_commits_per_flake
         )
+        .bind(flake_id)
+        .bind(max_commits_per_flake)
         .fetch_all(pool)
         .await?;
 
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
-            .map(|row| FlakeCommit {
-                hash: row.git_commit_hash,
+            .map(|(hash, committed_at, system_count, systems, commits_behind, build_status, evaluation_status)| {
+                let build_status = build_status.as_deref().map(|status| match status {
+                    "queued" => BuildStatus::Queued,
+                    "building" => BuildStatus::Building,
+                    "failed" => BuildStatus::Failed,
+                    "complete" => BuildStatus::Complete,
+                    _ => BuildStatus::Idle,
+                });
+
+                FlakeCommit {
+                hash,
                 message: "".to_string(), // We don't store commit messages in the database
                 author: "".to_string(),  // We don't store commit authors in the database
-                committed_at: row.commit_timestamp,
-                system_count: row.system_count.unwrap_or(0),
-                commits_behind: row.commits_behind,
-                systems: row.systems,
-                build_status: Some(BuildStatus::Idle), // TODO: Query actual build status from derivations
+                committed_at,
+                system_count,
+                commits_behind,
+                systems,
+                build_status,
+                evaluation_status,
+            }
             })
             .collect();
 
