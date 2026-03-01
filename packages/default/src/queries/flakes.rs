@@ -334,12 +334,14 @@ pub async fn fetch_flake_timelines(
 
     for (flake_id, flake_name, repo_url) in flakes {
         // Fetch recent commits for this flake, including systems at commit,
-        // build queue status, and dry-run/eval status.
+        // build queue status, dry-run/eval status, and git metadata (message/author).
         let commits_rows = sqlx::query_as::<
             _,
             (
                 String,
                 chrono::DateTime<chrono::Utc>,
+                Option<String>,
+                Option<String>,
                 i64,
                 Vec<String>,
                 i64,
@@ -351,6 +353,8 @@ pub async fn fetch_flake_timelines(
             SELECT
                 c.git_commit_hash,
                 c.commit_timestamp,
+                c.message,
+                c.author,
                 COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
                 COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
                 (
@@ -398,7 +402,7 @@ pub async fn fetch_flake_timelines(
 
         let commits: Vec<FlakeCommit> = commits_rows
             .into_iter()
-            .map(|(hash, committed_at, system_count, systems, commits_behind, build_status, evaluation_status)| {
+            .map(|(hash, committed_at, message, author, system_count, systems, commits_behind, build_status, evaluation_status)| {
                 let build_status = build_status.as_deref().map(|status| match status {
                     "queued" => BuildStatus::Queued,
                     "building" => BuildStatus::Building,
@@ -409,8 +413,8 @@ pub async fn fetch_flake_timelines(
 
                 FlakeCommit {
                 hash,
-                message: "".to_string(), // We don't store commit messages in the database
-                author: "".to_string(),  // We don't store commit authors in the database
+                message: message.unwrap_or_default(),
+                author: author.unwrap_or_default(),
                 committed_at,
                 system_count,
                 commits_behind,
