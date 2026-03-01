@@ -1,10 +1,10 @@
 ---
 id: TASK-122
 title: Builds View - Backend Integration
-status: Review
+status: Done
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-01 13:53'
+updated_date: '2026-03-01 13:55'
 labels:
   - backend
   - api
@@ -242,4 +242,16 @@ Acceptance Criteria Notes:
 2. Run cargo clippy and cargo test
 3. Consider running nix flake check if needed
 4. Ready for review once verification passes
+
+=== Final Disposition (2026-03-01) ===
+
+MR !134 CLOSED WITHOUT MERGE - Overtaken By Events
+
+The dev branch evolved significantly after this branch point.
+
+The functionality this MR provided is already in production through different implementation.
+
+See commits 9b9515c and fd1d379 which wired builds view to real APIs.
+
+Task marked Done - goal achieved via alternate path.
 <!-- SECTION:NOTES:END -->
