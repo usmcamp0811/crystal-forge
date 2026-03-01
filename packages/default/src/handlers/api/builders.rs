@@ -562,6 +562,14 @@ pub async fn append_job_logs(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
+    let max_chunk_bytes = state.server_config.max_build_log_chunk_mb * 1024 * 1024;
+    let max_total_bytes = state.server_config.max_build_log_size_mb * 1024 * 1024;
+
+    // Enforce per-request payload size limit before parsing JSON.
+    if body.len() > max_chunk_bytes {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/jobs/{}/logs", builder_id, job_id);
     let verified = authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
@@ -574,6 +582,10 @@ pub async fn append_job_logs(
     let request: AppendLogsRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    if request.logs.len() > max_chunk_bytes {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
     // Verify the job is assigned to this builder
     let job = builders::get_build_job_by_id(&state.pool, &job_id)
         .await
@@ -584,10 +596,26 @@ pub async fn append_job_logs(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    // Append logs
-    builders::append_job_logs(&state.pool, &job_id, &request.logs)
+    // Only queued/building jobs may receive log appends.
+    if job.status != "queued" && job.status != "building" {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Append logs with per-job size cap enforcement.
+    builders::append_job_logs_with_limits(&state.pool, &job_id, &request.logs, max_total_bytes)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("log_size_limit_exceeded") {
+                StatusCode::PAYLOAD_TOO_LARGE
+            } else if msg.contains("invalid_job_status") {
+                StatusCode::CONFLICT
+            } else if msg.contains("job_not_found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        })?;
 
     Ok(StatusCode::ACCEPTED)
 }

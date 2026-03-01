@@ -22,6 +22,7 @@ use crate::queries::commits::{
     mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
 use crate::queries::derivations::cleanup_partial_derivations;
+use crate::queries::builders::cleanup_expired_build_logs;
 
 pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     let flake_pool = pool.clone();
@@ -29,6 +30,7 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     let target_pool = pool.clone();
     let deployment_pool = pool.clone();
     let artifact_pool = pool.clone();
+    let build_log_pool = pool.clone();
 
     // Get the flake config with a fallback
     let flake_config = cfg.flakes.clone();
@@ -39,8 +41,49 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
         flake_config.commit_evaluation_interval,
     ));
     tokio::spawn(run_commit_artifact_hydration_loop(artifact_pool));
+    tokio::spawn(run_build_log_retention_loop(
+        build_log_pool,
+        cfg.server.build_log_retention_days,
+        cfg.server.failed_build_log_retention_days,
+    ));
 
     tokio::spawn(spawn_deployment_policy_manager(cfg, deployment_pool));
+}
+
+/// Runs daily build log retention cleanup.
+///
+/// Clears old logs to prevent unbounded growth in build_jobs.logs.
+async fn run_build_log_retention_loop(
+    pool: PgPool,
+    success_retention_days: i32,
+    failed_retention_days: i32,
+) {
+    info!(
+        "🔁 Starting build log retention loop (success={}d, failed={}d)",
+        success_retention_days, failed_retention_days
+    );
+
+    let mut ticker = interval(Duration::from_secs(24 * 60 * 60));
+
+    loop {
+        match cleanup_expired_build_logs(&pool, success_retention_days, failed_retention_days).await {
+            Ok((success_cleared, failed_cleared)) => {
+                if success_cleared > 0 || failed_cleared > 0 {
+                    info!(
+                        "🧹 Cleared expired build logs: success={}, failed={}",
+                        success_cleared, failed_cleared
+                    );
+                } else {
+                    debug!("Build log retention: no expired logs to clear");
+                }
+            }
+            Err(err) => {
+                error!("❌ Build log retention cleanup failed: {:#}", err);
+            }
+        }
+
+        ticker.tick().await;
+    }
 }
 
 /// Runs the periodic flake polling loop to check for new commits

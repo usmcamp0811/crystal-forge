@@ -710,21 +710,112 @@ pub async fn mark_job_complete(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob>
 
 /// Append logs to a job
 pub async fn append_job_logs(pool: &PgPool, job_id: &Uuid, new_logs: &str) -> Result<()> {
-    sqlx::query(
+    append_job_logs_with_limits(pool, job_id, new_logs, 10 * 1024 * 1024).await
+}
+
+/// Append logs to a job with safety limits.
+///
+/// Enforces:
+/// - job must be in queued/building status
+/// - total log bytes must not exceed max_total_log_bytes
+pub async fn append_job_logs_with_limits(
+    pool: &PgPool,
+    job_id: &Uuid,
+    new_logs: &str,
+    max_total_log_bytes: usize,
+) -> Result<()> {
+    let updated = sqlx::query_scalar::<_, Uuid>(
         r#"
         UPDATE build_jobs
         SET logs = COALESCE(logs, '') || $2,
             updated_at = now()
         WHERE id = $1
+          AND status IN ('queued', 'building')
+          AND OCTET_LENGTH(COALESCE(logs, '')) + OCTET_LENGTH($2) <= $3
+        RETURNING id
         "#,
     )
     .bind(job_id)
     .bind(new_logs)
+    .bind(max_total_log_bytes as i64)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to append job logs with limits")?;
+
+    if updated.is_some() {
+        return Ok(());
+    }
+
+    // Diagnose why update failed (status/limit/not-found) for precise error handling.
+    let diagnostics = sqlx::query_as::<_, (String, Option<i64>)>(
+        r#"
+        SELECT status, OCTET_LENGTH(COALESCE(logs, ''))
+        FROM build_jobs
+        WHERE id = $1
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to diagnose append log failure")?;
+
+    match diagnostics {
+        None => bail!("job_not_found"),
+        Some((status, current_len_opt)) => {
+            if status != "queued" && status != "building" {
+                bail!("invalid_job_status:{status}");
+            }
+
+            let current_len = current_len_opt.unwrap_or(0) as usize;
+            if current_len.saturating_add(new_logs.len()) > max_total_log_bytes {
+                bail!("log_size_limit_exceeded");
+            }
+
+            bail!("append_log_failed_unknown");
+        }
+    }
+}
+
+/// Clear old logs for completed/failed jobs according to retention policy.
+/// Returns number of rows updated for (success_logs_cleared, failed_logs_cleared).
+pub async fn cleanup_expired_build_logs(
+    pool: &PgPool,
+    success_retention_days: i32,
+    failed_retention_days: i32,
+) -> Result<(u64, u64)> {
+    let success_result = sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET logs = NULL,
+            updated_at = now()
+        WHERE status = 'success'
+          AND completed_at IS NOT NULL
+          AND completed_at < now() - ($1::text || ' days')::interval
+          AND logs IS NOT NULL
+        "#,
+    )
+    .bind(success_retention_days.to_string())
     .execute(pool)
     .await
-    .context("Failed to append job logs")?;
+    .context("Failed to clean up successful build logs")?;
 
-    Ok(())
+    let failed_result = sqlx::query(
+        r#"
+        UPDATE build_jobs
+        SET logs = NULL,
+            updated_at = now()
+        WHERE status = 'failed'
+          AND completed_at IS NOT NULL
+          AND completed_at < now() - ($1::text || ' days')::interval
+          AND logs IS NOT NULL
+        "#,
+    )
+    .bind(failed_retention_days.to_string())
+    .execute(pool)
+    .await
+    .context("Failed to clean up failed build logs")?;
+
+    Ok((success_result.rows_affected(), failed_result.rows_affected()))
 }
 
 /// Get a build job by ID
