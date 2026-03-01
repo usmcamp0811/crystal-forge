@@ -746,14 +746,14 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "test-builder".to_string(),
-            public_key: public_key_base64,
+            public_key: Some(public_key_base64),
             max_cpu_cores: Some(4),
             max_memory_mb: Some(8192),
             max_concurrent_jobs: Some(2),
             environment_ids: vec![],
         };
 
-        let builder = create_builder(&pool, &request)
+        let (builder, _private_key) = create_builder(&pool, &request)
             .await
             .expect("Failed to create builder");
 
@@ -784,14 +784,14 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "heartbeat-test".to_string(),
-            public_key: public_key_base64,
+            public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
             environment_ids: vec![],
         };
 
-        let builder = create_builder(&pool, &request)
+        let (builder, _private_key) = create_builder(&pool, &request)
             .await
             .expect("Failed to create builder");
 

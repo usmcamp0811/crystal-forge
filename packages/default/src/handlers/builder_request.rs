@@ -258,14 +258,14 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "test-auth-builder".to_string(),
-            public_key: public_key_base64,
+            public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
             environment_ids: vec![],
         };
 
-        let builder = create_builder(&pool, &request)
+        let (builder, _private_key) = create_builder(&pool, &request)
             .await
             .expect("Failed to create builder");
 
@@ -279,8 +279,14 @@ mod tests {
         // Create a test request body
         let body = Bytes::from("test request body");
 
-        // Sign the body
-        let signature = signing_key.sign(&body);
+        // Create timestamp
+        let timestamp = chrono::Utc::now().to_rfc3339();
+
+        // Create signature payload: {method}\n{path}\n{timestamp}\n{body}
+        let method = "POST";
+        let path = "/api/v1/test";
+        let signature_payload = format!("{}\n{}\n{}\n{}", method, path, timestamp, String::from_utf8_lossy(&body));
+        let signature = signing_key.sign(signature_payload.as_bytes());
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         // Create headers
@@ -293,9 +299,13 @@ mod tests {
             "X-Signature",
             HeaderValue::from_str(&signature_base64).unwrap(),
         );
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp).unwrap(),
+        );
 
         // Authenticate
-        let result = authenticate_builder_request(&headers, body.clone(), &pool).await;
+        let result = authenticate_builder_request(&headers, body.clone(), method, path, &pool).await;
 
         assert!(result.is_ok());
         let verified = result.unwrap();
@@ -314,21 +324,25 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "inactive-builder".to_string(),
-            public_key: public_key_base64,
+            public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
             environment_ids: vec![],
         };
 
-        let builder = create_builder(&pool, &request)
+        let (builder, _private_key) = create_builder(&pool, &request)
             .await
             .expect("Failed to create builder");
 
         // Builder starts as inactive - don't activate it
 
         let body = Bytes::from("test request body");
-        let signature = signing_key.sign(&body);
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let method = "POST";
+        let path = "/api/v1/test";
+        let signature_payload = format!("{}\n{}\n{}\n{}", method, path, timestamp, String::from_utf8_lossy(&body));
+        let signature = signing_key.sign(signature_payload.as_bytes());
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         let mut headers = HeaderMap::new();
@@ -340,9 +354,13 @@ mod tests {
             "X-Signature",
             HeaderValue::from_str(&signature_base64).unwrap(),
         );
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp).unwrap(),
+        );
 
         // Authenticate - should fail because builder is inactive
-        let result = authenticate_builder_request(&headers, body, &pool).await;
+        let result = authenticate_builder_request(&headers, body, method, path, &pool).await;
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
@@ -359,14 +377,14 @@ mod tests {
 
         let request = CreateBuilderRequest {
             name: "invalid-sig-builder".to_string(),
-            public_key: public_key_base64,
+            public_key: Some(public_key_base64),
             max_cpu_cores: None,
             max_memory_mb: None,
             max_concurrent_jobs: None,
             environment_ids: vec![],
         };
 
-        let builder = create_builder(&pool, &request)
+        let (builder, _private_key) = create_builder(&pool, &request)
             .await
             .expect("Failed to create builder");
 
@@ -377,10 +395,14 @@ mod tests {
         .expect("Failed to activate builder");
 
         let body = Bytes::from("test request body");
+        let timestamp = chrono::Utc::now().to_rfc3339();
+        let method = "POST";
+        let path = "/api/v1/test";
+        let signature_payload = format!("{}\n{}\n{}\n{}", method, path, timestamp, String::from_utf8_lossy(&body));
 
         // Use a different key to sign (wrong signature)
         let wrong_signing_key = ed25519_dalek::SigningKey::generate(&mut rand::thread_rng());
-        let signature = wrong_signing_key.sign(&body);
+        let signature = wrong_signing_key.sign(signature_payload.as_bytes());
         let signature_base64 = general_purpose::STANDARD.encode(signature.to_bytes());
 
         let mut headers = HeaderMap::new();
@@ -392,9 +414,13 @@ mod tests {
             "X-Signature",
             HeaderValue::from_str(&signature_base64).unwrap(),
         );
+        headers.insert(
+            "X-Timestamp",
+            HeaderValue::from_str(&timestamp).unwrap(),
+        );
 
         // Authenticate - should fail due to invalid signature
-        let result = authenticate_builder_request(&headers, body, &pool).await;
+        let result = authenticate_builder_request(&headers, body, method, path, &pool).await;
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
@@ -404,10 +430,12 @@ mod tests {
     async fn test_authenticate_builder_request_missing_headers() {
         let pool = test_pool().await;
         let body = Bytes::from("test");
+        let method = "POST";
+        let path = "/api/v1/test";
 
         // Missing both headers
         let headers = HeaderMap::new();
-        let result = authenticate_builder_request(&headers, body.clone(), &pool).await;
+        let result = authenticate_builder_request(&headers, body.clone(), method, path, &pool).await;
         assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
 
         // Missing signature
@@ -416,7 +444,7 @@ mod tests {
             "X-Builder-ID",
             HeaderValue::from_str(&Uuid::new_v4().to_string()).unwrap(),
         );
-        let result = authenticate_builder_request(&headers, body, &pool).await;
+        let result = authenticate_builder_request(&headers, body, method, path, &pool).await;
         assert_eq!(result.unwrap_err(), StatusCode::UNAUTHORIZED);
     }
 }
