@@ -4,6 +4,7 @@ title: Implement automatic build job creation for evaluated derivations
 status: To Do
 assignee: []
 created_date: '2026-03-01 02:14'
+updated_date: '2026-03-01 16:11'
 labels:
   - backend
   - build-system
@@ -61,10 +62,21 @@ Implement automatic build job creation with smart prioritization:
   - Maybe deployment_policy?
 
 ## Acceptance Criteria
-- [ ] Build jobs are automatically created when commits are successfully evaluated
-- [ ] Tracked systems (in systems table) get higher priority_weight
-- [ ] Newer commits (commits_behind=0) get higher priority_weight  
-- [ ] No duplicate build_jobs are created for same derivation
-- [ ] Build queue API shows queued jobs
-- [ ] Builders can pick up jobs and start building
+<!-- AC:BEGIN -->
+- [ ] #1 Build jobs are automatically created when commits are successfully evaluated
+- [ ] #2 Tracked systems (in systems table) get higher priority_weight
+- [ ] #3 Newer commits (commits_behind=0) get higher priority_weight  
+- [ ] #4 No duplicate build_jobs are created for same derivation
+- [ ] #5 Build queue API shows queued jobs
+- [ ] #6 Builders can pick up jobs and start building
 <!-- SECTION:DESCRIPTION:END -->
+
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Reality check (2026-03-01): still not implemented on dev. Commit evaluation path in packages/default/src/server/mod.rs evaluates commits but does not create build_jobs automatically.
+
+No INSERT INTO build_jobs path was found in current backend query code for post-evaluation job creation. Task remains needed.
+<!-- SECTION:NOTES:END -->
