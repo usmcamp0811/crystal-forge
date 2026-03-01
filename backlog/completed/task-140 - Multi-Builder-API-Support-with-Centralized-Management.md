@@ -691,6 +691,12 @@ Resuming task due to active build break in Review; applying minimal fix-up for w
 Adjusted flakes commit timeline semantics: commit `systems` now returns nixosConfigurations discovered from derivations at that commit (`derivation_type='nixos'`) instead of deployed CF hostnames. Added `[CF system]` suffix marker for configs that match a Crystal Forge system deployed at that commit.
 
 Updated flakes view copy to explicitly label `nixosConfigurations at this commit` and show marker legend. Verified with wasm cargo check, server cargo check (SQLX_OFFLINE=true), and nix build --no-link.
+
+Implemented commit artifact caching for flakes timelines to avoid repeated per-request flake evaluation and improve commit toggling performance. Added migration `0084_create_commit_artifacts_cache.sql` with per-commit cached `nixos_configurations` and `changed_files`.
+
+Timeline query now reads commit config names from `commit_artifacts_cache` (DB-first). On cache miss, API hydrates configs + changed files (best effort), persists cache row, and returns hydrated data. `[CF system]` marker remains response-time decoration based on deployment matching.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check --manifest-path packages/default/Cargo.toml --bin server` passed; `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed; `nix build --no-link` passed.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
