@@ -137,11 +137,11 @@ pub async fn load_flake_timelines_with_fallback() -> FlakeTimelinesLoadResult {
             redirect_to_login: true,
         },
         Err(error) => {
-            // Fall back to mock data if API is unavailable
+            // Return empty instead of mock data
             FlakeTimelinesLoadResult {
-                timelines: crate::views::dashboard::mock_flake_timelines(),
+                timelines: vec![],
                 notice: Some(format!(
-                    "Flake timelines API unavailable, using mock data: {error}"
+                    "Flake timelines API unavailable: {error}"
                 )),
                 redirect_to_login: false,
             }
