@@ -90,8 +90,8 @@ let
       builder_id = "00000000-0000-0000-0000-000000000001";
       private_key_path = "BUILDER_KEY_PATH_PLACEHOLDER";
       server_url = "http://127.0.0.1:${toString cf_port}";
-      poll_interval = "5s";
-      heartbeat_interval = "30s";
+      poll_interval = 5;
+      heartbeat_interval = 30;
       max_concurrent_jobs = 1;
     };
     client = {
