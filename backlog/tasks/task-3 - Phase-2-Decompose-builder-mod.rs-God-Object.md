@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-04 20:15'
-updated_date: '2026-03-01 15:11'
+updated_date: '2026-03-01 15:32'
 labels:
   - refactoring
   - architecture
@@ -51,4 +51,6 @@ CI Failure Investigation: The builder check failed due to a pre-existing flaky t
 Fixed flaky test in commit 9e7f8e6: Added serial_test dependency and #[serial] attributes to auth_whoami tests to prevent race conditions from parallel execution modifying shared environment variables.
 
 Commit 057cf81: Updated Cargo.lock to include serial_test dependency for Nix offline builds. This allows the vendored dependencies to include the new test dependency.
+
+Starting Phase 1: Refactoring queries/derivations.rs (2,012 lines) into focused modules: crud.rs, status.rs, build_queue.rs, cache.rs, lifecycle.rs, metadata.rs, and mod.rs.
 <!-- SECTION:NOTES:END -->
