@@ -5,12 +5,14 @@ use dioxus::prelude::*;
 use crate::api::client;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::theme::UiTheme;
 use crate::theme;
 
 /// Header bar displaying the current page title and optional actions.
 #[component]
 pub fn TopBar(title: String) -> Element {
     let mut app_state = use_context::<Signal<AppState>>();
+    let mut ui_theme = use_context::<Signal<UiTheme>>();
     let mut show_user_menu = use_signal(|| false);
     let auth_context = app_state.read().auth.clone();
     let nav = navigator();
@@ -40,6 +42,16 @@ pub fn TopBar(title: String) -> Element {
                 class: "flex items-center gap-4",
 
                 // Search (hidden on small screens)
+                button {
+                    class: "inline-flex items-center gap-2 px-3 py-2 rounded-lg border border-gray-700 text-xs font-medium text-gray-200 hover:bg-gray-700/70 transition-colors",
+                    onclick: move |_| {
+                        let next = ui_theme().toggle();
+                        ui_theme.set(next);
+                    },
+                    span { class: "text-gray-400", "Theme" }
+                    span { class: "text-white", "{ui_theme().label()}" }
+                }
+
                 div {
                     class: "hidden md:block",
                     input {
