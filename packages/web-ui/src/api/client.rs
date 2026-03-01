@@ -230,6 +230,12 @@ pub async fn fetch_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Fetch flake timelines for dashboard (CF system deployment counts).
+pub async fn fetch_dashboard_flake_timelines() -> Result<Vec<FlakeTimeline>, ApiClientError> {
+    let url = format!("{}/flakes/timelines?view=dashboard", base_url());
+    fetch_json(&url).await
+}
+
 /// Trigger sync for all flakes.
 pub async fn request_sync_all_flakes() -> Result<SystemMutationResponse, ApiClientError> {
     let url = format!("{}/flakes/sync", base_url());

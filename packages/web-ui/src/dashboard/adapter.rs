@@ -1,6 +1,6 @@
 use chrono::{Duration, TimeZone, Utc};
 
-use crate::api::client::{ApiClientError, fetch_dashboard, fetch_flake_timelines};
+use crate::api::client::{ApiClientError, fetch_dashboard, fetch_dashboard_flake_timelines};
 use crate::api::models::{
     BuildQueueItem, BuildQueueSummary, BuildStatus, CveSummary, DashboardSummary, DeploymentStatus,
     DeploymentStatusSummary, FleetHealthSummary, FlakeTimeline, RecentDeployment,
@@ -125,7 +125,7 @@ pub struct FlakeTimelinesLoadResult {
 
 /// Load flake timelines from API with fallback to mock data.
 pub async fn load_flake_timelines_with_fallback() -> FlakeTimelinesLoadResult {
-    match fetch_flake_timelines().await {
+    match fetch_dashboard_flake_timelines().await {
         Ok(timelines) => FlakeTimelinesLoadResult {
             timelines,
             notice: None,

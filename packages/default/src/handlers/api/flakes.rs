@@ -21,8 +21,9 @@ use crate::flake::commits::{
 };
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
-    count_systems_for_flake, delete_flake_by_id, fetch_flake_timelines, get_flake_by_id,
-    get_flake_by_name, insert_flake, list_flake_registry, update_flake,
+    count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
+    fetch_flake_timelines, get_flake_by_id, get_flake_by_name, insert_flake,
+    list_flake_registry, update_flake,
 };
 use crate::queries::users::get_by_email;
 
@@ -56,13 +57,24 @@ pub async fn list_flakes(State(pool): State<PgPool>, headers: HeaderMap) -> impl
 pub async fn get_flake_timelines(
     State(pool): State<PgPool>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> impl IntoResponse {
     if require_viewer_or_above(&pool, &headers).await.is_none() {
         return forbidden_viewer();
     }
 
+    // Dashboard view shows CF system deployment counts
+    // Flakes view shows nixosConfigurations from cache
+    let use_dashboard_view = params.get("view").map(|v| v == "dashboard").unwrap_or(false);
+
     // Fetch up to 10 most recent commits per flake
-    match fetch_flake_timelines(&pool, 10).await {
+    let fetch_result = if use_dashboard_view {
+        fetch_dashboard_flake_timelines(&pool, 10).await
+    } else {
+        fetch_flake_timelines(&pool, 10).await
+    };
+
+    match fetch_result {
         Ok(mut timelines) => {
             let mut remaining_hydration_budget = MAX_HYDRATION_COMMITS_PER_REQUEST;
 

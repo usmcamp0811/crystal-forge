@@ -188,10 +188,137 @@ pub async fn delete_flake_by_id(pool: &PgPool, flake_id: i32) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
-/// Fetch flake timelines with recent commits for the dashboard.
+/// Fetch flake timelines for dashboard view (CF system deployment counts).
 ///
 /// Returns up to `max_commits_per_flake` most recent commits for each flake,
-/// including system count and commits-behind calculation.
+/// showing count of Crystal Forge systems deployed at each commit.
+pub async fn fetch_dashboard_flake_timelines(
+    pool: &PgPool,
+    max_commits_per_flake: i64,
+) -> Result<Vec<FlakeTimeline>> {
+    let flakes = sqlx::query_as::<_, (i32, String, String)>(
+        "SELECT id, name, repo_url FROM flakes ORDER BY name ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut timelines = Vec::new();
+
+    for (flake_id, flake_name, repo_url) in flakes {
+        let commits_rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                chrono::DateTime<chrono::Utc>,
+                i64,
+                Vec<String>,
+                i64,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            r#"
+            SELECT
+                c.git_commit_hash,
+                c.commit_timestamp,
+                COALESCE(
+                    (
+                        SELECT COUNT(DISTINCT s.hostname)::bigint
+                        FROM view_system_deployment_status s
+                        WHERE s.current_commit_hash = c.git_commit_hash
+                    ),
+                    0
+                ) AS system_count,
+                COALESCE(
+                    (
+                        SELECT ARRAY_AGG(DISTINCT s.hostname ORDER BY s.hostname)
+                        FROM view_system_deployment_status s
+                        WHERE s.current_commit_hash = c.git_commit_hash
+                    ),
+                    ARRAY[]::text[]
+                ) AS systems,
+                (
+                    SELECT COUNT(*)::bigint
+                    FROM commits c2
+                    WHERE c2.flake_id = c.flake_id
+                    AND c2.commit_timestamp > c.commit_timestamp
+                ) AS commits_behind,
+                (
+                    SELECT
+                        CASE
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'building') > 0 THEN 'building'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'queued') > 0 THEN 'queued'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'failed') > 0 THEN 'failed'
+                            WHEN COUNT(*) FILTER (WHERE bj.status = 'success') > 0 THEN 'complete'
+                            ELSE NULL
+                        END
+                    FROM build_jobs bj
+                    JOIN derivations d ON d.id = bj.derivation_id
+                    WHERE d.commit_id = c.id
+                ) AS build_status,
+                (
+                    SELECT
+                        CASE
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 4) > 0 THEN 'running'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 3) > 0 THEN 'queued'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 6) > 0 THEN 'failed'
+                            WHEN COUNT(*) FILTER (WHERE d.status_id = 5) > 0 THEN 'complete'
+                            ELSE 'idle'
+                        END
+                    FROM derivations d
+                    WHERE d.commit_id = c.id
+                ) AS evaluation_status
+            FROM commits c
+            WHERE c.flake_id = $1
+            ORDER BY c.commit_timestamp DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(flake_id)
+        .bind(max_commits_per_flake)
+        .fetch_all(pool)
+        .await?;
+
+        let commits: Vec<FlakeCommit> = commits_rows
+            .into_iter()
+            .map(|(hash, committed_at, system_count, systems, commits_behind, build_status, evaluation_status)| {
+                let build_status = build_status.as_deref().map(|status| match status {
+                    "queued" => BuildStatus::Queued,
+                    "building" => BuildStatus::Building,
+                    "failed" => BuildStatus::Failed,
+                    "complete" => BuildStatus::Complete,
+                    _ => BuildStatus::Idle,
+                });
+
+                FlakeCommit {
+                hash,
+                message: "".to_string(),
+                author: "".to_string(),
+                committed_at,
+                system_count,
+                commits_behind,
+                systems,
+                build_status,
+                evaluation_status,
+            }
+            })
+            .collect();
+
+        timelines.push(FlakeTimeline {
+            flake_id,
+            flake_name,
+            repo_url,
+            commits,
+        });
+    }
+
+    Ok(timelines)
+}
+
+/// Fetch flake timelines for flakes view (nixosConfigurations in flake).
+///
+/// Returns up to `max_commits_per_flake` most recent commits for each flake,
+/// showing nixosConfigurations discovered at each commit from cache.
 pub async fn fetch_flake_timelines(
     pool: &PgPool,
     max_commits_per_flake: i64,
