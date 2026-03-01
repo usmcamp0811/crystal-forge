@@ -1,6 +1,8 @@
 use crate::config;
 use crate::models::commits::Commit;
-use crate::queries::commits::{flake_has_commits, flake_last_commit, insert_commit};
+use crate::queries::commits::{
+    flake_has_commits, flake_last_commit, insert_commit, insert_commit_with_metadata,
+};
 use anyhow::{bail, Context, Result};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -47,14 +49,23 @@ pub async fn fetch_and_insert_recent_commits(
     branch: &str,
     limit: Option<usize>,
 ) -> Result<Vec<String>> {
-    let commits = get_commits_with_timestamps(repo_url, branch, limit, None).await?;
+    let commits = get_commits_with_full_metadata(repo_url, branch, limit, None).await?;
 
     let mut inserted = Vec::new();
-    for (hash, timestamp) in commits {
-        if let Err(e) = insert_commit(pool, &hash, repo_url, timestamp).await {
-            warn!("Failed to insert commit {}: {}", hash, e);
+    for commit_data in commits {
+        if let Err(e) = insert_commit_with_metadata(
+            pool,
+            &commit_data.hash,
+            repo_url,
+            commit_data.timestamp,
+            Some(&commit_data.message),
+            Some(&commit_data.author),
+        )
+        .await
+        {
+            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
         } else {
-            inserted.push(hash);
+            inserted.push(commit_data.hash);
         }
     }
 
@@ -317,12 +328,21 @@ fn normalize_repo_url_for_git(repo_url: &str) -> String {
 }
 
 /// Get commits with timestamps, optionally since a specific commit
-async fn get_commits_with_timestamps(
+/// Commit data fetched from git log
+#[derive(Debug, Clone)]
+struct CommitData {
+    hash: String,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    message: String,
+    author: String,
+}
+
+async fn get_commits_with_full_metadata(
     repo_url: &str,
     branch: &str,
     limit: Option<usize>,
     since_commit: Option<&str>,
-) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+) -> Result<Vec<CommitData>> {
     let git_url = normalize_repo_url_for_git(repo_url);
     let temp_dir = tempfile::tempdir().context("Failed to create temporary directory")?;
     let clone_path = temp_dir.path();
@@ -349,8 +369,9 @@ async fn get_commits_with_timestamps(
         bail!("Git clone failed for {}: {}", repo_url, stderr);
     }
 
-    // Build git log args
-    let mut args = vec!["log", "--format=%H|%cI"];
+    // Build git log args with format: hash|timestamp|subject|author
+    // Using %x1E as field separator (ASCII record separator) to handle multi-line messages
+    let mut args = vec!["log", "--format=%H%x1E%cI%x1E%s%x1E%aN"];
 
     // Add range if since_commit provided
     let range;
@@ -408,19 +429,37 @@ async fn get_commits_with_timestamps(
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| {
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() != 2 {
-                bail!("Invalid git log format: {}", line);
+            let parts: Vec<&str> = line.split('\x1E').collect();
+            if parts.len() != 4 {
+                bail!("Invalid git log format (expected 4 fields): {}", line);
             }
             let hash = parts[0].trim().to_string();
             let timestamp = chrono::DateTime::parse_from_rfc3339(parts[1].trim())
                 .context("Failed to parse timestamp")?
                 .with_timezone(&chrono::Utc);
-            Ok((hash, timestamp))
+            let message = parts[2].trim().to_string();
+            let author = parts[3].trim().to_string();
+            Ok(CommitData {
+                hash,
+                timestamp,
+                message,
+                author,
+            })
         })
         .collect();
 
     commits
+}
+
+/// Legacy function for backward compatibility - returns only hash and timestamp
+async fn get_commits_with_timestamps(
+    repo_url: &str,
+    branch: &str,
+    limit: Option<usize>,
+    since_commit: Option<&str>,
+) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>> {
+    let commits = get_commits_with_full_metadata(repo_url, branch, limit, since_commit).await?;
+    Ok(commits.into_iter().map(|c| (c.hash, c.timestamp)).collect())
 }
 
 /// Fetch and insert all new commits since a given commit hash
@@ -430,7 +469,7 @@ pub async fn fetch_and_insert_commits_since(
     branch: &str,
     since_commit: &Commit,
 ) -> Result<Vec<String>> {
-    let commits = get_commits_with_timestamps(
+    let commits = get_commits_with_full_metadata(
         repo_url,
         branch,
         Some(50),
@@ -448,12 +487,21 @@ pub async fn fetch_and_insert_commits_since(
 
     let mut inserted = Vec::new();
     // Insert in reverse (oldest first) for chronological order
-    for (hash, timestamp) in commits.into_iter().rev() {
-        if let Err(e) = insert_commit(pool, &hash, repo_url, timestamp).await {
-            warn!("Failed to insert commit {}: {}", hash, e);
+    for commit_data in commits.into_iter().rev() {
+        if let Err(e) = insert_commit_with_metadata(
+            pool,
+            &commit_data.hash,
+            repo_url,
+            commit_data.timestamp,
+            Some(&commit_data.message),
+            Some(&commit_data.author),
+        )
+        .await
+        {
+            warn!("Failed to insert commit {}: {}", commit_data.hash, e);
         } else {
-            debug!("✅ Inserted commit {} for {}", hash, repo_url);
-            inserted.push(hash);
+            debug!("✅ Inserted commit {} for {}", commit_data.hash, repo_url);
+            inserted.push(commit_data.hash);
         }
     }
 

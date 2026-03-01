@@ -10,6 +10,17 @@ pub async fn insert_commit(
     repo_url: &str,
     commit_timestamp: chrono::DateTime<chrono::Utc>,
 ) -> Result<()> {
+    insert_commit_with_metadata(pool, commit_hash, repo_url, commit_timestamp, None, None).await
+}
+
+pub async fn insert_commit_with_metadata(
+    pool: &PgPool,
+    commit_hash: &str,
+    repo_url: &str,
+    commit_timestamp: chrono::DateTime<chrono::Utc>,
+    message: Option<&str>,
+    author: Option<&str>,
+) -> Result<()> {
     let flake_id: (i32,) = sqlx::query_as("SELECT id FROM flakes WHERE repo_url = $1")
         .bind(repo_url)
         .fetch_optional(pool)
@@ -17,12 +28,14 @@ pub async fn insert_commit(
         .context("No flake entry found")?;
 
     sqlx::query(
-        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp)
-         VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, message, author)
+         VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
     )
     .bind(flake_id.0)
     .bind(commit_hash)
     .bind(commit_timestamp)
+    .bind(message)
+    .bind(author)
     .execute(pool)
     .await?;
 
