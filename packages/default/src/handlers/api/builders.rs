@@ -301,8 +301,9 @@ pub async fn builder_heartbeat(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Json<HeartbeatResponse>, StatusCode> {
-    // Authenticate builder request
-    let verified = authenticate_builder_request_allow_inactive(&headers, body.clone(), &state.pool).await?;
+    // Authenticate builder request with replay resistance
+    let path = format!("/api/v1/builders/{}/heartbeat", builder_id);
+    let verified = authenticate_builder_request_allow_inactive(&headers, body.clone(), "POST", &path, &state.pool).await?;
 
     // Verify the builder_id in the path matches the authenticated builder
     if verified.builder_id != builder_id {
@@ -348,8 +349,9 @@ pub async fn get_next_job(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<Json<NextJobResponse>, StatusCode> {
-    // Authenticate builder request
-    let verified = authenticate_builder_request(&headers, body, &state.pool).await?;
+    // Authenticate builder request with replay resistance
+    let path = format!("/api/v1/builders/{}/jobs/next", builder_id);
+    let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
 
     // Verify the builder_id matches
     if verified.builder_id != builder_id {
@@ -423,8 +425,9 @@ pub async fn start_job(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    // Authenticate builder request
-    let verified = authenticate_builder_request(&headers, body, &state.pool).await?;
+    // Authenticate builder request with replay resistance
+    let path = format!("/api/v1/builders/{}/jobs/{}/start", builder_id, job_id);
+    let verified = authenticate_builder_request(&headers, body, "POST", &path, &state.pool).await?;
 
     if verified.builder_id != builder_id {
         return Err(StatusCode::FORBIDDEN);
@@ -451,8 +454,9 @@ pub async fn complete_job(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    // Authenticate builder request
-    let verified = authenticate_builder_request(&headers, body, &state.pool).await?;
+    // Authenticate builder request with replay resistance
+    let path = format!("/api/v1/builders/{}/jobs/{}/complete", builder_id, job_id);
+    let verified = authenticate_builder_request(&headers, body, "POST", &path, &state.pool).await?;
 
     if verified.builder_id != builder_id {
         return Err(StatusCode::FORBIDDEN);
@@ -487,8 +491,9 @@ pub async fn fail_job(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    // Authenticate builder request
-    let verified = authenticate_builder_request(&headers, body.clone(), &state.pool).await?;
+    // Authenticate builder request with replay resistance
+    let path = format!("/api/v1/builders/{}/jobs/{}/fail", builder_id, job_id);
+    let verified = authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
 
     if verified.builder_id != builder_id {
         return Err(StatusCode::FORBIDDEN);
@@ -532,8 +537,9 @@ pub async fn append_job_logs(
     headers: axum::http::HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, StatusCode> {
-    // Authenticate builder request
-    let verified = authenticate_builder_request(&headers, body.clone(), &state.pool).await?;
+    // Authenticate builder request with replay resistance
+    let path = format!("/api/v1/builders/{}/jobs/{}/logs", builder_id, job_id);
+    let verified = authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
 
     if verified.builder_id != builder_id {
         return Err(StatusCode::FORBIDDEN);

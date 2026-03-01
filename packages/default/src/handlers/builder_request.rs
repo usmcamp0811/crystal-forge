@@ -49,39 +49,62 @@ impl BuilderLookup for PgPool {
     }
 }
 
-/// Authenticate a builder API request.
+/// Authenticate a builder API request with replay resistance.
 ///
 /// # Headers
 ///
 /// - `X-Builder-ID`: UUID of the builder
-/// - `X-Signature`: Base64-encoded Ed25519 signature of the request body
+/// - `X-Signature`: Base64-encoded Ed25519 signature of the signed payload
+/// - `X-Timestamp`: ISO 8601 timestamp (RFC 3339 format)
+///
+/// # Signed Payload Format
+///
+/// The signature is computed over: `{method}\n{path}\n{timestamp}\n{body}`
+///
+/// Example:
+/// ```text
+/// POST
+/// /api/v1/builders/123/heartbeat
+/// 2026-03-01T02:30:00Z
+/// {"status":"active"}
+/// ```
+///
+/// # Replay Resistance
+///
+/// - Timestamp must be within ±5 minutes of server time
+/// - Signature binds to specific method + path (prevents cross-endpoint reuse)
 ///
 /// # Errors
 ///
 /// Returns `StatusCode::UNAUTHORIZED` for:
-/// - Missing X-Builder-ID header
-/// - Missing X-Signature header
+/// - Missing required headers (X-Builder-ID, X-Signature, X-Timestamp)
 /// - Invalid builder ID format
 /// - Unknown builder (no matching registration)
 /// - Invalid signature verification
 /// - Builder status is not 'active'
+/// - Timestamp outside freshness window (replay attack detected)
 ///
 /// Returns `StatusCode::BAD_REQUEST` for:
 /// - Malformed signature (invalid base64 or wrong length)
+/// - Malformed timestamp (invalid ISO 8601 format)
 ///
 /// Returns `StatusCode::INTERNAL_SERVER_ERROR` for:
 /// - Database errors during lookup
 pub async fn authenticate_builder_request_with_lookup<L: BuilderLookup>(
     headers: &HeaderMap,
     body: Bytes,
+    method: &str,
+    path: &str,
     lookup: &L,
 ) -> Result<VerifiedBuilderRequest, StatusCode> {
-    authenticate_builder_request_with_lookup_options(headers, body, lookup, false).await
+    authenticate_builder_request_with_lookup_options(headers, body, method, path, lookup, false).await
 }
 
 async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
     headers: &HeaderMap,
     body: Bytes,
+    method: &str,
+    path: &str,
     lookup: &L,
     allow_inactive: bool,
 ) -> Result<VerifiedBuilderRequest, StatusCode> {
@@ -93,6 +116,33 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
 
     let builder_id = Uuid::parse_str(builder_id_str)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    // Extract timestamp from header (required for replay resistance)
+    let timestamp_str = headers
+        .get("X-Timestamp")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    // Parse timestamp (ISO 8601 / RFC 3339 format)
+    let request_timestamp = chrono::DateTime::parse_from_rfc3339(timestamp_str)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .with_timezone(&chrono::Utc);
+
+    // Enforce freshness window (±5 minutes) to prevent replay attacks
+    let now = chrono::Utc::now();
+    let time_diff = (now - request_timestamp).num_seconds().abs();
+    const FRESHNESS_WINDOW_SECS: i64 = 5 * 60; // 5 minutes
+
+    if time_diff > FRESHNESS_WINDOW_SECS {
+        warn!(
+            builder_id = builder_id_str,
+            request_timestamp = %request_timestamp,
+            server_time = %now,
+            diff_secs = time_diff,
+            "builder auth rejected: timestamp outside freshness window (possible replay attack)"
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
     // Extract signature from header
     let sig = headers
@@ -132,16 +182,23 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Verify the signature
+    // Construct signed payload: method\npath\ntimestamp\nbody
+    // This binds the signature to specific endpoint and prevents replay across endpoints
+    let body_str = std::str::from_utf8(&body).unwrap_or("");
+    let signed_payload = format!("{}\n{}\n{}\n{}", method, path, timestamp_str, body_str);
+
+    // Verify the signature against the full signed payload
     if builder
         .public_key
         .verifying_key()
-        .verify(&body, &signature)
+        .verify(signed_payload.as_bytes(), &signature)
         .is_err()
     {
         warn!(
             builder_id = %builder.id,
             public_key = %builder.public_key.to_base64(),
+            method = method,
+            path = path,
             "builder auth rejected: signature verification failed"
         );
         return Err(StatusCode::UNAUTHORIZED);
@@ -159,9 +216,11 @@ async fn authenticate_builder_request_with_lookup_options<L: BuilderLookup>(
 pub async fn authenticate_builder_request(
     headers: &HeaderMap,
     body: Bytes,
+    method: &str,
+    path: &str,
     pool: &PgPool,
 ) -> Result<VerifiedBuilderRequest, StatusCode> {
-    authenticate_builder_request_with_lookup(headers, body, pool).await
+    authenticate_builder_request_with_lookup(headers, body, method, path, pool).await
 }
 
 /// Production entry point that allows inactive builders to authenticate.
@@ -169,9 +228,11 @@ pub async fn authenticate_builder_request(
 pub async fn authenticate_builder_request_allow_inactive(
     headers: &HeaderMap,
     body: Bytes,
+    method: &str,
+    path: &str,
     pool: &PgPool,
 ) -> Result<VerifiedBuilderRequest, StatusCode> {
-    authenticate_builder_request_with_lookup_options(headers, body, pool, true).await
+    authenticate_builder_request_with_lookup_options(headers, body, method, path, pool, true).await
 }
 
 #[cfg(test)]
