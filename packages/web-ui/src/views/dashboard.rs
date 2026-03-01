@@ -491,11 +491,11 @@ pub fn DashboardView() -> Element {
             div {
                 class: "flex items-center justify-between",
                 h2 {
-                    class: "text-lg font-semibold text-white",
+                    class: "text-lg font-semibold {theme::text::PRIMARY}",
                     "Dashboard Widgets"
                 }
                 button {
-                    class: "px-3 py-1.5 text-xs font-medium text-gray-400 hover:text-white bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-lg transition-colors",
+                    class: "px-3 py-1.5 text-xs font-medium {theme::text::SECONDARY} {theme::interactive::HOVER_BG} {theme::surface::SUBTLE_BG} border {theme::surface::CARD_BORDER} rounded-lg transition-colors",
                     onclick: move |_| {
                         widget_positions.set(default_widget_positions());
                     },

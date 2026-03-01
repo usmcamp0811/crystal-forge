@@ -57,6 +57,17 @@
     linear-gradient(135deg, #0b1020 0%, #111827 50%, #1a1a2e 100%);
   --cf-dev-login-bg: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
   --cf-history-timeline-bg: linear-gradient(180deg, #131b29 0%, #0f141d 100%);
+
+  --cf-timeline-line: #4b5563;
+  --cf-timeline-tick: #374151;
+  --cf-timeline-node-border-default: #111827;
+  --cf-timeline-node-border-latest: #f9fafb;
+  --cf-timeline-node-glow: rgba(255, 255, 255, 0.45);
+  --cf-timeline-node-text-default: #111827;
+  --cf-timeline-node-text-latest: #f9fafb;
+  --cf-timeline-ring-building: #42ff65;
+  --cf-timeline-ring-queued: #e57c00;
+  --cf-timeline-ring-idle: #9ca3af;
 }
 
 :root[data-theme="light"] {
@@ -117,6 +128,17 @@
     linear-gradient(135deg, #f7f8fb 0%, #e8edf8 55%, #dee6f5 100%);
   --cf-dev-login-bg: linear-gradient(135deg, #eef2fc 0%, #e0e8f8 100%);
   --cf-history-timeline-bg: linear-gradient(180deg, #edf3fb 0%, #e6edf8 100%);
+
+  --cf-timeline-line: #9fb0c9;
+  --cf-timeline-tick: #bccbde;
+  --cf-timeline-node-border-default: #dbe5f3;
+  --cf-timeline-node-border-latest: #1f2937;
+  --cf-timeline-node-glow: rgba(59, 130, 246, 0.25);
+  --cf-timeline-node-text-default: #1f2937;
+  --cf-timeline-node-text-latest: #ffffff;
+  --cf-timeline-ring-building: #10b981;
+  --cf-timeline-ring-queued: #d97706;
+  --cf-timeline-ring-idle: #64748b;
 }
 
 .cf-primary-btn {
@@ -298,6 +320,10 @@
 
 .cf-hover-bg:hover {
   background-color: var(--cf-hover-bg);
+}
+
+.cf-hover-text-primary:hover {
+  color: var(--cf-text-primary);
 }
 
 .cf-focus-ring:focus,
