@@ -35,16 +35,16 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
             -- Priority calculation:
             -- Base: 1.0
             -- * 10 if system is tracked (in systems table)
-            -- * 2 if commit is newest (commits_behind = 0)
-            -- * 0.5 for each commit behind
+            -- * 2 if commit is newer (based on timestamp)
             CASE 
                 WHEN s.id IS NOT NULL THEN 10.0  -- Tracked system
                 ELSE 1.0  -- Untracked
             END *
             CASE
-                WHEN c.commits_behind = 0 THEN 2.0  -- Newest commit
-                WHEN c.commits_behind IS NULL THEN 1.0
-                ELSE GREATEST(0.5, 1.0 / (1.0 + c.commits_behind::float))  -- Older commits get lower weight
+                -- Newer commits get higher priority (decay over time)
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600 THEN 2.0  -- < 1 hour old
+                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5  -- < 1 day old
+                ELSE 1.0  -- Older commits
             END as priority_weight,
             'queued' as status
         FROM derivations d

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH builder_environments AS (\n            SELECT environment_id \n            FROM builder_environment_assignments \n            WHERE builder_id = $1\n        ),\n        available_jobs AS (\n            SELECT bj.id\n            FROM build_jobs bj\n            WHERE bj.status = 'queued'\n                AND bj.retry_count < bj.max_retries\n                AND (\n                    -- No environment restrictions (wildcard builder)\n                    NOT EXISTS (SELECT 1 FROM builder_environments)\n                    OR\n                    -- Builder has environment assignments and job matches\n                    bj.environment_id IN (SELECT environment_id FROM builder_environments)\n                    OR\n                    -- Job has no environment (can be built by any builder)\n                    bj.environment_id IS NULL\n                )\n            ORDER BY bj.priority_weight DESC, bj.created_at ASC\n            LIMIT 1\n            FOR UPDATE SKIP LOCKED\n        )\n        UPDATE build_jobs\n        SET \n            status = 'building',\n            builder_id = $1,\n            started_at = NOW(),\n            updated_at = NOW()\n        FROM available_jobs\n        WHERE build_jobs.id = available_jobs.id\n        RETURNING build_jobs.id as \"id!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "a9ee136c38cc4d78a5dc03f7687e7c37922a63de99e040a5727be7dd5c50ae7a"
+}
