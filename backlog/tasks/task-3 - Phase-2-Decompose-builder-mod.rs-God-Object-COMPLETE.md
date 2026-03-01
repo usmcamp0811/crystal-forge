@@ -57,4 +57,6 @@ Starting Phase 1: Refactoring queries/derivations.rs (2,012 lines) into focused 
 Phase 2 COMPLETE - Ready to merge. Created follow-up task TASK-143 for Phase 1 (queries refactoring). MR includes: builder module refactoring (7 focused modules), flaky test fixes, and dependency updates.
 
 MR !146 merged into dev branch. Phase 2 complete. Worktree cleanup in progress.
+
+Worktree ~/code/crystal-forge/TASK-3-code-cleanup-refactoring removed and pruned.
 <!-- SECTION:NOTES:END -->
