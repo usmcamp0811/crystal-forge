@@ -812,4 +812,66 @@ mod tests {
         assert_eq!(updated.status, BuilderStatus::Active);
         assert!(updated.last_heartbeat_at.is_some());
     }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_create_builder_invalid_public_key_base64() {
+        let pool = test_pool().await;
+
+        // Invalid base64 string
+        let request = CreateBuilderRequest {
+            name: "invalid-key-builder".to_string(),
+            public_key: Some("not-valid-base64!!!".to_string()),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            environment_ids: vec![],
+        };
+
+        let result = create_builder(&pool, &request).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to decode base64"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_create_builder_invalid_public_key_length() {
+        let pool = test_pool().await;
+
+        // Valid base64 but wrong length (16 bytes instead of 32)
+        let wrong_length_key = base64::engine::general_purpose::STANDARD
+            .encode(vec![0u8; 16]);
+
+        let request = CreateBuilderRequest {
+            name: "wrong-length-builder".to_string(),
+            public_key: Some(wrong_length_key),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            environment_ids: vec![],
+        };
+
+        let result = create_builder(&pool, &request).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("must be exactly 32 bytes"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires running test database"]
+    async fn test_create_builder_empty_public_key() {
+        let pool = test_pool().await;
+
+        let request = CreateBuilderRequest {
+            name: "empty-key-builder".to_string(),
+            public_key: Some("".to_string()),
+            max_cpu_cores: None,
+            max_memory_mb: None,
+            max_concurrent_jobs: None,
+            environment_ids: vec![],
+        };
+
+        let result = create_builder(&pool, &request).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Public key cannot be empty"));
+    }
 }

@@ -41,16 +41,48 @@ pub async fn create_builder(
     State(state): State<CFState>,
     headers: axum::http::HeaderMap,
     Json(request): Json<CreateBuilderRequest>,
-) -> Result<Json<BuilderCreatedResponse>, StatusCode> {
+) -> Result<Json<BuilderCreatedResponse>, (StatusCode, String)> {
     // Verify admin authorization
     let Some(_admin_user) = require_admin(&state.pool, &headers).await else {
-        return Err(StatusCode::FORBIDDEN);
+        return Err((StatusCode::FORBIDDEN, "Admin access required".to_string()));
     };
 
+    // Validate request fields (input sanitization)
+    if request.name.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "Builder name cannot be empty".to_string()));
+    }
+    if request.name.len() > 255 {
+        return Err((StatusCode::BAD_REQUEST, "Builder name too long (max 255 characters)".to_string()));
+    }
+    
+    // Validate public key if provided (prevent DoS via oversized input)
+    if let Some(ref pk) = request.public_key {
+        if pk.is_empty() {
+            return Err((StatusCode::BAD_REQUEST, "Public key cannot be empty".to_string()));
+        }
+        if pk.len() > 1000 {
+            return Err((StatusCode::BAD_REQUEST, "Public key too long (max 1000 characters)".to_string()));
+        }
+    }
+
     // Create builder (may generate keypair server-side)
+    // PublicKey::from_base64() will validate:
+    // - Base64 decoding
+    // - Exactly 32 bytes (Ed25519 requirement)
+    // - Valid Ed25519 curve point
     let (builder, private_key_option) = builders::create_builder(&state.pool, &request)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!("Failed to create builder: {}", e);
+            // Return validation errors as 400, others as 500
+            if e.to_string().contains("Invalid public key") || 
+               e.to_string().contains("must be exactly 32 bytes") ||
+               e.to_string().contains("Failed to decode base64") {
+                (StatusCode::BAD_REQUEST, format!("Invalid public key: {}", e))
+            } else {
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create builder".to_string())
+            }
+        })?;
     
     // Get environment IDs for response
     let assigned_environment_ids = request.environment_ids.clone();
