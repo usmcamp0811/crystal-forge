@@ -8,6 +8,27 @@
   --cf-modal-blur: blur(6px);
   --cf-action-text: #d6c3e8;
 
+  --cf-page-bg: #030712;
+  --cf-sidebar-bg: #111827;
+  --cf-card-bg: #111827;
+  --cf-card-border: #1f2937;
+  --cf-divider: #1f2937;
+  --cf-subtle-bg: rgba(31, 41, 55, 0.5);
+
+  --cf-text-primary: #f3f4f6;
+  --cf-text-secondary: #9ca3af;
+  --cf-text-muted: #6b7280;
+  --cf-text-disabled: #4b5563;
+
+  --cf-hover-bg: rgba(31, 41, 55, 0.5);
+  --cf-focus-ring-color: rgba(59, 130, 246, 0.5);
+  --cf-input-bg: #111827;
+  --cf-input-border: #374151;
+  --cf-input-border-focus: #3b82f6;
+
+  --cf-success-btn: #059669;
+  --cf-success-btn-hover: #047857;
+
   --cf-chip-info-bg: #23354b;
   --cf-chip-info-border: #406084;
   --cf-chip-warning-bg: #493e26;
@@ -47,6 +68,27 @@
   --cf-modal-blur: blur(6px);
   --cf-action-text: #6f4f89;
 
+  --cf-page-bg: #eef2f7;
+  --cf-sidebar-bg: #ffffff;
+  --cf-card-bg: #ffffff;
+  --cf-card-border: #d1d9e6;
+  --cf-divider: #d7dfea;
+  --cf-subtle-bg: #eef3f9;
+
+  --cf-text-primary: #1f2937;
+  --cf-text-secondary: #4b5563;
+  --cf-text-muted: #6b7280;
+  --cf-text-disabled: #9ca3af;
+
+  --cf-hover-bg: #eef3f9;
+  --cf-focus-ring-color: rgba(59, 130, 246, 0.35);
+  --cf-input-bg: #ffffff;
+  --cf-input-border: #b9c6d8;
+  --cf-input-border-focus: #4f83d8;
+
+  --cf-success-btn: #059669;
+  --cf-success-btn-hover: #047857;
+
   --cf-chip-info-bg: #e8f2ff;
   --cf-chip-info-border: #95b6de;
   --cf-chip-warning-bg: #fff3df;
@@ -83,6 +125,14 @@
 
 .cf-primary-btn:hover {
   background-color: var(--cf-brand-purple-hover);
+}
+
+.cf-success-btn {
+  background-color: var(--cf-success-btn);
+}
+
+.cf-success-btn:hover {
+  background-color: var(--cf-success-btn-hover);
 }
 
 .cf-danger-btn {
@@ -204,6 +254,67 @@
 
 .cf-auth-bg-ambient {
   background: var(--cf-auth-bg-ambient);
+}
+
+.cf-page-bg {
+  background-color: var(--cf-page-bg);
+}
+
+.cf-sidebar-bg {
+  background-color: var(--cf-sidebar-bg);
+}
+
+.cf-card-bg {
+  background-color: var(--cf-card-bg);
+}
+
+.cf-card-border {
+  border-color: var(--cf-card-border);
+}
+
+.cf-divider > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--cf-divider);
+}
+
+.cf-subtle-bg {
+  background-color: var(--cf-subtle-bg);
+}
+
+.cf-text-primary {
+  color: var(--cf-text-primary);
+}
+
+.cf-text-secondary {
+  color: var(--cf-text-secondary);
+}
+
+.cf-text-muted {
+  color: var(--cf-text-muted);
+}
+
+.cf-text-disabled {
+  color: var(--cf-text-disabled);
+}
+
+.cf-hover-bg:hover {
+  background-color: var(--cf-hover-bg);
+}
+
+.cf-focus-ring:focus,
+.cf-focus-ring:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--cf-focus-ring-color);
+}
+
+.cf-input {
+  background-color: var(--cf-input-bg);
+  border-color: var(--cf-input-border);
+  color: var(--cf-text-secondary);
+}
+
+.cf-input:focus,
+.cf-input:focus-visible {
+  border-color: var(--cf-input-border-focus);
 }
 
 .cf-dev-login-bg {
