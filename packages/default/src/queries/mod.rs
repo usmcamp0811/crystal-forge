@@ -5,6 +5,7 @@ pub mod build_reservations;
 pub mod builders;
 pub mod cache_push;
 pub mod commits;
+pub mod commits_artifacts;
 pub mod cve_scans;
 pub mod dashboard;
 pub mod deployment;

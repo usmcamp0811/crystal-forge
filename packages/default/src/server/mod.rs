@@ -28,6 +28,7 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     let commit_pool = pool.clone();
     let target_pool = pool.clone();
     let deployment_pool = pool.clone();
+    let artifact_pool = pool.clone();
 
     // Get the flake config with a fallback
     let flake_config = cfg.flakes.clone();
@@ -37,6 +38,7 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
         commit_pool,
         flake_config.commit_evaluation_interval,
     ));
+    tokio::spawn(run_commit_artifact_hydration_loop(artifact_pool));
 
     tokio::spawn(spawn_deployment_policy_manager(cfg, deployment_pool));
 }
@@ -210,6 +212,87 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
         Err(e) => error!("❌ Failed to get pending commits: {e}"),
     }
     Ok(())
+}
+
+/// Background task to hydrate commit artifact cache (nixosConfigurations + changed files).
+/// Processes commits with missing cache entries, with progressive backoff on failure.
+async fn run_commit_artifact_hydration_loop(pool: PgPool) {
+    use crate::flake::commits::{get_commit_changed_files, get_commit_nixos_configurations};
+    use crate::queries::commits_artifacts::{
+        get_commits_needing_artifact_cache, mark_commit_artifact_hydration_failed,
+        upsert_commit_artifact_cache,
+    };
+
+    info!("🔁 Starting commit artifact hydration background task...");
+
+    let pool = pool.clone();
+    let mut ticker = interval(Duration::from_secs(120)); // Check every 2 minutes
+
+    loop {
+        ticker.tick().await;
+
+        // Process 1 commit at a time to avoid overwhelming nix eval
+        match get_commits_needing_artifact_cache(&pool, 1).await {
+            Ok(commits) if !commits.is_empty() => {
+                for (commit_id, commit_hash, repo_url) in commits {
+                    info!(
+                        "🔍 Hydrating commit artifacts for {} @ {}",
+                        repo_url, commit_hash
+                    );
+
+                    // Try to get nixosConfigurations
+                    let configs = match get_commit_nixos_configurations(&repo_url, &[commit_hash.clone()])
+                        .await
+                        .remove(&commit_hash)
+                    {
+                        Some(configs) => configs,
+                        None => {
+                            warn!(
+                                "⚠️  Failed to get nixosConfigurations for {} @ {}, marking as failed",
+                                repo_url, commit_hash
+                            );
+                            let _ = mark_commit_artifact_hydration_failed(&pool, commit_id).await;
+                            continue;
+                        }
+                    };
+
+                    // Try to get changed files (best effort)
+                    let changed_files = get_commit_changed_files(&repo_url, &[commit_hash.clone()])
+                        .await
+                        .ok()
+                        .and_then(|mut map| map.remove(&commit_hash))
+                        .unwrap_or_default();
+
+                    // Persist to cache
+                    match upsert_commit_artifact_cache(&pool, commit_id, &configs, &changed_files)
+                        .await
+                    {
+                        Ok(_) => {
+                            info!(
+                                "✅ Cached {} configs, {} files for {} @ {}",
+                                configs.len(),
+                                changed_files.len(),
+                                repo_url,
+                                commit_hash
+                            );
+                        }
+                        Err(err) => {
+                            error!(
+                                "❌ Failed to persist cache for {} @ {}: {:#}",
+                                repo_url, commit_hash, err
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(_) => {
+                debug!("No commits need artifact hydration");
+            }
+            Err(err) => {
+                error!("❌ Failed to query commits needing artifact cache: {:#}", err);
+            }
+        }
+    }
 }
 
 pub async fn memory_monitor_task(pool: PgPool) {
