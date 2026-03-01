@@ -63,11 +63,12 @@
   --cf-timeline-node-border-default: #111827;
   --cf-timeline-node-border-latest: #f9fafb;
   --cf-timeline-node-glow: rgba(255, 255, 255, 0.45);
-  --cf-timeline-node-text-default: #111827;
+  --cf-timeline-node-text-default: #f9fafb;
   --cf-timeline-node-text-latest: #f9fafb;
   --cf-timeline-ring-building: #42ff65;
   --cf-timeline-ring-queued: #e57c00;
   --cf-timeline-ring-idle: #9ca3af;
+  --cf-timeline-node-empty-bg: #4b5563;
 }
 
 :root[data-theme="light"] {
@@ -134,11 +135,12 @@
   --cf-timeline-node-border-default: #dbe5f3;
   --cf-timeline-node-border-latest: #1f2937;
   --cf-timeline-node-glow: rgba(59, 130, 246, 0.25);
-  --cf-timeline-node-text-default: #1f2937;
+  --cf-timeline-node-text-default: #ffffff;
   --cf-timeline-node-text-latest: #ffffff;
   --cf-timeline-ring-building: #10b981;
   --cf-timeline-ring-queued: #d97706;
   --cf-timeline-ring-idle: #64748b;
+  --cf-timeline-node-empty-bg: #94a3b8;
 }
 
 .cf-primary-btn {
@@ -351,6 +353,10 @@
   background: var(--cf-history-timeline-bg);
 }
 
+.cf-timeline-node-empty {
+  background-color: var(--cf-timeline-node-empty-bg);
+}
+
 .cf-first-run-banner {
   background: linear-gradient(135deg, rgba(139, 92, 246, 0.9) 0%, rgba(124, 58, 237, 0.9) 100%);
 }
@@ -361,6 +367,67 @@
 
 .cf-spinner-accent {
   border-color: var(--cf-brand-purple);
+}
+
+/*
+ * Light-theme compatibility bridge for remaining hardcoded Tailwind classes.
+ * This keeps legacy dark utility usage readable while token migration continues.
+ */
+:root[data-theme="light"] .text-white,
+:root[data-theme="light"] .text-gray-100,
+:root[data-theme="light"] .text-gray-200 {
+  color: var(--cf-text-primary) !important;
+}
+
+:root[data-theme="light"] .text-gray-300,
+:root[data-theme="light"] .text-gray-400 {
+  color: var(--cf-text-secondary) !important;
+}
+
+:root[data-theme="light"] .text-gray-500,
+:root[data-theme="light"] .text-gray-600 {
+  color: var(--cf-text-muted) !important;
+}
+
+:root[data-theme="light"] .bg-gray-950,
+:root[data-theme="light"] .bg-gray-900,
+:root[data-theme="light"] .bg-gray-800 {
+  background-color: var(--cf-card-bg) !important;
+}
+
+:root[data-theme="light"] [class~="bg-gray-950/70"],
+:root[data-theme="light"] [class~="bg-gray-950/50"],
+:root[data-theme="light"] [class~="bg-gray-900/80"],
+:root[data-theme="light"] [class~="bg-gray-900/70"],
+:root[data-theme="light"] [class~="bg-gray-900/60"],
+:root[data-theme="light"] [class~="bg-gray-900/50"],
+:root[data-theme="light"] [class~="bg-gray-800/80"],
+:root[data-theme="light"] [class~="bg-gray-800/50"] {
+  background-color: var(--cf-subtle-bg) !important;
+}
+
+:root[data-theme="light"] .border-gray-800,
+:root[data-theme="light"] .border-gray-700,
+:root[data-theme="light"] .border-gray-600 {
+  border-color: var(--cf-card-border) !important;
+}
+
+:root[data-theme="light"] .hover\:bg-gray-800:hover,
+:root[data-theme="light"] .hover\:bg-gray-700:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-800/80"]:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-800/60"]:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-700/70"]:hover,
+:root[data-theme="light"] [class~="hover:bg-gray-500/10"]:hover {
+  background-color: var(--cf-hover-bg) !important;
+}
+
+:root[data-theme="light"] .hover\:text-white:hover {
+  color: var(--cf-text-primary) !important;
+}
+
+:root[data-theme="light"] .ring-offset-gray-900,
+:root[data-theme="light"] [class~="ring-offset-gray-900"] {
+  --tw-ring-offset-color: var(--cf-page-bg) !important;
 }
 
 .cf-worker-header-gradient {

@@ -909,7 +909,7 @@ fn commits_behind_color(behind: i64) -> &'static str {
 
 fn commit_node_bg(system_count: i64, behind: i64) -> &'static str {
     if system_count == 0 {
-        "bg-gray-700"
+        "cf-timeline-node-empty"
     } else {
         commits_behind_bg(behind)
     }
