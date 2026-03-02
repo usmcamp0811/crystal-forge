@@ -347,9 +347,12 @@ mod tests {
     fn test_load_valid_private_key() {
         let key = SigningKey::generate(&mut rand::thread_rng());
         let key_bytes = key.to_bytes();
+        
+        // Encode key as base64 (matching cf-keygen format)
+        let key_base64 = base64::engine::general_purpose::STANDARD.encode(&key_bytes);
 
         let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(&key_bytes).unwrap();
+        temp_file.write_all(key_base64.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let loaded_key = BuilderApiClient::load_private_key(temp_file.path()).unwrap();
@@ -358,8 +361,11 @@ mod tests {
 
     #[test]
     fn test_load_invalid_key_length() {
+        // Write base64-encoded invalid key (16 bytes instead of 32)
+        let invalid_key = base64::engine::general_purpose::STANDARD.encode(&[0u8; 16]);
+        
         let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(&[0u8; 16]).unwrap(); // Wrong length
+        temp_file.write_all(invalid_key.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let result = BuilderApiClient::load_private_key(temp_file.path());
