@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: In Progress
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 04:47'
+updated_date: '2026-03-02 05:01'
 labels:
   - enhancement
   - builder
@@ -95,6 +95,30 @@ UI
 **Started work**: 2026-03-02
 **Worktree**: TASK-154-websocket-build-logs
 **Branch**: TASK-154-websocket-build-logs (from dev)
+
+## Progress Update
+
+### Server-Side WebSocket Endpoint ✅
+- Added axum WebSocket feature to Cargo.toml
+- Created `/api/v1/build-jobs/:job_id/logs/stream` endpoint
+- Supports dual message types:
+  1. **Plain text** = Build log lines (stored in database)
+  2. **JSON {cpu_percent, ram_used_mb, ram_total_mb, timestamp}** = System metrics (broadcast only, not stored)
+- Handles WebSocket lifecycle (ping/pong, close, errors)
+- Route registered in server.rs
+
+### Dependencies Updated ✅
+- Enabled `ws` feature on axum 0.7
+- Added tokio-tungstenite 0.24.0 (via Cargo.lock update)
+- Build in progress...
+
+### Next Steps
+1. ✅ Complete build verification
+2. ⏳ Update builder to send logs via WebSocket
+3. ⏳ Add system metrics collection in builder
+4. ⏳ Update UI to display streaming logs + metrics
+5. ⏳ Add HTTP fallback for reliability
+6. ⏳ Test end-to-end
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
