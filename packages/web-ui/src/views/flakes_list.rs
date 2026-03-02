@@ -604,6 +604,7 @@ pub fn FlakesListView() -> Element {
                 selected_flake_id: selected_history_flake,
                 selected_commit_hash: selected_history_commit,
                 timelines: flake_timelines.read().clone(),
+                eval_log_modal_open: eval_log_modal_open,
             }
 
             if let Some(editing) = editing_flake.read().clone() {
@@ -1030,6 +1031,7 @@ fn FlakeHistoryExplorer(
     selected_flake_id: Signal<Option<i32>>,
     selected_commit_hash: Signal<Option<String>>,
     timelines: Vec<FlakeTimeline>,
+    eval_log_modal_open: Signal<Option<(i32, String)>>,
 ) -> Element {
     let history = build_flake_history(&timelines);
 
@@ -1288,10 +1290,14 @@ fn FlakeHistoryExplorer(
                                                                         class: "text-[10px] text-gray-400",
                                                                         "{commit_time}"
                                                                     }
-                                                                    span {
-                                                                        class: "px-2 py-1 rounded border text-[10px]",
+                                                                    button {
+                                                                        class: "px-2 py-1 rounded border text-[10px] hover:opacity-80 transition-opacity cursor-pointer",
                                                                         style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
-                                                                        title: "Evaluation status - click to view logs (coming soon)",
+                                                                        title: "Click to view evaluation logs",
+                                                                        onclick: move |evt| {
+                                                                            evt.stop_propagation();
+                                                                            eval_log_modal_open.set(Some((commit_id_for_modal, commit_hash_for_modal.clone())));
+                                                                        },
                                                                         "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
                                                                     }
                                                                 }
