@@ -179,6 +179,10 @@ async fn process_pending_commits(pool: &PgPool, cf_state: &std::sync::Arc<crate:
                     continue;
                 }
                 
+                // CRITICAL: Create broadcast channel BEFORE eval starts
+                // This ensures WebSocket clients can subscribe before messages are sent
+                crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
+                
                 // Broadcast eval start status to WebSocket clients
                 crate::handlers::api::commits::broadcast_eval_status(
                     &cf_state,
