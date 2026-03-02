@@ -21,7 +21,7 @@ use crate::handlers::builder_request::{
     authenticate_builder_request_allow_inactive,
 };
 use crate::models::builders::{
-    AppendLogsRequest, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
+    AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, KeypairRegeneratedResponse,
     ReportMetricsRequest, UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest,
     UpdateBuilderRequest,
