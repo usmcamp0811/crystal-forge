@@ -4,7 +4,7 @@ title: Create Eval queue view with reordering support
 status: In Progress
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-02 18:24'
+updated_date: '2026-03-02 22:38'
 labels: []
 dependencies: []
 priority: medium
@@ -75,4 +75,24 @@ Create a new "Evals" view (similar to "Builds" view) that:
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-160-eval-queue-view
+
+## Queue Reset Enforcement Complete (2026-03-02)
+
+### Implemented
+- ✅ Migration 0088: Enforces single active evaluation at DB level with unique partial index
+- ✅ `reset_stuck_commit_evaluations`: Now resets ALL in_progress commits on startup (not just >30min)
+- ✅ `reset_stuck_builds`: New function resets derivations with status_id=8 (build-inprogress) → 7 (build-pending)
+- ✅ `mark_commit_evaluation_started`: Returns clear error when another commit is already in_progress (constraint violation)
+- ✅ Server startup sequence calls both reset functions before eval loop starts
+
+### Testing
+- ✅ Verified unique constraint prevents multiple in_progress commits
+- ✅ Backend compiles successfully
+- ✅ Frontend compiles successfully
+- ✅ SQLx metadata regenerated
+
+### Commit
+- `63804056` - feat: enforce single active evaluation and reset queues on startup
+
+This fixes the issue where multiple commits could be marked in_progress simultaneously, ensuring clean queue state on server restart.
 <!-- SECTION:NOTES:END -->
