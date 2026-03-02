@@ -1,9 +1,10 @@
 ---
 id: TASK-143
 title: 'Phase 1: Refactor queries/derivations.rs and queries/builders.rs'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-03-01 15:59'
+updated_date: '2026-03-02 04:43'
 labels:
   - refactoring
   - architecture
@@ -77,3 +78,61 @@ Extract to:
 - [ ] #13 No file exceeds 500 lines
 - [ ] #14 Update all imports across codebase
 <!-- AC:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+## Summary
+
+Successfully implemented automatic build job creation after commit evaluation with smart prioritization and full builder integration.
+
+## Completed Features
+
+1. **Automatic Job Creation** ✅
+   - Created `queries/build_jobs.rs` module with `create_build_jobs_for_commit()`
+   - Integrated into server after successful commit evaluation
+   - Creates one build_job per DryRunComplete derivation
+   - Idempotent with duplicate prevention
+
+2. **Smart Prioritization** ✅
+   - Tracked systems: 10x base weight
+   - Recent commits (timestamp-based):
+     - <1 hour: 2.0x multiplier
+     - <1 day: 1.5x multiplier  
+     - Older: 1.0x multiplier
+   - Example final weights: tracked+recent=20.0, untracked+old=1.0
+
+3. **Builder Integration** ✅
+   - `get_next_job_for_builder()` with environment filtering
+   - `FOR UPDATE SKIP LOCKED` for concurrency safety
+   - Wildcard environment support (NULL = build anything)
+   - Retry logic with automatic re-queuing
+   - Success/failure tracking with logs
+
+4. **Code Quality** ✅
+   - Fixed NULL log concatenation bug
+   - Added semaphore for concurrency control
+   - Shared DB pool instead of per-job creation
+   - Proper documentation aligned with implementation
+   - All tests passing
+   - CI green
+
+## Commits
+
+- `db5c87a4` - Core implementation + code review fixes
+- `673d803c` - Documentation alignment fix
+
+## Related Work
+
+- MR !148: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/148
+- Deferred real-time log streaming to TASK-154
+- Created TASK-155, TASK-156, TASK-157 for UI improvements
+
+## Verification
+
+- ✅ Build jobs created after evaluation  
+- ✅ Priority weights calculated correctly
+- ✅ No duplicates created
+- ✅ Builder can claim and execute jobs
+- ✅ Merged to dev branch
+<!-- SECTION:FINAL_SUMMARY:END -->
