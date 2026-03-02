@@ -1043,25 +1043,24 @@ fn FlakeHistoryExplorer(
     let current_commit_key = use_signal(|| (0i32, String::new()));
     
     // Get active commit for WebSocket connection
-    let active_flake_id = selected_flake_id
+    let active_flake_id_for_ws = selected_flake_id
         .read()
         .to_owned()
         .unwrap_or_else(|| flakes.first().map(|f| f.id).unwrap_or(0));
-    let commits = history.get(&active_flake_id).cloned().unwrap_or_default();
+    let commits_for_ws = history.get(&active_flake_id_for_ws).cloned().unwrap_or_default();
     let active_commit_for_ws = selected_commit_hash
         .read()
         .as_ref()
-        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .and_then(|hash| commits_for_ws.iter().find(|commit| &commit.hash == hash))
         .map(|commit| commit.clone())
-        .or_else(|| commits.first().cloned());
+        .or_else(|| commits_for_ws.first().cloned());
     
-    // Connect to WebSocket for active commit's eval status
-    let system_status = if let Some(ref commit) = active_commit_for_ws {
-        let (_logs, status_map, _conn_state, _reconnect) = use_websocket_eval_stream(&commit.id.to_string());
-        status_map
-    } else {
-        use_signal(|| HashMap::new())
-    };
+    // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
+    let commit_id_str = active_commit_for_ws
+        .as_ref()
+        .map(|c| c.id.to_string())
+        .unwrap_or_else(|| "0".to_string());
+    let (_logs, system_status, _conn_state, _reconnect) = use_websocket_eval_stream(&commit_id_str);
 
     if flakes.is_empty() {
         return rsx! {
