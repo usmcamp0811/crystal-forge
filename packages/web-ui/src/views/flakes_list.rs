@@ -2464,8 +2464,8 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
 
 fn eval_badge_label(status: Option<&str>) -> &'static str {
     match status {
-        Some("running") => "running",
-        Some("queued") => "queued",
+        Some("in_progress") => "running",
+        Some("pending") => "queued",
         Some("failed") => "failed",
         Some("complete") => "complete",
         _ => "idle",
@@ -2474,8 +2474,8 @@ fn eval_badge_label(status: Option<&str>) -> &'static str {
 
 fn eval_badge_style(status: Option<&str>) -> &'static str {
     match status {
-        Some("running") => "background-color: #1f3d52; border-color: #3b82f6; color: #dbeafe;",
-        Some("queued") => "background-color: #3a3120; border-color: #d97706; color: #fef3c7;",
+        Some("in_progress") => "background-color: #1f3d52; border-color: #3b82f6; color: #dbeafe;",
+        Some("pending") => "background-color: #3a3120; border-color: #d97706; color: #fef3c7;",
         Some("failed") => "background-color: #472726; border-color: #ef4444; color: #fee2e2;",
         Some("complete") => "background-color: #1f3a2f; border-color: #22c55e; color: #dcfce7;",
         _ => "background-color: #2b303b; border-color: #495264; color: #cbd5e1;",
