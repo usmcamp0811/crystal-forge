@@ -18,7 +18,7 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, dashboard, environments, flakes, systems,
+            builders, commits, dashboard, environments, flakes, systems,
         },
         status,
         webhook::webhook_handler,
@@ -97,8 +97,7 @@ async fn main() -> anyhow::Result<()> {
     // TODO: Update this to get the first N commits on the first time
     reset_non_terminal_derivations(&pool).await?;
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
-    spawn_background_tasks(cfg.clone(), background_pool);
-
+    
     // Start HTTP server
     info!("Starting Crystal Forge Server...");
     let server_cfg = &cfg.server;
@@ -106,6 +105,9 @@ async fn main() -> anyhow::Result<()> {
     info!("Port: {}", server_cfg.port);
 
     let state = CFState::new(pool, server_cfg.clone());
+    let state_arc = Arc::new(state.clone());
+    
+    spawn_background_tasks(cfg.clone(), background_pool, state_arc.clone());
     let mut app = Router::new()
         .route("/status", get(status::status))
         .route("/system_state", post(state::update))
@@ -228,6 +230,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/build-jobs/:job_id/logs/stream",
             get(builders::stream_build_logs),
+        )
+        .route(
+            "/api/v1/commits/:commit_id/eval/stream",
+            get(commits::stream_eval_logs),
         )
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))

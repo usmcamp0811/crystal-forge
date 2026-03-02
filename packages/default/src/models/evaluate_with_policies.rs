@@ -50,6 +50,7 @@ pub async fn evaluate_with_nix_eval_jobs(
     build_config: &BuildConfig,
     server_config: &ServerConfig,
     policies: &[DeploymentPolicy],
+    cf_state: Option<&crate::handlers::agent_request::CFState>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
 
@@ -122,6 +123,12 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                 debug!("📦 Evaluated: {}, drv_path={:?}, has_error={:?}",
                                     system_name, drv_path, has_error);
+                                
+                                // Broadcast to WebSocket clients
+                                if let Some(state) = cf_state {
+                                    let log_msg = format!("📦 Evaluated: {}", system_name);
+                                    crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                }
 
                                 // Extract policy check results from meta.policies
                                 let mut cf_agent_enabled = None;
@@ -231,6 +238,12 @@ pub async fn evaluate_with_nix_eval_jobs(
                         } else {
                             debug!("nix-eval-jobs stderr: {}", line);
                         }
+                        
+                        // Broadcast stderr to WebSocket clients
+                        if let Some(state) = cf_state {
+                            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
+                        }
+                        
                         stderr_output.push(line);
                     }
                     None => stderr_done = true,

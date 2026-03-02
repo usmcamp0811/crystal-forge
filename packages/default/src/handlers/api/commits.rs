@@ -1,0 +1,66 @@
+//! Commit-related API handlers.
+
+use axum::{
+    extract::{
+        ws::{Message, WebSocket},
+        Path, State, WebSocketUpgrade,
+    },
+    response::IntoResponse,
+};
+use futures::StreamExt;
+
+use crate::handlers::agent_request::CFState;
+
+/// WebSocket endpoint for streaming evaluation logs
+/// GET /api/v1/commits/:commit_id/eval/stream
+pub async fn stream_eval_logs(
+    ws: WebSocketUpgrade,
+    Path(commit_id): Path<i32>,
+    State(state): State<CFState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_eval_stream(socket, commit_id, state))
+}
+
+async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFState) {
+    tracing::info!("📡 WebSocket connection established for commit {} evaluation", commit_id);
+    
+    // Get or create broadcast channel for this commit
+    let mut rx = {
+        let mut channels = state.eval_log_channels.lock().await;
+        let tx = channels
+            .entry(commit_id)
+            .or_insert_with(|| {
+                let (tx, _rx) = tokio::sync::broadcast::channel(1000);
+                tracing::debug!("Created new broadcast channel for commit {}", commit_id);
+                tx
+            })
+            .clone();
+        tx.subscribe()
+    };
+    
+    // Stream messages from the broadcast channel to this WebSocket client
+    while let Ok(log_line) = rx.recv().await {
+        if let Err(e) = socket.send(Message::Text(log_line)).await {
+            tracing::error!("Failed to send eval log to WebSocket client: {}", e);
+            break;
+        }
+    }
+    
+    tracing::info!("WebSocket connection closed for commit {} eval", commit_id);
+}
+
+/// Helper function to broadcast a log line to all connected WebSocket clients for a commit
+pub async fn broadcast_eval_log(state: &CFState, commit_id: i32, log_line: String) {
+    let channels = state.eval_log_channels.lock().await;
+    if let Some(tx) = channels.get(&commit_id) {
+        // Send to all subscribers (ignore if no one is listening)
+        let _ = tx.send(log_line);
+    }
+}
+
+/// Cleanup broadcast channel when evaluation completes
+pub async fn cleanup_eval_channel(state: &CFState, commit_id: i32) {
+    let mut channels = state.eval_log_channels.lock().await;
+    channels.remove(&commit_id);
+    tracing::debug!("Cleaned up broadcast channel for commit {}", commit_id);
+}
