@@ -46,11 +46,20 @@ impl BuilderApiClient {
 
     /// Load Ed25519 private key from file
     fn load_private_key(path: &Path) -> Result<SigningKey> {
-        let key_data = fs::read(path).context("Failed to read private key file")?;
+        // Read the key file as string (base64 encoded, like agent keys)
+        let key_string = fs::read_to_string(path)
+            .context("Failed to read private key file")?
+            .trim()
+            .to_string();
+
+        // Decode base64 to raw bytes
+        let key_data = base64::engine::general_purpose::STANDARD
+            .decode(&key_string)
+            .context("Failed to decode base64 private key")?;
 
         if key_data.len() != 32 {
             anyhow::bail!(
-                "Invalid private key file: expected 32 bytes, got {}",
+                "Invalid private key: expected 32 bytes after base64 decode, got {}",
                 key_data.len()
             );
         }

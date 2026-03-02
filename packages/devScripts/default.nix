@@ -194,6 +194,7 @@ let
     runtimeInputs = with pkgs; [
       postgresql
       pkgs.crystal-forge.default.cf-keygen
+      coreutils
     ];
     text = ''
       set -euo pipefail
@@ -208,6 +209,24 @@ let
 
       BUILDER_PUBKEY="$(cat "$CF_KEY_DIR/builder.pub")"
       BUILDER_UUID="00000000-0000-0000-0000-000000000001"
+
+      echo "Waiting for server to be ready (migrations to run)..."
+
+      # Wait up to 60 seconds for the builders table to exist
+      for i in {1..60}; do
+        if psql -h 127.0.0.1 -p ${
+          toString db_port
+        } -U crystal_forge -d crystal_forge \
+               -c "SELECT 1 FROM builders LIMIT 1;" >/dev/null 2>&1; then
+          break
+        fi
+        if [ "$i" -eq 60 ]; then
+          echo "ERROR: Timed out waiting for builders table to exist"
+          echo "Make sure the server has started and run migrations"
+          exit 1
+        fi
+        sleep 1
+      done
 
       echo "Bootstrapping dev builder..."
       echo "  Builder ID: $BUILDER_UUID"
