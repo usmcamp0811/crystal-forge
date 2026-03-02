@@ -1,10 +1,10 @@
 ---
 id: TASK-160
 title: Create Eval queue view with reordering support
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-02 17:01'
+updated_date: '2026-03-02 18:24'
 labels: []
 dependencies: []
 priority: medium
@@ -70,3 +70,9 @@ Create a new "Evals" view (similar to "Builds" view) that:
 - [ ] #13 Completed evals shown with final status in queue
 - [ ] #14 Status items have explanatory text or hover tooltips explaining what each status means
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-160-eval-queue-view
+<!-- SECTION:NOTES:END -->
