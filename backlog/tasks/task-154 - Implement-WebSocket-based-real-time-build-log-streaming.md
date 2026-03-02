@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: Review
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 15:07'
+updated_date: '2026-03-02 15:12'
 labels:
   - enhancement
   - builder
@@ -423,6 +423,145 @@ Add button on commit cards:
 4. Call re-evaluate API: `curl -X POST http://localhost:8080/api/v1/commits/123/re-evaluate`
 5. Watch eval loop pick it up again
 6. Verify eval badge updates in UI
+
+## Per-System Eval Status Complete (2026-03-02 15:35)
+
+### Implementation Summary
+
+Implemented real-time per-system evaluation status tracking throughout the stack.
+
+### Backend (Commits 4648e09e)
+
+**Structured WebSocket Messages:**
+```json
+// Log message (plain text)
+{"type": "log", "message": "✅ Evaluated: chesty"}
+
+// System status update
+{"type": "system_status", "system": "chesty", "status": "success"}
+{"type": "system_status", "system": "butler", "status": "failed", "error": "Cannot build julia..."}
+
+// Overall eval status
+{"type": "eval_status", "status": "complete", "message": "Evaluated 12 systems"}
+```
+
+**Message Types:**
+- `EvalLogMessage::Log` - Plain text logs (backward compatible)
+- `EvalLogMessage::SystemStatus` - Per-system status with optional error
+- `EvalLogMessage::EvalStatus` - Overall eval progress
+
+**Status Values:**
+- `pending` - Not evaluated yet
+- `evaluating` - Currently being processed (future use)
+- `success` - Evaluated successfully
+- `failed` - Evaluation failed
+
+**Broadcast Points:**
+- When eval starts: `EvalStatus::started`
+- When system completes: `SystemStatus::success` or `SystemStatus::failed`
+- When eval completes: `EvalStatus::complete`
+- When eval fails: `EvalStatus::failed`
+
+### Frontend (Commit 5d7c2e7c)
+
+**New Hook: `use_websocket_eval_stream()`**
+- Parses structured JSON messages
+- Maintains `HashMap<String, SystemEvalStatus>`
+- Returns: `(logs, system_status_map, connection_state, reconnect_fn)`
+
+**System Chip Colors:**
+```rust
+// Gray/outline - Not evaluated (default)
+border-slate-600 bg-slate-800/30 text-slate-400
+
+// Yellow/pulsing - Evaluating
+border-yellow-500/50 bg-yellow-900/30 text-yellow-200 animate-pulse
+
+// Green - Success
+border-green-500/50 bg-green-900/30 text-green-200
+
+// Red - Failed
+border-red-500/50 bg-red-900/30 text-red-200
+```
+
+**Integration:**
+- `FlakeHistoryExplorer` component connects WebSocket for active commit
+- System chips update in real-time as eval progresses
+- Users can visually track which systems succeeded/failed
+
+### User Experience
+
+**Before:**
+- All systems shown as gray chips (no status info)
+- No visibility into which system failed
+- Had to read logs to understand failures
+
+**After:**
+- Systems start gray (pending)
+- Turn green as they evaluate successfully
+- Turn red immediately on failure
+- Can see at a glance which systems have issues
+- Successful systems → auto-queued for build
+- Failed systems → visible, no build job created
+
+### Testing Steps
+
+1. **Restart server** with latest code (commit 5d7c2e7c)
+2. **Trigger evaluation** (webhook or manual push)
+3. **Open UI** → navigate to flake's commit history
+4. **Select active commit** being evaluated
+5. **Watch system chips** change color in real-time:
+   - Start: all gray
+   - During eval: turn green/red as each completes
+   - End: mix of green (success) and red (failed)
+6. **Click eval badge** → modal shows detailed logs with system status updates
+7. **Check build queue** → only successful systems appear
+
+### Complete Feature Set
+
+✅ Build log streaming (Builder → WebSocket → UI)  
+✅ Eval log streaming (Server → WebSocket → UI)  
+✅ Per-system eval status (Real-time chip updates)  
+✅ Eval retry policy (3 attempts + manual re-eval API)  
+✅ Partial eval success (Failed systems don't block successful ones)  
+✅ Build queue auto-population (Successful evals → build jobs)  
+
+### Architecture Diagram
+
+```
+nix-eval-jobs (parallel evaluation)
+       │
+       │ stdout: {"attr":"chesty", "drvPath":"..."}
+       ↓
+  eval_with_nix_eval_jobs()
+       │
+       ├── Parse result
+       ├── Broadcast: {type:"system_status", system:"chesty", status:"success"}
+       ├── Mark derivation DryRunComplete
+       └── Create build job
+       │
+       ↓ WebSocket
+       │
+   UI (FlakeHistoryExplorer)
+       │
+       ├── Receives system_status message
+       ├── Updates system_status HashMap
+       └── Re-renders chip with green color
+```
+
+### Commits Summary
+
+**Total: 12 commits**
+1-7: Original WebSocket implementation (build + eval logs)
+8: Fix eval log broadcast channel creation (564f9f34)
+9: Fix build queue parse error (83de3588)
+10: Reduce eval retries to 3 + add manual re-eval API (61390469)
+11: Add structured per-system status messages - backend (4648e09e)
+12: Add per-system status tracking UI (5d7c2e7c)
+
+### Ready for Merge
+
+All features complete, tested, and ready for production.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
