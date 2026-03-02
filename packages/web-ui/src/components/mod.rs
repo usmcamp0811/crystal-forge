@@ -29,6 +29,7 @@ pub mod cve;
 pub mod dashboard;
 pub mod diff;
 pub mod environments;
+pub mod eval_log_modal;
 pub mod filters;
 pub mod flake;
 pub mod forms;
@@ -49,6 +50,7 @@ pub mod widget_grid;
 pub use charts::{DonutArc, DonutChartWithLegend, DonutSegment};
 pub use cve::{CveSeverityRow, CvesTab, VulnerabilityRow};
 pub use diff::DiffViewer;
+pub use eval_log_modal::EvalLogModal;
 pub use filters::{
     DeploymentFilterDropdown, EnvironmentFilterDropdown, HealthFilterDropdown, MultiSelectDropdown,
     ViewToggle,

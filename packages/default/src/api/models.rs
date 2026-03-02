@@ -430,6 +430,7 @@ pub struct FlakeTimeline {
 /// A commit in a flake timeline with deployment status.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlakeCommit {
+    pub id: i32,
     pub hash: String,
     pub message: String,
     pub author: String,

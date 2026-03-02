@@ -205,6 +205,7 @@ pub fn FlakesListView() -> Element {
     let query_view = prefers_view_from_query();
     let open_dropdown = use_signal(|| None::<FilterDropdown>);
     let container_id = use_memo(|| format!("flakes-filters-{}", Uuid::new_v4()));
+    let mut eval_log_modal_open = use_signal(|| None::<(i32, String)>); // (commit_id, commit_hash)
 
     use_effect(move || {
         if let Some(mode) = query_view {

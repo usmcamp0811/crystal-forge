@@ -208,6 +208,7 @@ pub async fn fetch_dashboard_flake_timelines(
         let commits_rows = sqlx::query_as::<
             _,
             (
+                i32,
                 String,
                 chrono::DateTime<chrono::Utc>,
                 i64,
@@ -219,6 +220,7 @@ pub async fn fetch_dashboard_flake_timelines(
         >(
             r#"
             SELECT
+                c.id,
                 c.git_commit_hash,
                 c.commit_timestamp,
                 COALESCE(
@@ -283,6 +285,7 @@ pub async fn fetch_dashboard_flake_timelines(
             .into_iter()
             .map(
                 |(
+                    id,
                     hash,
                     committed_at,
                     system_count,
@@ -300,6 +303,7 @@ pub async fn fetch_dashboard_flake_timelines(
                     });
 
                     FlakeCommit {
+                        id,
                         hash,
                         message: "".to_string(),
                         author: "".to_string(),
@@ -348,6 +352,7 @@ pub async fn fetch_flake_timelines(
         let commits_rows = sqlx::query_as::<
             _,
             (
+                i32,
                 String,
                 chrono::DateTime<chrono::Utc>,
                 Option<String>,
@@ -361,6 +366,7 @@ pub async fn fetch_flake_timelines(
         >(
             r#"
             SELECT
+                c.id,
                 c.git_commit_hash,
                 c.commit_timestamp,
                 c.message,
@@ -414,6 +420,7 @@ pub async fn fetch_flake_timelines(
             .into_iter()
             .map(
                 |(
+                    id,
                     hash,
                     committed_at,
                     message,
@@ -433,6 +440,7 @@ pub async fn fetch_flake_timelines(
                     });
 
                     FlakeCommit {
+                        id,
                         hash,
                         message: message.unwrap_or_default(),
                         author: author.unwrap_or_default(),
