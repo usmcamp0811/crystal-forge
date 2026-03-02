@@ -1,10 +1,10 @@
 ---
 id: TASK-143
 title: Implement automatic build job creation for evaluated derivations
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-03-01 02:14'
-updated_date: '2026-03-01 16:11'
+updated_date: '2026-03-02 04:45'
 labels:
   - backend
   - build-system
@@ -63,12 +63,12 @@ Implement automatic build job creation with smart prioritization:
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Build jobs are automatically created when commits are successfully evaluated
-- [ ] #2 Tracked systems (in systems table) get higher priority_weight
-- [ ] #3 Newer commits (commits_behind=0) get higher priority_weight  
-- [ ] #4 No duplicate build_jobs are created for same derivation
-- [ ] #5 Build queue API shows queued jobs
-- [ ] #6 Builders can pick up jobs and start building
+- [x] #1 Build jobs are automatically created when commits are successfully evaluated
+- [x] #2 Tracked systems (in systems table) get higher priority_weight
+- [x] #3 Newer commits (commits_behind=0) get higher priority_weight  
+- [x] #4 No duplicate build_jobs are created for same derivation
+- [x] #5 Build queue API shows queued jobs
+- [x] #6 Builders can pick up jobs and start building
 <!-- SECTION:DESCRIPTION:END -->
 
 <!-- AC:END -->
@@ -79,4 +79,15 @@ Implement automatic build job creation with smart prioritization:
 Reality check (2026-03-01): still not implemented on dev. Commit evaluation path in packages/default/src/server/mod.rs evaluates commits but does not create build_jobs automatically.
 
 No INSERT INTO build_jobs path was found in current backend query code for post-evaluation job creation. Task remains needed.
+
+**UPDATE 2026-03-02**: ✅ COMPLETED and merged to dev
+
+- MR !148: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/148
+- Created `packages/default/src/queries/build_jobs.rs` module
+- Implemented `create_build_jobs_for_commit()` called after successful evaluation
+- Smart prioritization: tracked systems (10x) × timestamp age (<1h=2x, <1d=1.5x, else=1x)
+- Builder integration with `get_next_job_for_builder()`, retry logic, log tracking
+- All acceptance criteria met
+- Deferred real-time log streaming to TASK-154
+- Created UI improvement tasks: TASK-155 (drag-drop queue), TASK-156 (completed builds view), TASK-157 (professional UI/UX designer)
 <!-- SECTION:NOTES:END -->
