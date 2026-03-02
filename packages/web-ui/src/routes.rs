@@ -12,7 +12,6 @@ use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
 use crate::views::dev_login::DevLoginView;
 use crate::views::environments::EnvironmentsView;
-use crate::views::evals::EvalsView;
 use crate::views::flakes::FlakesView;
 use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
@@ -46,9 +45,6 @@ pub enum Route {
 
     #[route("/builds")]
     BuildsView {},
-
-    #[route("/evals")]
-    EvalsView {},
 
     #[route("/builders")]
     BuildersView {},
@@ -90,7 +86,6 @@ impl Route {
             Route::SystemDetailView { id } => format!("System: {id}"),
             Route::FlakesView { .. } => "Flakes".to_string(),
             Route::BuildsView { .. } => "Builds".to_string(),
-            Route::EvalsView { .. } => "Evaluations".to_string(),
             Route::BuildersView { .. } => "Builders".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
