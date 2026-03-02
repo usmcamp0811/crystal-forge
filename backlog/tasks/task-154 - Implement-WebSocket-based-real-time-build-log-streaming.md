@@ -1,9 +1,10 @@
 ---
 id: TASK-154
 title: Implement WebSocket-based real-time build log streaming
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-02 03:36'
+updated_date: '2026-03-02 03:36'
 labels:
   - enhancement
   - builder
