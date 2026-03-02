@@ -1,10 +1,16 @@
 use crystal_forge::builder::api_client::BuilderApiClient;
 use crystal_forge::builder::metrics::SystemMetrics;
-use crystal_forge::builder::{run_build_loop, run_cache_push_loop, run_cve_scan_loop};
+use crystal_forge::builder::{run_build_loop, run_cache_push_loop, run_cve_scan_loop, get_gc_root_path};
 use crystal_forge::config::CrystalForgeConfig;
+use crystal_forge::derivations::Derivation;
 use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
 use crystal_forge::queries::derivations::get_derivation_by_id;
 use crystal_forge::server::memory_monitor_task;
+use anyhow::Result;
+use sqlx::PgPool;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command;
 use tokio::signal;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -251,11 +257,159 @@ async fn execute_build_job(
     // Send initial log message
     let _ = client.append_logs(job.id, &format!("🔨 Starting build for {}\n", derivation.derivation_name)).await;
 
-    // Execute the build with timeout
+    // Create a log streaming task
+    let (log_tx, mut log_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let log_client = client.clone();
+    let log_job_id = job.id;
+    
+    // Spawn task to batch and send logs every 2 seconds
+    let log_handle = tokio::spawn(async move {
+        let mut buffer = String::new();
+        let mut last_send = std::time::Instant::now();
+        let send_interval = std::time::Duration::from_secs(2);
+        
+        loop {
+            tokio::select! {
+                Some(line) = log_rx.recv() => {
+                    buffer.push_str(&line);
+                    buffer.push('\n');
+                    
+                    // Send if buffer is large (>4KB) or enough time passed
+                    if buffer.len() > 4096 || last_send.elapsed() >= send_interval {
+                        if !buffer.is_empty() {
+                            if let Err(e) = log_client.append_logs(log_job_id, &buffer).await {
+                                warn!("Failed to send logs: {}", e);
+                            }
+                            buffer.clear();
+                            last_send = std::time::Instant::now();
+                        }
+                    }
+                }
+                // Periodic flush
+                _ = tokio::time::sleep(send_interval) => {
+                    if !buffer.is_empty() {
+                        if let Err(e) = log_client.append_logs(log_job_id, &buffer).await {
+                            warn!("Failed to send logs: {}", e);
+                        }
+                        buffer.clear();
+                        last_send = std::time::Instant::now();
+            }
+        }
+    }
+}
+
+/// Build a derivation with real-time log streaming
+async fn build_with_log_streaming(
+    derivation: &mut Derivation,
+    pool: &PgPool,
+    build_config: &crystal_forge::config::BuildConfig,
+    log_tx: tokio::sync::mpsc::UnboundedSender<String>,
+) -> Result<String> {
+    let drv_path = derivation.derivation_path.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Derivation missing derivation_path"))?;
+
+    info!("🔨 Building with log streaming: {}", drv_path);
+
+    let gc_root_path = get_gc_root_path(derivation.id).await;
+
+    // Build the command (same as derivation.build())
+    let mut cmd = if build_config.should_use_systemd() {
+        let mut scoped = Command::new("systemd-run");
+        scoped.args(["--scope", "--collect", "--quiet"]);
+        // Apply systemd properties
+        if let Some(cpu) = build_config.max_cpu_cores {
+            scoped.args(["--property", &format!("CPUQuota={}%", cpu * 100)]);
+        }
+        if let Some(mem_mb) = build_config.max_memory_mb {
+            scoped.args(["--property", &format!("MemoryMax={}M", mem_mb)]);
+        }
+        scoped.args([
+            "--",
+            "nix-store",
+            "--realise",
+            "--add-root",
+            &gc_root_path,
+            "--indirect",
+            drv_path,
+        ]);
+        scoped
+    } else {
+        let mut direct = Command::new("nix-store");
+        direct.args([
+            "--realise",
+            "--add-root",
+            &gc_root_path,
+            "--indirect",
+            drv_path,
+        ]);
+        direct
+    };
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    build_config.apply_to_command(&mut cmd);
+
+    let mut child = cmd.spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn build process: {}", e))?;
+
+    let stdout = child.stdout.take().expect("Failed to capture stdout");
+    let stderr = child.stderr.take().expect("Failed to capture stderr");
+
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    // Stream logs line by line
+    loop {
+        tokio::select! {
+            line_result = stdout_reader.next_line() => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        info!("build: {}", line);
+                        let _ = log_tx.send(line);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        error!("Error reading stdout: {}", e);
+                        break;
+                    }
+                }
+            }
+            line_result = stderr_reader.next_line() => {
+                match line_result {
+                    Ok(Some(line)) => {
+                        warn!("build stderr: {}", line);
+                        let _ = log_tx.send(line);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        error!("Error reading stderr: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    let status = child.wait().await?;
+
+    if !status.success() {
+        return Err(anyhow::anyhow!("Build failed with status: {}", status));
+    }
+
+    // Parse output path from gc_root symlink
+    let output_path = tokio::fs::read_link(&gc_root_path).await
+        .map_err(|e| anyhow::anyhow!("Failed to read GC root symlink: {}", e))?;
+    
+    Ok(output_path.to_string_lossy().to_string())
+}
+    });
+
+    // Execute the build with timeout and log streaming
     let build_result = tokio::time::timeout(
         build_timeout,
-        derivation.build(&pool, &build_config)
+        build_with_log_streaming(&mut derivation, &pool, &build_config, log_tx)
     ).await;
+    
+    // Stop log streaming
+    log_handle.abort();
 
     match build_result {
         // Build succeeded within timeout
