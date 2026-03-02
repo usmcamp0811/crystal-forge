@@ -3,11 +3,12 @@
 use dioxus::prelude::*;
 
 use crate::components::layout::Card;
+use crate::hooks::websocket::{use_websocket_build_stream, ConnectionState};
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, PendingAction, build_status_badge_class, event_level_class,
-    mock_artifacts, mock_events, mock_logs,
+    build_status_badge_class, event_level_class, mock_artifacts, mock_events, mock_logs,
+    BuildAction, BuildItem, PendingAction,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,9 +50,25 @@ pub fn BuildDetailPane(
         };
     };
 
+    // Use WebSocket for real-time logs and metrics if job_id is available
+    let job_id_str = build.job_id.as_ref().map(|id| id.to_string());
+    let (ws_logs, ws_metrics, ws_state) = match job_id_str.as_ref() {
+        Some(job_id) => {
+            let (logs, metrics, state, _reconnect) = use_websocket_build_stream(job_id);
+            (Some(logs), Some(metrics), Some(state))
+        }
+        None => (None, None, None),
+    };
+
     let events = mock_events(build.id);
     let artifacts = mock_artifacts(build.id);
-    let logs = filtered_logs(build.id, &log_query.read());
+
+    // Use WebSocket logs if available, otherwise fall back to mock
+    let logs = if let Some(ws_logs) = ws_logs {
+        filtered_logs_from_vec(&ws_logs.read(), &log_query.read())
+    } else {
+        filtered_logs(build.id, &log_query.read())
+    };
 
     rsx! {
         Card {
@@ -95,6 +112,55 @@ pub fn BuildDetailPane(
                     if *tab.read() == DetailTab::Logs {
                         div {
                             class: "space-y-3",
+
+                            // WebSocket connection status and metrics
+                            if let Some(state) = ws_state {
+                                div {
+                                    class: "flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-700 bg-gray-900/60",
+                                    div {
+                                        class: "flex items-center gap-2",
+                                        // Connection status indicator
+                                        div {
+                                            class: match *state.read() {
+                                                ConnectionState::Connected => "w-2 h-2 rounded-full bg-green-500",
+                                                ConnectionState::Connecting => "w-2 h-2 rounded-full bg-yellow-500 animate-pulse",
+                                                ConnectionState::Disconnected => "w-2 h-2 rounded-full bg-gray-500",
+                                                ConnectionState::Error(_) => "w-2 h-2 rounded-full bg-red-500",
+                                            }
+                                        }
+                                        span {
+                                            class: "text-xs text-gray-300",
+                                            match state.read().clone() {
+                                                ConnectionState::Connected => "Live streaming",
+                                                ConnectionState::Connecting => "Connecting...",
+                                                ConnectionState::Disconnected => "Disconnected",
+                                                ConnectionState::Error(ref e) => e.as_str(),
+                                            }
+                                        }
+                                    }
+                                    // System metrics display
+                                    if let Some(metrics_signal) = ws_metrics {
+                                        if let Some(metrics) = metrics_signal.read().as_ref() {
+                                            div {
+                                                class: "flex items-center gap-4 text-xs",
+                                                div {
+                                                    class: "flex items-center gap-1",
+                                                    span { class: "text-gray-400", "CPU:" }
+                                                    span { class: "text-white font-mono", "{metrics.cpu_percent:.1}%" }
+                                                }
+                                                div {
+                                                    class: "flex items-center gap-1",
+                                                    span { class: "text-gray-400", "RAM:" }
+                                                    span { class: "text-white font-mono",
+                                                        "{metrics.ram_used_mb} MB / {metrics.ram_total_mb} MB"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             div {
                                 class: "flex flex-wrap gap-2",
                                 TogglePill { label: "Follow", value: follow_logs }
@@ -185,6 +251,18 @@ fn filtered_logs(build_id: i32, query: &str) -> Vec<String> {
     lines
         .into_iter()
         .filter(|line| line.to_lowercase().contains(&q))
+        .collect()
+}
+
+fn filtered_logs_from_vec(lines: &[String], query: &str) -> Vec<String> {
+    if query.trim().is_empty() {
+        return lines.to_vec();
+    }
+    let q = query.to_lowercase();
+    lines
+        .iter()
+        .filter(|line| line.to_lowercase().contains(&q))
+        .cloned()
         .collect()
 }
 
