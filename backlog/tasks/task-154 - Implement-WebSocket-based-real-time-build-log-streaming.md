@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: Review
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 15:05'
+updated_date: '2026-03-02 15:07'
 labels:
   - enhancement
   - builder
@@ -339,6 +339,90 @@ pub name: Option<String>,  // ✅ Optional - parse succeeds, system skipped
    - `📋 Created N build jobs for commit`
 4. Check UI build queue populates
 5. Click eval badge → verify logs show both successes and failures
+
+## Eval Retry Policy Updated (2026-03-02 15:10)
+
+### User Requirement
+"Retry failed things no more than 3 times by default.. allow for manual re-eval if needed"
+
+### Changes Implemented (Commit 61390469)
+
+#### 1. Reduced Retry Limit: 5 → 3
+```sql
+-- BEFORE
+AND COALESCE(c.evaluation_attempt_count, 0) < 5
+WHEN COALESCE(evaluation_attempt_count, 0) >= 5 THEN 'failed'
+
+-- AFTER
+AND COALESCE(c.evaluation_attempt_count, 0) < 3
+WHEN COALESCE(evaluation_attempt_count, 0) >= 3 THEN 'failed'
+```
+
+#### 2. Updated Backoff Schedule
+- **Attempt 1**: Immediate (first try)
+- **Attempt 2**: After 1 minute delay
+- **Attempt 3**: After 5 minute delay
+- **After 3 failures**: Marked as `failed` (removed from queue)
+
+#### 3. Manual Re-Evaluation API
+New endpoint: `POST /api/v1/commits/:commit_id/re-evaluate`
+
+**What it does:**
+- Resets `evaluation_status` to `pending`
+- Resets `evaluation_attempt_count` to `0`
+- Clears `evaluation_error_message`
+- Clears `evaluation_started_at`
+- Commit re-enters eval queue on next cycle
+
+**Use cases:**
+- Flake has been fixed (Julia deps resolved, etc.)
+- Infrastructure issue resolved (network, cache, etc.)
+- Want to force immediate retry without waiting for backoff
+- Exceeded 3 attempts but issue is now fixed
+
+#### 4. Query Function Added
+```rust
+pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()>
+```
+
+### Expected Behavior
+
+**Auto-retry flow:**
+```
+Eval fails (attempt 1)
+  ↓ wait 1 minute
+Eval fails (attempt 2)  
+  ↓ wait 5 minutes
+Eval fails (attempt 3)
+  ↓
+Marked 'failed' (no more auto-retry)
+```
+
+**Manual retry flow:**
+```
+User: POST /api/v1/commits/123/re-evaluate
+  ↓
+Server: Resets attempt count to 0
+  ↓
+Eval loop: Picks up commit on next cycle (< 30s)
+  ↓
+Eval runs again (fresh attempts)
+```
+
+### UI Integration (Future)
+Add button on commit cards:
+- Show on commits with `evaluation_status = 'failed'`
+- Button: "🔄 Retry Evaluation"
+- Calls: `POST /api/v1/commits/:id/re-evaluate`
+- Shows toast: "Evaluation queued"
+
+### Testing
+1. Restart server with these changes
+2. Let a commit fail 3 times (watch it go to 'failed')
+3. Verify it doesn't auto-retry anymore
+4. Call re-evaluate API: `curl -X POST http://localhost:8080/api/v1/commits/123/re-evaluate`
+5. Watch eval loop pick it up again
+6. Verify eval badge updates in UI
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
