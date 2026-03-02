@@ -1,9 +1,10 @@
 ---
 id: TASK-161
 title: Address MR !150 pre-merge WebSocket hardening
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-02 17:14'
+updated_date: '2026-03-02 17:16'
 labels: []
 dependencies:
   - TASK-154
