@@ -116,6 +116,7 @@ in mkShell {
     postgresql
     sqlx-cli
     vulnix
+    nix-eval-jobs # Required for commit evaluation
     python3
     python3Packages.pytest
     run-scenario
