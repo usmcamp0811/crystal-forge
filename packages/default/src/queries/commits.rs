@@ -59,8 +59,7 @@ pub async fn get_commit_by_id(pool: &PgPool, id: i32) -> Result<Commit> {
 }
 
 pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>> {
-    let rows = sqlx::query_as!(
-        Commit,
+    let rows = sqlx::query_as::<_, Commit>(
         r#"
         SELECT c.id, c.flake_id, c.git_commit_hash, c.commit_timestamp, c.attempt_count
         FROM commits c
@@ -248,7 +247,7 @@ pub async fn mark_commit_evaluation_failed(
     commit_id: i32,
     error: &str,
 ) -> Result<()> {
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE commits
         SET 
@@ -258,10 +257,10 @@ pub async fn mark_commit_evaluation_failed(
             END,
             evaluation_error_message = $2
         WHERE id = $1
-        "#,
-        commit_id,
-        error
+        "#
     )
+    .bind(commit_id)
+    .bind(error)
     .execute(pool)
     .await?;
 
@@ -277,7 +276,13 @@ pub async fn mark_commit_evaluation_failed(
 /// 
 /// Use this for manual re-evaluation after fixing issues.
 pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()> {
-    let result = sqlx::query!(
+    #[derive(sqlx::FromRow)]
+    struct ResetResult {
+        id: i32,
+        git_commit_hash: String,
+    }
+    
+    let result = sqlx::query_as::<_, ResetResult>(
         r#"
         UPDATE commits
         SET 
@@ -287,9 +292,9 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
             evaluation_error_message = NULL
         WHERE id = $1
         RETURNING id, git_commit_hash
-        "#,
-        commit_id
+        "#
     )
+    .bind(commit_id)
     .fetch_one(pool)
     .await?;
 
