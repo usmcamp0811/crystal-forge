@@ -24,7 +24,7 @@ pub fn EvalsView() -> Element {
         let mut refresh = refresh_trigger.clone();
         spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                gloo_timers::future::TimeoutFuture::new(5_000).await;
                 refresh.write().wrapping_add(1);
             }
         });
@@ -44,7 +44,7 @@ pub fn EvalsView() -> Element {
                 div {
                     class: "flex items-center gap-2",
                     button {
-                        class: "px-3 py-1.5 text-sm rounded {theme::button::SECONDARY}",
+                        class: "px-3 py-1.5 text-sm rounded bg-slate-700 hover:bg-slate-600 text-slate-200",
                         onclick: move |_| {
                             refresh_trigger.write().wrapping_add(1);
                         },
@@ -61,23 +61,19 @@ pub fn EvalsView() -> Element {
                         class: "overflow-x-auto",
                         
                         match &*dashboard.read() {
-                            Some(Ok(summary)) => {
-                                // For now, show recent commits from timeline
-                                // TODO: Add dedicated eval queue endpoint
+                            Some(Ok(_summary)) => {
+                                // TODO: Add dedicated eval queue API endpoint
+                                // For now, direct users to Flakes view
                                 rsx! {
-                                    if let Some(timeline) = summary.timeline.first() {
-                                        div {
-                                            class: "min-w-full",
-                                            EvalQueueTable {
-                                                commits: timeline.commits.clone(),
-                                                flake_name: timeline.flake_name.clone(),
-                                                eval_log_modal_open: eval_log_modal_open,
-                                            }
-                                        }
-                                    } else {
+                                    div {
+                                        class: "p-8 text-center",
                                         p {
-                                            class: "text-sm {theme::text::SECONDARY} p-4",
-                                            "No evaluations in queue"
+                                            class: "text-sm text-slate-400 mb-4",
+                                            "Evaluation queue coming soon!"
+                                        }
+                                        p {
+                                            class: "text-sm text-slate-500",
+                                            "For now, view active evaluations in the Flakes page."
                                         }
                                     }
                                 }
@@ -139,19 +135,19 @@ fn EvalQueueTable(
 
     rsx! {
         table {
-            class: "min-w-full divide-y {theme::border::SECONDARY}",
+            class: "min-w-full divide-y divide-slate-700",
             thead {
                 tr {
                     class: "text-left",
-                    th { class: "px-4 py-3 text-xs font-medium {theme::text::SECONDARY} uppercase tracking-wider", "Flake" }
-                    th { class: "px-4 py-3 text-xs font-medium {theme::text::SECONDARY} uppercase tracking-wider", "Commit" }
-                    th { class: "px-4 py-3 text-xs font-medium {theme::text::SECONDARY} uppercase tracking-wider", "Status" }
-                    th { class: "px-4 py-3 text-xs font-medium {theme::text::SECONDARY} uppercase tracking-wider", "Systems" }
-                    th { class: "px-4 py-3 text-xs font-medium {theme::text::SECONDARY} uppercase tracking-wider", "Actions" }
+                    th { class: "px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider", "Flake" }
+                    th { class: "px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider", "Commit" }
+                    th { class: "px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider", "Status" }
+                    th { class: "px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider", "Systems" }
+                    th { class: "px-4 py-3 text-xs font-medium text-slate-400 uppercase tracking-wider", "Actions" }
                 }
             }
             tbody {
-                class: "divide-y {theme::border::SECONDARY}",
+                class: "divide-y divide-slate-700",
                 for commit in active_commits {
                     {
                         let commit_id = commit.id;
@@ -192,7 +188,7 @@ fn EvalQueueTable(
                                 td {
                                     class: "px-4 py-3 text-sm",
                                     button {
-                                        class: "px-3 py-1 text-xs rounded {theme::button::PRIMARY}",
+                                        class: "px-3 py-1 text-xs rounded bg-blue-600 hover:bg-blue-500 text-white",
                                         onclick: move |_| {
                                             eval_log_modal_open.set(Some((commit_id, commit_hash.clone())));
                                         },
