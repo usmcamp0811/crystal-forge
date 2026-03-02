@@ -262,16 +262,11 @@ async fn execute_build_job(
     };
 
     // Wrap WebSocket in Arc<Mutex> for sharing between tasks
-    let ws_shared = ws_stream.map(|ws| std::sync::Arc::new(tokio::sync::Mutex::new(ws)));
+    let mut ws_shared = ws_stream.map(|ws| std::sync::Arc::new(tokio::sync::Mutex::new(ws)));
 
     // Send initial log message (via WebSocket if available, otherwise HTTP)
     let initial_log = format!("🔨 Starting build for {}\n", derivation.derivation_name);
-    if let Some(ref ws) = ws_shared {
-        let mut ws_lock = ws.lock().await;
-        let _ = crystal_forge::builder::api_client::BuilderApiClient::send_log_line(&mut *ws_lock, &initial_log).await;
-    } else {
-        let _ = client.append_logs(job.id, &initial_log).await;
-    }
+    send_log_with_fallback(&client, job.id, &mut ws_shared, &initial_log).await;
 
     // Spawn metrics reporting task if WebSocket is available
     let metrics_task = if let Some(ref ws) = ws_shared {
@@ -327,15 +322,9 @@ async fn execute_build_job(
             // Send success log
             let success_msg = format!("✅ Build completed successfully in {:.1}s\n", duration.as_secs_f64());
             let output_msg = format!("   Output: {}\n", store_path);
-            
-            if let Some(ref ws) = ws_shared {
-                let mut ws_lock = ws.lock().await;
-                let _ = crystal_forge::builder::api_client::BuilderApiClient::send_log_line(&mut *ws_lock, &success_msg).await;
-                let _ = crystal_forge::builder::api_client::BuilderApiClient::send_log_line(&mut *ws_lock, &output_msg).await;
-            } else {
-                let _ = client.append_logs(job.id, &success_msg).await;
-                let _ = client.append_logs(job.id, &output_msg).await;
-            }
+
+            send_log_with_fallback(&client, job.id, &mut ws_shared, &success_msg).await;
+            send_log_with_fallback(&client, job.id, &mut ws_shared, &output_msg).await;
 
             // Update derivation with store_path for signing
             derivation.store_path = Some(store_path.clone());
@@ -402,8 +391,20 @@ async fn execute_build_job(
             );
 
             // Send failure log
-            let _ = client.append_logs(job.id, &format!("❌ Build failed after {:.1}s\n", duration.as_secs_f64())).await;
-            let _ = client.append_logs(job.id, &format!("   Error: {}\n", e)).await;
+            send_log_with_fallback(
+                &client,
+                job.id,
+                &mut ws_shared,
+                &format!("❌ Build failed after {:.1}s\n", duration.as_secs_f64()),
+            )
+            .await;
+            send_log_with_fallback(
+                &client,
+                job.id,
+                &mut ws_shared,
+                &format!("   Error: {}\n", e),
+            )
+            .await;
 
             // Mark derivation as failed in database
             match pool.begin().await {
@@ -442,7 +443,13 @@ async fn execute_build_job(
             error!("⏱️ Job #{}: {}", job.id, timeout_msg);
 
             // Send timeout log
-            let _ = client.append_logs(job.id, &format!("⏱️  {}\n", timeout_msg)).await;
+            send_log_with_fallback(
+                &client,
+                job.id,
+                &mut ws_shared,
+                &format!("⏱️  {}\n", timeout_msg),
+            )
+            .await;
 
             let timeout_error = anyhow::anyhow!(timeout_msg.clone());
 
@@ -476,4 +483,42 @@ async fn execute_build_job(
     if let Some(task) = metrics_task {
         task.abort();
     }
+}
+
+async fn send_log_with_fallback(
+    client: &BuilderApiClient,
+    job_id: uuid::Uuid,
+    ws_shared: &mut Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<
+                tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+            >,
+        >,
+    >,
+    message: &str,
+) {
+    if let Some(ws) = ws_shared.as_ref() {
+        let mut ws_lock = ws.lock().await;
+        let sent_ok = crystal_forge::builder::api_client::BuilderApiClient::send_log_line(
+            &mut *ws_lock,
+            message,
+        )
+        .await
+        .is_ok();
+        drop(ws_lock);
+
+        if sent_ok {
+            return;
+        }
+
+        warn!(
+            "WebSocket log send failed for job {}, falling back to HTTP append",
+            job_id
+        );
+        *ws_shared = None;
+    }
+
+    let _ = client.append_logs(job_id, message).await;
 }

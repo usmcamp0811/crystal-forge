@@ -4,14 +4,26 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey};
-use futures::{SinkExt, StreamExt};
+use futures::SinkExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tokio_tungstenite::{connect_async, tungstenite::{Message, client::IntoClientRequest}};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BuildStreamMessage {
+    Log { message: String },
+    Metrics {
+        cpu_percent: f32,
+        ram_used_mb: u64,
+        ram_total_mb: u64,
+        timestamp: String,
+    },
+}
 
 /// API client for builder-to-server communication
 #[derive(Clone)]
@@ -350,7 +362,27 @@ impl BuilderApiClient {
         let ws_url = self.ws_url(job_id);
         info!("🔌 Connecting WebSocket to {}", ws_url);
 
-        let (ws_stream, _) = connect_async(&ws_url)
+        let path = format!("/api/v1/build-jobs/{}/logs/stream", job_id);
+        let (builder_id, signature, timestamp) = self.sign_request("GET", &path, &[]);
+
+        let mut request = ws_url
+            .clone()
+            .into_client_request()
+            .context("Failed to build WebSocket request")?;
+        request.headers_mut().insert(
+            "X-Builder-ID",
+            builder_id.parse().context("invalid X-Builder-ID header")?,
+        );
+        request.headers_mut().insert(
+            "X-Signature",
+            signature.parse().context("invalid X-Signature header")?,
+        );
+        request.headers_mut().insert(
+            "X-Timestamp",
+            timestamp.parse().context("invalid X-Timestamp header")?,
+        );
+
+        let (ws_stream, _) = connect_async(request)
             .await
             .context("Failed to connect WebSocket")?;
 
@@ -363,7 +395,10 @@ impl BuilderApiClient {
         ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
         line: &str,
     ) -> Result<()> {
-        ws.send(Message::Text(line.to_string()))
+        let payload = BuildStreamMessage::Log {
+            message: line.to_string(),
+        };
+        ws.send(Message::Text(serde_json::to_string(&payload)?))
             .await
             .context("Failed to send log line")?;
         Ok(())
@@ -376,15 +411,7 @@ impl BuilderApiClient {
         ram_used_mb: u64,
         ram_total_mb: u64,
     ) -> Result<()> {
-        #[derive(Serialize)]
-        struct SystemMetrics {
-            cpu_percent: f32,
-            ram_used_mb: u64,
-            ram_total_mb: u64,
-            timestamp: String,
-        }
-
-        let metrics = SystemMetrics {
+        let metrics = BuildStreamMessage::Metrics {
             cpu_percent,
             ram_used_mb,
             ram_total_mb,
@@ -452,5 +479,30 @@ mod tests {
         assert_eq!(id, builder_id.to_string());
         assert_eq!(sig.len(), 88); // 64 bytes Ed25519 signature as base64
         assert!(!ts.is_empty());
+    }
+
+    #[test]
+    fn build_stream_log_frame_uses_explicit_type() {
+        let msg = BuildStreamMessage::Log {
+            message: "line".to_string(),
+        };
+
+        let encoded = serde_json::to_string(&msg).expect("message should encode");
+        assert!(encoded.contains("\"type\":\"log\""));
+        assert!(encoded.contains("\"message\":\"line\""));
+    }
+
+    #[test]
+    fn build_stream_metrics_frame_uses_explicit_type() {
+        let msg = BuildStreamMessage::Metrics {
+            cpu_percent: 12.5,
+            ram_used_mb: 512,
+            ram_total_mb: 2048,
+            timestamp: "2026-03-02T17:00:00Z".to_string(),
+        };
+
+        let encoded = serde_json::to_string(&msg).expect("message should encode");
+        assert!(encoded.contains("\"type\":\"metrics\""));
+        assert!(encoded.contains("\"cpu_percent\":12.5"));
     }
 }

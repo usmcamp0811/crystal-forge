@@ -7,20 +7,18 @@
 use axum::{
     Json,
     extract::{Path, State, ws::{WebSocket, WebSocketUpgrade, Message}},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use bytes::Bytes;
-use futures::{sink::SinkExt, stream::StreamExt};
+use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::require_admin;
+use crate::handlers::api::rbac::{require_admin, require_viewer_or_above};
 use crate::handlers::builder_request::{
-    VerifiedBuilderRequest, authenticate_builder_request,
-    authenticate_builder_request_allow_inactive,
+    authenticate_builder_request, authenticate_builder_request_allow_inactive,
 };
 use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCreatedResponse, BuilderMetrics, BuilderSummary,
@@ -517,6 +515,8 @@ pub async fn complete_job(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    cleanup_build_log_channel(&state, job_id).await;
+
     Ok(StatusCode::OK)
 }
 
@@ -567,6 +567,7 @@ pub async fn fail_job(
     if updated_job.status == "queued" {
         Ok(StatusCode::OK) // Job re-queued for retry
     } else {
+        cleanup_build_log_channel(&state, job_id).await;
         Ok(StatusCode::ACCEPTED) // Job permanently failed
     }
 }
@@ -705,6 +706,27 @@ pub async fn append_job_logs(
 // WEBSOCKET LOG STREAMING
 // =============================================================================
 
+const BUILD_LOG_WS_CHANNEL_BUFFER: usize = 1024;
+const MAX_BUILD_LOG_WS_CHANNELS: usize = 2048;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum BuildStreamMessage {
+    Log { message: String },
+    Metrics {
+        cpu_percent: f32,
+        ram_used_mb: u64,
+        ram_total_mb: u64,
+        timestamp: String,
+    },
+    Error { message: String },
+}
+
+enum BuildLogStreamPrincipal {
+    Viewer,
+    Builder(Uuid),
+}
+
 /// WebSocket endpoint for real-time build log streaming
 /// GET /api/v1/build-jobs/:job_id/logs/stream
 ///
@@ -719,70 +741,234 @@ pub async fn stream_build_logs(
     ws: WebSocketUpgrade,
     Path(job_id): Path<Uuid>,
     State(state): State<CFState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_log_stream(socket, job_id, state.pool))
+    let principal = match authorize_build_log_stream(&state, &headers, job_id).await {
+        Ok(principal) => principal,
+        Err(status) => return status.into_response(),
+    };
+
+    ws.on_upgrade(move |socket| handle_log_stream(socket, job_id, state, principal))
 }
 
-#[derive(Serialize, Deserialize)]
-struct SystemMetrics {
-    cpu_percent: f32,
-    ram_used_mb: u64,
-    ram_total_mb: u64,
-    timestamp: String,
+async fn authorize_build_log_stream(
+    state: &CFState,
+    headers: &HeaderMap,
+    job_id: Uuid,
+) -> Result<BuildLogStreamPrincipal, StatusCode> {
+    if require_viewer_or_above(&state.pool, headers).await.is_some() {
+        return Ok(BuildLogStreamPrincipal::Viewer);
+    }
+
+    let path = format!("/api/v1/build-jobs/{}/logs/stream", job_id);
+    let verified = authenticate_builder_request(headers, Bytes::new(), "GET", &path, &state.pool)
+        .await
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if job.builder_id != Some(verified.builder_id) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(BuildLogStreamPrincipal::Builder(verified.builder_id))
 }
 
-async fn handle_log_stream(socket: WebSocket, job_id: Uuid, pool: PgPool) {
-    let (mut sender, mut receiver) = socket.split();
-    
+async fn handle_log_stream(
+    mut socket: WebSocket,
+    job_id: Uuid,
+    state: CFState,
+    principal: BuildLogStreamPrincipal,
+) {
     tracing::info!("WebSocket connection established for job {}", job_id);
-    
-    // Handle incoming messages (log lines from builder or metrics)
-    while let Some(msg) = receiver.next().await {
-        match msg {
-            Ok(Message::Text(text)) => {
-                // Try to parse as JSON metrics first
-                if let Ok(metrics) = serde_json::from_str::<SystemMetrics>(&text) {
-                    // This is a metrics message - just broadcast it, don't store
-                    tracing::debug!("Received metrics for job {}: CPU {}%, RAM {}/{} MB", 
-                        job_id, metrics.cpu_percent, metrics.ram_used_mb, metrics.ram_total_mb);
-                    
-                    // Echo back to all connected clients
-                    if let Err(e) = sender.send(Message::Text(text)).await {
-                        tracing::error!("Failed to send metrics: {}", e);
-                        break;
-                    }
-                } else {
-                    // Regular log line - append to database
-                    if let Err(e) = builders::append_job_logs(&pool, &job_id, &text).await {
-                        tracing::error!("Failed to append log for job {}: {}", job_id, e);
-                        let _ = sender.send(Message::Text(format!("ERROR: {}", e))).await;
-                        break;
-                    }
-                    
-                    // Echo back to confirm receipt
-                    if let Err(e) = sender.send(Message::Text(text)).await {
-                        tracing::error!("Failed to send WebSocket message: {}", e);
-                        break;
-                    }
-                }
-            }
-            Ok(Message::Close(_)) => {
-                tracing::info!("WebSocket closed for job {}", job_id);
-                break;
-            }
-            Ok(Message::Ping(data)) => {
-                if let Err(e) = sender.send(Message::Pong(data)).await {
-                    tracing::error!("Failed to send pong: {}", e);
+
+    let Some(tx) = get_or_create_build_log_channel(&state, job_id).await else {
+        let _ = socket
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1013,
+                reason: "Server overloaded".into(),
+            })))
+            .await;
+        return;
+    };
+
+    match principal {
+        BuildLogStreamPrincipal::Viewer => {
+            let mut rx = tx.subscribe();
+            while let Ok(frame) = rx.recv().await {
+                if let Err(e) = socket.send(Message::Text(frame)).await {
+                    tracing::debug!("Viewer build-log websocket closed for job {}: {}", job_id, e);
                     break;
                 }
             }
-            Ok(_) => {} // Ignore other message types
-            Err(e) => {
-                tracing::error!("WebSocket error for job {}: {}", job_id, e);
-                break;
+        }
+        BuildLogStreamPrincipal::Builder(builder_id) => {
+            let max_chunk_bytes = state.server_config.max_build_log_chunk_mb * 1024 * 1024;
+            let max_total_bytes = state.server_config.max_build_log_size_mb * 1024 * 1024;
+
+            while let Some(msg) = socket.next().await {
+                match msg {
+                    Ok(Message::Text(text)) => {
+                        if text.len() > max_chunk_bytes {
+                            let error = BuildStreamMessage::Error {
+                                message: format!(
+                                    "stream frame too large: {} bytes exceeds {}",
+                                    text.len(),
+                                    max_chunk_bytes
+                                ),
+                            };
+                            let _ = send_build_stream_message(&mut socket, &error).await;
+                            break;
+                        }
+
+                        let parsed = match serde_json::from_str::<BuildStreamMessage>(&text) {
+                            Ok(message) => message,
+                            Err(_) => {
+                                let error = BuildStreamMessage::Error {
+                                    message: "invalid websocket payload; expected typed JSON message"
+                                        .to_string(),
+                                };
+                                let _ = send_build_stream_message(&mut socket, &error).await;
+                                break;
+                            }
+                        };
+
+                        match parsed {
+                            BuildStreamMessage::Log { message } => {
+                                if let Err(e) = builders::append_job_logs_with_limits(
+                                    &state.pool,
+                                    &job_id,
+                                    &message,
+                                    max_total_bytes,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        "Failed to append log over WS for job {} from builder {}: {}",
+                                        job_id,
+                                        builder_id,
+                                        e
+                                    );
+                                    let error = BuildStreamMessage::Error {
+                                        message: "failed to persist log frame".to_string(),
+                                    };
+                                    let _ = send_build_stream_message(&mut socket, &error).await;
+                                    break;
+                                }
+
+                                let _ = broadcast_build_stream_message(
+                                    &tx,
+                                    &BuildStreamMessage::Log { message },
+                                );
+                            }
+                            BuildStreamMessage::Metrics {
+                                cpu_percent,
+                                ram_used_mb,
+                                ram_total_mb,
+                                timestamp,
+                            } => {
+                                let _ = broadcast_build_stream_message(
+                                    &tx,
+                                    &BuildStreamMessage::Metrics {
+                                        cpu_percent,
+                                        ram_used_mb,
+                                        ram_total_mb,
+                                        timestamp,
+                                    },
+                                );
+                            }
+                            BuildStreamMessage::Error { .. } => {
+                                let error = BuildStreamMessage::Error {
+                                    message: "clients cannot send error frames".to_string(),
+                                };
+                                let _ = send_build_stream_message(&mut socket, &error).await;
+                                break;
+                            }
+                        }
+                    }
+                    Ok(Message::Ping(data)) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) => break,
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::debug!(
+                            "Builder build-log websocket error for job {} (builder {}): {}",
+                            job_id,
+                            builder_id,
+                            e
+                        );
+                        break;
+                    }
+                }
             }
         }
     }
-    
+
     tracing::info!("WebSocket connection closed for job {}", job_id);
+}
+
+fn broadcast_build_stream_message(
+    tx: &tokio::sync::broadcast::Sender<String>,
+    msg: &BuildStreamMessage,
+) -> Result<(), serde_json::Error> {
+    let json = serde_json::to_string(msg)?;
+    let _ = tx.send(json);
+    Ok(())
+}
+
+async fn send_build_stream_message(
+    socket: &mut WebSocket,
+    msg: &BuildStreamMessage,
+) -> Result<(), ()> {
+    let json = match serde_json::to_string(msg) {
+        Ok(json) => json,
+        Err(_) => return Err(()),
+    };
+    socket.send(Message::Text(json)).await.map_err(|_| ())
+}
+
+async fn get_or_create_build_log_channel(
+    state: &CFState,
+    job_id: Uuid,
+) -> Option<tokio::sync::broadcast::Sender<String>> {
+    let mut channels = state.build_log_channels.lock().await;
+    if let Some(tx) = channels.get(&job_id) {
+        return Some(tx.clone());
+    }
+
+    if channels.len() >= MAX_BUILD_LOG_WS_CHANNELS {
+        return None;
+    }
+
+    let (tx, _rx) = tokio::sync::broadcast::channel(BUILD_LOG_WS_CHANNEL_BUFFER);
+    channels.insert(job_id, tx.clone());
+    Some(tx)
+}
+
+async fn cleanup_build_log_channel(state: &CFState, job_id: Uuid) {
+    let mut channels = state.build_log_channels.lock().await;
+    channels.remove(&job_id);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BuildStreamMessage;
+
+    #[test]
+    fn build_stream_requires_explicit_type_discriminator() {
+        let ambiguous_metrics_json =
+            r#"{"cpu_percent":10.0,"ram_used_mb":100,"ram_total_mb":200,"timestamp":"t"}"#;
+
+        let parsed = serde_json::from_str::<BuildStreamMessage>(ambiguous_metrics_json);
+        assert!(
+            parsed.is_err(),
+            "untagged JSON should not be accepted as a valid stream frame"
+        );
+    }
 }

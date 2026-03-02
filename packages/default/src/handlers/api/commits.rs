@@ -5,12 +5,17 @@ use axum::{
         ws::{Message, WebSocket},
         Path, State, WebSocketUpgrade,
     },
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use futures::StreamExt;
 use serde::{Serialize, Deserialize};
+use tokio::time::{interval, Duration};
 
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::rbac::require_viewer_or_above;
+
+const EVAL_LOG_CHANNEL_BUFFER: usize = 1000;
+const MAX_EVAL_LOG_CHANNELS: usize = 1024;
 
 /// Structured message types for eval log WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +55,12 @@ pub async fn stream_eval_logs(
     ws: WebSocketUpgrade,
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
+    if require_viewer_or_above(&state.pool, &headers).await.is_none() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
     ws.on_upgrade(move |socket| handle_eval_stream(socket, commit_id, state))
 }
 
@@ -58,24 +68,50 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
     tracing::info!("📡 WebSocket connection established for commit {} evaluation", commit_id);
     
     // Get or create broadcast channel for this commit
-    let mut rx = {
-        let mut channels = state.eval_log_channels.lock().await;
-        let tx = channels
-            .entry(commit_id)
-            .or_insert_with(|| {
-                let (tx, _rx) = tokio::sync::broadcast::channel(1000);
-                tracing::debug!("Created new broadcast channel for commit {}", commit_id);
-                tx
-            })
-            .clone();
-        tx.subscribe()
+    let Some(tx) = get_or_create_eval_channel(&state, commit_id).await else {
+        tracing::warn!(
+            "Rejecting eval websocket for commit {}: eval channel cap reached",
+            commit_id
+        );
+        let _ = socket
+            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                code: 1013,
+                reason: "Server overloaded".into(),
+            })))
+            .await;
+        return;
     };
+
+    let mut rx = tx.subscribe();
+    let mut keepalive = interval(Duration::from_secs(20));
     
     // Stream messages from the broadcast channel to this WebSocket client
-    while let Ok(log_line) = rx.recv().await {
-        if let Err(e) = socket.send(Message::Text(log_line)).await {
-            tracing::error!("Failed to send eval log to WebSocket client: {}", e);
-            break;
+    loop {
+        tokio::select! {
+            recv = rx.recv() => {
+                match recv {
+                    Ok(log_line) => {
+                        if let Err(e) = socket.send(Message::Text(log_line)).await {
+                            tracing::error!("Failed to send eval log to WebSocket client: {}", e);
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            "Eval stream for commit {} lagged; skipped {} messages",
+                            commit_id,
+                            skipped
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            _ = keepalive.tick() => {
+                if let Err(e) = socket.send(Message::Ping(Vec::new().into())).await {
+                    tracing::debug!("Eval WebSocket ping failed for commit {}: {}", commit_id, e);
+                    break;
+                }
+            }
         }
     }
     
@@ -84,12 +120,7 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
 
 /// Ensure a broadcast channel exists for this commit (create if needed)
 pub async fn ensure_eval_channel(state: &CFState, commit_id: i32) {
-    let mut channels = state.eval_log_channels.lock().await;
-    channels.entry(commit_id).or_insert_with(|| {
-        let (tx, _rx) = tokio::sync::broadcast::channel(1000);
-        tracing::debug!("📡 Created broadcast channel for commit {} evaluation", commit_id);
-        tx
-    });
+    let _ = get_or_create_eval_channel(state, commit_id).await;
 }
 
 /// Helper function to broadcast a log line to all connected WebSocket clients for a commit
@@ -124,17 +155,37 @@ pub async fn broadcast_eval_status(
 
 /// Internal: broadcast a structured message
 async fn broadcast_eval_message(state: &CFState, commit_id: i32, msg: EvalLogMessage) {
-    let mut channels = state.eval_log_channels.lock().await;
-    let tx = channels.entry(commit_id).or_insert_with(|| {
-        let (tx, _rx) = tokio::sync::broadcast::channel(1000);
-        tracing::debug!("📡 Created broadcast channel for commit {} (first broadcast)", commit_id);
-        tx
-    });
+    let Some(tx) = get_or_create_eval_channel(state, commit_id).await else {
+        tracing::warn!(
+            "Dropping eval broadcast for commit {}: eval channel cap reached",
+            commit_id
+        );
+        return;
+    };
     
     // Serialize to JSON
     if let Ok(json) = serde_json::to_string(&msg) {
         let _ = tx.send(json);
     }
+}
+
+async fn get_or_create_eval_channel(
+    state: &CFState,
+    commit_id: i32,
+) -> Option<tokio::sync::broadcast::Sender<String>> {
+    let mut channels = state.eval_log_channels.lock().await;
+    if let Some(tx) = channels.get(&commit_id) {
+        return Some(tx.clone());
+    }
+
+    if channels.len() >= MAX_EVAL_LOG_CHANNELS {
+        return None;
+    }
+
+    let (tx, _rx) = tokio::sync::broadcast::channel(EVAL_LOG_CHANNEL_BUFFER);
+    tracing::debug!("📡 Created broadcast channel for commit {}", commit_id);
+    channels.insert(commit_id, tx.clone());
+    Some(tx)
 }
 
 /// Cleanup broadcast channel when evaluation completes
@@ -165,5 +216,50 @@ pub async fn re_evaluate_commit(
                 "message": format!("Failed to reset evaluation: {}", e)
             })),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ServerConfig;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn test_state() -> CFState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
+            .expect("lazy pool should construct");
+        CFState::new(pool, ServerConfig::default())
+    }
+
+    #[tokio::test]
+    async fn eval_channel_fanout_and_cleanup() {
+        let state = test_state();
+        let commit_id = 42;
+
+        ensure_eval_channel(&state, commit_id).await;
+
+        let tx = {
+            let channels = state.eval_log_channels.lock().await;
+            channels
+                .get(&commit_id)
+                .expect("channel exists")
+                .clone()
+        };
+
+        let mut rx1 = tx.subscribe();
+        let mut rx2 = tx.subscribe();
+
+        broadcast_eval_log(&state, commit_id, "hello".to_string()).await;
+
+        let msg1 = rx1.recv().await.expect("first subscriber receives");
+        let msg2 = rx2.recv().await.expect("second subscriber receives");
+
+        assert_eq!(msg1, msg2);
+        assert!(msg1.contains("hello"));
+
+        cleanup_eval_channel(&state, commit_id).await;
+        let channels = state.eval_log_channels.lock().await;
+        assert!(!channels.contains_key(&commit_id));
     }
 }

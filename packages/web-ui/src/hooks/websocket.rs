@@ -36,6 +36,24 @@ pub enum EvalLogMessage {
     },
 }
 
+/// Structured build stream message types.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum BuildStreamMessage {
+    Log {
+        message: String,
+    },
+    Metrics {
+        cpu_percent: f32,
+        ram_used_mb: u64,
+        ram_total_mb: u64,
+        timestamp: String,
+    },
+    Error {
+        message: String,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum SystemEvalStatus {
@@ -252,15 +270,32 @@ fn connect_websocket(
         if let Ok(text) = event.data().dyn_into::<js_sys::JsString>() {
             let message: String = text.into();
 
-            // Try to parse as JSON metrics first
-            if let Ok(parsed_metrics) = serde_json::from_str::<SystemMetrics>(&message) {
-                // It's a metrics message
-                if let Some(mut metrics_signal) = metrics_msg {
-                    metrics_signal.set(Some(parsed_metrics));
+            match serde_json::from_str::<BuildStreamMessage>(&message) {
+                Ok(BuildStreamMessage::Metrics {
+                    cpu_percent,
+                    ram_used_mb,
+                    ram_total_mb,
+                    timestamp,
+                }) => {
+                    if let Some(mut metrics_signal) = metrics_msg {
+                        metrics_signal.set(Some(SystemMetrics {
+                            cpu_percent,
+                            ram_used_mb,
+                            ram_total_mb,
+                            timestamp,
+                        }));
+                    }
                 }
-            } else {
-                // It's a log line (plain text)
-                logs_msg.write().push(message);
+                Ok(BuildStreamMessage::Log { message }) => {
+                    logs_msg.write().push(message);
+                }
+                Ok(BuildStreamMessage::Error { message }) => {
+                    logs_msg.write().push(format!("[stream-error] {}", message));
+                }
+                Err(_) => {
+                    // Temporary backward compatibility with older plain-text streams.
+                    logs_msg.write().push(message);
+                }
             }
         }
     }) as Box<dyn FnMut(MessageEvent)>);
