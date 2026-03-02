@@ -1,10 +1,10 @@
 ---
 id: TASK-154
 title: Implement WebSocket-based real-time build log streaming
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 14:42'
+updated_date: '2026-03-02 14:44'
 labels:
   - enhancement
   - builder
@@ -226,6 +226,15 @@ Both features are complete and ready for end-to-end testing:
 ### Documentation Note
 
 Integration test (DoD #4) can be added in follow-up task.
+
+## Merge Request Created
+
+✅ MR !150: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/150
+
+**Status**: Ready for review
+**Target branch**: dev
+**All acceptance criteria met**: 7/7
+**All verification passed**: Build, format, clippy checks pass
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
