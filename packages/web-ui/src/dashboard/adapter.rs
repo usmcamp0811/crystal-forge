@@ -161,6 +161,7 @@ pub fn fallback_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> Build
             queued_at: now - Duration::minutes(14),
             started_at: Some(now - Duration::minutes(9)),
             elapsed_secs: Some(9 * 60),
+            logs: None,
         },
         BuildQueueItem {
             job_id: None,
@@ -174,6 +175,7 @@ pub fn fallback_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> Build
             queued_at: now - Duration::minutes(6),
             started_at: None,
             elapsed_secs: None,
+            logs: None,
         },
         BuildQueueItem {
             job_id: None,
@@ -187,6 +189,7 @@ pub fn fallback_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> Build
             queued_at: now - Duration::minutes(22),
             started_at: None,
             elapsed_secs: None,
+            logs: None,
         },
         BuildQueueItem {
             job_id: None,
@@ -200,6 +203,7 @@ pub fn fallback_build_queue_summary(now: chrono::DateTime<chrono::Utc>) -> Build
             queued_at: now - Duration::minutes(3),
             started_at: None,
             elapsed_secs: None,
+            logs: None,
         },
     ];
 

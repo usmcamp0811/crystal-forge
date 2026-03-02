@@ -221,6 +221,9 @@ pub struct BuildQueueItem {
     /// Elapsed time in seconds since started (for display).
     #[serde(default)]
     pub elapsed_secs: Option<i64>,
+    /// Build logs (if available).
+    #[serde(default)]
+    pub logs: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ pub fn BuildQueuePanel(
     queue: BuildQueueSummary,
     #[props(default)] flake_filter: Option<String>,
 ) -> Element {
-    let total_active = queue.building_count + queue.queued_count;
+    let _total_active = queue.building_count + queue.queued_count;
     let mut active_items: Vec<BuildQueueItem> = queue
         .items
         .iter()

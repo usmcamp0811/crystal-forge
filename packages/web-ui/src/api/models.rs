@@ -578,6 +578,9 @@ pub struct BuildQueueItem {
     /// Elapsed time in seconds since started (for display).
     #[serde(default)]
     pub elapsed_secs: Option<i64>,
+    /// Build logs (if available).
+    #[serde(default)]
+    pub logs: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -998,6 +1001,10 @@ pub struct BuilderSummary {
     pub max_concurrent_jobs: i32,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub assigned_environment_count: i32,
+    #[serde(default)]
+    pub active_jobs: i32,
+    #[serde(default)]
+    pub queued_jobs: i32,
 }
 
 /// Full builder details

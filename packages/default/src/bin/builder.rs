@@ -2,7 +2,8 @@ use crystal_forge::builder::api_client::BuilderApiClient;
 use crystal_forge::builder::metrics::SystemMetrics;
 use crystal_forge::builder::{run_build_loop, run_cache_push_loop, run_cve_scan_loop};
 use crystal_forge::config::CrystalForgeConfig;
-use crystal_forge::models::builders::ReportMetricsRequest;
+use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
+use crystal_forge::queries::derivations::get_derivation_by_id;
 use crystal_forge::server::memory_monitor_task;
 use tokio::signal;
 use tracing::{error, info, warn};
@@ -116,7 +117,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     );
 
     tokio::select! {
-        result = run_api_job_loop(poll_client, poll_interval, max_concurrent, build_config.clone(), cache_config.clone()) => {
+        result = run_api_job_loop(poll_client, poll_interval, build_config.clone(), cache_config.clone()) => {
             error!("Job loop exited unexpectedly: {:?}", result);
         }
         _ = signal::ctrl_c() => {
@@ -159,17 +160,25 @@ async fn run_heartbeat_loop(client: BuilderApiClient, interval: std::time::Durat
 async fn run_api_job_loop(
     client: BuilderApiClient,
     poll_interval: std::time::Duration,
-    max_concurrent: i32,
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
 ) -> anyhow::Result<()> {
+    // Create DB pool once and share across all jobs
+    let pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
     let mut ticker = tokio::time::interval(poll_interval);
+    
+    // Limit concurrent builds to max_concurrent_jobs
+    let max_concurrent = build_config.max_concurrent_derivations;
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    info!("🔨 Starting job polling loop (max concurrent: {})...", max_concurrent);
 
     loop {
         ticker.tick().await;
 
-        // TODO: Check current active job count against max_concurrent
-        // For now, we'll keep it simple and process one job at a time
+        // Check if we have capacity for another build
+        if semaphore.available_permits() == 0 {
+            continue; // All slots busy, skip polling
+        }
 
         match client.get_next_job().await {
             Ok(Some(job)) => {
@@ -184,28 +193,217 @@ async fn run_api_job_loop(
                     continue;
                 }
 
-                // TODO: Actually build the derivation
-                // This is a placeholder - in a real implementation, we would:
-                // 1. Fetch derivation details from the job
-                // 2. Build it using the existing derivation.build() logic
-                // 3. Stream logs during the build
-                // 4. Complete or fail based on the result
-
-                warn!("⚠️  Job execution not yet implemented in API mode");
-
-                // For now, just fail it
-                if let Err(e) = client
-                    .fail_job(job.id, "API mode job execution not yet implemented")
-                    .await
-                {
-                    error!("❌ Failed to fail job #{}: {}", job.id, e);
-                }
+                // Acquire semaphore permit for this build
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                
+                // Execute the build in a spawned task to allow concurrent builds
+                let job_client = client.clone();
+                let job_build_config = build_config.clone();
+                let job_cache_config = cache_config.clone();
+                let job_pool = pool.clone();
+                
+                tokio::spawn(async move {
+                    execute_build_job(job, job_client, job_build_config, job_cache_config, job_pool).await;
+                    drop(permit); // Release semaphore when build completes
+                });
             }
             Ok(None) => {
                 // No jobs available, continue polling
             }
             Err(e) => {
                 error!("❌ Failed to get next job: {}", e);
+            }
+        }
+    }
+}
+
+/// Execute a build job: fetch derivation, build it, report results
+async fn execute_build_job(
+    job: BuildJob,
+    client: BuilderApiClient,
+    build_config: crystal_forge::config::BuildConfig,
+    cache_config: crystal_forge::config::CacheConfig,
+    pool: sqlx::PgPool,
+) {
+    info!("🔨 Starting build for job #{} (derivation: {})", job.id, job.derivation_id);
+
+    // Fetch the derivation from database
+    let mut derivation = match get_derivation_by_id(&pool, job.derivation_id).await {
+        Ok(deriv) => deriv,
+        Err(e) => {
+            error!("❌ Failed to fetch derivation {}: {}", job.derivation_id, e);
+            if let Err(e2) = client.fail_job(job.id, &format!("Failed to fetch derivation: {}", e)).await {
+                error!("❌ Failed to report job failure: {}", e2);
+            }
+            return;
+        }
+    };
+
+    info!("📦 Building derivation: {}", derivation.derivation_name);
+
+    // Get build timeout from config
+    let build_timeout = std::cmp::min(
+        build_config.timeout,
+        std::time::Duration::from_secs(7200), // Max 2 hours
+    );
+
+    let start = std::time::Instant::now();
+
+    // Send initial log message
+    let _ = client.append_logs(job.id, &format!("🔨 Starting build for {}\n", derivation.derivation_name)).await;
+
+    // Execute the build with timeout
+    let build_result = tokio::time::timeout(
+        build_timeout,
+        derivation.build(&pool, &build_config)
+    ).await;
+
+    match build_result {
+        // Build succeeded within timeout
+        Ok(Ok(store_path)) => {
+            let duration = start.elapsed();
+            info!(
+                "✅ Job #{} completed in {:.1}s: {}",
+                job.id,
+                duration.as_secs_f64(),
+                store_path
+            );
+
+            // Send success log
+            let _ = client.append_logs(job.id, &format!("✅ Build completed successfully in {:.1}s\n", duration.as_secs_f64())).await;
+            let _ = client.append_logs(job.id, &format!("   Output: {}\n", store_path)).await;
+
+            // Update derivation with store_path for signing
+            derivation.store_path = Some(store_path.clone());
+
+            // Sign the derivation
+            let _ = client.append_logs(job.id, "🔐 Signing derivation...\n").await;
+            if let Err(e) = derivation.sign(&cache_config).await {
+                warn!("⚠️ Signing failed for job #{}, continuing anyway: {}", job.id, e);
+                let _ = client.append_logs(job.id, &format!("⚠️  Signing failed: {}\n", e)).await;
+            } else {
+                let _ = client.append_logs(job.id, "✅ Derivation signed\n").await;
+            }
+
+            // Create cache push job if configured
+            if cache_config.push_after_build {
+                let _ = client.append_logs(job.id, "📤 Queuing cache push job...\n").await;
+                if let Some(ref store_path) = derivation.store_path {
+                    if let Err(e) = crystal_forge::queries::cache_push::create_cache_push_job(
+                        &pool,
+                        derivation.id,
+                        store_path,
+                        cache_config.push_to.as_deref(),
+                    ).await {
+                        warn!("⚠️ Cache queue failed for job #{}, continuing anyway: {}", job.id, e);
+                        let _ = client.append_logs(job.id, &format!("⚠️  Cache push queue failed: {}\n", e)).await;
+                    } else {
+                        let _ = client.append_logs(job.id, "✅ Cache push job queued\n").await;
+                    }
+                }
+            }
+
+            // Mark derivation as complete in database
+            match pool.begin().await {
+                Ok(mut tx) => {
+                    if let Err(e) = crystal_forge::queries::derivations::mark_target_build_complete(
+                        &mut *tx,
+                        derivation.id,
+                        &store_path,
+                    ).await {
+                        error!("❌ Failed to mark derivation complete: {}", e);
+                    } else if let Err(e) = tx.commit().await {
+                        error!("❌ Failed to commit transaction: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Failed to begin transaction: {}", e);
+                }
+            }
+
+            // Report success to server
+            if let Err(e) = client.complete_job(job.id, &store_path).await {
+                error!("❌ Failed to report job completion: {}", e);
+            }
+        }
+
+        // Build failed within timeout
+        Ok(Err(e)) => {
+            let duration = start.elapsed();
+            error!(
+                "❌ Job #{} build failed after {:.1}s: {}",
+                job.id,
+                duration.as_secs_f64(),
+                e
+            );
+
+            // Send failure log
+            let _ = client.append_logs(job.id, &format!("❌ Build failed after {:.1}s\n", duration.as_secs_f64())).await;
+            let _ = client.append_logs(job.id, &format!("   Error: {}\n", e)).await;
+
+            // Mark derivation as failed in database
+            match pool.begin().await {
+                Ok(mut tx) => {
+                    if let Err(e2) = crystal_forge::queries::derivations::handle_derivation_failure(
+                        &mut *tx,
+                        &derivation,
+                        "build",
+                        &e,
+                    ).await {
+                        error!("❌ Failed to mark derivation failed: {}", e2);
+                    } else if let Err(e2) = tx.commit().await {
+                        error!("❌ Failed to commit transaction: {}", e2);
+                    }
+                }
+                Err(e2) => {
+                    error!("❌ Failed to begin transaction: {}", e2);
+                }
+            }
+
+            // Report failure to server
+            if let Err(e2) = client.fail_job(job.id, &e.to_string()).await {
+                error!("❌ Failed to report job failure: {}", e2);
+            }
+        }
+
+        // Build timed out
+        Err(_timeout) => {
+            let duration = start.elapsed();
+            let timeout_msg = format!(
+                "Build timed out after {:.1}s (limit: {:.1}s)",
+                duration.as_secs_f64(),
+                build_timeout.as_secs_f64()
+            );
+
+            error!("⏱️ Job #{}: {}", job.id, timeout_msg);
+
+            // Send timeout log
+            let _ = client.append_logs(job.id, &format!("⏱️  {}\n", timeout_msg)).await;
+
+            let timeout_error = anyhow::anyhow!(timeout_msg.clone());
+
+            // Mark derivation as failed in database
+            match pool.begin().await {
+                Ok(mut tx) => {
+                    if let Err(e) = crystal_forge::queries::derivations::handle_derivation_failure(
+                        &mut *tx,
+                        &derivation,
+                        "build-timeout",
+                        &timeout_error,
+                    ).await {
+                        error!("❌ Failed to mark derivation timeout: {}", e);
+                    } else if let Err(e) = tx.commit().await {
+                        error!("❌ Failed to commit transaction: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("❌ Failed to begin transaction: {}", e);
+                }
+            }
+
+            // Report timeout failure to server
+            if let Err(e) = client.fail_job(job.id, &timeout_msg).await {
+                error!("❌ Failed to report job timeout: {}", e);
             }
         }
     }

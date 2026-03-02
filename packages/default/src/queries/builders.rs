@@ -128,9 +128,12 @@ pub async fn list_builders(pool: &PgPool) -> Result<Vec<BuilderSummary>> {
             b.max_memory_mb,
             b.max_concurrent_jobs,
             b.last_heartbeat_at,
-            COALESCE(COUNT(bea.id), 0)::int as assigned_environment_count
+            COALESCE(COUNT(DISTINCT bea.id), 0)::int as assigned_environment_count,
+            COALESCE(COUNT(DISTINCT CASE WHEN bj.status = 'building' THEN bj.id END), 0)::int as active_jobs,
+            COALESCE(COUNT(DISTINCT CASE WHEN bj.status = 'queued' AND bj.builder_id = b.id THEN bj.id END), 0)::int as queued_jobs
         FROM builders b
         LEFT JOIN builder_environment_assignments bea ON bea.builder_id = b.id
+        LEFT JOIN build_jobs bj ON bj.builder_id = b.id AND bj.status IN ('queued', 'building')
         GROUP BY b.id, b.name, b.status, b.max_cpu_cores, b.max_memory_mb, b.max_concurrent_jobs, b.last_heartbeat_at
         ORDER BY b.created_at DESC
         "#
@@ -577,14 +580,14 @@ pub async fn claim_next_job_atomic(
     // Start transaction for atomic count + claim
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
-    // 1. Count active jobs for this builder WITH row-level lock
-    // FOR UPDATE locks the rows to prevent concurrent modifications during transaction
+    // 1. Count active jobs for this builder
+    // Note: We don't use FOR UPDATE here because it doesn't work with COUNT(*).
+    // The atomicity is ensured by the transaction and FOR UPDATE SKIP LOCKED on the job claim.
     let active_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
         FROM build_jobs
         WHERE builder_id = $1 AND status = 'building'
-        FOR UPDATE
         "#,
     )
     .bind(builder_id)

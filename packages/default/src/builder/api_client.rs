@@ -46,11 +46,20 @@ impl BuilderApiClient {
 
     /// Load Ed25519 private key from file
     fn load_private_key(path: &Path) -> Result<SigningKey> {
-        let key_data = fs::read(path).context("Failed to read private key file")?;
+        // Read the key file as string (base64 encoded, like agent keys)
+        let key_string = fs::read_to_string(path)
+            .context("Failed to read private key file")?
+            .trim()
+            .to_string();
+
+        // Decode base64 to raw bytes
+        let key_data = base64::engine::general_purpose::STANDARD
+            .decode(&key_string)
+            .context("Failed to decode base64 private key")?;
 
         if key_data.len() != 32 {
             anyhow::bail!(
-                "Invalid private key file: expected 32 bytes, got {}",
+                "Invalid private key: expected 32 bytes after base64 decode, got {}",
                 key_data.len()
             );
         }
@@ -338,9 +347,12 @@ mod tests {
     fn test_load_valid_private_key() {
         let key = SigningKey::generate(&mut rand::thread_rng());
         let key_bytes = key.to_bytes();
+        
+        // Encode key as base64 (matching cf-keygen format)
+        let key_base64 = base64::engine::general_purpose::STANDARD.encode(&key_bytes);
 
         let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(&key_bytes).unwrap();
+        temp_file.write_all(key_base64.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let loaded_key = BuilderApiClient::load_private_key(temp_file.path()).unwrap();
@@ -349,8 +361,11 @@ mod tests {
 
     #[test]
     fn test_load_invalid_key_length() {
+        // Write base64-encoded invalid key (16 bytes instead of 32)
+        let invalid_key = base64::engine::general_purpose::STANDARD.encode(&[0u8; 16]);
+        
         let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(&[0u8; 16]).unwrap(); // Wrong length
+        temp_file.write_all(invalid_key.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
         let result = BuilderApiClient::load_private_key(temp_file.path());

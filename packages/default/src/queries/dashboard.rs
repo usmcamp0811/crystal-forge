@@ -166,6 +166,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
             DateTime<Utc>,
             Option<DateTime<Utc>>,
             Option<i64>,
+            Option<String>,
         ),
     >(
         r#"
@@ -183,7 +184,8 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
             CASE
                 WHEN bj.started_at IS NULL THEN NULL
                 ELSE EXTRACT(EPOCH FROM (now() - bj.started_at))::BIGINT
-            END AS elapsed_secs
+            END AS elapsed_secs,
+            bj.logs
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
@@ -217,6 +219,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                 queued_at,
                 started_at,
                 elapsed_secs,
+                logs,
             )| {
                 let status = match status.as_str() {
                     "queued" => BuildStatus::Queued,
@@ -238,6 +241,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                     queued_at,
                     started_at,
                     elapsed_secs,
+                    logs,
                 }
             },
         )

@@ -12,6 +12,7 @@ mod routes;
 mod state;
 mod systems;
 pub mod theme;
+mod utils;
 mod views;
 
 use dioxus::prelude::*;

@@ -76,6 +76,10 @@ pub struct BuilderSummary {
     pub max_concurrent_jobs: i32,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub assigned_environment_count: i32,
+    #[sqlx(default)]
+    pub active_jobs: i32,
+    #[sqlx(default)]
+    pub queued_jobs: i32,
 }
 
 /// Builder with environment assignments

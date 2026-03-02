@@ -17,6 +17,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
+use crate::queries::build_jobs::create_build_jobs_for_commit;
 use crate::queries::builders::cleanup_expired_build_logs;
 use crate::queries::commits::{
     get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
@@ -203,6 +204,29 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                                 "❌ Failed to mark commit {} evaluation complete: {}",
                                 commit.git_commit_hash, e
                             );
+                        }
+
+                        // ⬇️ CREATE BUILD JOBS for evaluated derivations
+                        match create_build_jobs_for_commit(pool, commit.id).await {
+                            Ok(job_count) if job_count > 0 => {
+                                info!(
+                                    "📋 Queued {} build jobs for commit {}",
+                                    job_count, commit.git_commit_hash
+                                );
+                            }
+                            Ok(_) => {
+                                debug!(
+                                    "No new build jobs for commit {} (already queued or no ready derivations)",
+                                    commit.git_commit_hash
+                                );
+                            }
+                            Err(e) => {
+                                error!(
+                                    "❌ Failed to create build jobs for commit {}: {}",
+                                    commit.git_commit_hash, e
+                                );
+                                // Don't fail the whole evaluation if job creation fails
+                            }
                         }
 
                         let total = results.len();

@@ -116,6 +116,7 @@ in mkShell {
     postgresql
     sqlx-cli
     vulnix
+    nix-eval-jobs # Required for commit evaluation
     python3
     python3Packages.pytest
     run-scenario
@@ -160,7 +161,7 @@ in mkShell {
     echo "      full-stack up"
     echo "      - Launches PostgreSQL, the Crystal Forge server and agent in process-compose"
       echo "      server-stack up"
-      echo "      - Launches PostgreSQL and the Crystal Forge server in process-compose"
+      echo "      - Launches PostgreSQL, Crystal Forge server, and builder in process-compose"
       echo "      oidc-stack up"
       echo "      - Launches PostgreSQL, Keycloak OIDC provider, and server in OIDC mode"
       echo "      db-only up"

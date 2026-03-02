@@ -6,8 +6,8 @@ use crate::components::layout::Card;
 use crate::theme;
 
 use super::helpers::{
-    BuildAction, BuildItem, BuildStatus, build_status_badge_class, queue_row_style,
-    queue_sort_rank, short_commit,
+    build_status_badge_class, queue_row_style, queue_sort_rank, short_commit, BuildAction,
+    BuildItem, BuildStatus,
 };
 
 /// Build queue pane showing all queued and active builds.
@@ -81,7 +81,16 @@ pub fn BuildQueuePane(
 
                                 div {
                                     class: "mt-2 rounded-md border border-gray-700/60 bg-gray-950/70 px-2 py-1",
-                                    p { class: "text-[11px] text-gray-300 font-mono leading-5", "{build.summary}" }
+                                    p {
+                                        class: "text-[11px] text-gray-300 leading-5",
+                                        span { class: "text-gray-400", "Build target: " }
+                                        span { class: "font-mono text-cyan-300", "{build.flake}" }
+                                        span { class: "text-gray-500 mx-1", "·" }
+                                        span { class: "font-mono text-gray-300", "{build.hostname}" }
+                                    }
+                                    if !build.summary.is_empty() && build.summary != format!("job {}", build.job_id.map(|id| id.to_string()).unwrap_or_else(|| "unknown".to_string())) {
+                                        p { class: "text-[11px] text-gray-400 mt-1 italic truncate", "{build.summary}" }
+                                    }
                                 }
 
                                 div {
