@@ -248,6 +248,9 @@ async fn execute_build_job(
 
     let start = std::time::Instant::now();
 
+    // Send initial log message
+    let _ = client.append_logs(job.id, &format!("🔨 Starting build for {}\n", derivation.derivation_name)).await;
+
     // Execute the build with timeout
     let build_result = tokio::time::timeout(
         build_timeout,
@@ -265,16 +268,25 @@ async fn execute_build_job(
                 store_path
             );
 
+            // Send success log
+            let _ = client.append_logs(job.id, &format!("✅ Build completed successfully in {:.1}s\n", duration.as_secs_f64())).await;
+            let _ = client.append_logs(job.id, &format!("   Output: {}\n", store_path)).await;
+
             // Update derivation with store_path for signing
             derivation.store_path = Some(store_path.clone());
 
             // Sign the derivation
+            let _ = client.append_logs(job.id, "🔐 Signing derivation...\n").await;
             if let Err(e) = derivation.sign(&cache_config).await {
                 warn!("⚠️ Signing failed for job #{}, continuing anyway: {}", job.id, e);
+                let _ = client.append_logs(job.id, &format!("⚠️  Signing failed: {}\n", e)).await;
+            } else {
+                let _ = client.append_logs(job.id, "✅ Derivation signed\n").await;
             }
 
             // Create cache push job if configured
             if cache_config.push_after_build {
+                let _ = client.append_logs(job.id, "📤 Queuing cache push job...\n").await;
                 if let Some(ref store_path) = derivation.store_path {
                     if let Err(e) = crystal_forge::queries::cache_push::create_cache_push_job(
                         &pool,
@@ -283,6 +295,9 @@ async fn execute_build_job(
                         cache_config.push_to.as_deref(),
                     ).await {
                         warn!("⚠️ Cache queue failed for job #{}, continuing anyway: {}", job.id, e);
+                        let _ = client.append_logs(job.id, &format!("⚠️  Cache push queue failed: {}\n", e)).await;
+                    } else {
+                        let _ = client.append_logs(job.id, "✅ Cache push job queued\n").await;
                     }
                 }
             }
@@ -321,6 +336,10 @@ async fn execute_build_job(
                 e
             );
 
+            // Send failure log
+            let _ = client.append_logs(job.id, &format!("❌ Build failed after {:.1}s\n", duration.as_secs_f64())).await;
+            let _ = client.append_logs(job.id, &format!("   Error: {}\n", e)).await;
+
             // Mark derivation as failed in database
             match pool.begin().await {
                 Ok(mut tx) => {
@@ -356,6 +375,9 @@ async fn execute_build_job(
             );
 
             error!("⏱️ Job #{}: {}", job.id, timeout_msg);
+
+            // Send timeout log
+            let _ = client.append_logs(job.id, &format!("⏱️  {}\n", timeout_msg)).await;
 
             let timeout_error = anyhow::anyhow!(timeout_msg.clone());
 
