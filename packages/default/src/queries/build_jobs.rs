@@ -12,7 +12,7 @@ use uuid::Uuid;
 /// This function is called after successful commit evaluation to queue
 /// derivations for building. It implements smart prioritization based on:
 /// - Whether the system is tracked (in the systems table)
-/// - How recent the commit is (commits_behind value)
+/// - How recent the commit is (commit_timestamp age: <1h, <1d, older)
 ///
 /// # Arguments
 /// * `pool` - Database connection pool
