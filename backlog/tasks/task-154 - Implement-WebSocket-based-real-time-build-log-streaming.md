@@ -1,10 +1,10 @@
 ---
 id: TASK-154
 title: Implement WebSocket-based real-time build log streaming
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 18:00'
+updated_date: '2026-03-02 18:24'
 labels:
   - enhancement
   - builder
@@ -677,6 +677,10 @@ Verification run:
 2026-03-02: Committed MR hardening changes as `a87545df` and pushed to branch `TASK-154-websocket-build-logs`.
 
 MR !150 description updated with checked hardening checklist and verification commands/results.
+
+2026-03-02: MR !150 merged into dev. Task moved to Done.
+
+Post-merge cleanup: removed worktree `/home/mcamp/code/crystal-forge/TASK-154-websocket-build-logs` and ran `git worktree prune`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
