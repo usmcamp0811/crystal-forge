@@ -235,6 +235,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/commits/:commit_id/eval/stream",
             get(commits::stream_eval_logs),
         )
+        .route(
+            "/api/v1/commits/:commit_id/re-evaluate",
+            post(commits::re_evaluate_commit),
+        )
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))
         .route("/api/v1/admin/users/:id", patch(admin::update_user))

@@ -78,3 +78,27 @@ pub async fn cleanup_eval_channel(state: &CFState, commit_id: i32) {
     channels.remove(&commit_id);
     tracing::debug!("Cleaned up broadcast channel for commit {}", commit_id);
 }
+
+/// Trigger manual re-evaluation for a commit
+/// POST /api/v1/commits/:commit_id/re-evaluate
+pub async fn re_evaluate_commit(
+    Path(commit_id): Path<i32>,
+    State(state): State<CFState>,
+) -> impl IntoResponse {
+    match crate::queries::commits::reset_commit_evaluation(&state.pool, commit_id).await {
+        Ok(_) => (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "status": "ok",
+                "message": format!("Commit {} queued for re-evaluation", commit_id)
+            })),
+        ),
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to reset evaluation: {}", e)
+            })),
+        ),
+    }
+}
