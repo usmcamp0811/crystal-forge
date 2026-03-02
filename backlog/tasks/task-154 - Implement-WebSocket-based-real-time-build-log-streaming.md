@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: Review
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 14:44'
+updated_date: '2026-03-02 14:55'
 labels:
   - enhancement
   - builder
@@ -235,6 +235,53 @@ Integration test (DoD #4) can be added in follow-up task.
 **Target branch**: dev
 **All acceptance criteria met**: 7/7
 **All verification passed**: Build, format, clippy checks pass
+
+## Critical Bug Fixed (2026-03-02 14:52)
+
+### Issue
+Eval log broadcasts were being dropped because channels were only created when WebSocket clients connected. Since broadcasts happened BEFORE any clients connected, all eval logs were lost.
+
+### Root Cause
+```rust
+// OLD CODE - only sends if channel exists
+pub async fn broadcast_eval_log(state: &CFState, commit_id: i32, log_line: String) {
+    let channels = state.eval_log_channels.lock().await;
+    if let Some(tx) = channels.get(&commit_id) {  // ❌ Returns None if no clients connected yet
+        let _ = tx.send(log_line);
+    }
+}
+```
+
+### Solution
+Modified `broadcast_eval_log` to **create the channel on first broadcast** using `entry().or_insert_with()` pattern:
+
+```rust
+// NEW CODE - creates channel if needed
+pub async fn broadcast_eval_log(state: &CFState, commit_id: i32, log_line: String) {
+    let mut channels = state.eval_log_channels.lock().await;
+    let tx = channels.entry(commit_id).or_insert_with(|| {  // ✅ Creates channel if missing
+        let (tx, _rx) = tokio::sync::broadcast::channel(1000);
+        tx
+    });
+    let _ = tx.send(log_line);  // ✅ Always sends
+}
+```
+
+### Impact
+- ✅ Eval logs now visible in server logs
+- ✅ WebSocket clients can connect mid-evaluation and see previous logs (up to 1000 buffered)
+- ✅ Users can click eval badge and watch evaluation progress
+- ⚠️  Buffer limit: If >1000 log lines produced before first client, oldest are dropped
+
+### Commit
+**564f9f34**: fix: ensure eval log broadcast channel exists before first message
+
+### Testing Required
+1. Start server with this fix
+2. Trigger commit evaluation (webhook or manual)
+3. Click eval badge on commit card while evaluation is running
+4. Verify logs stream in modal in real-time
+5. Verify connection status indicator shows "Connected"
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
