@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: In Progress
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 05:01'
+updated_date: '2026-03-02 05:23'
 labels:
   - enhancement
   - builder
@@ -119,6 +119,70 @@ UI
 4. ⏳ Update UI to display streaming logs + metrics
 5. ⏳ Add HTTP fallback for reliability
 6. ⏳ Test end-to-end
+
+## MAJOR PROGRESS UPDATE (2026-03-02)
+
+### ✅ Completed
+
+1. **Server WebSocket Endpoint** (commit 82f827d7)
+   - Added `/api/v1/build-jobs/:job_id/logs/stream` endpoint
+   - Dual message type support: plain text logs + JSON metrics
+   - WebSocket lifecycle handling (ping/pong, close, errors)
+   - Route registered in server.rs
+
+2. **Builder WebSocket Client** (commit 885c7761)
+   - WebSocket connection established before build starts
+   - BuilderApiClient::create_log_stream() implemented
+   - Sends log lines as plain text messages
+   - Spawns metrics collection task (2-second interval)
+   - Sends CPU/RAM metrics as JSON: {cpu_percent, ram_used_mb, ram_total_mb, timestamp}
+   - Falls back to HTTP POST if WebSocket unavailable
+   - Metrics task cleaned up on build completion
+   - Added tokio-tungstenite dependency
+
+3. **UI WebSocket Client** (commit 5f4965f2)
+   - Added WebSocket features to web-sys (WebSocket, MessageEvent, CloseEvent, ErrorEvent, BinaryType)
+   - Created hooks/websocket module with connection hooks
+   - Implemented use_websocket_build_stream hook (combined logs + metrics)
+   - ConnectionState enum: Disconnected, Connecting, Connected, Error
+   - BuildDetailPane updated to use WebSocket streaming when job_id available
+   - Live connection status indicator (color-coded dot)
+   - Real-time CPU/RAM metrics display (updates every 2s from builder)
+   - Auto-connect on component mount
+   - Falls back to mock data if no job_id
+
+### 🔨 Architecture Implemented
+
+```
+Builder → WebSocket → Server → UI
+   │                      │
+   ├─ Plain text logs ────┼─→ Database (build_jobs.logs)
+   └─ JSON metrics ───────┼─→ Broadcast only (not stored)
+                          └─→ All connected clients
+```
+
+### ⏳ Remaining Work
+
+1. **End-to-End Testing**
+   - Manual test: Start a real build, watch logs stream in UI
+   - Verify metrics update every 2 seconds
+   - Test HTTP fallback when WebSocket disabled
+   - Verify logs persist to database correctly
+
+2. **Polish**
+   - Add auto-scroll / follow mode to UI (may already work via Dioxus signals)
+   - Test with multiple clients viewing same build
+   - Consider adding reconnection logic (currently auto-connects on mount)
+
+3. **Documentation**
+   - Update acceptance criteria checkboxes
+   - Document WebSocket message format
+   - Add architecture diagram to docs
+
+### 🎯 Status
+
+**Current State**: Core implementation complete, ready for testing
+**Next Action**: Manual end-to-end test with real build
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
