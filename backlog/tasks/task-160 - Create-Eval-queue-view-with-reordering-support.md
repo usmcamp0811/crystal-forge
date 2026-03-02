@@ -4,7 +4,7 @@ title: Create Eval queue view with reordering support
 status: To Do
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-02 16:59'
+updated_date: '2026-03-02 17:01'
 labels: []
 dependencies: []
 priority: medium
@@ -64,7 +64,9 @@ Create a new "Evals" view (similar to "Builds" view) that:
 - [ ] #7 Real-time updates via WebSocket as systems are evaluated
 - [ ] #8 Per-system status chips update in real-time during eval (pending → evaluating → success/failed)
 - [ ] #9 Policy check status shown per system: passed policy → added to build queue (green indicator)
-- [ ] #10 Policy failed systems shown with distinct status (yellow/orange)
-- [ ] #11 Flake view eval log chip redirects to Evals view instead of opening modal
-- [ ] #12 Completed evals shown with final status in queue
+- [ ] #10 Policy failed systems shown with 'Policy Failed' status (yellow/orange) with tooltip explaining what that means
+- [ ] #11 Systems that pass policy are removed from eval queue after a short delay (2-3 seconds) to show queue progression
+- [ ] #12 Flake view eval log chip redirects to Evals view instead of opening modal
+- [ ] #13 Completed evals shown with final status in queue
+- [ ] #14 Status items have explanatory text or hover tooltips explaining what each status means
 <!-- AC:END -->
