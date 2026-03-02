@@ -117,7 +117,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     );
 
     tokio::select! {
-        result = run_api_job_loop(poll_client, poll_interval, max_concurrent, build_config.clone(), cache_config.clone()) => {
+        result = run_api_job_loop(poll_client, poll_interval, build_config.clone(), cache_config.clone()) => {
             error!("Job loop exited unexpectedly: {:?}", result);
         }
         _ = signal::ctrl_c() => {
@@ -160,17 +160,25 @@ async fn run_heartbeat_loop(client: BuilderApiClient, interval: std::time::Durat
 async fn run_api_job_loop(
     client: BuilderApiClient,
     poll_interval: std::time::Duration,
-    max_concurrent: i32,
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
 ) -> anyhow::Result<()> {
+    // Create DB pool once and share across all jobs
+    let pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
     let mut ticker = tokio::time::interval(poll_interval);
+    
+    // Limit concurrent builds to max_concurrent_jobs
+    let max_concurrent = build_config.max_concurrent_derivations;
+    let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+    info!("🔨 Starting job polling loop (max concurrent: {})...", max_concurrent);
 
     loop {
         ticker.tick().await;
 
-        // TODO: Check current active job count against max_concurrent
-        // For now, we'll keep it simple and process one job at a time
+        // Check if we have capacity for another build
+        if semaphore.available_permits() == 0 {
+            continue; // All slots busy, skip polling
+        }
 
         match client.get_next_job().await {
             Ok(Some(job)) => {
@@ -185,13 +193,18 @@ async fn run_api_job_loop(
                     continue;
                 }
 
+                // Acquire semaphore permit for this build
+                let permit = semaphore.clone().acquire_owned().await.unwrap();
+                
                 // Execute the build in a spawned task to allow concurrent builds
                 let job_client = client.clone();
                 let job_build_config = build_config.clone();
                 let job_cache_config = cache_config.clone();
+                let job_pool = pool.clone();
                 
                 tokio::spawn(async move {
-                    execute_build_job(job, job_client, job_build_config, job_cache_config).await;
+                    execute_build_job(job, job_client, job_build_config, job_cache_config, job_pool).await;
+                    drop(permit); // Release semaphore when build completes
                 });
             }
             Ok(None) => {
@@ -210,21 +223,9 @@ async fn execute_build_job(
     client: BuilderApiClient,
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
+    pool: sqlx::PgPool,
 ) {
     info!("🔨 Starting build for job #{} (derivation: {})", job.id, job.derivation_id);
-
-    // We need database access to fetch the derivation
-    // In API mode, we still need a database connection for build operations
-    let pool = match crystal_forge::config::CrystalForgeConfig::db_pool().await {
-        Ok(pool) => pool,
-        Err(e) => {
-            error!("❌ Failed to connect to database for job #{}: {}", job.id, e);
-            if let Err(e2) = client.fail_job(job.id, &format!("Database connection failed: {}", e)).await {
-                error!("❌ Failed to report job failure: {}", e2);
-            }
-            return;
-        }
-    };
 
     // Fetch the derivation from database
     let mut derivation = match get_derivation_by_id(&pool, job.derivation_id).await {

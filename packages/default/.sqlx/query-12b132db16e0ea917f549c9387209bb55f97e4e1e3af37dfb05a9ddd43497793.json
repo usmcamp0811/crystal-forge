@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO build_jobs (\n            derivation_id,\n            environment_id,\n            priority_weight,\n            status\n        )\n        SELECT \n            d.id as derivation_id,\n            s.environment_id,\n            -- Priority calculation:\n            -- Base: 1.0\n            -- * 10 if system is tracked (in systems table)\n            -- * 2 if commit is newer (based on timestamp)\n            CASE \n                WHEN s.id IS NOT NULL THEN 10.0  -- Tracked system\n                ELSE 1.0  -- Untracked\n            END *\n            CASE\n                -- Newer commits get higher priority (decay over time)\n                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600 THEN 2.0  -- < 1 hour old\n                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5  -- < 1 day old\n                ELSE 1.0  -- Older commits\n            END as priority_weight,\n            'queued' as status\n        FROM derivations d\n        INNER JOIN commits c ON d.commit_id = c.id\n        LEFT JOIN systems s ON (\n            d.derivation_target = s.hostname \n            AND s.flake_id = c.flake_id\n        )\n        WHERE d.commit_id = $1\n            AND d.status_id = 5  -- CRITICAL: DryRunComplete (see migration 0027_create_derivation_statuses.sql)\n            AND NOT EXISTS (\n                -- Prevent duplicates: don't create job if one already exists\n                SELECT 1 FROM build_jobs bj \n                WHERE bj.derivation_id = d.id\n            )\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "12b132db16e0ea917f549c9387209bb55f97e4e1e3af37dfb05a9ddd43497793"
+}

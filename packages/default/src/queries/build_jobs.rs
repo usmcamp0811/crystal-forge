@@ -54,7 +54,7 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
             AND s.flake_id = c.flake_id
         )
         WHERE d.commit_id = $1
-            AND d.status_id = 5  -- DryRunComplete
+            AND d.status_id = 5  -- CRITICAL: DryRunComplete (see migration 0027_create_derivation_statuses.sql)
             AND NOT EXISTS (
                 -- Prevent duplicates: don't create job if one already exists
                 SELECT 1 FROM build_jobs bj 
@@ -182,7 +182,7 @@ pub async fn mark_job_failed(
                 ELSE 'queued'  -- Re-queue for retry
             END,
             builder_id = NULL,  -- Unassign so another builder can pick it up
-            logs = COALESCE($2, logs) || E'\n\nError: ' || $3,
+            logs = COALESCE(logs, '') || COALESCE($2, '') || E'\n\nError: ' || $3,
             completed_at = CASE
                 WHEN retry_count + 1 >= max_retries THEN NOW()
                 ELSE NULL
