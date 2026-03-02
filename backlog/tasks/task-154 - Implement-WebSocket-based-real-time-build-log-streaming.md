@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: In Progress
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 17:20'
+updated_date: '2026-03-02 17:44'
 labels:
   - enhancement
   - builder
@@ -647,6 +647,32 @@ If blockers require code changes beyond TASK-154 scope, create follow-up task(s)
 Merge tracking: follow-up hardening captured in TASK-161. Do not merge MR !150 until TASK-161 acceptance criteria are complete or explicitly waived by maintainer.
 
 LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-154-websocket-build-logs
+
+2026-03-02 MR !150 hardening implemented in code (review blockers addressed):
+
+- WS AuthZ parity: `build-jobs/:job_id/logs/stream` now authorizes either viewer+ session or signed builder request bound to path+timestamp, and validates builder owns the job. `commits/:commit_id/eval/stream` now requires viewer+ session.
+
+- Explicit framing: build stream now requires typed JSON envelopes (`type=log|metrics|error`) end-to-end (builder sender, server parser, UI parser), eliminating JSON/plain-text ambiguity.
+
+- Backpressure/safety: added build and eval channel caps and bounded buffers; added max WS frame size checks for build log ingest; eval stream now includes keepalive ping and lag logging.
+
+- Lifecycle cleanup: build stream broadcast channels now cleaned up on terminal job states (complete/permanent fail); eval channels still cleaned on evaluation completion/failure.
+
+- Fallback correctness: builder log send now falls back to HTTP append when WS send fails and disables WS after failure to avoid repeated partial-failure behavior.
+
+- Added focused tests: typed build frame discriminator test, build frame serialization tests, eval channel fanout+cleanup test.
+
+Verification run:
+
+- `nix develop -c cargo check -p crystal-forge` (pass)
+
+- `nix develop -c cargo test build_stream_log_frame_uses_explicit_type` (pass)
+
+- `nix develop -c cargo test build_stream_requires_explicit_type_discriminator` (pass)
+
+- `nix develop -c cargo test eval_channel_fanout_and_cleanup` (pass)
+
+- `nix build .#packages.x86_64-linux.default` (pass)
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
