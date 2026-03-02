@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: In Progress
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 17:44'
+updated_date: '2026-03-02 18:00'
 labels:
   - enhancement
   - builder
@@ -673,6 +673,10 @@ Verification run:
 - `nix develop -c cargo test eval_channel_fanout_and_cleanup` (pass)
 
 - `nix build .#packages.x86_64-linux.default` (pass)
+
+2026-03-02: Committed MR hardening changes as `a87545df` and pushed to branch `TASK-154-websocket-build-logs`.
+
+MR !150 description updated with checked hardening checklist and verification commands/results.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
