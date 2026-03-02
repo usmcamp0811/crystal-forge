@@ -225,6 +225,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/builders/:id/jobs/:job_id/logs",
             post(builders::append_job_logs),
         )
+        .route(
+            "/api/v1/build-jobs/:job_id/logs/stream",
+            get(builders::stream_build_logs),
+        )
         .route("/api/v1/admin/users", get(admin::list_users))
         .route("/api/v1/admin/users", post(admin::create_user))
         .route("/api/v1/admin/users/:id", patch(admin::update_user))

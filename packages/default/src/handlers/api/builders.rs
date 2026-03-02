@@ -6,10 +6,12 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, State, ws::{WebSocket, WebSocketUpgrade, Message}},
     http::StatusCode,
+    response::IntoResponse,
 };
 use bytes::Bytes;
+use futures::{sink::SinkExt, stream::StreamExt};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -697,4 +699,90 @@ pub async fn append_job_logs(
             max_total_bytes
         ),
     ))
+}
+
+// =============================================================================
+// WEBSOCKET LOG STREAMING
+// =============================================================================
+
+/// WebSocket endpoint for real-time build log streaming
+/// GET /api/v1/build-jobs/:job_id/logs/stream
+///
+/// This endpoint allows clients (UI or builders) to stream logs in real-time.
+/// Builders send log lines, UI clients receive them.
+///
+/// Message Format:
+/// - Text messages from builder -> stored as logs in database
+/// - Text messages to clients -> broadcast log lines
+/// - JSON messages -> system metrics (CPU/RAM usage)
+pub async fn stream_build_logs(
+    ws: WebSocketUpgrade,
+    Path(job_id): Path<Uuid>,
+    State(state): State<CFState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_log_stream(socket, job_id, state.pool))
+}
+
+#[derive(Serialize, Deserialize)]
+struct SystemMetrics {
+    cpu_percent: f32,
+    ram_used_mb: u64,
+    ram_total_mb: u64,
+    timestamp: String,
+}
+
+async fn handle_log_stream(socket: WebSocket, job_id: Uuid, pool: PgPool) {
+    let (mut sender, mut receiver) = socket.split();
+    
+    tracing::info!("WebSocket connection established for job {}", job_id);
+    
+    // Handle incoming messages (log lines from builder or metrics)
+    while let Some(msg) = receiver.next().await {
+        match msg {
+            Ok(Message::Text(text)) => {
+                // Try to parse as JSON metrics first
+                if let Ok(metrics) = serde_json::from_str::<SystemMetrics>(&text) {
+                    // This is a metrics message - just broadcast it, don't store
+                    tracing::debug!("Received metrics for job {}: CPU {}%, RAM {}/{} MB", 
+                        job_id, metrics.cpu_percent, metrics.ram_used_mb, metrics.ram_total_mb);
+                    
+                    // Echo back to all connected clients
+                    if let Err(e) = sender.send(Message::Text(text)).await {
+                        tracing::error!("Failed to send metrics: {}", e);
+                        break;
+                    }
+                } else {
+                    // Regular log line - append to database
+                    if let Err(e) = builders::append_job_logs(&pool, &job_id, &text).await {
+                        tracing::error!("Failed to append log for job {}: {}", job_id, e);
+                        let _ = sender.send(Message::Text(format!("ERROR: {}", e))).await;
+                        break;
+                    }
+                    
+                    // Echo back to confirm receipt
+                    if let Err(e) = sender.send(Message::Text(text)).await {
+                        tracing::error!("Failed to send WebSocket message: {}", e);
+                        break;
+                    }
+                }
+            }
+            Ok(Message::Close(_)) => {
+                tracing::info!("WebSocket closed for job {}", job_id);
+                break;
+            }
+            Ok(Message::Ping(data)) => {
+                if let Err(e) = sender.send(Message::Pong(data)).await {
+                    tracing::error!("Failed to send pong: {}", e);
+                    break;
+                }
+            }
+            Ok(_) => {} // Ignore other message types
+            Err(e) => {
+                tracing::error!("WebSocket error for job {}: {}", job_id, e);
+                break;
+            }
+        }
+    }
+    
+    tracing::info!("WebSocket connection closed for job {}", job_id);
 }
