@@ -1,7 +1,7 @@
 ---
 id: TASK-160
 title: Create Eval queue view with reordering support
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-02 16:22'
 updated_date: '2026-03-02 16:58'
