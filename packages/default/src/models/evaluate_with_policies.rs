@@ -22,7 +22,8 @@ pub struct NixEvalJobResult {
     pub attr: String,
     #[serde(rename = "attrPath")]
     pub attr_path: Vec<String>,
-    pub name: String,
+    /// Name is optional because nix-eval-jobs may omit it on errors
+    pub name: Option<String>,
     #[serde(rename = "drvPath")]
     pub drv_path: Option<String>,
     pub error: Option<String>,
