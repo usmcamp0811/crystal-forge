@@ -116,6 +116,25 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
         .and_then(|result| result.as_ref().ok())
         .cloned();
 
+    let in_progress_count = queue_items
+        .read()
+        .iter()
+        .filter(|item| is_in_progress_eval_status(&item.evaluation_status))
+        .count();
+    let pending_count = queue_items
+        .read()
+        .iter()
+        .filter(|item| is_pending_eval_status(&item.evaluation_status))
+        .count();
+
+    if initial_commit_id.is_none() {
+        if let Some(live) = live_item.as_ref() {
+            if Some(live.commit_id) != *selected_commit_id.read() {
+                selected_commit_id.set(Some(live.commit_id));
+            }
+        }
+    }
+
     rsx! {
         div {
             class: "space-y-6",
@@ -152,6 +171,14 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     class: "text-xs px-3 py-2 rounded-lg border text-red-100",
                     style: "background-color: #4A252D; border-color: #7A3D48;",
                     "Failed to refresh evaluation queue: {error}"
+                }
+            }
+
+            if in_progress_count == 0 && pending_count > 0 {
+                p {
+                    class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
+                    style: "background-color: #493E26; border-color: #8C7041;",
+                    "No evaluations are currently running. {pending_count} commit(s) are pending in queue. If this persists, the eval worker loop may be stalled."
                 }
             }
 
@@ -465,12 +492,16 @@ fn StatCard(label: String, value: String, tone: &'static str) -> Element {
 
 fn is_active_eval_status(status: &str) -> bool {
     let normalized = status.trim().to_ascii_lowercase();
-    matches!(normalized.as_str(), "pending" | "in_progress" | "in-progress")
+    matches!(normalized.as_str(), "pending" | "in_progress" | "in-progress" | "in progress")
 }
 
 fn is_in_progress_eval_status(status: &str) -> bool {
     let normalized = status.trim().to_ascii_lowercase();
-    matches!(normalized.as_str(), "in_progress" | "in-progress")
+    matches!(normalized.as_str(), "in_progress" | "in-progress" | "in progress")
+}
+
+fn is_pending_eval_status(status: &str) -> bool {
+    status.trim().eq_ignore_ascii_case("pending")
 }
 
 fn active_row_class(is_selected: bool) -> &'static str {
