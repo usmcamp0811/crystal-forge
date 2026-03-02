@@ -217,6 +217,6 @@ mod tests {
         assert_eq!(parsed.repo, "org/repo");
         assert_eq!(parsed.commit, "abc123");
         assert_eq!(parsed.system, None);
-        assert_eq!(parsed.short_format(), "org/repo @ abc1234");
+        assert_eq!(parsed.short_format(), "org/repo @ abc123");
     }
 }
