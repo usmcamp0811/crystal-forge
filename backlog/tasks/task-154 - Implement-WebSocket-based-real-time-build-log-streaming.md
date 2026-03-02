@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: Review
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 17:13'
+updated_date: '2026-03-02 17:14'
 labels:
   - enhancement
   - builder
@@ -642,6 +642,8 @@ Non-blocking but recommended before/with merge:
 - Automated tests: at least one handler-level test per WS endpoint (build ingest/storage behavior + eval fanout/cleanup).
 
 If blockers require code changes beyond TASK-154 scope, create follow-up task(s) and link them here before merge decision.
+
+Merge tracking: follow-up hardening captured in TASK-161. Do not merge MR !150 until TASK-161 acceptance criteria are complete or explicitly waived by maintainer.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
