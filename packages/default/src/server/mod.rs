@@ -179,7 +179,13 @@ async fn process_pending_commits(pool: &PgPool, cf_state: &std::sync::Arc<crate:
                     continue;
                 }
                 
-                // Broadcast eval start message to WebSocket clients
+                // Broadcast eval start status to WebSocket clients
+                crate::handlers::api::commits::broadcast_eval_status(
+                    &cf_state,
+                    commit.id,
+                    "started".to_string(),
+                    Some(format!("Starting evaluation for commit {}", &commit.git_commit_hash[..7.min(commit.git_commit_hash.len())])),
+                ).await;
                 crate::handlers::api::commits::broadcast_eval_log(
                     &cf_state,
                     commit.id,
@@ -207,7 +213,13 @@ async fn process_pending_commits(pool: &PgPool, cf_state: &std::sync::Arc<crate:
                 .await
                 {
                     Ok((results, policy_checks)) => {
-                        // Broadcast completion message
+                        // Broadcast completion status
+                        crate::handlers::api::commits::broadcast_eval_status(
+                            &cf_state,
+                            commit.id,
+                            "complete".to_string(),
+                            Some(format!("Evaluated {} systems", results.len())),
+                        ).await;
                         crate::handlers::api::commits::broadcast_eval_log(
                             &cf_state,
                             commit.id,
@@ -282,7 +294,13 @@ async fn process_pending_commits(pool: &PgPool, cf_state: &std::sync::Arc<crate:
                             commit.git_commit_hash, e
                         );
                         
-                        // Broadcast failure message
+                        // Broadcast failure status
+                        crate::handlers::api::commits::broadcast_eval_status(
+                            &cf_state,
+                            commit.id,
+                            "failed".to_string(),
+                            Some(format!("Evaluation failed: {}", e)),
+                        ).await;
                         crate::handlers::api::commits::broadcast_eval_log(
                             &cf_state,
                             commit.id,

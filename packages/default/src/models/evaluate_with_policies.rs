@@ -125,10 +125,38 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 debug!("📦 Evaluated: {}, drv_path={:?}, has_error={:?}",
                                     system_name, drv_path, has_error);
                                 
-                                // Broadcast to WebSocket clients
+                                // Broadcast system status to WebSocket clients
                                 if let Some(state) = cf_state {
-                                    let log_msg = format!("📦 Evaluated: {}", system_name);
-                                    crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                    if has_error {
+                                        // Broadcast failure status
+                                        let error_msg = result.error.clone().unwrap_or_else(|| "Unknown error".to_string());
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
+                                            Some(error_msg.clone()),
+                                        ).await;
+                                        crate::handlers::api::commits::broadcast_eval_log(
+                                            state,
+                                            commit.id,
+                                            format!("❌ {}: {}", system_name, error_msg),
+                                        ).await;
+                                    } else {
+                                        // Broadcast success status
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::Success,
+                                            None,
+                                        ).await;
+                                        crate::handlers::api::commits::broadcast_eval_log(
+                                            state,
+                                            commit.id,
+                                            format!("✅ Evaluated: {}", system_name),
+                                        ).await;
+                                    }
                                 }
 
                                 // Extract policy check results from meta.policies

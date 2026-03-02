@@ -8,8 +8,41 @@ use axum::{
     response::IntoResponse,
 };
 use futures::StreamExt;
+use serde::{Serialize, Deserialize};
 
 use crate::handlers::agent_request::CFState;
+
+/// Structured message types for eval log WebSocket
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum EvalLogMessage {
+    /// Plain text log line
+    Log { message: String },
+    
+    /// Per-system status update
+    SystemStatus {
+        system: String,
+        status: SystemEvalStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    
+    /// Overall eval status
+    EvalStatus {
+        status: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemEvalStatus {
+    Pending,
+    Evaluating,
+    Success,
+    Failed,
+}
 
 /// WebSocket endpoint for streaming evaluation logs
 /// GET /api/v1/commits/:commit_id/eval/stream
@@ -62,14 +95,46 @@ pub async fn ensure_eval_channel(state: &CFState, commit_id: i32) {
 /// Helper function to broadcast a log line to all connected WebSocket clients for a commit
 /// IMPORTANT: This will create a channel if one doesn't exist, so logs are buffered even if no clients are connected yet
 pub async fn broadcast_eval_log(state: &CFState, commit_id: i32, log_line: String) {
+    let msg = EvalLogMessage::Log { message: log_line };
+    broadcast_eval_message(state, commit_id, msg).await;
+}
+
+/// Broadcast a system status update
+pub async fn broadcast_system_status(
+    state: &CFState,
+    commit_id: i32,
+    system: String,
+    status: SystemEvalStatus,
+    error: Option<String>,
+) {
+    let msg = EvalLogMessage::SystemStatus { system, status, error };
+    broadcast_eval_message(state, commit_id, msg).await;
+}
+
+/// Broadcast an overall eval status update
+pub async fn broadcast_eval_status(
+    state: &CFState,
+    commit_id: i32,
+    status: String,
+    message: Option<String>,
+) {
+    let msg = EvalLogMessage::EvalStatus { status, message };
+    broadcast_eval_message(state, commit_id, msg).await;
+}
+
+/// Internal: broadcast a structured message
+async fn broadcast_eval_message(state: &CFState, commit_id: i32, msg: EvalLogMessage) {
     let mut channels = state.eval_log_channels.lock().await;
     let tx = channels.entry(commit_id).or_insert_with(|| {
         let (tx, _rx) = tokio::sync::broadcast::channel(1000);
         tracing::debug!("📡 Created broadcast channel for commit {} (first broadcast)", commit_id);
         tx
     });
-    // Send to all subscribers (if channel is full, oldest messages are dropped)
-    let _ = tx.send(log_line);
+    
+    // Serialize to JSON
+    if let Ok(json) = serde_json::to_string(&msg) {
+        let _ = tx.send(json);
+    }
 }
 
 /// Cleanup broadcast channel when evaluation completes
