@@ -236,6 +236,10 @@ let
       psql -h 127.0.0.1 -p ${
         toString db_port
       } -U crystal_forge -d crystal_forge <<SQL
+        -- Delete any existing dev builder to ensure clean state
+        DELETE FROM builders WHERE id = '$BUILDER_UUID'::uuid;
+        
+        -- Insert dev builder with active status
         INSERT INTO builders (id, name, public_key, status, max_concurrent_jobs)
         VALUES (
           '$BUILDER_UUID'::uuid,
@@ -243,11 +247,7 @@ let
           '$BUILDER_PUBKEY',
           'active',
           1
-        )
-        ON CONFLICT (id) DO UPDATE SET
-          public_key = EXCLUDED.public_key,
-          status = 'active',
-          updated_at = now();
+        );
       SQL
 
       echo "✅ Dev builder registered successfully"
