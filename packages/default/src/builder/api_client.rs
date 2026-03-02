@@ -4,10 +4,12 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use chrono::Utc;
 use ed25519_dalek::{Signature, Signer, SigningKey};
+use futures::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
@@ -333,6 +335,66 @@ impl BuilderApiClient {
         }
 
         debug!("Logs appended to job {}", job_id);
+        Ok(())
+    }
+
+    /// Create WebSocket URL for log streaming
+    fn ws_url(&self, job_id: &Uuid) -> String {
+        let base = self.server_url.replace("http://", "ws://").replace("https://", "wss://");
+        format!("{}/api/v1/build-jobs/{}/logs/stream", base, job_id)
+    }
+
+    /// Stream a log line via WebSocket
+    /// Returns a WebSocket stream that can be used to send log lines and metrics
+    pub async fn create_log_stream(&self, job_id: &Uuid) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
+        let ws_url = self.ws_url(job_id);
+        info!("🔌 Connecting WebSocket to {}", ws_url);
+
+        let (ws_stream, _) = connect_async(&ws_url)
+            .await
+            .context("Failed to connect WebSocket")?;
+
+        info!("✅ WebSocket connected for job {}", job_id);
+        Ok(ws_stream)
+    }
+
+    /// Send a log line via WebSocket stream
+    pub async fn send_log_line(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        line: &str,
+    ) -> Result<()> {
+        ws.send(Message::Text(line.to_string()))
+            .await
+            .context("Failed to send log line")?;
+        Ok(())
+    }
+
+    /// Send system metrics via WebSocket stream
+    pub async fn send_metrics(
+        ws: &mut tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+        cpu_percent: f32,
+        ram_used_mb: u64,
+        ram_total_mb: u64,
+    ) -> Result<()> {
+        #[derive(Serialize)]
+        struct SystemMetrics {
+            cpu_percent: f32,
+            ram_used_mb: u64,
+            ram_total_mb: u64,
+            timestamp: String,
+        }
+
+        let metrics = SystemMetrics {
+            cpu_percent,
+            ram_used_mb,
+            ram_total_mb,
+            timestamp: Utc::now().to_rfc3339(),
+        };
+
+        let json = serde_json::to_string(&metrics)?;
+        ws.send(Message::Text(json))
+            .await
+            .context("Failed to send metrics")?;
         Ok(())
     }
 }

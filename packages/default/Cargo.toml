@@ -39,6 +39,7 @@ argon2 = "0.5"
 systemstat = "0.2.4"
 num_cpus = "1.16"
 futures = "0.3.31"
+tokio-tungstenite = "0.24"
 bigdecimal = { version = "0.4", features = ["serde"] }
 sqlx = { version = "0.8.6", features = ["uuid", "postgres", "runtime-tokio", "chrono", "macros", "bigdecimal"] }
 chrono = { version = "0.4.41", features = ["serde"] }
