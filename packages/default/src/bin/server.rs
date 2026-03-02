@@ -97,7 +97,7 @@ async fn main() -> anyhow::Result<()> {
     // TODO: Update this to get the first N commits on the first time
     reset_non_terminal_derivations(&pool).await?;
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
-    
+
     // Start HTTP server
     info!("Starting Crystal Forge Server...");
     let server_cfg = &cfg.server;
@@ -106,7 +106,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = CFState::new(pool, server_cfg.clone());
     let state_arc = Arc::new(state.clone());
-    
+
     spawn_background_tasks(cfg.clone(), background_pool, state_arc.clone());
     let mut app = Router::new()
         .route("/status", get(status::status))
@@ -230,6 +230,11 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/build-jobs/:job_id/logs/stream",
             get(builders::stream_build_logs),
+        )
+        .route("/api/v1/commits/eval-queue", get(commits::list_eval_queue))
+        .route(
+            "/api/v1/commits/eval-queue/reorder",
+            post(commits::reorder_eval_queue),
         )
         .route(
             "/api/v1/commits/:commit_id/eval/stream",

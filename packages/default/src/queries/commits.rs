@@ -82,7 +82,7 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
             )
         )
         ORDER BY c.commit_timestamp DESC
-        "#
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -234,12 +234,12 @@ pub async fn mark_commit_evaluation_complete(pool: &PgPool, commit_id: i32) -> R
 }
 
 /// Mark commit evaluation as failed (with retry logic)
-/// 
+///
 /// Retries up to 3 times with exponential backoff:
 /// - Attempt 1: immediate
 /// - Attempt 2: after 1 minute
 /// - Attempt 3: after 5 minutes (from attempt 2)
-/// 
+///
 /// After 3 failed attempts, marks as permanently 'failed'.
 /// Manual re-evaluation can be triggered via API (resets attempt count).
 pub async fn mark_commit_evaluation_failed(
@@ -257,7 +257,7 @@ pub async fn mark_commit_evaluation_failed(
             END,
             evaluation_error_message = $2
         WHERE id = $1
-        "#
+        "#,
     )
     .bind(commit_id)
     .bind(error)
@@ -268,12 +268,12 @@ pub async fn mark_commit_evaluation_failed(
 }
 
 /// Reset commit evaluation status to allow manual retry
-/// 
+///
 /// This resets:
 /// - evaluation_status → 'pending'
 /// - evaluation_attempt_count → 0
 /// - evaluation_error_message → NULL
-/// 
+///
 /// Use this for manual re-evaluation after fixing issues.
 pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()> {
     #[derive(sqlx::FromRow)]
@@ -281,7 +281,7 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
         id: i32,
         git_commit_hash: String,
     }
-    
+
     let result = sqlx::query_as::<_, ResetResult>(
         r#"
         UPDATE commits
@@ -292,7 +292,7 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
             evaluation_error_message = NULL
         WHERE id = $1
         RETURNING id, git_commit_hash
-        "#
+        "#,
     )
     .bind(commit_id)
     .fetch_one(pool)
@@ -303,5 +303,107 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()
         result.id, result.git_commit_hash
     );
 
+    Ok(())
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct EvalQueueRow {
+    pub commit_id: i32,
+    pub flake_id: i32,
+    pub flake_name: String,
+    pub branch: String,
+    pub commit_hash: String,
+    pub commit_message: Option<String>,
+    pub author: Option<String>,
+    pub committed_at: chrono::DateTime<chrono::Utc>,
+    pub evaluation_status: String,
+    pub queue_position: i64,
+    pub systems: Vec<String>,
+    pub system_count: i64,
+    pub passed_count: i64,
+    pub policy_failed_count: i64,
+    pub eval_failed_count: i64,
+}
+
+pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueRow>> {
+    let rows = sqlx::query_as::<_, EvalQueueRow>(
+        r#"
+        SELECT
+            c.id AS commit_id,
+            c.flake_id,
+            f.name AS flake_name,
+            COALESCE(f.branch, 'main') AS branch,
+            c.git_commit_hash AS commit_hash,
+            c.message AS commit_message,
+            c.author,
+            c.commit_timestamp AS committed_at,
+            COALESCE(c.evaluation_status, 'pending') AS evaluation_status,
+            COALESCE(c.eval_queue_position, 9223372036854775807) AS queue_position,
+            COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
+            COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
+            COALESCE((
+                SELECT COUNT(*)::bigint
+                FROM derivations d
+                WHERE d.commit_id = c.id
+                  AND d.cf_agent_enabled IS TRUE
+            ), 0) AS passed_count,
+            COALESCE((
+                SELECT COUNT(*)::bigint
+                FROM derivations d
+                WHERE d.commit_id = c.id
+                  AND d.cf_agent_enabled IS FALSE
+            ), 0) AS policy_failed_count,
+            COALESCE((
+                SELECT COUNT(*)::bigint
+                FROM derivations d
+                WHERE d.commit_id = c.id
+                  AND d.status_id = 6
+            ), 0) AS eval_failed_count
+        FROM commits c
+        JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+        WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'complete', 'failed')
+        ORDER BY
+            CASE
+                WHEN c.evaluation_status IN ('pending', 'in_progress') THEN 0
+                ELSE 1
+            END,
+            COALESCE(c.eval_queue_position, 9223372036854775807),
+            c.commit_timestamp DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows)
+}
+
+pub async fn reorder_eval_queue(pool: &PgPool, ordered_commit_ids: &[i32]) -> Result<()> {
+    if ordered_commit_ids.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        WITH ordered AS (
+            SELECT commit_id, ordinality::bigint AS position
+            FROM UNNEST($1::int[]) WITH ORDINALITY AS t(commit_id, ordinality)
+        )
+        UPDATE commits c
+        SET eval_queue_position = o.position
+        FROM ordered o
+        WHERE c.id = o.commit_id
+          AND COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress')
+        "#,
+    )
+    .bind(ordered_commit_ids)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
     Ok(())
 }

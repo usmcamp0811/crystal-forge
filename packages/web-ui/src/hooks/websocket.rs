@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
-use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::*;
 use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 
 /// System metrics sent by the builder during a build.
@@ -61,6 +61,8 @@ pub enum SystemEvalStatus {
     Evaluating,
     Success,
     Failed,
+    PolicyFailed,
+    QueuedForBuild,
 }
 
 /// WebSocket connection state.
@@ -408,6 +410,12 @@ fn connect_eval_websocket(
                             SystemEvalStatus::Failed => format!("❌ {}: evaluation failed", system),
                             SystemEvalStatus::Evaluating => format!("⏳ {}: evaluating...", system),
                             SystemEvalStatus::Pending => format!("⏸ {}: pending", system),
+                            SystemEvalStatus::PolicyFailed => {
+                                format!("⚠️ {}: policy failed", system)
+                            }
+                            SystemEvalStatus::QueuedForBuild => {
+                                format!("🚀 {}: queued for build", system)
+                            }
                         }
                     };
                     logs_msg.write().push(log_line);

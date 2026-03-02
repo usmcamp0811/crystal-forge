@@ -268,6 +268,60 @@ html, body {
   color: var(--cf-chip-violet-text);
 }
 
+.cf-eval-chip-pending {
+  background-color: #253449;
+  border-color: #3e5b82;
+  color: #dbeafe;
+}
+
+.cf-eval-chip-active {
+  background-color: #493e26;
+  border-color: #8c7041;
+  color: #fde68a;
+}
+
+.cf-eval-chip-complete {
+  background-color: #23363a;
+  border-color: #3d6870;
+  color: #ccfbf1;
+}
+
+.cf-eval-chip-failed {
+  background-color: #4a252d;
+  border-color: #7a3d48;
+  color: #fecdd3;
+}
+
+.cf-eval-system-pending {
+  background-color: #2b303b;
+  border-color: #495264;
+  color: #cbd5e1;
+}
+
+.cf-eval-system-evaluating {
+  background-color: #493e26;
+  border-color: #8c7041;
+  color: #fde68a;
+}
+
+.cf-eval-system-success {
+  background-color: #23363a;
+  border-color: #3d6870;
+  color: #ccfbf1;
+}
+
+.cf-eval-system-policy-failed {
+  background-color: #3b2f00;
+  border-color: #7a6000;
+  color: #fef3c7;
+}
+
+.cf-eval-system-failed {
+  background-color: #4a252d;
+  border-color: #7a3d48;
+  color: #fecdd3;
+}
+
 .cf-policy-selected {
   background-color: var(--cf-policy-selected-bg);
   border-color: var(--cf-policy-selected-border);

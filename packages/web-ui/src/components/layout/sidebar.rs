@@ -120,6 +120,23 @@ pub fn SidebarNav() -> Element {
                     )
                 }
                 NavLink {
+                    to: Route::EvaluationsView {},
+                    label: "Evaluations",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M4 6h16" }
+                            path { d: "M4 12h16" }
+                            path { d: "M4 18h10" }
+                            path { d: "M18 16l2 2 4-4" }
+                        }
+                    )
+                }
+                NavLink {
                     to: Route::BuildersView {},
                     label: "Builders",
                     icon: rsx!(

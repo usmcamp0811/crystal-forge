@@ -124,39 +124,17 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                 debug!("📦 Evaluated: {}, drv_path={:?}, has_error={:?}",
                                     system_name, drv_path, has_error);
-                                
-                                // Broadcast system status to WebSocket clients
+
+                                // Broadcast in-progress status to WebSocket clients.
                                 if let Some(state) = cf_state {
-                                    if has_error {
-                                        // Broadcast failure status
-                                        let error_msg = result.error.clone().unwrap_or_else(|| "Unknown error".to_string());
-                                        crate::handlers::api::commits::broadcast_system_status(
-                                            state,
-                                            commit.id,
-                                            system_name.clone(),
-                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
-                                            Some(error_msg.clone()),
-                                        ).await;
-                                        crate::handlers::api::commits::broadcast_eval_log(
-                                            state,
-                                            commit.id,
-                                            format!("❌ {}: {}", system_name, error_msg),
-                                        ).await;
-                                    } else {
-                                        // Broadcast success status
-                                        crate::handlers::api::commits::broadcast_system_status(
-                                            state,
-                                            commit.id,
-                                            system_name.clone(),
-                                            crate::handlers::api::commits::SystemEvalStatus::Success,
-                                            None,
-                                        ).await;
-                                        crate::handlers::api::commits::broadcast_eval_log(
-                                            state,
-                                            commit.id,
-                                            format!("✅ Evaluated: {}", system_name),
-                                        ).await;
-                                    }
+                                    crate::handlers::api::commits::broadcast_system_status(
+                                        state,
+                                        commit.id,
+                                        system_name.clone(),
+                                        crate::handlers::api::commits::SystemEvalStatus::Evaluating,
+                                        None,
+                                    )
+                                    .await;
                                 }
 
                                 // Extract policy check results from meta.policies
@@ -192,6 +170,66 @@ pub async fn evaluate_with_nix_eval_jobs(
                                     }
                                 } else {
                                     debug!("⚠️  No meta field for {}", system_name);
+                                }
+
+                                // Broadcast post-policy status to WebSocket clients.
+                                if let Some(state) = cf_state {
+                                    if has_error {
+                                        let error_msg = result
+                                            .error
+                                            .clone()
+                                            .unwrap_or_else(|| "Unknown error".to_string());
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
+                                            Some(error_msg.clone()),
+                                        )
+                                        .await;
+                                        crate::handlers::api::commits::broadcast_eval_log(
+                                            state,
+                                            commit.id,
+                                            format!("❌ {}: {}", system_name, error_msg),
+                                        )
+                                        .await;
+                                    } else if cf_agent_enabled == Some(true) {
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                                            None,
+                                        )
+                                        .await;
+                                        crate::handlers::api::commits::broadcast_eval_log(
+                                            state,
+                                            commit.id,
+                                            format!(
+                                                "✅ {}: policy passed (CF enabled), queued for build",
+                                                system_name
+                                            ),
+                                        )
+                                        .await;
+                                    } else {
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::PolicyFailed,
+                                            Some("CF agent not enabled in configuration".to_string()),
+                                        )
+                                        .await;
+                                        crate::handlers::api::commits::broadcast_eval_log(
+                                            state,
+                                            commit.id,
+                                            format!(
+                                                "⚠️ {}: policy failed (CF agent not enabled)",
+                                                system_name
+                                            ),
+                                        )
+                                        .await;
+                                    }
                                 }
 
                                 // Insert derivation with policy check results
@@ -267,12 +305,12 @@ pub async fn evaluate_with_nix_eval_jobs(
                         } else {
                             debug!("nix-eval-jobs stderr: {}", line);
                         }
-                        
+
                         // Broadcast stderr to WebSocket clients
                         if let Some(state) = cf_state {
                             crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
                         }
-                        
+
                         stderr_output.push(line);
                     }
                     None => stderr_done = true,

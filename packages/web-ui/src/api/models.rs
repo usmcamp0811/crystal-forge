@@ -585,6 +585,41 @@ pub struct BuildQueueItem {
     pub logs: Option<String>,
 }
 
+/// Summary of the evaluation queue for the evaluations page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalQueueSummary {
+    pub active_count: i64,
+    pub completed_count: i64,
+    pub items: Vec<EvalQueueItem>,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// A single commit item in the evaluation queue.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalQueueItem {
+    pub commit_id: i32,
+    pub flake_id: i32,
+    pub flake_name: String,
+    pub branch: String,
+    pub commit_hash: String,
+    pub commit_message: Option<String>,
+    pub author: Option<String>,
+    pub committed_at: DateTime<Utc>,
+    pub evaluation_status: String,
+    pub queue_position: i64,
+    pub systems: Vec<String>,
+    pub system_count: i64,
+    pub passed_count: i64,
+    pub policy_failed_count: i64,
+    pub eval_failed_count: i64,
+}
+
+/// Request payload for persisting evaluation queue ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReorderEvalQueueRequest {
+    pub ordered_commit_ids: Vec<i32>,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Pagination
 // ─────────────────────────────────────────────────────────────────────────────

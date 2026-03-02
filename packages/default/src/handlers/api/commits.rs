@@ -1,21 +1,109 @@
 //! Commit-related API handlers.
 
 use axum::{
+    Json,
     extract::{
-        ws::{Message, WebSocket},
         Path, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use serde::{Serialize, Deserialize};
-use tokio::time::{interval, Duration};
+use serde::{Deserialize, Serialize};
+use tokio::time::{Duration, interval};
 
+use crate::api::models::{EvalQueueItem, EvalQueueSummary, ReorderEvalQueueRequest};
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::require_viewer_or_above;
+use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 
 const EVAL_LOG_CHANNEL_BUFFER: usize = 1000;
 const MAX_EVAL_LOG_CHANNELS: usize = 1024;
+
+/// List evaluation queue items.
+/// GET /api/v1/commits/eval-queue
+pub async fn list_eval_queue(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let rows = match crate::queries::commits::list_eval_queue(&state.pool, 200).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::error!("Failed to list eval queue: {}", err);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut active_count = 0_i64;
+    let mut completed_count = 0_i64;
+
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            if matches!(row.evaluation_status.as_str(), "pending" | "in_progress") {
+                active_count += 1;
+            } else {
+                completed_count += 1;
+            }
+
+            EvalQueueItem {
+                commit_id: row.commit_id,
+                flake_id: row.flake_id,
+                flake_name: row.flake_name,
+                branch: row.branch,
+                commit_hash: row.commit_hash,
+                commit_message: row.commit_message,
+                author: row.author,
+                committed_at: row.committed_at,
+                evaluation_status: row.evaluation_status,
+                queue_position: row.queue_position,
+                systems: row.systems,
+                system_count: row.system_count,
+                passed_count: row.passed_count,
+                policy_failed_count: row.policy_failed_count,
+                eval_failed_count: row.eval_failed_count,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Json(EvalQueueSummary {
+        active_count,
+        completed_count,
+        items,
+        timestamp: chrono::Utc::now(),
+    })
+    .into_response()
+}
+
+/// Persist evaluation queue order for active commits.
+/// POST /api/v1/commits/eval-queue/reorder
+pub async fn reorder_eval_queue(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Json(request): Json<ReorderEvalQueueRequest>,
+) -> impl IntoResponse {
+    if require_operator_or_admin(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN;
+    }
+
+    if let Err(err) =
+        crate::queries::commits::reorder_eval_queue(&state.pool, &request.ordered_commit_ids).await
+    {
+        tracing::error!("Failed to reorder eval queue: {}", err);
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+
+    StatusCode::OK
+}
 
 /// Structured message types for eval log WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +111,7 @@ const MAX_EVAL_LOG_CHANNELS: usize = 1024;
 pub enum EvalLogMessage {
     /// Plain text log line
     Log { message: String },
-    
+
     /// Per-system status update
     SystemStatus {
         system: String,
@@ -31,7 +119,7 @@ pub enum EvalLogMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    
+
     /// Overall eval status
     EvalStatus {
         status: String,
@@ -47,6 +135,8 @@ pub enum SystemEvalStatus {
     Evaluating,
     Success,
     Failed,
+    PolicyFailed,
+    QueuedForBuild,
 }
 
 /// WebSocket endpoint for streaming evaluation logs
@@ -57,7 +147,10 @@ pub async fn stream_eval_logs(
     State(state): State<CFState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&state.pool, &headers).await.is_none() {
+    if require_viewer_or_above(&state.pool, &headers)
+        .await
+        .is_none()
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -65,8 +158,11 @@ pub async fn stream_eval_logs(
 }
 
 async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFState) {
-    tracing::info!("📡 WebSocket connection established for commit {} evaluation", commit_id);
-    
+    tracing::info!(
+        "📡 WebSocket connection established for commit {} evaluation",
+        commit_id
+    );
+
     // Get or create broadcast channel for this commit
     let Some(tx) = get_or_create_eval_channel(&state, commit_id).await else {
         tracing::warn!(
@@ -84,7 +180,7 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
 
     let mut rx = tx.subscribe();
     let mut keepalive = interval(Duration::from_secs(20));
-    
+
     // Stream messages from the broadcast channel to this WebSocket client
     loop {
         tokio::select! {
@@ -114,7 +210,7 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
             }
         }
     }
-    
+
     tracing::info!("WebSocket connection closed for commit {} eval", commit_id);
 }
 
@@ -138,7 +234,11 @@ pub async fn broadcast_system_status(
     status: SystemEvalStatus,
     error: Option<String>,
 ) {
-    let msg = EvalLogMessage::SystemStatus { system, status, error };
+    let msg = EvalLogMessage::SystemStatus {
+        system,
+        status,
+        error,
+    };
     broadcast_eval_message(state, commit_id, msg).await;
 }
 
@@ -162,7 +262,7 @@ async fn broadcast_eval_message(state: &CFState, commit_id: i32, msg: EvalLogMes
         );
         return;
     };
-    
+
     // Serialize to JSON
     if let Ok(json) = serde_json::to_string(&msg) {
         let _ = tx.send(json);
@@ -241,10 +341,7 @@ mod tests {
 
         let tx = {
             let channels = state.eval_log_channels.lock().await;
-            channels
-                .get(&commit_id)
-                .expect("channel exists")
-                .clone()
+            channels.get(&commit_id).expect("channel exists").clone()
         };
 
         let mut rx1 = tx.subscribe();
