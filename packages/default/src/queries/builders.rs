@@ -577,14 +577,14 @@ pub async fn claim_next_job_atomic(
     // Start transaction for atomic count + claim
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
-    // 1. Count active jobs for this builder WITH row-level lock
-    // FOR UPDATE locks the rows to prevent concurrent modifications during transaction
+    // 1. Count active jobs for this builder
+    // Note: We don't use FOR UPDATE here because it doesn't work with COUNT(*).
+    // The atomicity is ensured by the transaction and FOR UPDATE SKIP LOCKED on the job claim.
     let active_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*)
         FROM build_jobs
         WHERE builder_id = $1 AND status = 'building'
-        FOR UPDATE
         "#,
     )
     .bind(builder_id)
