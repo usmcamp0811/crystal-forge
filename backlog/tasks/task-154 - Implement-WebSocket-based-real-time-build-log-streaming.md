@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: Review
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 14:55'
+updated_date: '2026-03-02 15:05'
 labels:
   - enhancement
   - builder
@@ -282,6 +282,63 @@ pub async fn broadcast_eval_log(state: &CFState, commit_id: i32, log_line: Strin
 3. Click eval badge on commit card while evaluation is running
 4. Verify logs stream in modal in real-time
 5. Verify connection status indicator shows "Connected"
+
+## Build Queue Issue Fixed (2026-03-02 15:03)
+
+### User Report
+"Systems become eval'd they should be going into the build queue but its not or the ui is not updating correctly"
+
+### Root Cause Analysis
+Build jobs were NOT being created because:
+
+1. **Eval parsing was failing**: `nix-eval-jobs` outputs error results with missing `name` field
+2. **Parse failure aborted processing**: `Failed to parse nix-eval-jobs output: missing field 'name'`
+3. **No DryRunComplete marking**: Since eval "failed", no derivations marked complete
+4. **No build jobs created**: `create_build_jobs_for_commit` only queues derivations with `status_id = 5` (DryRunComplete)
+
+### The Parse Error
+```
+2026-03-02T14:47:14.856558Z  WARN Failed to parse nix-eval-jobs output: missing field `name` at line 1 column 2422
+```
+
+This happened because one system (butler) had an eval error:
+```json
+{"attr":"butler","attrPath":["butler"],"error":"error: Cannot build julia-sources.nix.drv"}
+```
+
+Note: No `name` field when there's an error!
+
+### The Fix (Commit 83de3588)
+Made `NixEvalJobResult.name` optional:
+```rust
+// BEFORE
+pub name: String,  // ❌ Required - parse fails on errors
+
+// AFTER  
+pub name: Option<String>,  // ✅ Optional - parse succeeds, system skipped
+```
+
+### Impact
+- ✅ Partial eval success now works
+- ✅ Systems that eval successfully → marked DryRunComplete → build jobs created
+- ✅ Systems with eval errors → logged as warnings → skipped (no build job)
+- ✅ Build queue UI will now populate as systems eval
+
+### Expected Behavior After Fix
+1. Eval starts for commit
+2. Each system evaluates in parallel (nix-eval-jobs)
+3. **Successful systems**: Marked DryRunComplete → build job created → appears in build queue UI
+4. **Failed systems**: Warning logged → no build job
+5. Eval completes even if some systems failed
+
+### Testing
+1. Restart server with this fix
+2. Trigger commit evaluation
+3. Watch server logs for:
+   - `✅ Marked derivation X as DryRunComplete`
+   - `📋 Created N build jobs for commit`
+4. Check UI build queue populates
+5. Click eval badge → verify logs show both successes and failures
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
