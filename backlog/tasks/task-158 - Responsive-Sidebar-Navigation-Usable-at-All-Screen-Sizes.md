@@ -1,9 +1,10 @@
 ---
 id: TASK-158
 title: Responsive Sidebar Navigation - Usable at All Screen Sizes
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-02 13:45'
+updated_date: '2026-03-02 13:45'
 labels:
   - frontend
   - ui
