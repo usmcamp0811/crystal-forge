@@ -4,7 +4,7 @@ title: Create Eval queue view with reordering support
 status: In Progress
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-02 22:38'
+updated_date: '2026-03-02 23:20'
 labels: []
 dependencies: []
 priority: medium
@@ -95,4 +95,27 @@ LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-160-eval-queue
 - `63804056` - feat: enforce single active evaluation and reset queues on startup
 
 This fixes the issue where multiple commits could be marked in_progress simultaneously, ensuring clean queue state on server restart.
+
+## Eval Status Alignment Fix (2026-03-02)
+
+### Problem
+Flakes view and Evaluations view were showing different statuses for the same commits:
+- Flakes view: Used derivation dry-run status (status_id 3,4,5,6) showing 'queued'
+- Evaluations view: Used commits.evaluation_status showing 'complete'
+
+### Solution
+- Updated Flakes timeline query to use `commits.evaluation_status` directly
+- Removed complex derivation status subquery
+- Updated frontend badge labels to match commit status values:
+  - `pending` → displays as 'queued'
+  - `in_progress` → displays as 'running'
+  - `complete` → displays as 'complete'
+  - `failed` → displays as 'failed'
+
+### Result
+✅ Both views now use the same source of truth
+✅ Status chips align correctly between Flakes and Evaluations views
+
+### Commit
+- `36958f51` - fix: align Flakes view eval status with Evaluations view
 <!-- SECTION:NOTES:END -->
