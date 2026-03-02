@@ -1,10 +1,10 @@
 ---
 id: TASK-154
 title: Implement WebSocket-based real-time build log streaming
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 03:36'
+updated_date: '2026-03-02 04:47'
 labels:
   - enhancement
   - builder
@@ -88,6 +88,14 @@ UI
 - [ ] #6 Auto-scroll / follow mode works in UI
 - [ ] #7 Existing build execution continues to work unchanged
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+**Started work**: 2026-03-02
+**Worktree**: TASK-154-websocket-build-logs
+**Branch**: TASK-154-websocket-build-logs (from dev)
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
