@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: In Progress
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 17:19'
+updated_date: '2026-03-02 17:20'
 labels:
   - enhancement
   - builder
@@ -645,6 +645,8 @@ Non-blocking but recommended before/with merge:
 If blockers require code changes beyond TASK-154 scope, create follow-up task(s) and link them here before merge decision.
 
 Merge tracking: follow-up hardening captured in TASK-161. Do not merge MR !150 until TASK-161 acceptance criteria are complete or explicitly waived by maintainer.
+
+LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-154-websocket-build-logs
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
