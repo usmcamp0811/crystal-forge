@@ -25,7 +25,7 @@ use crate::queries::commits::{
 };
 use crate::queries::derivations::cleanup_partial_derivations;
 
-pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
+pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool, cf_state: std::sync::Arc<crate::handlers::agent_request::CFState>) {
     let flake_pool = pool.clone();
     let commit_pool = pool.clone();
     let target_pool = pool.clone();
@@ -40,6 +40,7 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool) {
     tokio::spawn(run_commit_evaluation_loop(
         commit_pool,
         flake_config.commit_evaluation_interval,
+        cf_state,
     ));
     tokio::spawn(run_commit_artifact_hydration_loop(artifact_pool));
     tokio::spawn(run_build_log_retention_loop(
@@ -108,7 +109,7 @@ async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
 }
 
 /// Runs the periodic commit evaluation check loop
-pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
+pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration, cf_state: std::sync::Arc<crate::handlers::agent_request::CFState>) {
     info!(
         "🔁 Starting periodic commit evaluation check loop (every {:?})...",
         interval
@@ -130,14 +131,14 @@ pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration) {
     let mut ticker = time::interval_at(Instant::now() + interval, interval);
 
     loop {
-        if let Err(e) = process_pending_commits(&pool).await {
+        if let Err(e) = process_pending_commits(&pool, &cf_state).await {
             error!("❌ Error in commit evaluation cycle: {e}");
         }
         ticker.tick().await;
     }
 }
 
-async fn process_pending_commits(pool: &PgPool) -> Result<()> {
+async fn process_pending_commits(pool: &PgPool, cf_state: &std::sync::Arc<crate::handlers::agent_request::CFState>) -> Result<()> {
     match get_commits_pending_evaluation(&pool).await {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
@@ -177,6 +178,23 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                     );
                     continue;
                 }
+                
+                // CRITICAL: Create broadcast channel BEFORE eval starts
+                // This ensures WebSocket clients can subscribe before messages are sent
+                crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
+                
+                // Broadcast eval start status to WebSocket clients
+                crate::handlers::api::commits::broadcast_eval_status(
+                    &cf_state,
+                    commit.id,
+                    "started".to_string(),
+                    Some(format!("Starting evaluation for commit {}", &commit.git_commit_hash[..7.min(commit.git_commit_hash.len())])),
+                ).await;
+                crate::handlers::api::commits::broadcast_eval_log(
+                    &cf_state,
+                    commit.id,
+                    format!("🚀 Starting evaluation for commit {}", commit.git_commit_hash)
+                ).await;
 
                 // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations
                 // This will:
@@ -194,10 +212,27 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                     &build_config,
                     &server_config,
                     &policies, // Check deployment policies
+                    Some(&cf_state), // Pass CFState for WebSocket broadcasting
                 )
                 .await
                 {
                     Ok((results, policy_checks)) => {
+                        // Broadcast completion status
+                        crate::handlers::api::commits::broadcast_eval_status(
+                            &cf_state,
+                            commit.id,
+                            "complete".to_string(),
+                            Some(format!("Evaluated {} systems", results.len())),
+                        ).await;
+                        crate::handlers::api::commits::broadcast_eval_log(
+                            &cf_state,
+                            commit.id,
+                            format!("✅ Evaluation complete for commit {}", commit.git_commit_hash)
+                        ).await;
+                        
+                        // Cleanup WebSocket broadcast channel
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        
                         // ⬇️ mark COMPLETE
                         if let Err(e) = mark_commit_evaluation_complete(pool, commit.id).await {
                             error!(
@@ -262,6 +297,22 @@ async fn process_pending_commits(pool: &PgPool) -> Result<()> {
                             "❌ Failed to evaluate commit {}: {}",
                             commit.git_commit_hash, e
                         );
+                        
+                        // Broadcast failure status
+                        crate::handlers::api::commits::broadcast_eval_status(
+                            &cf_state,
+                            commit.id,
+                            "failed".to_string(),
+                            Some(format!("Evaluation failed: {}", e)),
+                        ).await;
+                        crate::handlers::api::commits::broadcast_eval_log(
+                            &cf_state,
+                            commit.id,
+                            format!("❌ Evaluation failed: {}", e)
+                        ).await;
+                        
+                        // Cleanup WebSocket broadcast channel
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
 
                         // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
                         // depending on attempt limit inside your SQL)

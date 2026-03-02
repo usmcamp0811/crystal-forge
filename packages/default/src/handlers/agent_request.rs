@@ -8,8 +8,10 @@ use bytes::Bytes;
 use ed25519_dalek::Signature;
 use ed25519_dalek::Verifier;
 use sqlx::PgPool;
+use uuid::Uuid;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct VerifiedAgentRequest {
@@ -131,6 +133,8 @@ use crate::config::ServerConfig;
 pub struct CFState {
     pub pool: PgPool,
     pub server_config: ServerConfig,
+    pub eval_log_channels: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>>,
+    pub build_log_channels: Arc<tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>>,
 }
 
 impl CFState {
@@ -138,6 +142,8 @@ impl CFState {
         Self {
             pool,
             server_config,
+            eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

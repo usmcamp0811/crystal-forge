@@ -152,6 +152,7 @@ impl FlakeListItem {
 
 #[derive(Clone, Debug, PartialEq)]
 struct FlakeHistoryCommit {
+    id: i32,
     hash: String,
     message: String,
     author: String,
@@ -205,6 +206,7 @@ pub fn FlakesListView() -> Element {
     let query_view = prefers_view_from_query();
     let open_dropdown = use_signal(|| None::<FilterDropdown>);
     let container_id = use_memo(|| format!("flakes-filters-{}", Uuid::new_v4()));
+    let mut eval_log_modal_open = use_signal(|| None::<(i32, String)>); // (commit_id, commit_hash)
 
     use_effect(move || {
         if let Some(mode) = query_view {
@@ -535,6 +537,15 @@ pub fn FlakesListView() -> Element {
                 }
             }
 
+            // Eval log modal
+            if let Some((commit_id, commit_hash)) = eval_log_modal_open.read().clone() {
+                crate::components::EvalLogModal {
+                    commit_id: commit_id,
+                    commit_hash: commit_hash,
+                    on_close: move |_| eval_log_modal_open.set(None),
+                }
+            }
+
             FiltersBar {
                 environments: environments.clone(),
                 search: search,
@@ -593,6 +604,7 @@ pub fn FlakesListView() -> Element {
                 selected_flake_id: selected_history_flake,
                 selected_commit_hash: selected_history_commit,
                 timelines: flake_timelines.read().clone(),
+                eval_log_modal_open: eval_log_modal_open,
             }
 
             if let Some(editing) = editing_flake.read().clone() {
@@ -1019,13 +1031,36 @@ fn FlakeHistoryExplorer(
     selected_flake_id: Signal<Option<i32>>,
     selected_commit_hash: Signal<Option<String>>,
     timelines: Vec<FlakeTimeline>,
+    eval_log_modal_open: Signal<Option<(i32, String)>>,
 ) -> Element {
+    use crate::hooks::websocket::{use_websocket_eval_stream, SystemEvalStatus};
+    
     let history = build_flake_history(&timelines);
 
     // Cache for loaded commit diffs
     let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
     // Track current active commit hash to force re-render when diff loads
     let current_commit_key = use_signal(|| (0i32, String::new()));
+    
+    // Get active commit for WebSocket connection
+    let active_flake_id_for_ws = selected_flake_id
+        .read()
+        .to_owned()
+        .unwrap_or_else(|| flakes.first().map(|f| f.id).unwrap_or(0));
+    let commits_for_ws = history.get(&active_flake_id_for_ws).cloned().unwrap_or_default();
+    let active_commit_for_ws = selected_commit_hash
+        .read()
+        .as_ref()
+        .and_then(|hash| commits_for_ws.iter().find(|commit| &commit.hash == hash))
+        .map(|commit| commit.clone())
+        .or_else(|| commits_for_ws.first().cloned());
+    
+    // Connect to WebSocket for active commit's eval status (MUST be unconditional hook call)
+    let commit_id_str = active_commit_for_ws
+        .as_ref()
+        .map(|c| c.id.to_string())
+        .unwrap_or_else(|| "0".to_string());
+    let (_logs, system_status, _conn_state, _reconnect) = use_websocket_eval_stream(&commit_id_str);
 
     if flakes.is_empty() {
         return rsx! {
@@ -1183,6 +1218,8 @@ fn FlakeHistoryExplorer(
                                             class: "space-y-3 relative",
                                             for commit in commits.iter() {
                                                 {
+                                                    let commit_hash_for_modal = commit.hash.clone();
+                                                    let commit_id_for_modal = commit.id;
                                                     let is_active = active_commit
                                                         .as_ref()
                                                         .map(|value| value.hash == commit.hash)
@@ -1275,9 +1312,14 @@ fn FlakeHistoryExplorer(
                                                                         class: "text-[10px] text-gray-400",
                                                                         "{commit_time}"
                                                                     }
-                                                                    span {
-                                                                        class: "px-2 py-1 rounded border text-[10px]",
+                                                                    button {
+                                                                        class: "px-2 py-1 rounded border text-[10px] hover:opacity-80 transition-opacity cursor-pointer",
                                                                         style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
+                                                                        title: "Click to view evaluation logs",
+                                                                        onclick: move |evt| {
+                                                                            evt.stop_propagation();
+                                                                            eval_log_modal_open.set(Some((commit_id_for_modal, commit_hash_for_modal.clone())));
+                                                                        },
                                                                         "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
                                                                     }
                                                                 }
@@ -1344,10 +1386,21 @@ fn FlakeHistoryExplorer(
                                         div {
                                             class: "flex flex-wrap gap-2",
                                             for hostname in commit.systems.iter() {
-                                                span {
-                                                    key: "{hostname}",
-                                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-800/60 text-slate-200 text-xs font-mono",
-                                                    "{hostname}"
+                                                {
+                                                    let status = system_status.read().get(hostname).cloned();
+                                                    let chip_class = match status {
+                                                        Some(SystemEvalStatus::Success) => "px-2 py-1 rounded border border-green-500/50 bg-green-900/30 text-green-200 text-xs font-mono",
+                                                        Some(SystemEvalStatus::Failed) => "px-2 py-1 rounded border border-red-500/50 bg-red-900/30 text-red-200 text-xs font-mono",
+                                                        Some(SystemEvalStatus::Evaluating) => "px-2 py-1 rounded border border-yellow-500/50 bg-yellow-900/30 text-yellow-200 text-xs font-mono animate-pulse",
+                                                        Some(SystemEvalStatus::Pending) | None => "px-2 py-1 rounded border border-slate-600 bg-slate-800/30 text-slate-400 text-xs font-mono",
+                                                    };
+                                                    rsx! {
+                                                        span {
+                                                            key: "{hostname}",
+                                                            class: "{chip_class}",
+                                                            "{hostname}"
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -2390,6 +2443,7 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
             .map(|commit| {
                 let short_hash = commit.hash.chars().take(7).collect::<String>();
                 FlakeHistoryCommit {
+                    id: commit.id,
                     hash: commit.hash.clone(),
                     message: normalize_commit_message(&commit.message, &short_hash),
                     author: normalize_commit_author(&commit.author),

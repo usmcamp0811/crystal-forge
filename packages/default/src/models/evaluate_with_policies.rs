@@ -22,7 +22,8 @@ pub struct NixEvalJobResult {
     pub attr: String,
     #[serde(rename = "attrPath")]
     pub attr_path: Vec<String>,
-    pub name: String,
+    /// Name is optional because nix-eval-jobs may omit it on errors
+    pub name: Option<String>,
     #[serde(rename = "drvPath")]
     pub drv_path: Option<String>,
     pub error: Option<String>,
@@ -50,6 +51,7 @@ pub async fn evaluate_with_nix_eval_jobs(
     build_config: &BuildConfig,
     server_config: &ServerConfig,
     policies: &[DeploymentPolicy],
+    cf_state: Option<&crate::handlers::agent_request::CFState>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
 
@@ -122,6 +124,40 @@ pub async fn evaluate_with_nix_eval_jobs(
 
                                 debug!("📦 Evaluated: {}, drv_path={:?}, has_error={:?}",
                                     system_name, drv_path, has_error);
+                                
+                                // Broadcast system status to WebSocket clients
+                                if let Some(state) = cf_state {
+                                    if has_error {
+                                        // Broadcast failure status
+                                        let error_msg = result.error.clone().unwrap_or_else(|| "Unknown error".to_string());
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
+                                            Some(error_msg.clone()),
+                                        ).await;
+                                        crate::handlers::api::commits::broadcast_eval_log(
+                                            state,
+                                            commit.id,
+                                            format!("❌ {}: {}", system_name, error_msg),
+                                        ).await;
+                                    } else {
+                                        // Broadcast success status
+                                        crate::handlers::api::commits::broadcast_system_status(
+                                            state,
+                                            commit.id,
+                                            system_name.clone(),
+                                            crate::handlers::api::commits::SystemEvalStatus::Success,
+                                            None,
+                                        ).await;
+                                        crate::handlers::api::commits::broadcast_eval_log(
+                                            state,
+                                            commit.id,
+                                            format!("✅ Evaluated: {}", system_name),
+                                        ).await;
+                                    }
+                                }
 
                                 // Extract policy check results from meta.policies
                                 let mut cf_agent_enabled = None;
@@ -231,6 +267,12 @@ pub async fn evaluate_with_nix_eval_jobs(
                         } else {
                             debug!("nix-eval-jobs stderr: {}", line);
                         }
+                        
+                        // Broadcast stderr to WebSocket clients
+                        if let Some(state) = cf_state {
+                            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
+                        }
+                        
                         stderr_output.push(line);
                     }
                     None => stderr_done = true,

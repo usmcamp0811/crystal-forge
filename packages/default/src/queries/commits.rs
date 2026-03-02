@@ -59,31 +59,26 @@ pub async fn get_commit_by_id(pool: &PgPool, id: i32) -> Result<Commit> {
 }
 
 pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>> {
-    let rows = sqlx::query_as!(
-        Commit,
+    let rows = sqlx::query_as::<_, Commit>(
         r#"
         SELECT c.id, c.flake_id, c.git_commit_hash, c.commit_timestamp, c.attempt_count
         FROM commits c
         LEFT JOIN derivations d ON c.id = d.commit_id
         WHERE d.commit_id IS NULL
         AND c.evaluation_status = 'pending'
-        AND COALESCE(c.evaluation_attempt_count, 0) < 5
+        AND COALESCE(c.evaluation_attempt_count, 0) < 3
         AND (
             c.evaluation_started_at IS NULL
             OR (
-                -- Attempts 1-3: retry after 1 minute
-                COALESCE(c.evaluation_attempt_count, 0) < 3 
+                -- Attempt 1: immediate
+                -- Attempt 2: retry after 1 minute
+                COALESCE(c.evaluation_attempt_count, 0) = 1
                 AND c.evaluation_started_at < NOW() - INTERVAL '1 minute'
             )
             OR (
-                -- Attempt 4: retry after 1 hour
-                c.evaluation_attempt_count = 3
-                AND c.evaluation_started_at < NOW() - INTERVAL '1 hour'
-            )
-            OR (
-                -- Attempt 5: retry after 2 hours
-                c.evaluation_attempt_count = 4
-                AND c.evaluation_started_at < NOW() - INTERVAL '2 hours'
+                -- Attempt 3: retry after 5 minutes
+                c.evaluation_attempt_count = 2
+                AND c.evaluation_started_at < NOW() - INTERVAL '5 minutes'
             )
         )
         ORDER BY c.commit_timestamp DESC
@@ -239,27 +234,74 @@ pub async fn mark_commit_evaluation_complete(pool: &PgPool, commit_id: i32) -> R
 }
 
 /// Mark commit evaluation as failed (with retry logic)
+/// 
+/// Retries up to 3 times with exponential backoff:
+/// - Attempt 1: immediate
+/// - Attempt 2: after 1 minute
+/// - Attempt 3: after 5 minutes (from attempt 2)
+/// 
+/// After 3 failed attempts, marks as permanently 'failed'.
+/// Manual re-evaluation can be triggered via API (resets attempt count).
 pub async fn mark_commit_evaluation_failed(
     pool: &PgPool,
     commit_id: i32,
     error: &str,
 ) -> Result<()> {
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE commits
         SET 
             evaluation_status = CASE 
-                WHEN COALESCE(evaluation_attempt_count, 0) >= 5 THEN 'failed'
+                WHEN COALESCE(evaluation_attempt_count, 0) >= 3 THEN 'failed'
                 ELSE 'pending'
             END,
             evaluation_error_message = $2
         WHERE id = $1
-        "#,
-        commit_id,
-        error
+        "#
     )
+    .bind(commit_id)
+    .bind(error)
     .execute(pool)
     .await?;
+
+    Ok(())
+}
+
+/// Reset commit evaluation status to allow manual retry
+/// 
+/// This resets:
+/// - evaluation_status → 'pending'
+/// - evaluation_attempt_count → 0
+/// - evaluation_error_message → NULL
+/// 
+/// Use this for manual re-evaluation after fixing issues.
+pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<()> {
+    #[derive(sqlx::FromRow)]
+    struct ResetResult {
+        id: i32,
+        git_commit_hash: String,
+    }
+    
+    let result = sqlx::query_as::<_, ResetResult>(
+        r#"
+        UPDATE commits
+        SET 
+            evaluation_status = 'pending',
+            evaluation_attempt_count = 0,
+            evaluation_started_at = NULL,
+            evaluation_error_message = NULL
+        WHERE id = $1
+        RETURNING id, git_commit_hash
+        "#
+    )
+    .bind(commit_id)
+    .fetch_one(pool)
+    .await?;
+
+    info!(
+        "🔄 Reset evaluation for commit {} ({})",
+        result.id, result.git_commit_hash
+    );
 
     Ok(())
 }

@@ -510,6 +510,8 @@ pub struct CommitDiffResponse {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FlakeCommit {
+    /// Database commit ID.
+    pub id: i32,
     /// Full commit hash.
     pub hash: String,
     /// Short commit message (first line).

@@ -8,6 +8,7 @@ mod bootstrap;
 mod components;
 mod dashboard;
 mod environments;
+mod hooks;
 mod routes;
 mod state;
 mod systems;
