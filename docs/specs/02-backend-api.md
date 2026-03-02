@@ -289,6 +289,79 @@ Builders are worker processes that build Nix derivations.
 
 ---
 
+## Evaluation Queue API
+
+The evaluation queue manages commit evaluations (nix-eval-jobs runs).
+
+### Endpoints
+
+| Method | Endpoint | Role | Description |
+|--------|----------|------|-------------|
+| GET | `/commits/eval-queue` | Viewer+ | Get evaluation queue with status |
+| POST | `/commits/eval-queue/reorder` | Operator+ | Change queue order |
+
+### GET /commits/eval-queue
+
+**Response:**
+```json
+{
+  "active_queue": [
+    {
+      "commit_id": 123,
+      "flake_id": 1,
+      "flake_name": "nixos-configs",
+      "git_commit_hash": "abc123...",
+      "commit_message": "Update system configs",
+      "commit_timestamp": "2024-03-02T12:00:00Z",
+      "evaluation_status": "in_progress",
+      "eval_queue_position": 1,
+      "system_statuses": [
+        {
+          "system_name": "nixos-desktop",
+          "status": "evaluating"
+        },
+        {
+          "system_name": "nixos-server",
+          "status": "policy_passed"
+        }
+      ]
+    }
+  ],
+  "completed_queue": [...]
+}
+```
+
+### POST /commits/eval-queue/reorder
+
+**Request:**
+```json
+{
+  "commit_id": 123,
+  "new_position": 2
+}
+```
+
+Moves the specified commit to the given position in the queue. Queue positions are recalculated for all affected commits.
+
+### Evaluation States
+
+```
+pending → in_progress → complete
+            ↓
+          failed
+```
+
+**Per-System States** (during in_progress):
+```
+pending → evaluating → eval_complete → policy_check
+                 ↓              ↓
+            eval_failed    policy_passed / policy_failed
+```
+
+**Key Invariant:** Only ONE commit can have `evaluation_status = 'in_progress'` at a time.
+
+---
+
 ## Build Queue API
 
 The build queue manages Nix derivation builds.
@@ -596,6 +669,66 @@ src/
 
 ---
 
+---
+
+## WebSocket Streaming
+
+### Evaluation Logs (Real-Time)
+
+**Endpoint:** `ws://localhost:8080/ws/eval-stream/:commit_id`
+
+**Purpose:** Stream evaluation logs in real-time as nix-eval-jobs runs.
+
+**Protocol:**
+1. Client connects with commit ID
+2. Server checks if commit evaluation is in progress
+3. If yes: streams log lines as they appear
+4. If no: closes connection with "not found" message
+
+**Message Format:**
+```json
+{
+  "type": "log",
+  "data": "evaluating system: nixos-desktop",
+  "timestamp": "2024-03-02T12:34:56Z"
+}
+```
+
+**System Status Updates:**
+```json
+{
+  "type": "system_status",
+  "system": "nixos-desktop",
+  "status": "evaluating",
+  "data": null
+}
+```
+
+```json
+{
+  "type": "system_status",
+  "system": "nixos-desktop",
+  "status": "policy_passed",
+  "data": {
+    "queued_for_build": true
+  }
+}
+```
+
+**Status Values:**
+- `pending` - Waiting to evaluate
+- `evaluating` - Currently running nix-eval-jobs
+- `eval_complete` - Evaluation succeeded
+- `eval_failed` - Evaluation failed
+- `policy_passed` - CF enabled, added to build queue
+- `policy_failed` - CF disabled, skipped
+
+**Key Files:**
+- `src/handlers/websocket.rs` - WebSocket handler
+- `src/models/evaluate_with_policies.rs` - Broadcasts status updates
+
+---
+
 ## Summary
 
 | Resource | Endpoints | Auth |
@@ -604,12 +737,14 @@ src/
 | Flakes | CRUD + sync | Viewer+ |
 | Builders | CRUD + pause/resume | Viewer+ |
 | Build Queue | CRUD | Viewer+ |
+| Eval Queue | GET + reorder | Viewer+ |
 | Environments | CRUD | Viewer+ |
 | Dashboard | GET | Viewer+ |
 | Admin Users | CRUD | Admin+ |
 | Admin Audit | GET | Admin+ |
 | Admin OIDC | CRUD | Admin+ |
 | Agent/Builder | Various | Key-based |
+| WebSocket | eval-stream/:commit_id | Session |
 
 For frontend views, see `01-frontend-views.md`.
 For system overview, see `00-system-overview.md`.

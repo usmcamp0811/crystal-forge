@@ -353,11 +353,107 @@ Frontend                      Backend
 
 ---
 
+## Evaluations Queue (`/evaluations`)
+
+**Route:** `/evaluations` or `/evaluations/:commit_id`
+
+**Purpose:** Monitor the evaluation queue and see real-time evaluation progress.
+
+### What It Shows
+
+#### Active Queue Section
+- Commits currently being evaluated or pending evaluation
+- Each commit row shows:
+  - Flake name
+  - Commit hash (short) and message
+  - Timestamp
+  - Evaluation status chip (pending/running/complete/failed)
+  - System count and per-system status chips
+  - Reorder controls (up/down arrows)
+
+#### Completed Queue Section
+- Recently completed evaluations (last 10)
+- Shows final status and systems evaluated
+
+#### Selected Commit Detail Panel
+When a commit is selected:
+- Full commit information
+- Per-system status chips with colors:
+  - 🟡 Pending - Waiting to evaluate
+  - 🔵 Evaluating - nix-eval-jobs running
+  - 🟢 Policy Passed - CF enabled, added to build queue
+  - 🟠 Policy Failed - CF disabled, skipped
+  - ✅ Eval Complete - Finished successfully
+  - ❌ Eval Failed - Evaluation error
+- Real-time evaluation log stream (WebSocket)
+- Connection status badge (connected/disconnected)
+
+### Evaluation States
+
+A commit goes through these states:
+
+```
+pending → in_progress → complete
+            ↓
+          failed
+```
+
+**Per-System States** (during in_progress):
+```
+pending → evaluating → eval_complete → policy_check
+             ↓              ↓
+        eval_failed    policy_passed / policy_failed
+```
+
+### Queue Reordering
+
+**How It Works:**
+- Users can reorder pending commits using up/down arrows or drag-and-drop
+- Order persists to `commits.eval_queue_position` in database
+- Only affects pending commits (not in_progress)
+
+**UI/UX:**
+- Warning banner appears when pending commits exist but no eval is active
+- Auto-follows in-progress commit when opening `/evaluations`
+- Auto-refresh every 3 seconds (cache-busting with `?_ts=...`)
+
+### What Is an "Evaluation"?
+
+An evaluation is running `nix-eval-jobs` on a commit to:
+1. Discover all systems in the flake
+2. Evaluate each system's NixOS configuration
+3. Run policy checks (is CF enabled?)
+4. Queue passing systems for build
+
+**Key Invariant:** Only ONE commit can be evaluated at a time.
+
+### Data Flow
+
+```
+Frontend                              Backend
+   │                                    │
+   ├─ GET /api/v1/commits/eval-queue ─►│ Get queue status
+   │                                    │
+   ├─ WS /ws/eval-stream/:commit_id ──►│ Real-time logs
+   │                                    │
+   │◄─ {type: "log", data: "..."}  ◄───│ Stream log lines
+   │◄─ {type: "system_status", ...} ◄──│ Status updates
+   │                                    │
+   ├─ POST /api/v1/commits/eval-queue/reorder ─►│ Change order
+```
+
+### How to Modify
+
+- **Backend:** `handlers/api/commits.rs`, `handlers/websocket.rs`, `models/evaluate_with_policies.rs`
+- **Frontend:** `views/evaluations.rs`
+
+---
+
 ## Builds Queue (`/builds`)
 
 **Route:** `/builds`
 
-**Purpose:** Monitor the build queue and builder workers.
+**Purpose:** Monitor the build queue and builder workers (Stage 2 after evaluation).
 
 ### What It Shows
 
@@ -388,7 +484,7 @@ pending → building → built → cache-pushing → cache-pushed
 ### What Is a "Build"?
 
 A build is a **Nix derivation** that needs to be built:
-- Created when a new commit is detected
+- Created after evaluation when system passes policy check
 - Queued for an available builder
 - Builder runs `nix build`
 - On success: optionally push to cache

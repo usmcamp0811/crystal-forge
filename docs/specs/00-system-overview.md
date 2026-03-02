@@ -99,23 +99,81 @@ System ∞──∞ Deployment (has history of)
 
 **Key API:** `POST /systems` - Register new system
 
-### 2. Building Derivations (Continuous)
+### 2. Evaluation and Build Queue Pipeline
 
-The builder is **always** working through the build queue:
+CF has a **two-stage pipeline** for processing flake commits: Evaluation → Build
 
-1. User commits to a tracked flake
-2. CF detects change (via periodic sync or webhook)
-3. Derivation added to build queue
-4. Available builder picks up job
-5. Builder runs `nix build`
-6. On success: push to cache (if configured)
-7. On failure: report error, allow retry
+#### Stage 1: Evaluation Queue
+
+When a new commit is detected:
+
+1. Commit added to database with `evaluation_status = 'pending'`
+2. Evaluation loop picks up pending commits (FIFO order by default, reorderable via UI)
+3. **Only one commit can be evaluated at a time** (enforced by DB unique constraint)
+4. Commit marked as `in_progress`
+5. `nix-eval-jobs` evaluates all systems in parallel
+6. For each system that completes:
+   - Policy check runs (is CF enabled for this system?)
+   - If **passes**: System derivation → Build Queue
+   - If **fails**: System marked as "Policy Failed"
+7. When all systems complete: commit marked as `complete`
+
+**Key Database Fields:**
+- `commits.evaluation_status`: `pending` | `in_progress` | `complete` | `failed`
+- `commits.eval_queue_position`: Order in queue (nullable, user-reorderable)
+- Unique constraint: Only one commit can have `evaluation_status = 'in_progress'`
+
+**Startup Behavior:**
+- Server resets ALL `in_progress` commits → `pending` on startup
+- This prevents orphaned states from crashes/restarts
+
+**Key APIs:**
+- `GET /api/v1/commits/eval-queue` - View evaluation queue
+- `POST /api/v1/commits/eval-queue/reorder` - Change queue order
+- WebSocket: Real-time eval log streaming and system status updates
+
+#### Stage 2: Build Queue
+
+After evaluation, derivations enter the build queue:
+
+1. System derivations that **passed policy** are added to build queue
+2. Builder picks up jobs from queue
+3. Builder runs `nix build`
+4. On success: push to cache (if configured)
+5. On failure: report error, allow retry
+
+**Key Database Fields:**
+- `derivations.status_id`:
+  - `3` = dry-run-pending
+  - `4` = dry-run-inprogress
+  - `5` = dry-run-complete
+  - `6` = dry-run-failed
+  - `7` = build-pending
+  - `8` = build-inprogress
+  - `10` = build-complete
+  - `12` = build-failed
+
+**Startup Behavior:**
+- Server resets derivations with `status_id = 8` → `7` on startup
+- This prevents stuck builds from crashes/restarts
 
 **Key point:** The build queue is always being processed. Builders continuously build and push to cache until the queue is empty.
 
 **Key APIs:**
 - `GET /build-queue` - View pending builds
 - `POST /builders/:id/pause` - Pause builder
+
+#### Critical Invariant: Single Active Evaluation
+
+**Why?** nix-eval-jobs is resource-intensive and evaluations should complete before starting new ones.
+
+**How enforced:**
+- Unique partial index: `idx_commits_single_in_progress` on `commits(evaluation_status) WHERE evaluation_status = 'in_progress'`
+- Attempts to mark a second commit as `in_progress` fail with constraint violation
+- Evaluation loop processes pending commits serially
+
+**Status Alignment:**
+Both Flakes view and Evaluations view use `commits.evaluation_status` as the single source of truth (not derivation status).
 
 ### 3. Deploying to a System
 
