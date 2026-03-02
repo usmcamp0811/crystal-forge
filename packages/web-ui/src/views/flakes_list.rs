@@ -1033,12 +1033,35 @@ fn FlakeHistoryExplorer(
     timelines: Vec<FlakeTimeline>,
     eval_log_modal_open: Signal<Option<(i32, String)>>,
 ) -> Element {
+    use crate::hooks::websocket::{use_websocket_eval_stream, SystemEvalStatus};
+    
     let history = build_flake_history(&timelines);
 
     // Cache for loaded commit diffs
     let loaded_diffs = use_signal(|| HashMap::<(i32, String), String>::new());
     // Track current active commit hash to force re-render when diff loads
     let current_commit_key = use_signal(|| (0i32, String::new()));
+    
+    // Get active commit for WebSocket connection
+    let active_flake_id = selected_flake_id
+        .read()
+        .to_owned()
+        .unwrap_or_else(|| flakes.first().map(|f| f.id).unwrap_or(0));
+    let commits = history.get(&active_flake_id).cloned().unwrap_or_default();
+    let active_commit_for_ws = selected_commit_hash
+        .read()
+        .as_ref()
+        .and_then(|hash| commits.iter().find(|commit| &commit.hash == hash))
+        .map(|commit| commit.clone())
+        .or_else(|| commits.first().cloned());
+    
+    // Connect to WebSocket for active commit's eval status
+    let system_status = if let Some(ref commit) = active_commit_for_ws {
+        let (_logs, status_map, _conn_state, _reconnect) = use_websocket_eval_stream(&commit.id.to_string());
+        status_map
+    } else {
+        use_signal(|| HashMap::new())
+    };
 
     if flakes.is_empty() {
         return rsx! {
@@ -1364,10 +1387,21 @@ fn FlakeHistoryExplorer(
                                         div {
                                             class: "flex flex-wrap gap-2",
                                             for hostname in commit.systems.iter() {
-                                                span {
-                                                    key: "{hostname}",
-                                                    class: "px-2 py-1 rounded border border-slate-600 bg-slate-800/60 text-slate-200 text-xs font-mono",
-                                                    "{hostname}"
+                                                {
+                                                    let status = system_status.read().get(hostname).cloned();
+                                                    let chip_class = match status {
+                                                        Some(SystemEvalStatus::Success) => "px-2 py-1 rounded border border-green-500/50 bg-green-900/30 text-green-200 text-xs font-mono",
+                                                        Some(SystemEvalStatus::Failed) => "px-2 py-1 rounded border border-red-500/50 bg-red-900/30 text-red-200 text-xs font-mono",
+                                                        Some(SystemEvalStatus::Evaluating) => "px-2 py-1 rounded border border-yellow-500/50 bg-yellow-900/30 text-yellow-200 text-xs font-mono animate-pulse",
+                                                        Some(SystemEvalStatus::Pending) | None => "px-2 py-1 rounded border border-slate-600 bg-slate-800/30 text-slate-400 text-xs font-mono",
+                                                    };
+                                                    rsx! {
+                                                        span {
+                                                            key: "{hostname}",
+                                                            class: "{chip_class}",
+                                                            "{hostname}"
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }

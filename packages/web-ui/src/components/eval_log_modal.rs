@@ -2,13 +2,14 @@
 
 use dioxus::prelude::*;
 
-use crate::hooks::websocket::{use_websocket_logs, ConnectionState};
+use crate::hooks::websocket::{use_websocket_eval_stream, ConnectionState};
 use crate::theme;
 
 #[component]
 pub fn EvalLogModal(commit_id: i32, commit_hash: String, on_close: EventHandler<()>) -> Element {
-    // Connect to eval log WebSocket
-    let (logs, connection_state, _reconnect) = use_websocket_logs(&commit_id.to_string());
+    // Connect to eval log WebSocket with per-system status tracking
+    let (logs, _system_status, connection_state, _reconnect) =
+        use_websocket_eval_stream(&commit_id.to_string());
 
     rsx! {
         // Modal overlay
