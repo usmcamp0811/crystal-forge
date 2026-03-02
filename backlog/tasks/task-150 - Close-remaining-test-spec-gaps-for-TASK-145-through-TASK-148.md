@@ -1,9 +1,10 @@
 ---
 id: TASK-150
 title: Close remaining test/spec gaps for TASK-145 through TASK-148
-status: Backlog
+status: Cancelled
 assignee: []
 created_date: '2026-03-01 16:11'
+updated_date: '2026-03-02 17:27'
 labels:
   - security
   - follow-up
@@ -16,6 +17,7 @@ references:
   - TASK-147
   - TASK-148
 priority: medium
+ordinal: 2000
 ---
 
 ## Description
