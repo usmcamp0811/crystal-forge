@@ -173,12 +173,15 @@ pub async fn get_commit_distance_from_head(
 
 /// Reset commits stuck in 'in_progress' state (from crashed evaluations)
 pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
+    // Reset ALL in_progress commits on startup (not just stuck ones)
+    // This ensures clean state and enforces single-eval-at-a-time invariant
     let reset = sqlx::query!(
         r#"
         UPDATE commits
-        SET evaluation_status = 'pending'
+        SET 
+            evaluation_status = 'pending',
+            evaluation_started_at = NULL
         WHERE evaluation_status = 'in_progress'
-          AND evaluation_started_at < NOW() - INTERVAL '30 minutes'
         RETURNING id, git_commit_hash
         "#
     )
@@ -186,7 +189,7 @@ pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
     .await?;
 
     if !reset.is_empty() {
-        warn!("🧹 Reset {} stuck commit evaluations", reset.len());
+        warn!("🧹 Reset {} in-progress commit evaluations on startup", reset.len());
         for row in &reset {
             info!("  - Commit {} ({})", row.id, row.git_commit_hash);
         }
@@ -196,6 +199,9 @@ pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
 }
 
 /// Mark commit evaluation as started
+/// 
+/// This will fail if another commit is already in_progress due to the unique constraint
+/// enforced by idx_commits_single_in_progress (migration 0088)
 pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Result<()> {
     sqlx::query!(
         r#"
@@ -209,7 +215,19 @@ pub async fn mark_commit_evaluation_started(pool: &PgPool, commit_id: i32) -> Re
         commit_id
     )
     .execute(pool)
-    .await?;
+    .await
+    .map_err(|e| {
+        // Check if this is a unique constraint violation (another commit is in_progress)
+        if let sqlx::Error::Database(ref db_err) = e {
+            if db_err.code().as_deref() == Some("23505") {
+                return anyhow::anyhow!(
+                    "Cannot start evaluation for commit {}: another commit is already being evaluated",
+                    commit_id
+                );
+            }
+        }
+        anyhow::anyhow!("Failed to mark commit {} as in_progress: {}", commit_id, e)
+    })?;
 
     Ok(())
 }

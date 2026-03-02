@@ -23,7 +23,7 @@ use crate::queries::commits::{
     get_commits_pending_evaluation, mark_commit_evaluation_complete, mark_commit_evaluation_failed,
     mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
-use crate::queries::derivations::cleanup_partial_derivations;
+use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
 
 pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool, cf_state: std::sync::Arc<crate::handlers::agent_request::CFState>) {
     let flake_pool = pool.clone();
@@ -118,6 +118,10 @@ pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration, cf_sta
     // ⬇️ cleanup any stranded 'in_progress' from previous runs
     if let Err(e) = reset_stuck_commit_evaluations(&pool).await {
         error!("❌ Failed to reset stuck commit evaluations: {}", e);
+    }
+
+    if let Err(e) = reset_stuck_builds(&pool).await {
+        error!("❌ Failed to reset stuck builds: {}", e);
     }
 
     if let Err(e) = cleanup_partial_derivations(&pool).await {
