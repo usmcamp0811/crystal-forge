@@ -546,6 +546,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
             repo_url: "github:acme/infra".to_string(),
             commits: vec![
                 FlakeCommit {
+                    id: 1,
                     hash: "a1b2c3d4e5f6789012345678".to_string(),
                     message: "feat: add monitoring stack".to_string(),
                     author: "alice".to_string(),
@@ -563,6 +564,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     evaluation_status: None,
                 },
                 FlakeCommit {
+                    id: 2,
                     hash: "b2c3d4e5f6789012345678ab".to_string(),
                     message: "fix: nginx config reload".to_string(),
                     author: "bob".to_string(),
@@ -574,6 +576,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     evaluation_status: None,
                 },
                 FlakeCommit {
+                    id: 3,
                     hash: "c3d4e5f6789012345678abcd".to_string(),
                     message: "chore: update nixpkgs".to_string(),
                     author: "alice".to_string(),
@@ -592,6 +595,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
             repo_url: "github:acme/workstations".to_string(),
             commits: vec![
                 FlakeCommit {
+                    id: 4,
                     hash: "f1a2b3c4d5e6f7890123456".to_string(),
                     message: "feat: add vscode extensions".to_string(),
                     author: "dave".to_string(),
@@ -612,6 +616,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
                     evaluation_status: None,
                 },
                 FlakeCommit {
+                    id: 5,
                     hash: "a2b3c4d5e6f78901234567ab".to_string(),
                     message: "fix: bluetooth audio".to_string(),
                     author: "eve".to_string(),
@@ -629,6 +634,7 @@ pub fn mock_flake_timelines() -> Vec<FlakeTimeline> {
             flake_name: "edge-nodes".to_string(),
             repo_url: "github:acme/edge".to_string(),
             commits: vec![FlakeCommit {
+                id: 6,
                 hash: "1234567890abcdef12345678".to_string(),
                 message: "fix: wireguard tunnel".to_string(),
                 author: "frank".to_string(),

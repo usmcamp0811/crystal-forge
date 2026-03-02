@@ -152,6 +152,7 @@ impl FlakeListItem {
 
 #[derive(Clone, Debug, PartialEq)]
 struct FlakeHistoryCommit {
+    id: i32,
     hash: String,
     message: String,
     author: String,
@@ -533,6 +534,15 @@ pub fn FlakesListView() -> Element {
                             }
                         });
                     },
+                }
+            }
+
+            // Eval log modal
+            if let Some((commit_id, commit_hash)) = eval_log_modal_open.read().clone() {
+                crate::components::EvalLogModal {
+                    commit_id: commit_id,
+                    commit_hash: commit_hash,
+                    on_close: move |_| eval_log_modal_open.set(None),
                 }
             }
 
@@ -1184,6 +1194,8 @@ fn FlakeHistoryExplorer(
                                             class: "space-y-3 relative",
                                             for commit in commits.iter() {
                                                 {
+                                                    let commit_hash_for_modal = commit.hash.clone();
+                                                    let commit_id_for_modal = commit.id;
                                                     let is_active = active_commit
                                                         .as_ref()
                                                         .map(|value| value.hash == commit.hash)
@@ -1279,6 +1291,7 @@ fn FlakeHistoryExplorer(
                                                                     span {
                                                                         class: "px-2 py-1 rounded border text-[10px]",
                                                                         style: "{eval_badge_style(commit.evaluation_status.as_deref())}",
+                                                                        title: "Evaluation status - click to view logs (coming soon)",
                                                                         "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
                                                                     }
                                                                 }
@@ -2391,6 +2404,7 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
             .map(|commit| {
                 let short_hash = commit.hash.chars().take(7).collect::<String>();
                 FlakeHistoryCommit {
+                    id: commit.id,
                     hash: commit.hash.clone(),
                     message: normalize_commit_message(&commit.message, &short_hash),
                     author: normalize_commit_author(&commit.author),
