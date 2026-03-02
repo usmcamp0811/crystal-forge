@@ -49,13 +49,27 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
     tracing::info!("WebSocket connection closed for commit {} eval", commit_id);
 }
 
+/// Ensure a broadcast channel exists for this commit (create if needed)
+pub async fn ensure_eval_channel(state: &CFState, commit_id: i32) {
+    let mut channels = state.eval_log_channels.lock().await;
+    channels.entry(commit_id).or_insert_with(|| {
+        let (tx, _rx) = tokio::sync::broadcast::channel(1000);
+        tracing::debug!("📡 Created broadcast channel for commit {} evaluation", commit_id);
+        tx
+    });
+}
+
 /// Helper function to broadcast a log line to all connected WebSocket clients for a commit
+/// IMPORTANT: This will create a channel if one doesn't exist, so logs are buffered even if no clients are connected yet
 pub async fn broadcast_eval_log(state: &CFState, commit_id: i32, log_line: String) {
-    let channels = state.eval_log_channels.lock().await;
-    if let Some(tx) = channels.get(&commit_id) {
-        // Send to all subscribers (ignore if no one is listening)
-        let _ = tx.send(log_line);
-    }
+    let mut channels = state.eval_log_channels.lock().await;
+    let tx = channels.entry(commit_id).or_insert_with(|| {
+        let (tx, _rx) = tokio::sync::broadcast::channel(1000);
+        tracing::debug!("📡 Created broadcast channel for commit {} (first broadcast)", commit_id);
+        tx
+    });
+    // Send to all subscribers (if channel is full, oldest messages are dropped)
+    let _ = tx.send(log_line);
 }
 
 /// Cleanup broadcast channel when evaluation completes
