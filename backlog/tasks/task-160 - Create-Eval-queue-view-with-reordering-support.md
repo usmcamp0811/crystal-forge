@@ -4,7 +4,7 @@ title: Create Eval queue view with reordering support
 status: To Do
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-02 16:58'
+updated_date: '2026-03-02 16:59'
 labels: []
 dependencies: []
 priority: medium
@@ -58,12 +58,13 @@ Create a new "Evals" view (similar to "Builds" view) that:
 - [ ] #1 New Evals view accessible via sidebar navigation
 - [ ] #2 Eval queue displays commits in order (similar to Build queue)
 - [ ] #3 Each commit row shows: flake name, branch, commit hash, system count, overall status
-- [ ] #4 Queue supports reordering via up/down arrows and drag-and-drop
-- [ ] #5 Queue order persists to database
-- [ ] #6 Real-time updates via WebSocket as systems are evaluated
-- [ ] #7 Per-system status chips update in real-time during eval (pending → evaluating → success/failed)
-- [ ] #8 Policy check status shown per system: passed policy → added to build queue (green indicator)
-- [ ] #9 Policy failed systems shown with distinct status (yellow/orange)
-- [ ] #10 Flake view eval log chip redirects to Evals view instead of opening modal
-- [ ] #11 Completed evals shown with final status in queue
+- [ ] #4 Per-commit progress indicator showing passed/total (e.g., '3/5 passed')
+- [ ] #5 Queue supports reordering via up/down arrows and drag-and-drop
+- [ ] #6 Queue order persists to database
+- [ ] #7 Real-time updates via WebSocket as systems are evaluated
+- [ ] #8 Per-system status chips update in real-time during eval (pending → evaluating → success/failed)
+- [ ] #9 Policy check status shown per system: passed policy → added to build queue (green indicator)
+- [ ] #10 Policy failed systems shown with distinct status (yellow/orange)
+- [ ] #11 Flake view eval log chip redirects to Evals view instead of opening modal
+- [ ] #12 Completed evals shown with final status in queue
 <!-- AC:END -->
