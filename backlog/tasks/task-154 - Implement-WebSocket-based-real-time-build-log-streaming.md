@@ -4,7 +4,7 @@ title: Implement WebSocket-based real-time build log streaming
 status: Review
 assignee: []
 created_date: '2026-03-02 03:36'
-updated_date: '2026-03-02 15:28'
+updated_date: '2026-03-02 17:13'
 labels:
   - enhancement
   - builder
@@ -620,6 +620,28 @@ agent  builder  cf-keygen  server  test-agent
 ✅ **MR !150 ready for merge**  
 
 Next: Restart server, test end-to-end, merge to dev.
+
+2026-03-02 Review cleanup (merge readiness): captured reviewer feedback as explicit pre-merge checks.
+
+BLOCKING checks before merging MR !150:
+
+1) WebSocket AuthZ parity: enforce same authorization rules on `/api/v1/build-jobs/:job_id/logs/stream` and `/api/v1/commits/:commit_id/eval/stream` as corresponding REST resources. Ensure builder-ingest path is restricted to builder/agent identity only.
+
+2) Backpressure/memory safety: verify bounded buffers for build-log ingest and eval broadcast channels; cap active channel count and message/frame size; ensure channel cleanup on all completion/error/close paths.
+
+3) Message framing correctness: avoid JSON-vs-log ambiguity by switching to explicit envelope/discriminator (`type: log|metrics|...`) for WS payloads.
+
+4) WS↔HTTP fallback correctness: verify no duplicate log lines and no tail-loss when fallback occurs mid-build.
+
+Non-blocking but recommended before/with merge:
+
+- Keepalive/ping strategy for quiet eval streams behind proxies.
+
+- Connection lifecycle metrics/observability: active WS connections and eval channel counts.
+
+- Automated tests: at least one handler-level test per WS endpoint (build ingest/storage behavior + eval fanout/cleanup).
+
+If blockers require code changes beyond TASK-154 scope, create follow-up task(s) and link them here before merge decision.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
