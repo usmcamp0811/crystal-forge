@@ -390,14 +390,6 @@ pub async fn builder_heartbeat(
         message: "Heartbeat recorded".to_string(),
     }))
 }
-
-#[derive(Debug, Serialize)]
-pub struct NextJobResponse {
-    pub job_id: Option<Uuid>,
-    pub derivation_id: Option<i32>,
-    pub message: String,
-}
-
 /// GET /api/v1/builders/:id/next-job - Get next job for builder
 ///
 /// This endpoint implements the load-based job assignment logic:
@@ -409,7 +401,7 @@ pub async fn get_next_job(
     Path(builder_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<Json<NextJobResponse>, StatusCode> {
+) -> Result<Json<BuildJob>, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
     let verified = authenticate_builder_request(&headers, body, "GET", &path, &state.pool).await?;
@@ -447,19 +439,11 @@ pub async fn get_next_job(
 
     if let Some(job) = job {
         // Job successfully claimed (already marked as 'building')
-        Ok(Json(NextJobResponse {
-            job_id: Some(job.id),
-            derivation_id: Some(job.derivation_id),
-            message: "Job assigned".to_string(),
-        }))
+        Ok(Json(job))
     } else {
         // Either no jobs available OR builder at capacity
-        // (atomic function returns None in both cases)
-        Ok(Json(NextJobResponse {
-            job_id: None,
-            derivation_id: None,
-            message: "No jobs available or builder at capacity".to_string(),
-        }))
+        // Return 404 NOT_FOUND so builder knows to wait
+        Err(StatusCode::NOT_FOUND)
     }
 }
 
