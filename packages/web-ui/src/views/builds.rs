@@ -36,9 +36,9 @@ pub fn BuildsView() -> Element {
                 .map(|builder| WorkerItem {
                     id: builder.id.to_string(),
                     name: builder.name.clone(),
-                    active_slots: 0,
+                    active_slots: builder.active_jobs.max(0) as usize,
                     total_slots: builder.max_concurrent_jobs.max(1) as usize,
-                    queue_depth: 0,
+                    queue_depth: builder.queued_jobs.max(0) as usize,
                     status: match builder.status {
                         BuilderStatus::Active => WorkerStatus::Running,
                         BuilderStatus::Inactive => WorkerStatus::Paused,
