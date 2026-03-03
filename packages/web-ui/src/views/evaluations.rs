@@ -477,15 +477,15 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
         // Modal for maximized logs - OUTSIDE main content div for proper z-index layering
         if *log_modal_open.read() {
             div {
-                class: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4",
+                style: "position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.8); padding: 1rem;",
                 onclick: move |_| log_modal_open.set(false),
                 div {
-                    class: "w-full max-w-7xl max-h-[90vh] flex flex-col bg-gray-900 rounded-lg border border-gray-700 shadow-2xl",
+                    style: "width: 100%; max-width: 90rem; max-height: 90vh; display: flex; flex-direction: column; background-color: rgb(17, 24, 39); border-radius: 0.5rem; border: 1px solid rgb(55, 65, 81); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);",
                     onclick: move |evt| evt.stop_propagation(),
                     
                     // Header
                     div {
-                        class: "flex items-center justify-between px-4 py-3 border-b border-gray-700",
+                        style: "display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; border-bottom: 1px solid rgb(55, 65, 81);",
                         div {
                             h2 { class: "text-lg font-semibold text-white", "Evaluation Logs" }
                             if let Some(item) = selected_item.clone() {
@@ -512,9 +512,13 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     
                     // Logs content
                     div {
-                        class: "flex-1 overflow-auto p-4 space-y-1 bg-gray-950/60",
-                        for line in eval_logs.read().iter().rev().take(1000).rev() {
-                            p { class: "text-sm font-mono text-gray-300", "{line}" }
+                        style: "flex: 1; overflow: auto; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
+                        for line in eval_logs.read().iter() {
+                            p { 
+                                class: "text-sm font-mono text-gray-300",
+                                style: "margin-bottom: 0.25rem;",
+                                "{line}" 
+                            }
                         }
                         if eval_logs.read().is_empty() {
                             p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
