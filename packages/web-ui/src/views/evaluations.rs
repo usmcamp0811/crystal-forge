@@ -606,7 +606,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     
                     // Logs content
                     div {
-                        style: "flex: 1; overflow: auto; overflow-x: hidden; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
+                        style: "flex: 1; min-height: 0; overflow: auto; overflow-x: hidden; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
                         if filtered_logs.is_empty() {
                             if !eval_logs.read().is_empty()
                                 && *log_verbosity.read() == LogVerbosity::Concise

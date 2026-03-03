@@ -81,7 +81,9 @@ pub async fn get_commits_pending_evaluation(pool: &PgPool) -> Result<Vec<Commit>
                 AND c.evaluation_started_at < NOW() - INTERVAL '5 minutes'
             )
         )
-        ORDER BY c.commit_timestamp DESC
+        ORDER BY
+            COALESCE(c.eval_queue_position, 9223372036854775807),
+            c.commit_timestamp DESC
         "#,
     )
     .fetch_all(pool)
@@ -383,8 +385,9 @@ pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueR
         WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'complete', 'failed')
         ORDER BY
             CASE
-                WHEN c.evaluation_status IN ('pending', 'in_progress') THEN 0
-                ELSE 1
+                WHEN c.evaluation_status = 'in_progress' THEN 0
+                WHEN c.evaluation_status = 'pending' THEN 1
+                ELSE 2
             END,
             COALESCE(c.eval_queue_position, 9223372036854775807),
             c.commit_timestamp DESC
