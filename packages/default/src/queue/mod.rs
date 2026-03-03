@@ -7,7 +7,7 @@
 //!
 //! - **Eval Queue**: Notifies eval loop when new commits are inserted
 //! - **Build Queue**: Notifies build workers when new build jobs are created
-//! - **FIFO Ordering**: MPSC channels maintain insertion order
+//! - **Coalesced Wakeups**: At-most-one pending wakeup per queue to avoid burst growth
 //! - **Fallback Polling**: Periodic ticks catch any missed notifications
 //!
 //! ## Usage
