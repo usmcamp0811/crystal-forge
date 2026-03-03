@@ -1,10 +1,10 @@
 ---
 id: TASK-160
 title: Create Eval queue view with reordering support
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-03 14:25'
+updated_date: '2026-03-03 17:51'
 labels: []
 dependencies: []
 priority: medium
@@ -128,4 +128,7 @@ Flakes view and Evaluations view were showing different statuses for the same co
 
 ### Commit
 - `36958f51` - fix: align Flakes view eval status with Evaluations view
+
+Resuming post-review fixes for MR 151 based on merge-blocker checklist.
+LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-160-eval-queue-view
 <!-- SECTION:NOTES:END -->
