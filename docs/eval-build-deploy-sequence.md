@@ -21,14 +21,17 @@ sequenceDiagram
     API->>DB: Insert commit (evaluation_status=pending)
     API->>EQ: notify_eval_queue()
 
-    EQ->>DB: Select next pending commit by eval_queue_position
-    EQ->>DB: Mark commit in_progress
-    EQ->>NEJ: Evaluate all nixosConfigurations in parallel
-    NEJ-->>EQ: Per-system eval results + metadata
+    rect rgb(230, 240, 255)
+        note right of EQ: Eval loop runs continuously
+        EQ->>DB: Select next pending commit by eval_queue_position
+        EQ->>DB: Mark commit in_progress
+        EQ->>NEJ: Evaluate all nixosConfigurations in parallel
+        NEJ-->>EQ: Per-system eval results + metadata
 
-    EQ->>DB: Upsert derivations + policy outcomes
-    EQ->>DB: Mark successful derivations DryRunComplete
-    EQ->>DB: Mark commit complete or failed/pending(retry)
+        EQ->>DB: Upsert derivations + policy outcomes
+        EQ->>DB: Mark successful derivations DryRunComplete
+        EQ->>DB: Mark commit complete or failed/pending(retry)
+    end
 
     EQ->>DB: create_build_jobs_for_commit()
     EQ->>B: notify_build_queue()
@@ -42,6 +45,7 @@ sequenceDiagram
         alt Build success
             B->>DB: Mark build complete + store_path
             B->>DB: Create cache_push_job
+            note right of B: Cache push job enqueued
         else Build failed
             B->>DB: mark_job_failed_with_retry()
         end
