@@ -6,53 +6,51 @@ This diagram explains how Crystal Forge processes a commit from discovery to dep
 
 ```mermaid
 flowchart TD
-    A[New commit detected\nflake poll/webhook/manual] --> B[Commit inserted in DB\nstatus=pending]
-    B --> C[QueueNotifier.notify_eval_queue]
-    C --> D[Eval loop wakes immediately\nwith periodic fallback tick]
+    A[Commit detected] --> B[Insert commit pending]
+    B --> C[Notify eval queue]
+    C --> D[Eval loop wake up]
 
-    D --> E{Pick next commit}
-    E -->|ordered by eval_queue_position,\nthen commit time| F[Mark commit in_progress\n(single active eval enforced)]
-    E -->|none| D
+    D --> E{Pending commit exists}
+    E -->|yes| F[Pick by eval queue position]
+    E -->|no| D
 
-    F --> G[nix-eval-jobs evaluates all systems\nin parallel]
-    G --> H[Policy checks per system\nCF agent enabled?]
-    H --> I[Store/Update derivations]
-    I --> J{System outcome}
+    F --> G[Mark commit in progress]
+    G --> H[Run nix eval jobs]
+    H --> I[Store derivation results]
+    I --> J{Per system outcome}
 
-    J -->|eval failed| K[System status=Failed]
-    J -->|policy failed| L[System status=PolicyFailed]
-    J -->|eval ok + policy pass| M[Mark derivation DryRunComplete\nstatus_id=5]
+    J -->|eval failed| K[System marked failed]
+    J -->|policy failed| L[System marked policy failed]
+    J -->|eval and policy pass| M[Mark derivation dry run complete]
 
-    M --> N[create_build_jobs_for_commit]
-    N --> O[Build jobs inserted\nstatus=queued]
-    O --> P[QueueNotifier.notify_build_queue]
+    M --> N[Create build jobs for commit]
+    N --> O[Build jobs queued]
+    O --> P[Notify build queue]
 
-    P --> Q[Builder claims next job\natomic claim + capacity limits]
-    Q --> R[Build execution]
-    R --> S{Build result}
+    P --> Q[Builder claims next job]
+    Q --> R[Run build]
+    R --> S{Build outcome}
 
-    S -->|success| T[Mark build complete\nstore_path saved]
-    S -->|failure| U[Retry or terminal fail\nbased on retry policy]
+    S -->|success| T[Build complete with store path]
+    S -->|failed| U[Build retry or fail]
 
-    T --> V[Create cache_push_job]
-    V --> W[Cache worker picks job]
-    W --> X{Cache push result}
+    T --> V[Enqueue cache push job]
+    V --> W[Cache worker claims cache job]
+    W --> X{Cache push outcome}
 
-    X -->|success| Y[cache_push_job completed\nremove GC root]
-    X -->|failed| Z[Backoff retry\nthen permanently_failed after max attempts]
+    X -->|success| Y[Cache push completed]
+    X -->|failed| Z[Cache push retry with backoff]
 
-    Y --> AA[Deployability improved\nlatest deployable target available]
+    Y --> AA[Deployable target available]
     Z --> AA
 
-    AA --> AB[Deployment Policy Manager loop\nauto_latest systems]
-    AB --> AC[Update system desired_target\nto latest deployable store path]
-
-    AC --> AD[Agent heartbeat to server\nreturns desired_target]
-    AD --> AE{Agent compares\ncurrent vs desired}
-    AE -->|already current| AF[No deployment]
-    AE -->|different| AG[Deploy from cache\nnix copy + switch via systemd-run]
-    AG --> AH[Agent reports state change\ncf_deployment]
-    AH --> AI[Fleet converges on newer target]
+    AA --> AB[Policy manager updates desired target]
+    AB --> AC[Agent heartbeat reads desired target]
+    AC --> AD{Current target equals desired}
+    AD -->|yes| AE[No deployment action]
+    AD -->|no| AF[Agent deploys from cache]
+    AF --> AG[Agent reports deployment state]
+    AG --> AH[Fleet converges on new target]
 ```
 
 ## Quick Explanation
