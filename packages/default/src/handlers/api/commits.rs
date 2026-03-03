@@ -12,7 +12,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, interval};
 
-use crate::api::models::{EvalQueueItem, EvalQueueSummary, ReorderEvalQueueRequest};
+use crate::api::models::{ApiError, EvalQueueItem, EvalQueueSummary, ReorderEvalQueueRequest};
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 
@@ -92,7 +92,7 @@ pub async fn reorder_eval_queue(
         .await
         .is_none()
     {
-        return StatusCode::FORBIDDEN;
+        return StatusCode::FORBIDDEN.into_response();
     }
 
     if let Err(err) =
@@ -102,14 +102,22 @@ pub async fn reorder_eval_queue(
             .to_string()
             .starts_with("invalid eval queue reorder request:")
         {
-            return StatusCode::BAD_REQUEST;
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "validation_error".to_string(),
+                    message: err.to_string(),
+                    details: None,
+                }),
+            )
+                .into_response();
         }
 
         tracing::error!("Failed to reorder eval queue: {}", err);
-        return StatusCode::INTERNAL_SERVER_ERROR;
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    StatusCode::OK
+    StatusCode::OK.into_response()
 }
 
 /// Structured message types for eval log WebSocket

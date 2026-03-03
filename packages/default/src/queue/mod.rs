@@ -149,10 +149,7 @@ mod tests {
         notifier.notify_eval_queue();
 
         // Verify the task completes
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            handle
-        ).await;
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), handle).await;
 
         assert!(result.is_ok(), "Notification should wake up the receiver");
     }
@@ -174,10 +171,7 @@ mod tests {
         notifier.notify_build_queue();
 
         // Verify the task completes
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(100),
-            handle
-        ).await;
+        let result = tokio::time::timeout(tokio::time::Duration::from_millis(100), handle).await;
 
         assert!(result.is_ok(), "Notification should wake up the receiver");
     }
@@ -197,12 +191,36 @@ mod tests {
         // This should timeout because additional notifications were coalesced.
         let result = tokio::time::timeout(
             tokio::time::Duration::from_millis(50),
-            notifier.wait_for_eval_work()
-        ).await;
+            notifier.wait_for_eval_work(),
+        )
+        .await;
 
         assert!(
             result.is_err(),
             "Should timeout after a single coalesced notification is consumed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_coalescing_does_not_stall_follow_up_work() {
+        let notifier = QueueNotifier::new();
+
+        for _ in 0..10_000 {
+            notifier.notify_eval_queue();
+        }
+
+        notifier.wait_for_eval_work().await;
+
+        notifier.notify_eval_queue();
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            notifier.wait_for_eval_work(),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "A new wakeup after draining the coalesced token should still be observed"
         );
     }
 }

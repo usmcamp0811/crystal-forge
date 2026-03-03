@@ -100,20 +100,20 @@ Crystal Forge uses an event-driven architecture for both evaluation and build qu
 
 #### Queue Notification System
 
-The `QueueNotifier` provides FIFO-ordered event channels using Tokio MPSC:
+The `QueueNotifier` provides bounded event channels using Tokio MPSC:
 
 ```rust
 pub struct QueueNotifier {
-    eval_tx: mpsc::UnboundedSender<()>,
-    eval_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
-    build_tx: mpsc::UnboundedSender<()>,
-    build_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
+    eval_tx: mpsc::Sender<()>,   // channel(1), coalesced wakeups
+    eval_rx: Arc<Mutex<mpsc::Receiver<()>>>,
+    build_tx: mpsc::Sender<()>,  // channel(1), coalesced wakeups
+    build_rx: Arc<Mutex<mpsc::Receiver<()>>>,
 }
 ```
 
 **Key Benefits**:
 - **Zero-latency triggering**: Work starts immediately when commits/jobs arrive
-- **FIFO guarantees**: MPSC channels maintain insertion order
+- **Bounded memory**: channel capacity is 1 and duplicate wakeups are coalesced
 - **Idle efficiency**: No CPU cycles wasted polling empty queues
 - **Fallback safety**: Periodic ticks catch any missed notifications
 
@@ -133,11 +133,12 @@ Commit Insert → notify_eval_queue() → Eval Loop Wakes → Process Pending
 **Processing Loop**:
 ```rust
 loop {
+    process_pending_commits(&pool, &cf_state, &queue_notifier).await;
+
     tokio::select! {
         _ = ticker.tick() => { /* fallback: every 60s */ }
         _ = queue_notifier.wait_for_eval_work() => { /* immediate */ }
     }
-    process_pending_commits(&pool, &cf_state, &queue_notifier).await;
 }
 ```
 
@@ -159,7 +160,7 @@ Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers
 **Fire-and-Forget Semantics**:
 - Notifications never block the sender
 - Dropped receivers (server shutdown) are silently ignored
-- Multiple notifications queue up (no coalescing)
+- Multiple notifications coalesce into one pending wakeup
 
 **FIFO Ordering**:
 - MPSC channels guarantee insertion order

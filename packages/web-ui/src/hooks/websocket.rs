@@ -119,6 +119,7 @@ pub fn use_websocket_eval_stream(
     let mut logs = use_signal(Vec::<String>::new);
     let mut system_status = use_signal(std::collections::HashMap::<String, SystemEvalStatus>::new);
     let mut connection_state = use_signal(|| ConnectionState::Disconnected);
+    let mut active_socket = use_signal(|| None::<WebSocket>);
 
     let commit_id = commit_id.to_string();
 
@@ -128,16 +129,29 @@ pub fn use_websocket_eval_stream(
         let logs = logs.clone();
         let system_status = system_status.clone();
         let connection_state = connection_state.clone();
+        let active_socket = active_socket.clone();
 
         Rc::new(move || {
-            connect_eval_websocket(&commit_id, logs, system_status, connection_state);
+            connect_eval_websocket(
+                &commit_id,
+                logs,
+                system_status,
+                connection_state,
+                active_socket,
+            );
         })
     });
 
     // Auto-connect on mount
     use_effect(move || {
         let commit_id = commit_id.clone();
-        connect_eval_websocket(&commit_id, logs, system_status, connection_state);
+        connect_eval_websocket(
+            &commit_id,
+            logs,
+            system_status,
+            connection_state,
+            active_socket,
+        );
     });
 
     (logs, system_status, connection_state, reconnect)
@@ -335,7 +349,16 @@ fn connect_eval_websocket(
     mut logs: Signal<Vec<String>>,
     mut system_status: Signal<std::collections::HashMap<String, SystemEvalStatus>>,
     mut connection_state: Signal<ConnectionState>,
+    mut active_socket: Signal<Option<WebSocket>>,
 ) {
+    if let Some(existing) = active_socket.write().take() {
+        existing.set_onopen(None);
+        existing.set_onmessage(None);
+        existing.set_onerror(None);
+        existing.set_onclose(None);
+        let _ = existing.close();
+    }
+
     connection_state.set(ConnectionState::Connecting);
 
     // Build WebSocket URL
@@ -464,4 +487,6 @@ fn connect_eval_websocket(
     }) as Box<dyn FnMut(CloseEvent)>);
     ws.set_onclose(Some(onclose.as_ref().unchecked_ref()));
     onclose.forget();
+
+    active_socket.set(Some(ws));
 }
