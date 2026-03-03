@@ -135,8 +135,24 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
         }
     }
 
-    // State for log modal
+    // State for log modal + verbosity controls
     let mut log_modal_open = use_signal(|| false);
+    let mut log_verbosity = use_signal(|| LogVerbosity::Concise);
+
+    let filtered_logs = {
+        let logs = eval_logs.read();
+        filter_eval_logs(&logs, *log_verbosity.read())
+    };
+    let concise_btn_class = if *log_verbosity.read() == LogVerbosity::Concise {
+        "px-2 py-1 text-[11px] bg-blue-800/60 text-blue-100"
+    } else {
+        "px-2 py-1 text-[11px] bg-gray-900 text-gray-300 hover:bg-gray-800"
+    };
+    let verbose_btn_class = if *log_verbosity.read() == LogVerbosity::Verbose {
+        "px-2 py-1 text-[11px] border-l border-gray-700 bg-blue-800/60 text-blue-100"
+    } else {
+        "px-2 py-1 text-[11px] border-l border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800"
+    };
 
     rsx! {
         div {
@@ -198,16 +214,39 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                     "{connection_badge_text(&connection_state.read())}"
                                 }
                             }
-                            button {
-                                class: "px-3 py-1.5 text-xs rounded text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
-                                onclick: move |_| log_modal_open.set(true),
-                                "⛶ Maximize"
+                            div { class: "flex items-center gap-2",
+                                span {
+                                    class: "text-[11px] text-gray-400",
+                                    "{filtered_logs.len()} shown / {eval_logs.read().len()} total"
+                                }
+                                div { class: "inline-flex items-center rounded border border-gray-700 overflow-hidden",
+                                    button {
+                                        class: "{concise_btn_class}",
+                                        onclick: move |_| log_verbosity.set(LogVerbosity::Concise),
+                                        "Concise"
+                                    }
+                                    button {
+                                        class: "{verbose_btn_class}",
+                                        onclick: move |_| log_verbosity.set(LogVerbosity::Verbose),
+                                        "Verbose"
+                                    }
+                                }
+                                button {
+                                    class: "px-3 py-1.5 text-xs rounded text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                                    onclick: move |_| log_modal_open.set(true),
+                                    "⛶ Maximize"
+                                }
                             }
                         }
                         div {
                             class: "h-96 overflow-y-auto rounded border border-gray-700 p-3",
                             style: "background-color: rgb(3, 7, 18); scrollbar-width: thin;",
-                            if eval_logs.read().is_empty() {
+                            if filtered_logs.is_empty() {
+                                if !eval_logs.read().is_empty()
+                                    && *log_verbosity.read() == LogVerbosity::Concise
+                                {
+                                    p { class: "text-sm text-gray-500", "No high-signal lines in concise mode. Switch to Verbose to see all warnings." }
+                                } else
                                 // Show helpful loading/waiting state when no logs yet
                                 if let Some(item) = selected_item.clone() {
                                     if is_in_progress_eval_status(&item.evaluation_status) {
@@ -227,7 +266,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                     p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
                                 }
                             } else {
-                                for line in eval_logs.read().iter().rev().take(200).rev() {
+                                for line in filtered_logs.iter().rev().take(200).rev() {
                                     p { 
                                         class: "text-xs font-mono text-gray-300",
                                         style: "margin-bottom: 0.25rem; line-height: 1.5;",
@@ -518,6 +557,18 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                             }
                         }
                         div { class: "flex items-center gap-2",
+                            div { class: "inline-flex items-center rounded border border-gray-700 overflow-hidden",
+                                button {
+                                    class: "{concise_btn_class}",
+                                    onclick: move |_| log_verbosity.set(LogVerbosity::Concise),
+                                    "Concise"
+                                }
+                                button {
+                                    class: "{verbose_btn_class}",
+                                    onclick: move |_| log_verbosity.set(LogVerbosity::Verbose),
+                                    "Verbose"
+                                }
+                            }
                             p {
                                 class: "text-xs",
                                 span {
@@ -536,7 +587,12 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     // Logs content
                     div {
                         style: "flex: 1; overflow: auto; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
-                        if eval_logs.read().is_empty() {
+                        if filtered_logs.is_empty() {
+                            if !eval_logs.read().is_empty()
+                                && *log_verbosity.read() == LogVerbosity::Concise
+                            {
+                                p { class: "text-gray-500", "No high-signal lines in concise mode. Switch to Verbose to see all warnings." }
+                            } else
                             // Show helpful loading/waiting state in modal too
                             if let Some(item) = selected_item.clone() {
                                 if is_in_progress_eval_status(&item.evaluation_status) {
@@ -556,7 +612,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                 p { class: "text-gray-500", "No log messages yet for selected commit." }
                             }
                         } else {
-                            for line in eval_logs.read().iter() {
+                            for line in filtered_logs.iter() {
                                 p { 
                                     class: "text-sm font-mono text-gray-300",
                                     style: "margin-bottom: 0.25rem;",
@@ -601,6 +657,90 @@ fn StatCard(label: String, value: String, tone: &'static str) -> Element {
             p { class: "text-lg font-semibold", "{value}" }
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LogVerbosity {
+    Concise,
+    Verbose,
+}
+
+fn filter_eval_logs(raw: &[String], verbosity: LogVerbosity) -> Vec<String> {
+    match verbosity {
+        LogVerbosity::Verbose => raw.to_vec(),
+        LogVerbosity::Concise => filter_concise_logs(raw),
+    }
+}
+
+fn filter_concise_logs(raw: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pending_warning: Option<(String, usize)> = None;
+
+    for line in raw {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+
+        if lower.starts_with("evaluation warning:") {
+            match &mut pending_warning {
+                Some((msg, count)) if msg == trimmed => {
+                    *count += 1;
+                }
+                Some((msg, count)) => {
+                    out.push(summarize_warning(msg, *count));
+                    *msg = trimmed.to_string();
+                    *count = 1;
+                }
+                None => {
+                    pending_warning = Some((trimmed.to_string(), 1));
+                }
+            }
+            continue;
+        }
+
+        if let Some((msg, count)) = pending_warning.take() {
+            out.push(summarize_warning(&msg, count));
+        }
+
+        if is_high_signal_log(trimmed) {
+            out.push(trimmed.to_string());
+        }
+    }
+
+    if let Some((msg, count)) = pending_warning.take() {
+        out.push(summarize_warning(&msg, count));
+    }
+
+    out
+}
+
+fn summarize_warning(message: &str, count: usize) -> String {
+    if count <= 1 {
+        format!("⚠️  {message}")
+    } else {
+        format!("⚠️  (x{count}) {message}")
+    }
+}
+
+fn is_high_signal_log(line: &str) -> bool {
+    if line.is_empty() {
+        return false;
+    }
+
+    let lower = line.to_ascii_lowercase();
+    line.starts_with('✅')
+        || line.starts_with('❌')
+        || line.starts_with('🚀')
+        || line.starts_with('⏳')
+        || line.starts_with('📊')
+        || line.starts_with('🔐')
+        || line.starts_with('📦')
+        || line.starts_with('⚠')
+        || line.starts_with('═')
+        || lower.contains("starting evaluation")
+        || lower.contains("queued for build")
+        || lower.contains("policy")
+        || lower.contains("error")
+        || lower.contains("failed")
 }
 
 fn is_active_eval_status(status: &str) -> bool {
