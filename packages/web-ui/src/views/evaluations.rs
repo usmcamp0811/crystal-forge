@@ -543,15 +543,20 @@ fn MetricsStrip(summary: EvalQueueSummary) -> Element {
 
 #[component]
 fn StatCard(label: String, value: String, tone: &'static str) -> Element {
-    let class = match tone {
-        "blue" => "border-blue-500/40 bg-blue-900/20 text-blue-100",
-        "green" => "border-emerald-500/40 bg-emerald-900/20 text-emerald-100",
-        _ => "border-slate-600 bg-slate-800/30 text-slate-100",
+    let style = match tone {
+        "blue" => "background-color: rgba(23, 37, 84, 0.6); border-color: rgba(59, 130, 246, 0.5); color: rgb(219, 234, 254);",
+        "green" => "background-color: rgba(6, 78, 59, 0.6); border-color: rgba(16, 185, 129, 0.5); color: rgb(209, 250, 229);",
+        _ => "background-color: rgba(30, 41, 59, 0.8); border-color: rgb(71, 85, 105); color: rgb(241, 245, 249);",
     };
     rsx! {
         div {
-            class: "rounded-lg border px-3 py-2 {class}",
-            p { class: "text-[11px] uppercase tracking-wide opacity-80", "{label}" }
+            class: "rounded-lg border px-3 py-2",
+            style: "{style}",
+            p { 
+                class: "text-[11px] uppercase tracking-wide",
+                style: "opacity: 0.8;",
+                "{label}" 
+            }
             p { class: "text-lg font-semibold", "{value}" }
         }
     }
