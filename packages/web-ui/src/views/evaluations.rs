@@ -267,10 +267,10 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                 }
                             } else {
                                 for line in filtered_logs.iter().rev().take(200).rev() {
-                                    p { 
-                                        class: "text-xs font-mono text-gray-300",
-                                        style: "margin-bottom: 0.25rem; line-height: 1.5;",
-                                        "{line}" 
+                                    p {
+                                        class: "text-xs font-mono text-gray-300 whitespace-pre-wrap break-words",
+                                        style: "margin-bottom: 0.25rem; line-height: 1.5; overflow-wrap: anywhere;",
+                                        "{line}"
                                     }
                                 }
                             }
@@ -613,10 +613,10 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                             }
                         } else {
                             for line in filtered_logs.iter() {
-                                p { 
-                                    class: "text-sm font-mono text-gray-300",
-                                    style: "margin-bottom: 0.25rem;",
-                                    "{line}" 
+                                p {
+                                    class: "text-sm font-mono text-gray-300 whitespace-pre-wrap break-words",
+                                    style: "margin-bottom: 0.25rem; overflow-wrap: anywhere;",
+                                    "{line}"
                                 }
                             }
                         }
