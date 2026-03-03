@@ -470,58 +470,57 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                             }
                         }
                     }
-
+                }
             }
-
-            // Modal for maximized logs
-            if *log_modal_open.read() {
+        }
+        
+        // Modal for maximized logs - OUTSIDE main content div for proper z-index layering
+        if *log_modal_open.read() {
+            div {
+                class: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4",
+                onclick: move |_| log_modal_open.set(false),
                 div {
-                    class: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4",
-                    onclick: move |_| log_modal_open.set(false),
+                    class: "w-full max-w-7xl max-h-[90vh] flex flex-col bg-gray-900 rounded-lg border border-gray-700 shadow-2xl",
+                    onclick: move |evt| evt.stop_propagation(),
+                    
+                    // Header
                     div {
-                        class: "w-full max-w-7xl max-h-[90vh] flex flex-col bg-gray-900 rounded-lg border border-gray-700 shadow-2xl",
-                        onclick: move |evt| evt.stop_propagation(),
-                        
-                        // Header
+                        class: "flex items-center justify-between px-4 py-3 border-b border-gray-700",
                         div {
-                            class: "flex items-center justify-between px-4 py-3 border-b border-gray-700",
-                            div {
-                                h2 { class: "text-lg font-semibold text-white", "Evaluation Logs" }
-                                if let Some(item) = selected_item.clone() {
-                                    p { class: "text-xs text-gray-400 mt-1",
-                                        "{item.flake_name} · {item.commit_hash.chars().take(8).collect::<String>()}"
-                                    }
-                                }
-                            }
-                            div { class: "flex items-center gap-2",
-                                p {
-                                    class: "text-xs",
-                                    span {
-                                        class: "inline-flex items-center px-2 py-0.5 rounded border {connection_badge_class(&connection_state.read())}",
-                                        "{connection_badge_text(&connection_state.read())}"
-                                    }
-                                }
-                                button {
-                                    class: "px-3 py-1.5 text-sm rounded text-white {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
-                                    onclick: move |_| log_modal_open.set(false),
-                                    "✕ Close"
+                            h2 { class: "text-lg font-semibold text-white", "Evaluation Logs" }
+                            if let Some(item) = selected_item.clone() {
+                                p { class: "text-xs text-gray-400 mt-1",
+                                    "{item.flake_name} · {item.commit_hash.chars().take(8).collect::<String>()}"
                                 }
                             }
                         }
-                        
-                        // Logs content
-                        div {
-                            class: "flex-1 overflow-auto p-4 space-y-1 bg-gray-950/60",
-                            for line in eval_logs.read().iter().rev().take(1000).rev() {
-                                p { class: "text-sm font-mono text-gray-300", "{line}" }
+                        div { class: "flex items-center gap-2",
+                            p {
+                                class: "text-xs",
+                                span {
+                                    class: "inline-flex items-center px-2 py-0.5 rounded border {connection_badge_class(&connection_state.read())}",
+                                    "{connection_badge_text(&connection_state.read())}"
+                                }
                             }
-                            if eval_logs.read().is_empty() {
-                                p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
+                            button {
+                                class: "px-3 py-1.5 text-sm rounded text-white {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
+                                onclick: move |_| log_modal_open.set(false),
+                                "✕ Close"
                             }
                         }
                     }
+                    
+                    // Logs content
+                    div {
+                        class: "flex-1 overflow-auto p-4 space-y-1 bg-gray-950/60",
+                        for line in eval_logs.read().iter().rev().take(1000).rev() {
+                            p { class: "text-sm font-mono text-gray-300", "{line}" }
+                        }
+                        if eval_logs.read().is_empty() {
+                            p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
+                        }
+                    }
                 }
-            }
             }
         }
     }
