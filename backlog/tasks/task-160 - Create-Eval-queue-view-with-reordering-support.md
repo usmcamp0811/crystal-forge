@@ -4,7 +4,7 @@ title: Create Eval queue view with reordering support
 status: In Progress
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-03 17:51'
+updated_date: '2026-03-03 18:10'
 labels: []
 dependencies: []
 priority: medium
@@ -131,4 +131,19 @@ Flakes view and Evaluations view were showing different statuses for the same co
 
 Resuming post-review fixes for MR 151 based on merge-blocker checklist.
 LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-160-eval-queue-view
+
+Post-review MR-151 hardening pass completed:
+- Reorder validation now reports explicit duplicate/missing/extra ID sets and returns structured 400 response body.
+- Reorder + insert paths now use a shared advisory transaction lock for queue-position consistency under concurrency.
+- Active queue ordering tie-breakers now include immutable id fallback after eval_queue_position + commit_timestamp.
+- Added regression tests for reorder validation paths and queue coalescing follow-up wake behavior.
+- Eval websocket reconnect now explicitly tears down prior socket before opening a new stream.
+- Updated architecture doc to match bounded channel(1) coalescing and process-before-wait loop ordering.
+
+Verification executed:
+- nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml queries::commits::tests -- --nocapture (pass)
+- nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml queue::tests -- --nocapture (pass)
+- nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml (pass)
+
+Note: nix develop -c cargo check --manifest-path packages/default/Cargo.toml without SQLX_OFFLINE requires a running DB in this repo and failed in this session due connection refused.
 <!-- SECTION:NOTES:END -->
