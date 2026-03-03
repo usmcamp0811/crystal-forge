@@ -71,6 +71,64 @@ Create a new "Evals" view (similar to "Builds" view) that:
 - [ ] #14 Status items have explanatory text or hover tooltips explaining what each status means
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Event-Driven Queue Architecture Implementation
+
+### Current State (Polling)
+- Eval loop: polls every 60s for pending commits
+- Build workers: poll every 5s when idle
+- High latency (up to 60s for eval, 5s for builds)
+- Wastes CPU cycles polling empty queues
+
+### Target State (Event-Driven)
+- Both queues wake immediately when work arrives
+- FIFO ordering maintained via MPSC channels
+- Idle when empty (no polling)
+- Fallback periodic tick to catch missed events
+
+### Implementation Steps
+
+1. **Create QueueNotification System** (`src/queue/mod.rs`)
+   - MPSC unbounded channels for eval and build queues
+   - Shared state in server initialization
+   - Thread-safe Arc wrapper
+
+2. **Modify Eval Loop** (`src/server/mod.rs`)
+   - Replace pure polling with `tokio::select!`
+   - Listen to eval channel + 60s fallback ticker
+   - Process commits immediately on notification
+
+3. **Modify Build Workers** (`src/builder/worker.rs`)
+   - Replace 5s sleep with notification listener
+   - Listen to build channel + 5s fallback ticker
+   - Claim work immediately on notification
+
+4. **Add Notification Triggers**
+   - `insert_commit_with_metadata`: Notify eval queue
+   - `create_build_jobs_for_commit`: Notify build queue
+   - Handle flake polling triggers
+   - Handle webhook triggers (future)
+
+5. **Update Architecture Docs** (`docs/architecture.md`)
+   - Document event-driven queue design
+   - Explain FIFO guarantees
+   - Document fallback polling behavior
+
+### Safety Considerations
+- Keep fallback polling to catch missed notifications
+- MPSC channels are unbounded (notifications are tiny)
+- No blocking operations in notification path
+- Notifications are fire-and-forget (no errors on dropped receiver)
+
+### Testing
+- Verify immediate eval on commit insert
+- Verify immediate build on job creation
+- Verify no busy-wait when queues are empty
+- Verify FIFO ordering is maintained
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
