@@ -135,6 +135,9 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
         }
     }
 
+    // State for log modal
+    let mut log_modal_open = use_signal(|| false);
+
     rsx! {
         div {
             class: "space-y-6",
@@ -179,6 +182,38 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     class: "text-xs px-3 py-2 rounded-lg border text-amber-100",
                     style: "background-color: #493E26; border-color: #8C7041;",
                     "No evaluations are currently running. {pending_count} commit(s) are pending in queue. If this persists, the eval worker loop may be stalled."
+                }
+            }
+
+            // Full-width Evaluation Logs at the top
+            Card {
+                title: Some("Evaluation Logs".to_string()),
+                children: rsx! {
+                    div { class: "space-y-2",
+                        div { class: "flex items-center justify-between",
+                            p {
+                                class: "text-xs",
+                                span {
+                                    class: "inline-flex items-center px-2 py-0.5 rounded border {connection_badge_class(&connection_state.read())}",
+                                    "{connection_badge_text(&connection_state.read())}"
+                                }
+                            }
+                            button {
+                                class: "px-3 py-1.5 text-xs rounded text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
+                                onclick: move |_| log_modal_open.set(true),
+                                "⛶ Maximize"
+                            }
+                        }
+                        div {
+                            class: "h-[30vh] overflow-auto rounded border border-gray-700 bg-gray-950/60 p-3 space-y-1",
+                            for line in eval_logs.read().iter().rev().take(200).rev() {
+                                p { class: "text-xs font-mono text-gray-300", "{line}" }
+                            }
+                            if eval_logs.read().is_empty() {
+                                p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -379,7 +414,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     Card {
                         title: Some("Selected Commit".to_string()),
                         children: rsx! {
-                            if let Some(item) = selected_item {
+                            if let Some(item) = selected_item.clone() {
                                 div { class: "space-y-3",
                                     p { class: "text-sm text-white font-semibold", "{item.flake_name}" }
                                     p { class: "text-xs text-gray-400 font-mono", "{item.commit_hash}" }
@@ -436,28 +471,57 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                         }
                     }
 
-                    Card {
-                        title: Some("Evaluation Logs".to_string()),
-                        children: rsx! {
-                            p {
-                                class: "text-xs mb-2",
-                                span {
-                                    class: "inline-flex items-center px-2 py-0.5 rounded border {connection_badge_class(&connection_state.read())}",
-                                    "{connection_badge_text(&connection_state.read())}"
+            }
+
+            // Modal for maximized logs
+            if *log_modal_open.read() {
+                div {
+                    class: "fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4",
+                    onclick: move |_| log_modal_open.set(false),
+                    div {
+                        class: "w-full max-w-7xl max-h-[90vh] flex flex-col bg-gray-900 rounded-lg border border-gray-700 shadow-2xl",
+                        onclick: move |evt| evt.stop_propagation(),
+                        
+                        // Header
+                        div {
+                            class: "flex items-center justify-between px-4 py-3 border-b border-gray-700",
+                            div {
+                                h2 { class: "text-lg font-semibold text-white", "Evaluation Logs" }
+                                if let Some(item) = selected_item.clone() {
+                                    p { class: "text-xs text-gray-400 mt-1",
+                                        "{item.flake_name} · {item.commit_hash.chars().take(8).collect::<String>()}"
+                                    }
                                 }
                             }
-                            div {
-                                class: "max-h-[34vh] overflow-auto rounded border border-gray-700 bg-gray-950/60 p-3 space-y-1",
-                                for line in eval_logs.read().iter().rev().take(120).rev() {
-                                    p { class: "text-xs font-mono text-gray-300", "{line}" }
+                            div { class: "flex items-center gap-2",
+                                p {
+                                    class: "text-xs",
+                                    span {
+                                        class: "inline-flex items-center px-2 py-0.5 rounded border {connection_badge_class(&connection_state.read())}",
+                                        "{connection_badge_text(&connection_state.read())}"
+                                    }
                                 }
-                                if eval_logs.read().is_empty() {
-                                    p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
+                                button {
+                                    class: "px-3 py-1.5 text-sm rounded text-white {theme::interactive::DANGER_BTN} {theme::interactive::FOCUS_RING}",
+                                    onclick: move |_| log_modal_open.set(false),
+                                    "✕ Close"
                                 }
+                            }
+                        }
+                        
+                        // Logs content
+                        div {
+                            class: "flex-1 overflow-auto p-4 space-y-1 bg-gray-950/60",
+                            for line in eval_logs.read().iter().rev().take(1000).rev() {
+                                p { class: "text-sm font-mono text-gray-300", "{line}" }
+                            }
+                            if eval_logs.read().is_empty() {
+                                p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
                             }
                         }
                     }
                 }
+            }
             }
         }
     }
