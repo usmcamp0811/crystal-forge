@@ -39,21 +39,21 @@ use tracing::debug;
 
 /// Event-driven queue notification system.
 ///
-/// Uses unbounded MPSC channels to notify workers when new work arrives.
-/// This eliminates polling delays and reduces CPU usage when queues are empty.
+/// Uses bounded MPSC channels with coalesced wakeups.
+/// This eliminates polling delays while preventing unbounded growth during notification bursts.
 #[derive(Clone)]
 pub struct QueueNotifier {
-    eval_tx: mpsc::UnboundedSender<()>,
-    eval_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<()>>>,
-    build_tx: mpsc::UnboundedSender<()>,
-    build_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<()>>>,
+    eval_tx: mpsc::Sender<()>,
+    eval_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<()>>>,
+    build_tx: mpsc::Sender<()>,
+    build_rx: Arc<tokio::sync::Mutex<mpsc::Receiver<()>>>,
 }
 
 impl QueueNotifier {
     /// Create a new queue notifier system.
     pub fn new() -> Self {
-        let (eval_tx, eval_rx) = mpsc::unbounded_channel();
-        let (build_tx, build_rx) = mpsc::unbounded_channel();
+        let (eval_tx, eval_rx) = mpsc::channel(1);
+        let (build_tx, build_rx) = mpsc::channel(1);
 
         Self {
             eval_tx,
@@ -72,10 +72,15 @@ impl QueueNotifier {
     ///
     /// Fire-and-forget: errors are logged but don't propagate.
     pub fn notify_eval_queue(&self) {
-        // send() on unbounded channel only fails if receiver is dropped
-        // In that case, the server is shutting down, so we can ignore the error
-        let _ = self.eval_tx.send(());
-        debug!("🔔 Notified eval queue of new work");
+        match self.eval_tx.try_send(()) {
+            Ok(_) => debug!("🔔 Notified eval queue of new work"),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                debug!("🔔 Eval queue already has pending wakeup; coalescing notification")
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                debug!("Eval queue receiver dropped; skipping notification")
+            }
+        }
     }
 
     /// Notify the build queue that new build jobs are available.
@@ -87,8 +92,15 @@ impl QueueNotifier {
     ///
     /// Fire-and-forget: errors are logged but don't propagate.
     pub fn notify_build_queue(&self) {
-        let _ = self.build_tx.send(());
-        debug!("🔔 Notified build queue of new work");
+        match self.build_tx.try_send(()) {
+            Ok(_) => debug!("🔔 Notified build queue of new work"),
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                debug!("🔔 Build queue already has pending wakeup; coalescing notification")
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                debug!("Build queue receiver dropped; skipping notification")
+            }
+        }
     }
 
     /// Wait for eval work notification (async).
@@ -171,7 +183,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_notifications_received() {
+    async fn test_multiple_notifications_are_coalesced() {
         let notifier = QueueNotifier::new();
 
         // Send multiple notifications before anyone is listening
@@ -179,18 +191,18 @@ mod tests {
         notifier.notify_eval_queue();
         notifier.notify_eval_queue();
 
-        // All notifications should be in the queue
-        // We can consume them one by one
-        notifier.wait_for_eval_work().await;
-        notifier.wait_for_eval_work().await;
+        // Only one wakeup should be queued due to channel capacity=1.
         notifier.wait_for_eval_work().await;
 
-        // This should timeout since all notifications were consumed
+        // This should timeout because additional notifications were coalesced.
         let result = tokio::time::timeout(
             tokio::time::Duration::from_millis(50),
             notifier.wait_for_eval_work()
         ).await;
 
-        assert!(result.is_err(), "Should timeout after all notifications consumed");
+        assert!(
+            result.is_err(),
+            "Should timeout after a single coalesced notification is consumed"
+        );
     }
 }

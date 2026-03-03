@@ -98,6 +98,13 @@ pub async fn reorder_eval_queue(
     if let Err(err) =
         crate::queries::commits::reorder_eval_queue(&state.pool, &request.ordered_commit_ids).await
     {
+        if err
+            .to_string()
+            .starts_with("invalid eval queue reorder request:")
+        {
+            return StatusCode::BAD_REQUEST;
+        }
+
         tracing::error!("Failed to reorder eval queue: {}", err);
         return StatusCode::INTERNAL_SERVER_ERROR;
     }

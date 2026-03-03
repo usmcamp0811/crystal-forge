@@ -2,6 +2,7 @@ use crate::models::commits::Commit;
 use crate::models::flakes::Flake;
 use anyhow::{Context, Result};
 use sqlx::PgPool;
+use std::collections::HashSet;
 use tracing::{debug, error, info, warn};
 
 pub async fn insert_commit(
@@ -28,8 +29,17 @@ pub async fn insert_commit_with_metadata(
         .context("No flake entry found")?;
 
     sqlx::query(
-        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, message, author)
-         VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+        r#"
+        WITH next_position AS (
+            SELECT COALESCE(MAX(eval_queue_position), 0) + 1 AS position
+            FROM commits
+            WHERE COALESCE(evaluation_status, 'pending') IN ('pending', 'in_progress')
+        )
+        INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, message, author, eval_queue_position)
+        SELECT $1, $2, $3, $4, $5, position
+        FROM next_position
+        ON CONFLICT DO NOTHING
+        "#,
     )
     .bind(flake_id.0)
     .bind(commit_hash)
@@ -402,11 +412,57 @@ pub async fn list_eval_queue(pool: &PgPool, limit: i64) -> Result<Vec<EvalQueueR
 }
 
 pub async fn reorder_eval_queue(pool: &PgPool, ordered_commit_ids: &[i32]) -> Result<()> {
-    if ordered_commit_ids.is_empty() {
-        return Ok(());
+    let mut tx = pool.begin().await?;
+
+    let active_commit_ids: Vec<i32> = sqlx::query_scalar(
+        r#"
+        SELECT c.id
+        FROM commits c
+        WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress')
+        ORDER BY
+            CASE
+                WHEN c.evaluation_status = 'in_progress' THEN 0
+                ELSE 1
+            END,
+            COALESCE(c.eval_queue_position, 9223372036854775807),
+            c.commit_timestamp DESC
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
+
+    if active_commit_ids.is_empty() {
+        if ordered_commit_ids.is_empty() {
+            tx.commit().await?;
+            return Ok(());
+        }
+
+        return Err(anyhow::anyhow!(
+            "invalid eval queue reorder request: no active queue items exist"
+        ));
     }
 
-    let mut tx = pool.begin().await?;
+    if ordered_commit_ids.len() != active_commit_ids.len() {
+        return Err(anyhow::anyhow!(
+            "invalid eval queue reorder request: payload size {} does not match active queue size {}",
+            ordered_commit_ids.len(),
+            active_commit_ids.len()
+        ));
+    }
+
+    let payload_set: HashSet<i32> = ordered_commit_ids.iter().copied().collect();
+    if payload_set.len() != ordered_commit_ids.len() {
+        return Err(anyhow::anyhow!(
+            "invalid eval queue reorder request: duplicate commit IDs are not allowed"
+        ));
+    }
+
+    let active_set: HashSet<i32> = active_commit_ids.iter().copied().collect();
+    if payload_set != active_set {
+        return Err(anyhow::anyhow!(
+            "invalid eval queue reorder request: payload must be a full permutation of active queue IDs"
+        ));
+    }
 
     sqlx::query(
         r#"
