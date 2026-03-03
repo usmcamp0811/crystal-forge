@@ -63,6 +63,35 @@ pub async fn evaluate_with_nix_eval_jobs(
         target_system,
         policies.len()
     );
+    
+    // Broadcast detailed start information
+    if let Some(state) = cf_state {
+        let start_msg = format!(
+            "🚀 Starting evaluation for flake: {}\n   Commit: {}\n   Target: {}\n   Workers: {}",
+            flake.name, &commit_hash[..8.min(commit_hash.len())], target_system, server_config.eval_workers
+        );
+        crate::handlers::api::commits::broadcast_eval_log(state, commit.id, start_msg).await;
+        
+        if !policies.is_empty() {
+            let policy_msg = format!("📋 Checking {} deployment policies:", policies.len());
+            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, policy_msg).await;
+            for policy in policies {
+                let policy_detail = format!(
+                    "   • {} (strict: {})",
+                    policy.description(),
+                    policy.is_strict()
+                );
+                crate::handlers::api::commits::broadcast_eval_log(state, commit.id, policy_detail).await;
+            }
+        }
+        
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            "⏳ Evaluating nixosConfigurations...".to_string()
+        ).await;
+    }
+    
     if !policies.is_empty() {
         info!("   Policies will be evaluated in parallel by nix-eval-jobs:");
         for policy in policies {
@@ -125,8 +154,27 @@ pub async fn evaluate_with_nix_eval_jobs(
                                 debug!("📦 Evaluated: {}, drv_path={:?}, has_error={:?}",
                                     system_name, drv_path, has_error);
 
-                                // Broadcast in-progress status to WebSocket clients.
+                                // Broadcast system evaluation result to logs
                                 if let Some(state) = cf_state {
+                                    if has_error {
+                                        let error_msg = result.error.as_ref()
+                                            .map(|e| {
+                                                // Truncate long errors for readability
+                                                if e.len() > 200 {
+                                                    format!("{}...", &e[..200])
+                                                } else {
+                                                    e.clone()
+                                                }
+                                            })
+                                            .unwrap_or_else(|| "Unknown error".to_string());
+                                        let log_msg = format!("❌ {}: {}", system_name, error_msg);
+                                        crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                    } else {
+                                        let log_msg = format!("✅ {} evaluated successfully", system_name);
+                                        crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                    }
+                                    
+                                    // Broadcast in-progress status to WebSocket clients.
                                     crate::handlers::api::commits::broadcast_system_status(
                                         state,
                                         commit.id,
@@ -159,9 +207,21 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 } else {
                                                     warn!("⚠️  {}", warning);
                                                 }
+                                                
+                                                // Broadcast policy warnings to logs
+                                                if let Some(state) = cf_state {
+                                                    let log_msg = format!("⚠️  {}: {}", system_name, warning);
+                                                    crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                                }
                                             }
                                         } else if let Some(true) = cf_agent_enabled {
                                             info!("✅ {} has CF agent enabled", system_name);
+                                            
+                                            // Broadcast policy success to logs
+                                            if let Some(state) = cf_state {
+                                                let log_msg = format!("✅ {}: Crystal Forge agent enabled", system_name);
+                                                crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
+                                            }
                                         }
 
                                         policy_checks.push(check);
@@ -400,22 +460,111 @@ pub async fn evaluate_with_nix_eval_jobs(
     }
 
     info!("✅ Evaluated {} configurations in parallel", results.len());
+    
+    // Calculate statistics for summary
+    let total_systems = results.len();
+    let successful = results.iter().filter(|r| r.error.is_none()).count();
+    let failed = total_systems - successful;
+    
+    let with_agent = policy_checks
+        .iter()
+        .filter(|c| c.cf_agent_enabled == Some(true))
+        .count();
+    let coverage = if policy_checks.len() > 0 {
+        (with_agent as f64 / policy_checks.len() as f64) * 100.0
+    } else {
+        0.0
+    };
+    
     if !policies.is_empty() && !policy_checks.is_empty() {
-        let with_agent = policy_checks
-            .iter()
-            .filter(|c| c.cf_agent_enabled == Some(true))
-            .count();
-        let coverage = if policy_checks.len() > 0 {
-            (with_agent as f64 / policy_checks.len() as f64) * 100.0
-        } else {
-            0.0
-        };
         info!(
             "   CF agent: {}/{} systems enabled ({:.1}%)",
             with_agent,
             policy_checks.len(),
             coverage
         );
+    }
+    
+    // Broadcast comprehensive summary to WebSocket clients
+    if let Some(state) = cf_state {
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            "".to_string()  // Blank line for readability
+        ).await;
+        
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            "═══════════════════════════════════════".to_string()
+        ).await;
+        
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            "📊 Evaluation Summary".to_string()
+        ).await;
+        
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            "═══════════════════════════════════════".to_string()
+        ).await;
+        
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            format!("✅ Successful: {} systems", successful)
+        ).await;
+        
+        if failed > 0 {
+            crate::handlers::api::commits::broadcast_eval_log(
+                state,
+                commit.id,
+                format!("❌ Failed: {} systems", failed)
+            ).await;
+        }
+        
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            format!("📦 Total: {} nixosConfigurations", total_systems)
+        ).await;
+        
+        if !policy_checks.is_empty() {
+            crate::handlers::api::commits::broadcast_eval_log(
+                state,
+                commit.id,
+                "".to_string()
+            ).await;
+            
+            crate::handlers::api::commits::broadcast_eval_log(
+                state,
+                commit.id,
+                format!("🔐 Policy Compliance: {:.1}% ({}/{})",
+                    coverage, with_agent, policy_checks.len())
+            ).await;
+        }
+        
+        if evaluated_derivations.len() > 0 {
+            crate::handlers::api::commits::broadcast_eval_log(
+                state,
+                commit.id,
+                "".to_string()
+            ).await;
+            
+            crate::handlers::api::commits::broadcast_eval_log(
+                state,
+                commit.id,
+                format!("🚀 {} derivations ready for build queue", evaluated_derivations.len())
+            ).await;
+        }
+        
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            "═══════════════════════════════════════".to_string()
+        ).await;
     }
 
     Ok((results, policy_checks))
