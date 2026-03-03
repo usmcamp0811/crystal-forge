@@ -166,7 +166,12 @@ pub async fn run_commit_evaluation_loop(
     let mut ticker = time::interval_at(Instant::now() + interval, interval);
 
     loop {
-        // Wait for either a notification or the periodic ticker
+        // ALWAYS check for pending work first (in case notification was sent before we started waiting)
+        if let Err(e) = process_pending_commits(&pool, &cf_state, &queue_notifier).await {
+            error!("❌ Error in commit evaluation cycle: {e}");
+        }
+
+        // Wait for either a notification or the periodic ticker before checking again
         tokio::select! {
             _ = ticker.tick() => {
                 debug!("⏰ Eval loop: periodic tick (fallback polling)");
@@ -174,11 +179,6 @@ pub async fn run_commit_evaluation_loop(
             _ = queue_notifier.wait_for_eval_work() => {
                 debug!("🔔 Eval loop: notified of new work");
             }
-        }
-
-        // Process pending commits regardless of trigger source
-        if let Err(e) = process_pending_commits(&pool, &cf_state, &queue_notifier).await {
-            error!("❌ Error in commit evaluation cycle: {e}");
         }
     }
 }

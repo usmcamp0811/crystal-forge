@@ -206,11 +206,29 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                         }
                         div {
                             class: "h-[30vh] overflow-auto rounded border border-gray-700 bg-gray-950/60 p-3 space-y-1",
-                            for line in eval_logs.read().iter().rev().take(200).rev() {
-                                p { class: "text-xs font-mono text-gray-300", "{line}" }
-                            }
                             if eval_logs.read().is_empty() {
-                                p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
+                                // Show helpful loading/waiting state when no logs yet
+                                if let Some(item) = selected_item.clone() {
+                                    if is_in_progress_eval_status(&item.evaluation_status) {
+                                        div { class: "flex items-center gap-2 text-blue-400",
+                                            div { class: "animate-spin rounded-full h-4 w-4 border-b-2 border-blue-400" }
+                                            p { class: "text-sm", "Evaluation starting... waiting for logs to stream" }
+                                        }
+                                    } else if is_pending_eval_status(&item.evaluation_status) {
+                                        div { class: "flex items-center gap-2 text-amber-400",
+                                            div { class: "animate-pulse h-4 w-4 rounded-full bg-amber-400" }
+                                            p { class: "text-sm", "Queued for evaluation - will start momentarily" }
+                                        }
+                                    } else {
+                                        p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
+                                    }
+                                } else {
+                                    p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
+                                }
+                            } else {
+                                for line in eval_logs.read().iter().rev().take(200).rev() {
+                                    p { class: "text-xs font-mono text-gray-300", "{line}" }
+                                }
                             }
                         }
                     }
@@ -513,15 +531,33 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     // Logs content
                     div {
                         style: "flex: 1; overflow: auto; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
-                        for line in eval_logs.read().iter() {
-                            p { 
-                                class: "text-sm font-mono text-gray-300",
-                                style: "margin-bottom: 0.25rem;",
-                                "{line}" 
-                            }
-                        }
                         if eval_logs.read().is_empty() {
-                            p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
+                            // Show helpful loading/waiting state in modal too
+                            if let Some(item) = selected_item.clone() {
+                                if is_in_progress_eval_status(&item.evaluation_status) {
+                                    div { class: "flex items-center gap-2 text-blue-400",
+                                        div { class: "animate-spin rounded-full h-5 w-5 border-b-2 border-blue-400" }
+                                        p { "Evaluation starting... waiting for logs to stream" }
+                                    }
+                                } else if is_pending_eval_status(&item.evaluation_status) {
+                                    div { class: "flex items-center gap-2 text-amber-400",
+                                        div { class: "animate-pulse h-5 w-5 rounded-full bg-amber-400" }
+                                        p { "Queued for evaluation - will start momentarily" }
+                                    }
+                                } else {
+                                    p { class: "text-gray-500", "No log messages yet for selected commit." }
+                                }
+                            } else {
+                                p { class: "text-gray-500", "No log messages yet for selected commit." }
+                            }
+                        } else {
+                            for line in eval_logs.read().iter() {
+                                p { 
+                                    class: "text-sm font-mono text-gray-300",
+                                    style: "margin-bottom: 0.25rem;",
+                                    "{line}" 
+                                }
+                            }
                         }
                     }
                 }
