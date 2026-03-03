@@ -1,10 +1,10 @@
 ---
 id: TASK-160
 title: Create Eval queue view with reordering support
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-02 18:24'
+updated_date: '2026-03-03 14:25'
 labels: []
 dependencies: []
 priority: medium
@@ -75,4 +75,14 @@ Create a new "Evals" view (similar to "Builds" view) that:
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: OpenCode on reckless in /home/mcamp/code/crystal-forge/TASK-160-eval-queue-view
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/151
+
+Pushed branch: TASK-160-eval-queue-view
+
+Implemented fixes for eval log overflow containment and queue ordering alignment with eval_queue_position.
+
+Verification run: nix develop -c cargo check --manifest-path packages/default/Cargo.toml (pass, warnings only).
+
+Verification run: nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml (pass, warnings only).
 <!-- SECTION:NOTES:END -->
