@@ -4,7 +4,7 @@ title: Create Eval queue view with reordering support
 status: In Progress
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-03 18:10'
+updated_date: '2026-03-03 18:14'
 labels: []
 dependencies: []
 priority: medium
@@ -146,4 +146,8 @@ Verification executed:
 - nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml (pass)
 
 Note: nix develop -c cargo check --manifest-path packages/default/Cargo.toml without SQLX_OFFLINE requires a running DB in this repo and failed in this session due connection refused.
+
+Committed and pushed MR-151 hardening updates.
+Commit: ee17bffd
+Push: TASK-160-eval-queue-view -> origin (GitLab HTTPS push using glab token auth).
 <!-- SECTION:NOTES:END -->
