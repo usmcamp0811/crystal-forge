@@ -24,6 +24,7 @@ use crystal_forge::{
         webhook::webhook_handler,
     },
     queries::derivations::reset_non_terminal_derivations,
+    queue::QueueNotifier,
     server::memory_monitor_task,
     server::spawn_background_tasks,
 };
@@ -107,7 +108,11 @@ async fn main() -> anyhow::Result<()> {
     let state = CFState::new(pool, server_cfg.clone());
     let state_arc = Arc::new(state.clone());
 
-    spawn_background_tasks(cfg.clone(), background_pool, state_arc.clone());
+    // Create event-driven queue notifier
+    let queue_notifier = Arc::new(QueueNotifier::new());
+    info!("🔔 Initialized event-driven queue notification system");
+
+    spawn_background_tasks(cfg.clone(), background_pool, state_arc.clone(), queue_notifier.clone());
     let mut app = Router::new()
         .route("/status", get(status::status))
         .route("/system_state", post(state::update))

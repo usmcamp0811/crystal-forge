@@ -94,12 +94,88 @@ Agent State + Builder Evaluation → Server Comparison → Compliance Alert
 
 Current system state compared against latest evaluated configuration to detect unauthorized changes.
 
+### Event-Driven Queue Architecture
+
+Crystal Forge uses an event-driven architecture for both evaluation and build queues, replacing polling-based approaches with immediate notifications.
+
+#### Queue Notification System
+
+The `QueueNotifier` provides FIFO-ordered event channels using Tokio MPSC:
+
+```rust
+pub struct QueueNotifier {
+    eval_tx: mpsc::UnboundedSender<()>,
+    eval_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
+    build_tx: mpsc::UnboundedSender<()>,
+    build_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
+}
+```
+
+**Key Benefits**:
+- **Zero-latency triggering**: Work starts immediately when commits/jobs arrive
+- **FIFO guarantees**: MPSC channels maintain insertion order
+- **Idle efficiency**: No CPU cycles wasted polling empty queues
+- **Fallback safety**: Periodic ticks catch any missed notifications
+
+#### Eval Queue Flow
+
+```
+Commit Insert → notify_eval_queue() → Eval Loop Wakes → Process Pending
+                                    ↓
+                        (fallback: 60s ticker)
+```
+
+**Trigger Points**:
+1. Flake polling discovers new commits
+2. Webhook receives push notification
+3. Manual commit insertion via API
+
+**Processing Loop**:
+```rust
+loop {
+    tokio::select! {
+        _ = ticker.tick() => { /* fallback: every 60s */ }
+        _ = queue_notifier.wait_for_eval_work() => { /* immediate */ }
+    }
+    process_pending_commits(&pool, &cf_state, &queue_notifier).await;
+}
+```
+
+#### Build Queue Flow
+
+```
+Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers Wake
+                                                           ↓
+                                        (NOT YET IMPLEMENTED: workers still poll 5s)
+```
+
+**Current State**:
+- Server-side build job creation triggers notification
+- Build workers (separate processes) still poll every 5s
+- Future: PostgreSQL LISTEN/NOTIFY or unified process model
+
+#### Notification Guarantees
+
+**Fire-and-Forget Semantics**:
+- Notifications never block the sender
+- Dropped receivers (server shutdown) are silently ignored
+- Multiple notifications queue up (no coalescing)
+
+**FIFO Ordering**:
+- MPSC channels guarantee insertion order
+- First commit inserted → first evaluation started
+- First build job created → first worker claims it
+
+**Fallback Polling**:
+- Eval loop: 60s ticker (catches DB corruption, missed signals)
+- Build workers: 5s ticker (until event-driven build implemented)
+
 ### Key Architectural Decisions
 
 1. **Shared PostgreSQL**: Enables horizontal scaling of servers and builders
 2. **Ed25519 signatures**: Cryptographic verification of all agent communications
 3. **Rust implementation**: Memory safety and performance for security-critical deployment
-4. **Grafana integration**: Leverage proven dashboard/alerting rather than custom UI
+4. **Event-driven queues**: Immediate processing with FIFO guarantees and fallback polling
 5. **Flake-native**: Direct integration with modern Nix ecosystem
 
 ### Observability Points

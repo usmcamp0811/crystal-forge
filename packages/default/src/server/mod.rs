@@ -6,10 +6,12 @@ use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
 use crate::models::evaluate_with_policies::evaluate_with_nix_eval_jobs;
 use crate::models::flakes::Flake;
+use crate::queue::QueueNotifier;
 // NOTE: removed increment_commit_list_attempt_count – we now rely on the new evaluation_* fields
 use crate::queries::flakes::get_all_flakes_from_db;
 use anyhow::Result;
 use sqlx::PgPool;
+use std::sync::Arc;
 use tokio::time;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -25,7 +27,12 @@ use crate::queries::commits::{
 };
 use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
 
-pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool, cf_state: std::sync::Arc<crate::handlers::agent_request::CFState>) {
+pub fn spawn_background_tasks(
+    cfg: CrystalForgeConfig,
+    pool: PgPool,
+    cf_state: Arc<crate::handlers::agent_request::CFState>,
+    queue_notifier: Arc<QueueNotifier>,
+) {
     let flake_pool = pool.clone();
     let commit_pool = pool.clone();
     let target_pool = pool.clone();
@@ -36,11 +43,16 @@ pub fn spawn_background_tasks(cfg: CrystalForgeConfig, pool: PgPool, cf_state: s
     // Get the flake config with a fallback
     let flake_config = cfg.flakes.clone();
 
-    tokio::spawn(run_flake_polling_loop(flake_pool, flake_config.clone()));
+    tokio::spawn(run_flake_polling_loop(
+        flake_pool,
+        flake_config.clone(),
+        queue_notifier.clone(),
+    ));
     tokio::spawn(run_commit_evaluation_loop(
         commit_pool,
         flake_config.commit_evaluation_interval,
         cf_state,
+        queue_notifier.clone(),
     ));
     tokio::spawn(run_commit_artifact_hydration_loop(artifact_pool));
     tokio::spawn(run_build_log_retention_loop(
@@ -90,15 +102,25 @@ async fn run_build_log_retention_loop(
 }
 
 /// Runs the periodic flake polling loop to check for new commits
-async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
+async fn run_flake_polling_loop(
+    pool: PgPool,
+    flake_config: FlakeConfig,
+    queue_notifier: Arc<QueueNotifier>,
+) {
     info!("🔄 Starting periodic flake polling loop...");
     loop {
         // Get all flakes from database instead of just config ones
         match get_all_flakes_from_db(&pool, &flake_config).await {
             Ok(db_flakes) => {
                 if !db_flakes.is_empty() {
-                    if let Err(e) = sync_all_watched_flakes_commits(&pool, &db_flakes).await {
-                        error!("❌ Error in flake polling cycle: {e}");
+                    match sync_all_watched_flakes_commits(&pool, &db_flakes).await {
+                        Ok(total_inserted) => {
+                            if total_inserted > 0 {
+                                info!("📥 Inserted {} new commits, notifying eval queue", total_inserted);
+                                queue_notifier.notify_eval_queue();
+                            }
+                        }
+                        Err(e) => error!("❌ Error in flake polling cycle: {e}"),
                     }
                 }
             }
@@ -108,10 +130,19 @@ async fn run_flake_polling_loop(pool: PgPool, flake_config: FlakeConfig) {
     }
 }
 
-/// Runs the periodic commit evaluation check loop
-pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration, cf_state: std::sync::Arc<crate::handlers::agent_request::CFState>) {
+/// Runs the event-driven commit evaluation loop with fallback polling.
+///
+/// Uses `tokio::select!` to listen for:
+/// 1. Queue notifications (immediate processing when commits arrive)
+/// 2. Periodic ticker (fallback to catch any missed notifications)
+pub async fn run_commit_evaluation_loop(
+    pool: PgPool,
+    interval: Duration,
+    cf_state: Arc<crate::handlers::agent_request::CFState>,
+    queue_notifier: Arc<QueueNotifier>,
+) {
     info!(
-        "🔁 Starting periodic commit evaluation check loop (every {:?})...",
+        "🔁 Starting event-driven commit evaluation loop (fallback every {:?})...",
         interval
     );
 
@@ -131,18 +162,32 @@ pub async fn run_commit_evaluation_loop(pool: PgPool, interval: Duration, cf_sta
     // `PgPool` is cheap to clone; keep an owned copy in the task.
     let pool = pool.clone();
 
-    // Use an interval ticker to avoid accumulating sleep drift.
+    // Use an interval ticker as fallback to catch missed notifications
     let mut ticker = time::interval_at(Instant::now() + interval, interval);
 
     loop {
-        if let Err(e) = process_pending_commits(&pool, &cf_state).await {
+        // Wait for either a notification or the periodic ticker
+        tokio::select! {
+            _ = ticker.tick() => {
+                debug!("⏰ Eval loop: periodic tick (fallback polling)");
+            }
+            _ = queue_notifier.wait_for_eval_work() => {
+                debug!("🔔 Eval loop: notified of new work");
+            }
+        }
+
+        // Process pending commits regardless of trigger source
+        if let Err(e) = process_pending_commits(&pool, &cf_state, &queue_notifier).await {
             error!("❌ Error in commit evaluation cycle: {e}");
         }
-        ticker.tick().await;
     }
 }
 
-async fn process_pending_commits(pool: &PgPool, cf_state: &std::sync::Arc<crate::handlers::agent_request::CFState>) -> Result<()> {
+async fn process_pending_commits(
+    pool: &PgPool,
+    cf_state: &Arc<crate::handlers::agent_request::CFState>,
+    queue_notifier: &Arc<QueueNotifier>,
+) -> Result<()> {
     match get_commits_pending_evaluation(&pool).await {
         Ok(pending_commits) => {
             info!("📌 Found {} pending commits", pending_commits.len());
@@ -249,9 +294,11 @@ async fn process_pending_commits(pool: &PgPool, cf_state: &std::sync::Arc<crate:
                         match create_build_jobs_for_commit(pool, commit.id).await {
                             Ok(job_count) if job_count > 0 => {
                                 info!(
-                                    "📋 Queued {} build jobs for commit {}",
+                                    "📋 Queued {} build jobs for commit {}, notifying build workers",
                                     job_count, commit.git_commit_hash
                                 );
+                                // Notify build queue that new work is available
+                                queue_notifier.notify_build_queue();
                             }
                             Ok(_) => {
                                 debug!(
