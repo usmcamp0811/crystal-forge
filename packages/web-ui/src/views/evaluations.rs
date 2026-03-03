@@ -205,7 +205,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                             }
                         }
                         div {
-                            class: "h-[30vh] overflow-auto rounded border border-gray-700 bg-gray-950/60 p-3 space-y-1",
+                            class: "h-96 overflow-y-auto rounded border border-gray-700 p-3",
+                            style: "background-color: rgb(3, 7, 18); scrollbar-width: thin;",
                             if eval_logs.read().is_empty() {
                                 // Show helpful loading/waiting state when no logs yet
                                 if let Some(item) = selected_item.clone() {
@@ -227,7 +228,11 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                 }
                             } else {
                                 for line in eval_logs.read().iter().rev().take(200).rev() {
-                                    p { class: "text-xs font-mono text-gray-300", "{line}" }
+                                    p { 
+                                        class: "text-xs font-mono text-gray-300",
+                                        style: "margin-bottom: 0.25rem; line-height: 1.5;",
+                                        "{line}" 
+                                    }
                                 }
                             }
                         }
