@@ -209,7 +209,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
             Card {
                 title: Some("Evaluation Logs".to_string()),
                 children: rsx! {
-                    div { class: "space-y-2",
+                    div { class: "space-y-2 min-w-0",
                         div { class: "flex items-center justify-between",
                             p {
                                 class: "text-xs",
@@ -253,8 +253,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                         }
                         if *log_expanded.read() {
                             div {
-                                class: "overflow-y-auto overflow-x-hidden rounded border border-gray-700 p-3 min-w-0",
-                                style: "background-color: rgb(3, 7, 18); scrollbar-width: thin; height: 20rem; min-height: 20rem; max-height: 20rem;",
+                                class: "overflow-y-auto overflow-x-auto rounded border border-gray-700 p-3 min-w-0",
+                                style: "background-color: rgb(3, 7, 18); scrollbar-width: thin; height: 20rem; min-height: 20rem; max-height: 20rem; max-width: 100%; overflow: auto;",
                                 if filtered_logs.is_empty() {
                                     if !eval_logs.read().is_empty()
                                         && *log_verbosity.read() == LogVerbosity::Concise
@@ -282,8 +282,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                 } else {
                                     for line in filtered_logs.iter().rev().take(200).rev() {
                                         p {
-                                            class: "text-xs font-mono text-gray-300 whitespace-pre-wrap break-words max-w-full",
-                                            style: "margin-bottom: 0.25rem; line-height: 1.5; overflow-wrap: anywhere; word-break: break-word;",
+                                            class: "block w-full text-xs font-mono text-gray-300 whitespace-pre-wrap max-w-full",
+                                            style: "margin-bottom: 0.25rem; line-height: 1.5; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;",
                                             "{line}"
                                         }
                                     }
@@ -561,8 +561,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
             div {
                 style: "position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.8); padding: 1rem;",
                 onclick: move |_| log_modal_open.set(false),
-                div {
-                    style: "width: 100%; max-width: 90rem; max-height: 90vh; display: flex; flex-direction: column; background-color: rgb(17, 24, 39); border-radius: 0.5rem; border: 1px solid rgb(55, 65, 81); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);",
+                    div {
+                        style: "width: 100%; max-width: 90rem; max-height: 90vh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background-color: rgb(17, 24, 39); border-radius: 0.5rem; border: 1px solid rgb(55, 65, 81); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);",
                     onclick: move |evt| evt.stop_propagation(),
                     
                     // Header
@@ -606,7 +606,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     
                     // Logs content
                     div {
-                        style: "flex: 1; min-height: 0; overflow: auto; overflow-x: hidden; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
+                        style: "flex: 1; min-height: 0; min-width: 0; max-width: 100%; overflow: auto; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
                         if filtered_logs.is_empty() {
                             if !eval_logs.read().is_empty()
                                 && *log_verbosity.read() == LogVerbosity::Concise
@@ -634,8 +634,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                         } else {
                             for line in filtered_logs.iter() {
                                 p {
-                                    class: "text-sm font-mono text-gray-300 whitespace-pre-wrap break-words max-w-full",
-                                    style: "margin-bottom: 0.25rem; overflow-wrap: anywhere; word-break: break-word;",
+                                    class: "block w-full text-sm font-mono text-gray-300 whitespace-pre-wrap max-w-full",
+                                    style: "margin-bottom: 0.25rem; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;",
                                     "{line}"
                                 }
                             }
