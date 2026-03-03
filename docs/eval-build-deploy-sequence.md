@@ -7,83 +7,124 @@ This sequence diagram shows who talks to whom and in what order.
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Poller as Flake Poller/Webhook
-    participant API as Crystal Forge Server
-    participant EQ as Eval Loop
-    participant NEJ as nix-eval-jobs
+    participant Poller as Flake Poller / Webhook
+    participant API as Crystal Forge Server (REST API)
     participant DB as PostgreSQL
+    participant EQ as Eval Worker
+    participant NEJ as nix-eval-jobs
     participant B as Builder
     participant CQ as Cache Worker
     participant DPM as Deployment Policy Manager
     participant Agent as CF Agent
 
-    Poller->>API: New commit detected
-    API->>DB: Insert commit (evaluation_status=pending)
-    API->>EQ: notify_eval_queue()
+    rect rgb(240, 250, 240)
+        note right of Poller: Commit ingestion
+        Poller->>API: New commit detected
+        API->>DB: Insert commit (status=pending)
+        API->>EQ: notify_eval_queue()
+    end
 
     rect rgb(230, 240, 255)
-        note right of EQ: Eval loop runs continuously
-        EQ->>DB: Select next pending commit by eval_queue_position
-        EQ->>DB: Mark commit in_progress
+        note right of EQ: Eval loop (continuous)
+        EQ->>DB: SELECT next pending commit (by eval_queue_position)
+        EQ->>DB: UPDATE commit SET status=in_progress
         EQ->>NEJ: Evaluate all nixosConfigurations in parallel
         NEJ-->>EQ: Per-system eval results + metadata
 
-        EQ->>DB: Upsert derivations + policy outcomes
-        EQ->>DB: Mark successful derivations DryRunComplete
-        EQ->>DB: Mark commit complete or failed/pending(retry)
+        EQ->>DB: UPSERT derivations + eval_policy outcomes
+        EQ->>DB: UPDATE derivation SET status=DryRunComplete (if eval+policy passed)
+        EQ->>DB: UPDATE commit SET status=complete/failed/pending_retry
     end
 
-    EQ->>DB: create_build_jobs_for_commit()
+    EQ->>DB: INSERT build_jobs (one per derivation with DryRunComplete)
     EQ->>B: notify_build_queue()
 
-    loop Build queue processing
+    loop Build queue (with lease semantics)
         B->>API: GET /builders/:id/next-job
-        API->>DB: Atomic claim (respect capacity/env)
-        DB-->>API: build job or none
-        API-->>B: Claimed job
-        B->>DB: Build derivation, update status/logs
+        API->>DB: Atomic claim (respects max_concurrent_jobs)
+        DB-->>API: job + lease_expires_at
+        API-->>B: Job with lease
+
+        rect rgb(255, 245, 230)
+            note right of B: Building (lease renewal)
+            B->>B: Execute nix build
+            B->>API: POST /builders/:id/jobs/:id/logs (streaming)
+            API->>DB: Append build logs
+        end
+
         alt Build success
-            B->>DB: Mark build complete + store_path
-            B->>DB: Create cache_push_job
-            note right of B: Cache push job enqueued
+            B->>API: POST /builders/:id/jobs/:id/complete
+            API->>DB: UPDATE job SET status=success, store_path
+            API->>DB: INSERT cache_push_job (for this derivation)
+            API->>B: 200 OK
+            note right of B: Builder creates GC root after build
         else Build failed
-            B->>DB: mark_job_failed_with_retry()
+            B->>API: POST /builders/:id/jobs/:id/fail
+            API->>DB: UPDATE job SET retry_count+1, status=queued/failed
+            API->>B: 200 OK (or 202 if permanently failed)
+        end
+
+        Note over B,DB: If builder dies: lease expires, job re-claimable by another
+    end
+
+    rect rgb(250, 240, 250)
+        note right of CQ: Cache push (idempotent)
+        loop Cache worker (processes pending jobs)
+            CQ->>DB: SELECT cache_push_job WHERE status=pending (order by created_at)
+            CQ->>DB: UPDATE job SET status=in_progress, attempts=attempts+1
+            CQ->>CQ: nix copy --to cache-backend (idempotent: "exists" = success)
+            alt Push success
+                CQ->>DB: UPDATE job SET status=completed
+                CQ->>DB: DELETE gc_root (artifact now in cache, safe to collect)
+            else Push failed
+                CQ->>DB: UPDATE job SET status=failed, retry_after=now()+backoff
+            end
         end
     end
 
-    loop Cache push processing
-        CQ->>DB: Claim pending/retryable cache_push_job
-        CQ->>DB: Mark cache job in_progress
-        CQ->>CQ: Push to configured cache backend
-        alt Push success
-            CQ->>DB: Mark cache job completed
-            CQ->>DB: Remove GC root
-        else Push failed
-            CQ->>DB: Mark failed + retry_after backoff
+    rect rgb(240, 230, 250)
+        note right of DPM: Deployment convergence
+        loop Policy manager (periodic)
+            DPM->>DB: SELECT systems WHERE deployment_policy=auto_latest
+            DPM->>DB: For each host: latest derivation WHERE status=success AND cache_status=completed
+            DPM->>DB: UPDATE system SET desired_target=:latest_deployable_store_path
         end
-    end
 
-    loop Deployment convergence
-        DPM->>DB: Find auto_latest systems
-        DPM->>DB: Compute latest deployable targets per host
-        DPM->>DB: Update desired_target for each system
+        Agent->>API: POST /agent/heartbeat (includes /run/current-system)
+        API->>DB: SELECT system.desired_target
+        API-->>Agent: desired_target (or null)
 
-        Agent->>API: Heartbeat + current state
-        API->>DB: Fetch desired_target
-        API-->>Agent: desired_target (or none)
-
-        alt desired_target differs from current
-            Agent->>Agent: nix copy from cache + activate via systemd-run
-            Agent->>API: Report cf_deployment state change
+        alt desired_target != current_system
+            Agent->>Agent: nix copy --from cache + systemctl switch
+            Agent->>API: POST /agent/state (state_change_reason=cf_deployment)
+            API->>DB: INSERT system_state record
         else already current
-            Agent->>API: Heartbeat only
+            Note over Agent,API: No action needed
         end
     end
 ```
 
 ## Reading Guide
 
-- `notify_eval_queue()` reduces wait time by waking eval processing immediately.
-- Eval ordering is user-controllable through queue position.
-- Builders and cache workers are separate stages with separate retry behavior.
-- Deployment is driven by `desired_target` updates and agent heartbeats.
+### Key Architectural Decisions
+
+1. **All DB writes go through API**: Builders, eval workers, and cache workers never write to DB directly. This provides authentication, authorization, and a central place for idempotency logic.
+
+2. **Job lease semantics**: When a builder claims a job, it receives a lease (`lease_expires_at`). If the builder dies, the lease eventually expires and the job can be re-claimed by another builder (at-least-once delivery). Builders should be idempotent when re-running work.
+
+3. **Eval produces partial results**: A commit can be "complete" but only some systems may have `DryRunComplete` derivations. Build jobs are only created for derivations that passed both evaluation AND policy checks.
+
+4. **Eval policy vs Deployment policy**:
+   - **Eval policy** (checked during eval): Is this system allowed to be built? (e.g., CF agent must be enabled)
+   - **Deployment policy** (checked by DPM): Which version should this host run? (e.g., auto_latest, manual, pinned)
+
+5. **Cache push is idempotent**: Pushing the same store path twice is safe - the cache backend returns "already exists" which we treat as success.
+
+6. **"Deployable" definition**: A derivation is deployable when:
+   - Build status = success
+   - Cache push status = completed (artifact in binary cache)
+   - (Implicit) Policy allows deployment to that host
+
+7. **GC root lifecycle**: Builder creates a GC root after successful build to prevent Nix from garbage-collecting the output before it reaches the cache. Cache worker removes the GC root only after successful push.
+
+8. **desired_target is per-host**: The DPM sets `desired_target` individually for each system, allowing different hosts to be on different commits ("partial rollouts" or "canary deployments" are supported via manual/pinned policies).
