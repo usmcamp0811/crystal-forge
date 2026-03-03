@@ -135,7 +135,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
         }
     }
 
-    // State for log modal + verbosity controls
+    // State for log panel/modal + verbosity controls
+    let mut log_expanded = use_signal(|| false);
     let mut log_modal_open = use_signal(|| false);
     let mut log_verbosity = use_signal(|| LogVerbosity::Concise);
 
@@ -215,6 +216,15 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                 }
                             }
                             div { class: "flex items-center gap-2",
+                                button {
+                                    class: "px-2 py-1 text-[11px] rounded border border-gray-700 bg-gray-900 text-gray-300 hover:bg-gray-800",
+                                    onclick: move |_| log_expanded.set(!log_expanded()),
+                                    if *log_expanded.read() {
+                                        "▾ Collapse"
+                                    } else {
+                                        "▸ Expand"
+                                    }
+                                }
                                 span {
                                     class: "text-[11px] text-gray-400",
                                     "{filtered_logs.len()} shown / {eval_logs.read().len()} total"
@@ -238,41 +248,48 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                 }
                             }
                         }
-                        div {
-                            class: "overflow-y-auto rounded border border-gray-700 p-3",
-                            style: "background-color: rgb(3, 7, 18); scrollbar-width: thin; height: 20rem; min-height: 20rem; max-height: 20rem;",
-                            if filtered_logs.is_empty() {
-                                if !eval_logs.read().is_empty()
-                                    && *log_verbosity.read() == LogVerbosity::Concise
-                                {
-                                    p { class: "text-sm text-gray-500", "No high-signal lines in concise mode. Switch to Verbose to see all warnings." }
-                                } else
-                                // Show helpful loading/waiting state when no logs yet
-                                if let Some(item) = selected_item.clone() {
-                                    if is_in_progress_eval_status(&item.evaluation_status) {
-                                        div { class: "flex items-center gap-2 text-blue-400",
-                                            div { class: "animate-spin rounded-full h-4 w-4 border-b-2 border-blue-400" }
-                                            p { class: "text-sm", "Evaluation starting... waiting for logs to stream" }
-                                        }
-                                    } else if is_pending_eval_status(&item.evaluation_status) {
-                                        div { class: "flex items-center gap-2 text-amber-400",
-                                            div { class: "animate-pulse h-4 w-4 rounded-full bg-amber-400" }
-                                            p { class: "text-sm", "Queued for evaluation - will start momentarily" }
+                        if *log_expanded.read() {
+                            div {
+                                class: "overflow-y-auto rounded border border-gray-700 p-3",
+                                style: "background-color: rgb(3, 7, 18); scrollbar-width: thin; height: 20rem; min-height: 20rem; max-height: 20rem;",
+                                if filtered_logs.is_empty() {
+                                    if !eval_logs.read().is_empty()
+                                        && *log_verbosity.read() == LogVerbosity::Concise
+                                    {
+                                        p { class: "text-sm text-gray-500", "No high-signal lines in concise mode. Switch to Verbose to see all warnings." }
+                                    } else
+                                    // Show helpful loading/waiting state when no logs yet
+                                    if let Some(item) = selected_item.clone() {
+                                        if is_in_progress_eval_status(&item.evaluation_status) {
+                                            div { class: "flex items-center gap-2 text-blue-400",
+                                                div { class: "animate-spin rounded-full h-4 w-4 border-b-2 border-blue-400" }
+                                                p { class: "text-sm", "Evaluation starting... waiting for logs to stream" }
+                                            }
+                                        } else if is_pending_eval_status(&item.evaluation_status) {
+                                            div { class: "flex items-center gap-2 text-amber-400",
+                                                div { class: "animate-pulse h-4 w-4 rounded-full bg-amber-400" }
+                                                p { class: "text-sm", "Queued for evaluation - will start momentarily" }
+                                            }
+                                        } else {
+                                            p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
                                         }
                                     } else {
                                         p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
                                     }
                                 } else {
-                                    p { class: "text-sm text-gray-500", "No log messages yet for selected commit." }
-                                }
-                            } else {
-                                for line in filtered_logs.iter().rev().take(200).rev() {
-                                    p {
-                                        class: "text-xs font-mono text-gray-300 whitespace-pre-wrap break-words",
-                                        style: "margin-bottom: 0.25rem; line-height: 1.5; overflow-wrap: anywhere;",
-                                        "{line}"
+                                    for line in filtered_logs.iter().rev().take(200).rev() {
+                                        p {
+                                            class: "text-xs font-mono text-gray-300 whitespace-pre-wrap break-words",
+                                            style: "margin-bottom: 0.25rem; line-height: 1.5; overflow-wrap: anywhere;",
+                                            "{line}"
+                                        }
                                     }
                                 }
+                            }
+                        } else {
+                            p {
+                                class: "text-xs text-gray-500",
+                                "Collapsed. Click Expand to view inline logs, or use Maximize for full-screen."
                             }
                         }
                     }
