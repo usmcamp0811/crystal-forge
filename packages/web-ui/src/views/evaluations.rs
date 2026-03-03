@@ -107,7 +107,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
     let selected_commit_str = (*selected_commit_id.read())
         .map(|id| id.to_string())
         .unwrap_or_else(|| "0".to_string());
-    let (eval_logs, system_status, connection_state, _reconnect) =
+    let (eval_logs, system_status, connection_state, reconnect) =
         use_websocket_eval_stream(&selected_commit_str);
 
     let summary_snapshot = queue_resource
@@ -172,7 +172,10 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     class: "flex flex-wrap items-center gap-2",
                     button {
                         class: "px-3 py-2 rounded-lg text-sm font-medium text-white {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
-                        onclick: move |_| refresh.set(refresh() + 1),
+                        onclick: move |_| {
+                            refresh.set(refresh() + 1);
+                            reconnect();
+                        },
                         "Refresh"
                     }
                 }
@@ -250,7 +253,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                         }
                         if *log_expanded.read() {
                             div {
-                                class: "overflow-y-auto rounded border border-gray-700 p-3",
+                                class: "overflow-y-auto overflow-x-hidden rounded border border-gray-700 p-3 min-w-0",
                                 style: "background-color: rgb(3, 7, 18); scrollbar-width: thin; height: 20rem; min-height: 20rem; max-height: 20rem;",
                                 if filtered_logs.is_empty() {
                                     if !eval_logs.read().is_empty()
@@ -279,8 +282,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                                 } else {
                                     for line in filtered_logs.iter().rev().take(200).rev() {
                                         p {
-                                            class: "text-xs font-mono text-gray-300 whitespace-pre-wrap break-words",
-                                            style: "margin-bottom: 0.25rem; line-height: 1.5; overflow-wrap: anywhere;",
+                                            class: "text-xs font-mono text-gray-300 whitespace-pre-wrap break-words max-w-full",
+                                            style: "margin-bottom: 0.25rem; line-height: 1.5; overflow-wrap: anywhere; word-break: break-word;",
                                             "{line}"
                                         }
                                     }
@@ -603,7 +606,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     
                     // Logs content
                     div {
-                        style: "flex: 1; overflow: auto; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
+                        style: "flex: 1; overflow: auto; overflow-x: hidden; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
                         if filtered_logs.is_empty() {
                             if !eval_logs.read().is_empty()
                                 && *log_verbosity.read() == LogVerbosity::Concise
@@ -631,8 +634,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                         } else {
                             for line in filtered_logs.iter() {
                                 p {
-                                    class: "text-sm font-mono text-gray-300 whitespace-pre-wrap break-words",
-                                    style: "margin-bottom: 0.25rem; overflow-wrap: anywhere;",
+                                    class: "text-sm font-mono text-gray-300 whitespace-pre-wrap break-words max-w-full",
+                                    style: "margin-bottom: 0.25rem; overflow-wrap: anywhere; word-break: break-word;",
                                     "{line}"
                                 }
                             }
