@@ -85,4 +85,47 @@ Implemented fixes for eval log overflow containment and queue ordering alignment
 Verification run: nix develop -c cargo check --manifest-path packages/default/Cargo.toml (pass, warnings only).
 
 Verification run: nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml (pass, warnings only).
+
+## Queue Reset Enforcement Complete (2026-03-02)
+
+### Implemented
+- ✅ Migration 0088: Enforces single active evaluation at DB level with unique partial index
+- ✅ `reset_stuck_commit_evaluations`: Now resets ALL in_progress commits on startup (not just >30min)
+- ✅ `reset_stuck_builds`: New function resets derivations with status_id=8 (build-inprogress) → 7 (build-pending)
+- ✅ `mark_commit_evaluation_started`: Returns clear error when another commit is already in_progress (constraint violation)
+- ✅ Server startup sequence calls both reset functions before eval loop starts
+
+### Testing
+- ✅ Verified unique constraint prevents multiple in_progress commits
+- ✅ Backend compiles successfully
+- ✅ Frontend compiles successfully
+- ✅ SQLx metadata regenerated
+
+### Commit
+- `63804056` - feat: enforce single active evaluation and reset queues on startup
+
+This fixes the issue where multiple commits could be marked in_progress simultaneously, ensuring clean queue state on server restart.
+
+## Eval Status Alignment Fix (2026-03-02)
+
+### Problem
+Flakes view and Evaluations view were showing different statuses for the same commits:
+- Flakes view: Used derivation dry-run status (status_id 3,4,5,6) showing 'queued'
+- Evaluations view: Used commits.evaluation_status showing 'complete'
+
+### Solution
+- Updated Flakes timeline query to use `commits.evaluation_status` directly
+- Removed complex derivation status subquery
+- Updated frontend badge labels to match commit status values:
+  - `pending` → displays as 'queued'
+  - `in_progress` → displays as 'running'
+  - `complete` → displays as 'complete'
+  - `failed` → displays as 'failed'
+
+### Result
+✅ Both views now use the same source of truth
+✅ Status chips align correctly between Flakes and Evaluations views
+
+### Commit
+- `36958f51` - fix: align Flakes view eval status with Evaluations view
 <!-- SECTION:NOTES:END -->
