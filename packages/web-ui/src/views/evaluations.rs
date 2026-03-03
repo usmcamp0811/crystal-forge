@@ -239,8 +239,8 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                             }
                         }
                         div {
-                            class: "h-96 overflow-y-auto rounded border border-gray-700 p-3",
-                            style: "background-color: rgb(3, 7, 18); scrollbar-width: thin;",
+                            class: "overflow-y-auto rounded border border-gray-700 p-3",
+                            style: "background-color: rgb(3, 7, 18); scrollbar-width: thin; height: 20rem; min-height: 20rem; max-height: 20rem;",
                             if filtered_logs.is_empty() {
                                 if !eval_logs.read().is_empty()
                                     && *log_verbosity.read() == LogVerbosity::Concise
