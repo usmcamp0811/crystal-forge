@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-04 23:30'
+updated_date: '2026-03-04 23:54'
 labels:
   - dev-experience
   - eval-queue
@@ -72,6 +72,12 @@ This enables rapid, deterministic reproduction/validation for the eval-log-visib
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-174-mock-eval-build-dev-mode
+
+Progress update: implemented server.execution_mode (real|mock, default real), dev safety validation (mock requires auth_mode=dev), startup hard-guard in server/builder binaries, mock eval path wiring + deterministic mock results/log streaming + policy check pass shape, mock build path wiring in API builder loop, eval queue API/UI execution_mode indicator with MOCK MODE badge, and developer docs at docs/mock-execution-mode.md.
+
+Verification run in task worktree: `nix develop -c rustfmt --edition 2021 --check <modified rust files>` (pass), `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` (pass), `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge config::server::tests` (pass), `nix develop -c cargo check` in packages/web-ui (pass).
+
+Note: backend checks/tests were run with `SQLX_OFFLINE=true` to avoid requiring a live DB during targeted validation.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
