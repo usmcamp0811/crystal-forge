@@ -19,6 +19,38 @@ use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_ab
 const EVAL_LOG_CHANNEL_BUFFER: usize = 1000;
 const MAX_EVAL_LOG_CHANNELS: usize = 1024;
 
+fn parse_id_list(segment: &str) -> Option<Vec<i32>> {
+    let trimmed = segment.trim();
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.trim().is_empty() {
+        return Some(Vec::new());
+    }
+
+    inner
+        .split(',')
+        .map(|value| value.trim().parse::<i32>().ok())
+        .collect()
+}
+
+fn reorder_validation_details(message: &str) -> Option<serde_json::Value> {
+    let prefix = "invalid eval queue reorder request: ";
+    let payload = message.strip_prefix(prefix)?;
+
+    let (duplicates_raw, rest) = payload.split_once("; missing IDs: ")?;
+    let duplicates_raw = duplicates_raw.strip_prefix("duplicate IDs: ")?;
+    let (missing_raw, extra_raw) = rest.split_once("; extra IDs: ")?;
+
+    let duplicate_ids = parse_id_list(duplicates_raw)?;
+    let missing_ids = parse_id_list(missing_raw)?;
+    let extra_ids = parse_id_list(extra_raw)?;
+
+    Some(serde_json::json!({
+        "duplicate_ids": duplicate_ids,
+        "missing_ids": missing_ids,
+        "extra_ids": extra_ids,
+    }))
+}
+
 /// List evaluation queue items.
 /// GET /api/v1/commits/eval-queue
 pub async fn list_eval_queue(
@@ -107,7 +139,7 @@ pub async fn reorder_eval_queue(
                 Json(ApiError {
                     error: "validation_error".to_string(),
                     message: err.to_string(),
-                    details: None,
+                    details: reorder_validation_details(&err.to_string()),
                 }),
             )
                 .into_response();
@@ -373,5 +405,25 @@ mod tests {
         cleanup_eval_channel(&state, commit_id).await;
         let channels = state.eval_log_channels.lock().await;
         assert!(!channels.contains_key(&commit_id));
+    }
+
+    #[test]
+    fn reorder_validation_details_extracts_structured_ids() {
+        let message = "invalid eval queue reorder request: duplicate IDs: [11, 22]; missing IDs: [33]; extra IDs: [44, 55]";
+        let details = reorder_validation_details(message).expect("details should parse");
+
+        assert_eq!(details["duplicate_ids"], serde_json::json!([11, 22]));
+        assert_eq!(details["missing_ids"], serde_json::json!([33]));
+        assert_eq!(details["extra_ids"], serde_json::json!([44, 55]));
+    }
+
+    #[test]
+    fn reorder_validation_details_handles_empty_lists() {
+        let message = "invalid eval queue reorder request: duplicate IDs: []; missing IDs: []; extra IDs: []";
+        let details = reorder_validation_details(message).expect("details should parse");
+
+        assert_eq!(details["duplicate_ids"], serde_json::json!([]));
+        assert_eq!(details["missing_ids"], serde_json::json!([]));
+        assert_eq!(details["extra_ids"], serde_json::json!([]));
     }
 }
