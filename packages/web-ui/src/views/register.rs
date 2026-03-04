@@ -5,29 +5,9 @@ use dioxus::prelude::*;
 use crate::state::app_state::AppState;
 use crate::theme;
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RegisterRequest {
-    username: String,
-    email: String,
-    password: String,
-    first_name: Option<String>,
-    last_name: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct RegisterResponse {
-    user_id: String,
-    username: String,
-    email: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct SetupStatus {
-    requires_setup: bool,
-    allow_registration: bool,
-}
+#[path = "register_api.rs"]
+mod register_api;
+use register_api::{RegisterRequest, fetch_setup_status, register_user};
 
 /// First-run registration view.
 ///
@@ -64,56 +44,17 @@ pub fn RegisterView() -> Element {
     // Check if registration is allowed on mount
     use_effect(move || {
         spawn(async move {
-            // In UI check mode, simulate first-run setup
-            if ui_check_mode {
-                is_first_run.set(true);
-                registration_allowed.set(true);
+            if let Some(status) = fetch_setup_status(ui_check_mode).await {
+                is_first_run.set(status.requires_setup);
+                registration_allowed.set(status.requires_setup || status.allow_registration);
                 status_checked.set(true);
+
+                if !status.requires_setup && !status.allow_registration {
+                    nav.push("/login");
+                }
                 return;
             }
 
-            use wasm_bindgen::JsCast;
-            use wasm_bindgen_futures::JsFuture;
-
-            let window = web_sys::window().expect("no global window");
-            let mut opts = web_sys::RequestInit::new();
-            opts.set_method("GET");
-
-            if let Ok(request) =
-                web_sys::Request::new_with_str_and_init("/api/auth/setup-status", &opts)
-            {
-                if let Ok(resp_value) = JsFuture::from(window.fetch_with_request(&request)).await {
-                    if let Ok(resp) = resp_value.dyn_into::<web_sys::Response>() {
-                        if resp.ok() {
-                            if let Ok(text_promise) = resp.text() {
-                                if let Ok(text_value) = JsFuture::from(text_promise).await {
-                                    if let Some(text) = text_value.as_string() {
-                                        if let Ok(status) =
-                                            serde_json::from_str::<SetupStatus>(&text)
-                                        {
-                                            is_first_run.set(status.requires_setup);
-                                            // Allow registration if first-run OR explicitly enabled
-                                            registration_allowed.set(
-                                                status.requires_setup || status.allow_registration,
-                                            );
-                                            status_checked.set(true);
-
-                                            // If registration not allowed, redirect to login
-                                            if !status.requires_setup && !status.allow_registration
-                                            {
-                                                nav.push("/login");
-                                            }
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // On error, redirect to login for safety
             status_checked.set(true);
             nav.push("/login");
         });
@@ -135,7 +76,7 @@ pub fn RegisterView() -> Element {
             is_loading.set(true);
             error_message.set(None);
 
-            let register_payload = RegisterRequest {
+            let payload = RegisterRequest {
                 username: username(),
                 email: email(),
                 password: password(),
@@ -151,56 +92,12 @@ pub fn RegisterView() -> Element {
                 },
             };
 
-            // Use web-sys fetch API directly
-            use wasm_bindgen::JsCast;
-            use wasm_bindgen::JsValue;
-            use wasm_bindgen_futures::JsFuture;
+            if let Err(err) = register_user(&payload).await {
+                error_message.set(Some(err));
+                is_loading.set(false);
+                return;
+            }
 
-            let window = web_sys::window().expect("no global window");
-            let mut opts = web_sys::RequestInit::new();
-            opts.set_method("POST");
-
-            let json_body = match serde_json::to_string(&register_payload) {
-                Ok(j) => j,
-                Err(e) => {
-                    error_message.set(Some(format!("Failed to serialize request: {}", e)));
-                    is_loading.set(false);
-                    return;
-                }
-            };
-            opts.set_body(&JsValue::from_str(&json_body));
-
-            let request =
-                match web_sys::Request::new_with_str_and_init("/api/auth/local/register", &opts) {
-                    Ok(req) => req,
-                    Err(e) => {
-                        error_message.set(Some(format!("Failed to create request: {:?}", e)));
-                        is_loading.set(false);
-                        return;
-                    }
-                };
-
-            let _ = request.headers().set("Content-Type", "application/json");
-
-            let resp_value = match JsFuture::from(window.fetch_with_request(&request)).await {
-                Ok(v) => v,
-                Err(e) => {
-                    error_message.set(Some(format!("Network error: {:?}", e)));
-                    is_loading.set(false);
-                    return;
-                }
-            };
-
-            let resp: web_sys::Response = match resp_value.dyn_into() {
-                Ok(r) => r,
-                Err(_) => {
-                    error_message.set(Some("Invalid response from server".to_string()));
-                    is_loading.set(false);
-                    return;
-                }
-            };
-
-            if resp.status() >= 200 && resp.status() < 300 {
                 // Registration successful - redirect to login
                 error_message.set(Some(
                     "Registration successful. Redirecting to login...".to_string(),
@@ -212,45 +109,6 @@ pub fn RegisterView() -> Element {
                 if let Some(window) = web_sys::window() {
                     let _ = window.location().set_href("/login");
                 }
-            } else {
-                // Try to get error message from response
-                let status = resp.status();
-                let status_text = resp.status_text();
-
-                if let Ok(text_promise) = resp.text() {
-                    if let Ok(text_value) = JsFuture::from(text_promise).await {
-                        if let Some(text) = text_value.as_string() {
-                            if !text.is_empty() {
-                                error_message.set(Some(format!(
-                                    "Registration failed ({}): {}",
-                                    status, text
-                                )));
-                            } else {
-                                error_message.set(Some(format!(
-                                    "Registration failed: {} {}",
-                                    status, status_text
-                                )));
-                            }
-                        } else {
-                            error_message.set(Some(format!(
-                                "Registration failed: {} {}",
-                                status, status_text
-                            )));
-                        }
-                    } else {
-                        error_message.set(Some(format!(
-                            "Registration failed: {} {}",
-                            status, status_text
-                        )));
-                    }
-                } else {
-                    error_message.set(Some(format!(
-                        "Registration failed: {} {}",
-                        status, status_text
-                    )));
-                }
-                is_loading.set(false);
-            }
         });
     };
 
