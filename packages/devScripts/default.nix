@@ -12,7 +12,11 @@ let
   oidc_client_secret = "dev-only-secret";
   grafana_port = 3446;
   pgweb_port = 12084;
-  oidc_issuer = "http://127.0.0.1:${toString oidc_port}/realms/${oidc_realm}";
+
+  # Internal (local) issuer for health checks
+  oidc_issuer_internal =
+    "http://127.0.0.1:${toString oidc_port}/realms/${oidc_realm}";
+
   oidc_realm_import = ./oidc/realm-crystal-forge.json;
   tomlFormat = pkgs.formats.toml { };
 
@@ -48,7 +52,9 @@ let
         cf-keygen -f "$CF_KEY_DIR/builder.key"
       fi
 
-      ACTUAL_HOSTNAME="$(hostname -s)"
+      # Prefer an address other machines can resolve (FQDN), fall back to short host.
+      # If your LAN DNS doesn't resolve either, set CF_PUBLIC_HOST yourself before running.
+      ACTUAL_HOST="''${CF_PUBLIC_HOST:-$(hostname -f 2>/dev/null || hostname -s)}"
       ACTUAL_PUBKEY="$(cat "$CF_KEY_DIR/agent.pub")"
 
       CONFIG_DIR="''${XDG_RUNTIME_DIR:-/tmp}/crystal-forge"
@@ -56,7 +62,7 @@ let
       CONFIG_FILE="$CONFIG_DIR/crystal-forge-config.toml"
 
       sed \
-        -e "s/HOSTNAME_PLACEHOLDER/$ACTUAL_HOSTNAME/g" \
+        -e "s/HOSTNAME_PLACEHOLDER/$ACTUAL_HOST/g" \
         -e "s|PUBLIC_KEY_PLACEHOLDER|$ACTUAL_PUBKEY|g" \
         -e "s|BUILDER_KEY_PATH_PLACEHOLDER|$CF_KEY_DIR/builder.key|g" \
         ${configTemplate} > "$CONFIG_FILE"
@@ -68,6 +74,7 @@ let
   envExports = ''
     export CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
   '';
+
   configTemplate = tomlFormat.generate "crystal-forge-config-template.toml" {
     database = {
       host = "127.0.0.1";
@@ -89,13 +96,17 @@ let
       enable_api_mode = true;
       builder_id = "00000000-0000-0000-0000-000000000001";
       private_key_path = "BUILDER_KEY_PATH_PLACEHOLDER";
-      server_url = "http://127.0.0.1:${toString cf_port}";
+
+      # 👇 external-friendly (not localhost)
+      server_url = "http://HOSTNAME_PLACEHOLDER:${toString cf_port}";
+
       poll_interval = 5;
       heartbeat_interval = 30;
       max_concurrent_jobs = 1;
     };
     client = {
-      server_host = "127.0.0.1";
+      # 👇 external-friendly (not localhost)
+      server_host = "HOSTNAME_PLACEHOLDER";
       server_port = cf_port;
       private_key = "$CF_KEY_DIR/agent.key";
     };
@@ -128,12 +139,15 @@ let
 
   simulatePush = pkgs.writeShellApplication {
     name = "simulate-push";
-    runtimeInputs = with pkgs; [ git curl jq ];
+    runtimeInputs = with pkgs; [ git curl jq hostname ];
     text = ''
       set -euo pipefail
 
       REPO_URL="''${1:-https://gitlab.com/usmcamp0811/dotfiles}"
-      SERVER_URL="''${2:-http://localhost:${toString cf_port}/webhook}"
+
+      HOST="''${CF_PUBLIC_HOST:-$(hostname -f 2>/dev/null || hostname -s)}"
+      DEFAULT_SERVER_URL="http://$HOST:${toString cf_port}/webhook"
+      SERVER_URL="''${2:-$DEFAULT_SERVER_URL}"
 
       if [[ -z "$REPO_URL" ]]; then
         echo "Usage: simulate-push <repo-url> [server-url]"
@@ -238,7 +252,7 @@ let
       } -U crystal_forge -d crystal_forge <<SQL
         -- Delete any existing dev builder to ensure clean state
         DELETE FROM builders WHERE id = '$BUILDER_UUID'::uuid;
-        
+
         -- Insert dev builder with active status
         INSERT INTO builders (id, name, public_key, status, max_concurrent_jobs)
         VALUES (
@@ -274,46 +288,47 @@ let
 
   startBuilderApi = pkgs.writeShellApplication {
     name = "start-builder-api";
-    runtimeInputs = with pkgs; [ nix python3 coreutils ];
+    runtimeInputs = with pkgs; [ nix python3 coreutils hostname ];
     text = ''
-            set -euo pipefail
+      set -euo pipefail
 
-            REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
-            DEFAULT_SERVER_URL="http://127.0.0.1:${toString cf_port}"
+      REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
+      HOST="''${CF_PUBLIC_HOST:-$(hostname -f 2>/dev/null || hostname -s)}"
+      DEFAULT_SERVER_URL="http://$HOST:${toString cf_port}"
 
-            echo "🔧 Crystal Forge API Builder Launcher"
-            echo ""
+      echo "🔧 Crystal Forge API Builder Launcher"
+      echo ""
 
-            read -r -p "Builder UUID: " BUILDER_ID
-            if [[ -z "$BUILDER_ID" ]]; then
-              echo "Builder UUID is required."
-              exit 1
-            fi
+      read -r -p "Builder UUID: " BUILDER_ID
+      if [[ -z "$BUILDER_ID" ]]; then
+        echo "Builder UUID is required."
+        exit 1
+      fi
 
-            read -r -p "Server URL [$DEFAULT_SERVER_URL]: " SERVER_URL
-            SERVER_URL="''${SERVER_URL:-$DEFAULT_SERVER_URL}"
+      read -r -p "Server URL [$DEFAULT_SERVER_URL]: " SERVER_URL
+      SERVER_URL="''${SERVER_URL:-$DEFAULT_SERVER_URL}"
 
-            read -r -p "Poll interval seconds [5]: " POLL_INTERVAL
-            POLL_INTERVAL="''${POLL_INTERVAL:-5}"
+      read -r -p "Poll interval seconds [5]: " POLL_INTERVAL
+      POLL_INTERVAL="''${POLL_INTERVAL:-5}"
 
-            read -r -p "Heartbeat interval seconds [30]: " HEARTBEAT_INTERVAL
-            HEARTBEAT_INTERVAL="''${HEARTBEAT_INTERVAL:-30}"
+      read -r -p "Heartbeat interval seconds [30]: " HEARTBEAT_INTERVAL
+      HEARTBEAT_INTERVAL="''${HEARTBEAT_INTERVAL:-30}"
 
-            read -r -p "Max concurrent jobs [1]: " MAX_CONCURRENT_JOBS
-            MAX_CONCURRENT_JOBS="''${MAX_CONCURRENT_JOBS:-1}"
+      read -r -p "Max concurrent jobs [1]: " MAX_CONCURRENT_JOBS
+      MAX_CONCURRENT_JOBS="''${MAX_CONCURRENT_JOBS:-1}"
 
-            read -r -s -p "Builder private key hex (64 chars): " PRIVATE_KEY_HEX
-            echo ""
+      read -r -s -p "Builder private key hex (64 chars): " PRIVATE_KEY_HEX
+      echo ""
 
-            if [[ -z "$PRIVATE_KEY_HEX" ]]; then
-              echo "Private key hex is required."
-              exit 1
-            fi
+      if [[ -z "$PRIVATE_KEY_HEX" ]]; then
+        echo "Private key hex is required."
+        exit 1
+      fi
 
-            KEY_FILE="$(mktemp "''${TMPDIR:-/tmp}/cf-builder-key.XXXXXX")"
-            trap 'rm -f "$KEY_FILE"' EXIT
+      KEY_FILE="$(mktemp "''${TMPDIR:-/tmp}/cf-builder-key.XXXXXX")"
+      trap 'rm -f "$KEY_FILE"' EXIT
 
-            python3 - "$PRIVATE_KEY_HEX" "$KEY_FILE" <<'PY'
+      python3 - "$PRIVATE_KEY_HEX" "$KEY_FILE" <<'PY'
       import pathlib
       import string
       import sys
@@ -332,21 +347,21 @@ let
       out.write_bytes(bytes.fromhex(hex_key))
       PY
 
-            chmod 600 "$KEY_FILE"
+      chmod 600 "$KEY_FILE"
 
-            export CRYSTAL_FORGE__BUILDER__ENABLE_API_MODE=true
-            export CRYSTAL_FORGE__BUILDER__BUILDER_ID="$BUILDER_ID"
-            export CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH="$KEY_FILE"
-            export CRYSTAL_FORGE__BUILDER__SERVER_URL="$SERVER_URL"
-            export CRYSTAL_FORGE__BUILDER__POLL_INTERVAL="$POLL_INTERVAL"
-            export CRYSTAL_FORGE__BUILDER__HEARTBEAT_INTERVAL="$HEARTBEAT_INTERVAL"
-            export CRYSTAL_FORGE__BUILDER__MAX_CONCURRENT_JOBS="$MAX_CONCURRENT_JOBS"
+      export CRYSTAL_FORGE__BUILDER__ENABLE_API_MODE=true
+      export CRYSTAL_FORGE__BUILDER__BUILDER_ID="$BUILDER_ID"
+      export CRYSTAL_FORGE__BUILDER__PRIVATE_KEY_PATH="$KEY_FILE"
+      export CRYSTAL_FORGE__BUILDER__SERVER_URL="$SERVER_URL"
+      export CRYSTAL_FORGE__BUILDER__POLL_INTERVAL="$POLL_INTERVAL"
+      export CRYSTAL_FORGE__BUILDER__HEARTBEAT_INTERVAL="$HEARTBEAT_INTERVAL"
+      export CRYSTAL_FORGE__BUILDER__MAX_CONCURRENT_JOBS="$MAX_CONCURRENT_JOBS"
 
-            echo "🚀 Starting builder in API mode..."
-            echo "   Builder ID: $BUILDER_ID"
-            echo "   Server URL: $SERVER_URL"
+      echo "🚀 Starting builder in API mode..."
+      echo "   Builder ID: $BUILDER_ID"
+      echo "   Server URL: $SERVER_URL"
 
-            nix run "$REPO_ROOT#builder"
+      nix run "$REPO_ROOT#builder"
     '';
   };
 
@@ -396,13 +411,19 @@ let
     services.grafana.grafana = {
       enable = true;
       http_port = grafana_port;
-      domain = "localhost";
+
+      # NOTE: grafana's "domain" affects generated links; keep it reachable remotely.
+      domain = "0.0.0.0";
+
       datasources = [{
         name = "Crystal Forge PostgreSQL";
         uid = "crystal-forge-postgres";
         type = "postgres";
         access = "proxy";
-        url = "localhost:${toString db_port}";
+
+        # Postgres is local to the same machine running grafana here.
+        url = "127.0.0.1:${toString db_port}";
+
         database = "crystal_forge";
         user = "crystal_forge";
         secureJsonData = { password = db_password; };
@@ -484,8 +505,9 @@ let
         }:8080 -e KEYCLOAK_ADMIN=admin -e KEYCLOAK_ADMIN_PASSWORD=admin -v ${oidc_realm_import}:/opt/keycloak/data/import/realm-crystal-forge.json:ro quay.io/keycloak/keycloak:26.0 start-dev --import-realm --http-port=8080 --hostname-strict=false
       '';
       readiness_probe = {
+        # Probe locally so it works regardless of LAN DNS
         exec.command =
-          "${pkgs.curl}/bin/curl -fsS ${oidc_issuer}/.well-known/openid-configuration >/dev/null";
+          "${pkgs.curl}/bin/curl -fsS ${oidc_issuer_internal}/.well-known/openid-configuration >/dev/null";
         initial_delay_seconds = 5;
         period_seconds = 5;
         timeout_seconds = 3;
@@ -498,11 +520,18 @@ let
   server-oidc-module = {
     settings.processes.server.environment = {
       AUTH_MODE = "oidc";
-      CRYSTAL_FORGE_OIDC_ISSUER_URL = oidc_issuer;
+
+      # 👇 issuer that remote browsers/clients can resolve
+      CRYSTAL_FORGE_OIDC_ISSUER_URL =
+        "http://HOSTNAME_PLACEHOLDER:${toString oidc_port}/realms/${oidc_realm}";
+
       CRYSTAL_FORGE_OIDC_CLIENT_ID = oidc_client_id;
       CRYSTAL_FORGE_OIDC_CLIENT_SECRET = oidc_client_secret;
+
+      # 👇 callback that matches the host you're visiting from your laptop
       CRYSTAL_FORGE_OIDC_REDIRECT_URI =
-        "http://127.0.0.1:${toString cf_port}/api/auth/oidc/callback";
+        "http://HOSTNAME_PLACEHOLDER:${toString cf_port}/api/auth/oidc/callback";
+
       CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP = "admin";
     };
     settings.processes.server.depends_on."oidc".condition = "process_healthy";
@@ -539,10 +568,18 @@ let
       server-oidc-module
     ];
   };
-in full-stack.config.outputs.package // {
-  inherit runServer runAgent runBuilder simulatePush startBuilderApi
-    bootstrapDevBuilder envExports;
-  db-only = dbOnly.config.outputs.package;
-  server-only = server-only.config.outputs.package;
-  oidc-stack = oidc-stack.config.outputs.package;
-}
+in
+  full-stack.config.outputs.package
+  // {
+    inherit
+      runServer
+      runAgent
+      runBuilder
+      simulatePush
+      startBuilderApi
+      bootstrapDevBuilder
+      envExports;
+    db-only = dbOnly.config.outputs.package;
+    server-only = server-only.config.outputs.package;
+    oidc-stack = oidc-stack.config.outputs.package;
+  }

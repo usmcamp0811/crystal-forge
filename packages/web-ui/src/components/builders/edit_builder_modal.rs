@@ -5,15 +5,22 @@ use uuid::Uuid;
 
 use crate::api::{
     self,
-    models::{
-        BuilderStatus, UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest,
-        UpdateBuilderRequest,
-    },
+    models::BuilderStatus,
 };
 use crate::components::builders::generate_ed25519_keypair;
 use crate::components::loading::LoadingSpinner;
 use crate::components::modals::ConfirmDialog;
 use crate::theme;
+
+#[path = "edit_builder_modal_actions.rs"]
+mod edit_builder_modal_actions;
+#[path = "edit_builder_modal_sections.rs"]
+mod edit_builder_modal_sections;
+use edit_builder_modal_actions::{
+    apply_builder_public_key, build_update_request, delete_builder_permanently,
+    deactivate_builder, submit_builder_update,
+};
+use edit_builder_modal_sections::KeyRotationSection;
 
 #[component]
 pub fn EditBuilderModal(
@@ -82,38 +89,18 @@ pub fn EditBuilderModal(
         is_submitting.set(true);
         error_message.set(None);
 
-        // Update builder config
-        let update_request = UpdateBuilderRequest {
-            name: if name().trim().is_empty() {
-                None
-            } else {
-                Some(name().trim().to_string())
-            },
-            status: Some(status()),
-            max_cpu_cores: max_cpu_cores().trim().parse::<i32>().ok(),
-            max_memory_mb: max_memory_mb().trim().parse::<i32>().ok(),
-            max_concurrent_jobs: max_concurrent_jobs().trim().parse::<i32>().ok(),
-        };
+        let update_request = build_update_request(
+            name().as_str(),
+            status(),
+            max_cpu_cores().as_str(),
+            max_memory_mb().as_str(),
+            max_concurrent_jobs().as_str(),
+        );
 
-        match api::client::update_builder(&builder_id, &update_request).await {
-            Ok(_) => {
-                // Update environment assignments
-                let env_request = UpdateBuilderEnvironmentsRequest {
-                    environment_ids: selected_environments(),
-                };
-
-                match api::client::update_builder_environments(&builder_id, &env_request).await {
-                    Ok(_) => {
-                        on_success.call(());
-                    }
-                    Err(e) => {
-                        error_message.set(Some(format!("Failed to update environments: {}", e)));
-                        is_submitting.set(false);
-                    }
-                }
-            }
-            Err(e) => {
-                error_message.set(Some(format!("Failed to update builder: {}", e)));
+        match submit_builder_update(&builder_id, &update_request, selected_environments()).await {
+            Ok(_) => on_success.call(()),
+            Err(message) => {
+                error_message.set(Some(message));
                 is_submitting.set(false);
             }
         }
@@ -147,16 +134,10 @@ pub fn EditBuilderModal(
         is_submitting.set(true);
         error_message.set(None);
 
-        let request = UpdateBuilderPublicKeyRequest {
-            public_key: next_public_key,
-        };
-
-        match api::client::update_builder_public_key(&builder_id, &request).await {
-            Ok(_) => {
-                on_success.call(());
-            }
-            Err(e) => {
-                error_message.set(Some(format!("Failed to update builder key: {}", e)));
+        match apply_builder_public_key(&builder_id, next_public_key).await {
+            Ok(_) => on_success.call(()),
+            Err(message) => {
+                error_message.set(Some(message));
                 is_submitting.set(false);
             }
         }
@@ -167,12 +148,10 @@ pub fn EditBuilderModal(
             is_submitting.set(true);
             error_message.set(None);
 
-            match api::client::deactivate_builder(&builder_id).await {
-                Ok(_) => {
-                    on_success.call(());
-                }
-                Err(e) => {
-                    error_message.set(Some(format!("Failed to deactivate builder: {}", e)));
+            match deactivate_builder(&builder_id).await {
+                Ok(_) => on_success.call(()),
+                Err(message) => {
+                    error_message.set(Some(message));
                     is_submitting.set(false);
                 }
             }
@@ -184,12 +163,10 @@ pub fn EditBuilderModal(
             is_submitting.set(true);
             error_message.set(None);
 
-            match api::client::delete_builder_permanently(&builder_id).await {
-                Ok(_) => {
-                    on_success.call(());
-                }
-                Err(e) => {
-                    error_message.set(Some(format!("Failed to delete builder: {}", e)));
+            match delete_builder_permanently(&builder_id).await {
+                Ok(_) => on_success.call(()),
+                Err(message) => {
+                    error_message.set(Some(message));
                     is_submitting.set(false);
                 }
             }
@@ -405,85 +382,14 @@ pub fn EditBuilderModal(
                                 }
                             }
 
-                            // Key rotation
-                            div {
-                                class: "border border-slate-700 rounded p-4 space-y-3",
-                                div {
-                                    class: "flex items-center justify-between",
-                                    h3 {
-                                        class: "text-sm font-medium {theme::text::PRIMARY}",
-                                        "Rotate Builder Keypair"
-                                    }
-                                    button {
-                                        class: "px-3 py-1 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING}",
-                                        onclick: handle_generate_keypair,
-                                        disabled: is_submitting(),
-                                        "🔑 Generate New Keypair"
-                                    }
-                                }
-                                p {
-                                    class: "text-xs {theme::text::SECONDARY}",
-                                    "Paste a public key manually or generate a new keypair. Apply to save the public key to this builder."
-                                }
-
-                                div {
-                                    label {
-                                        class: "block text-sm font-medium {theme::text::PRIMARY} mb-1",
-                                        "Public Key (base64)"
-                                    }
-                                    textarea {
-                                        class: "w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-white font-mono text-xs",
-                                        rows: "2",
-                                        value: "{rotated_public_key}",
-                                        oninput: move |e| rotated_public_key.set(e.value()),
-                                        disabled: is_submitting(),
-                                    }
-                                }
-
-                                if !rotated_private_key().is_empty() {
-                                    div {
-                                        div {
-                                            class: "flex items-center justify-between mb-1",
-                                            label {
-                                                class: "block text-sm font-medium text-amber-400",
-                                                "Generated Private Key"
-                                                span { class: "text-xs {theme::text::SECONDARY} ml-2", "(save this securely)" }
-                                            }
-                                            button {
-                                                class: "text-xs text-blue-400 hover:text-blue-300",
-                                                onclick: move |_| show_rotated_private_key.set(!show_rotated_private_key()),
-                                                if show_rotated_private_key() { "Hide" } else { "Show" }
-                                            }
-                                        }
-                                        if show_rotated_private_key() {
-                                            textarea {
-                                                class: "w-full px-3 py-2 bg-amber-900/20 border border-amber-700/50 rounded text-amber-200 font-mono text-xs",
-                                                rows: "2",
-                                                readonly: true,
-                                                value: "{rotated_private_key}",
-                                            }
-                                        } else {
-                                            div {
-                                                class: "px-3 py-2 bg-slate-900 border border-slate-700 rounded text-slate-500 font-mono text-xs",
-                                                "••••••••••••••••••••••••••••••••"
-                                            }
-                                        }
-                                    }
-                                }
-
-                                div {
-                                    class: "pt-1",
-                                    button {
-                                        class: "px-4 py-2 rounded-lg text-sm font-medium text-white transition-colors {theme::interactive::PRIMARY_BTN} {theme::interactive::FOCUS_RING} disabled:opacity-50",
-                                        onclick: handle_update_public_key,
-                                        disabled: is_submitting() || rotated_public_key().trim().is_empty(),
-                                        if is_submitting() {
-                                            "Applying..."
-                                        } else {
-                                            "Apply Public Key Update"
-                                        }
-                                    }
-                                }
+                            KeyRotationSection {
+                                is_submitting: is_submitting(),
+                                rotated_public_key: rotated_public_key,
+                                rotated_private_key: rotated_private_key(),
+                                show_rotated_private_key: show_rotated_private_key(),
+                                on_generate_keypair: handle_generate_keypair,
+                                on_toggle_private_key: move |_: MouseEvent| show_rotated_private_key.set(!show_rotated_private_key()),
+                                on_apply_public_key: handle_update_public_key,
                             }
                         }
 

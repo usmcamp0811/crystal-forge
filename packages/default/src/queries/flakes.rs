@@ -392,18 +392,7 @@ pub async fn fetch_flake_timelines(
                     JOIN derivations d ON d.id = bj.derivation_id
                     WHERE d.commit_id = c.id
                 ) AS build_status,
-                (
-                    SELECT
-                        CASE
-                            WHEN COUNT(*) FILTER (WHERE d.status_id = 4) > 0 THEN 'running'
-                            WHEN COUNT(*) FILTER (WHERE d.status_id = 3) > 0 THEN 'queued'
-                            WHEN COUNT(*) FILTER (WHERE d.status_id = 6) > 0 THEN 'failed'
-                            WHEN COUNT(*) FILTER (WHERE d.status_id = 5) > 0 THEN 'complete'
-                            ELSE 'idle'
-                        END
-                    FROM derivations d
-                    WHERE d.commit_id = c.id
-                ) AS evaluation_status
+                c.evaluation_status
             FROM commits c
             LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
             WHERE c.flake_id = $1

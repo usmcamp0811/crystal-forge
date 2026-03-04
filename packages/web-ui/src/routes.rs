@@ -12,6 +12,7 @@ use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
 use crate::views::dev_login::DevLoginView;
 use crate::views::environments::EnvironmentsView;
+use crate::views::evaluations::{EvaluationsCommitView, EvaluationsView};
 use crate::views::flakes::FlakesView;
 use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
@@ -45,6 +46,12 @@ pub enum Route {
 
     #[route("/builds")]
     BuildsView {},
+
+    #[route("/evaluations")]
+    EvaluationsView {},
+
+    #[route("/evaluations/:commit_id")]
+    EvaluationsCommitView { commit_id: i32 },
 
     #[route("/builders")]
     BuildersView {},
@@ -86,6 +93,10 @@ impl Route {
             Route::SystemDetailView { id } => format!("System: {id}"),
             Route::FlakesView { .. } => "Flakes".to_string(),
             Route::BuildsView { .. } => "Builds".to_string(),
+            Route::EvaluationsView { .. } => "Evaluations".to_string(),
+            Route::EvaluationsCommitView { commit_id } => {
+                format!("Evaluations · commit {commit_id}")
+            }
             Route::BuildersView { .. } => "Builders".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),

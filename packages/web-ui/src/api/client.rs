@@ -111,6 +111,21 @@ pub async fn request_system_sync(
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Fetch the evaluation queue (active + completed commits).
+pub async fn fetch_eval_queue() -> Result<EvalQueueSummary, ApiClientError> {
+    let url = format!("{}/commits/eval-queue?_ts={}", base_url(), js_sys::Date::now());
+    fetch_json(&url).await
+}
+
+/// Persist queue ordering for active commit evaluations.
+pub async fn reorder_eval_queue(ordered_commit_ids: &[i32]) -> Result<(), ApiClientError> {
+    let url = format!("{}/commits/eval-queue/reorder", base_url());
+    let request = ReorderEvalQueueRequest {
+        ordered_commit_ids: ordered_commit_ids.to_vec(),
+    };
+    send_empty_with_csrf("POST", &url, Some(&request)).await
+}
+
 /// Move a queued build job to the front of the queue (admin/operator).
 pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/build-jobs/{}/prioritize", base_url(), job_id);

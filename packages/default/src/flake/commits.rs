@@ -173,11 +173,13 @@ pub async fn initialize_flake_commits(
 pub async fn sync_all_watched_flakes_commits(
     pool: &PgPool,
     watched_flakes: &[config::WatchedFlake],
-) -> Result<()> {
+) -> Result<usize> {
     info!(
         "🔄 Syncing commits for {} watched flakes",
         watched_flakes.len()
     );
+
+    let mut total_inserted = 0;
 
     for flake in watched_flakes {
         if !flake.auto_poll {
@@ -202,10 +204,12 @@ pub async fn sync_all_watched_flakes_commits(
                         .await
                         {
                             Ok(new_commits) => {
-                                if !new_commits.is_empty() {
+                                let count = new_commits.len();
+                                total_inserted += count;
+                                if count > 0 {
                                     info!(
                                         "✅ Found {} new commits for {}",
-                                        new_commits.len(),
+                                        count,
                                         flake.name
                                     );
                                 } else {
@@ -234,9 +238,11 @@ pub async fn sync_all_watched_flakes_commits(
                 .await
                 {
                     Ok(commits) => {
+                        let count = commits.len();
+                        total_inserted += count;
                         info!(
                             "✅ Successfully initialized {} commits for {}",
-                            commits.len(),
+                            count,
                             flake.name
                         );
                     }
@@ -251,7 +257,7 @@ pub async fn sync_all_watched_flakes_commits(
         }
     }
 
-    Ok(())
+    Ok(total_inserted)
 }
 
 /// Sync commits for a single flake repository URL.

@@ -2010,3 +2010,29 @@ pub async fn cleanup_partial_derivations(pool: &PgPool) -> Result<()> {
 
     Ok(())
 }
+
+/// Reset all in-progress builds on startup
+/// This ensures clean state when server restarts mid-build
+pub async fn reset_stuck_builds(pool: &PgPool) -> Result<()> {
+    let reset = sqlx::query!(
+        r#"
+        UPDATE derivations
+        SET 
+            status_id = 7,  -- build-pending
+            started_at = NULL
+        WHERE status_id = 8  -- build-inprogress
+        RETURNING id, derivation_name
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    if !reset.is_empty() {
+        warn!("🧹 Reset {} in-progress builds on startup", reset.len());
+        for row in &reset {
+            info!("  - Derivation {} ({})", row.id, row.derivation_name);
+        }
+    }
+
+    Ok(())
+}

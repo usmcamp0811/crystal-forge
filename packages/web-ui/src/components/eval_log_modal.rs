@@ -20,6 +20,7 @@ pub fn EvalLogModal(commit_id: i32, commit_hash: String, on_close: EventHandler<
             // Modal panel
             div {
                 class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl w-full max-w-4xl max-h-[80vh] flex flex-col",
+                style: "overflow: hidden;",
                 onclick: |evt| evt.stop_propagation(),
 
                 // Header
@@ -63,9 +64,10 @@ pub fn EvalLogModal(commit_id: i32, commit_hash: String, on_close: EventHandler<
 
                 // Log content (scrollable)
                 div {
-                    class: "flex-1 overflow-auto p-4 bg-gray-950",
+                    class: "flex-1 min-h-0 min-w-0 overflow-auto p-4 bg-gray-950",
                     pre {
-                        class: "text-xs font-mono text-gray-200 whitespace-pre-wrap",
+                        class: "block w-full max-w-full text-xs font-mono text-gray-200 whitespace-pre-wrap",
+                        style: "white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;",
                         if logs.read().is_empty() {
                             "Waiting for evaluation logs..."
                         } else {

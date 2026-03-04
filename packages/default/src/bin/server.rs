@@ -24,6 +24,7 @@ use crystal_forge::{
         webhook::webhook_handler,
     },
     queries::derivations::reset_non_terminal_derivations,
+    queue::QueueNotifier,
     server::memory_monitor_task,
     server::spawn_background_tasks,
 };
@@ -97,7 +98,7 @@ async fn main() -> anyhow::Result<()> {
     // TODO: Update this to get the first N commits on the first time
     reset_non_terminal_derivations(&pool).await?;
     initialize_flake_commits(&flake_init_pool, &cfg.flakes.watched).await?;
-    
+
     // Start HTTP server
     info!("Starting Crystal Forge Server...");
     let server_cfg = &cfg.server;
@@ -106,8 +107,12 @@ async fn main() -> anyhow::Result<()> {
 
     let state = CFState::new(pool, server_cfg.clone());
     let state_arc = Arc::new(state.clone());
-    
-    spawn_background_tasks(cfg.clone(), background_pool, state_arc.clone());
+
+    // Create event-driven queue notifier
+    let queue_notifier = Arc::new(QueueNotifier::new());
+    info!("🔔 Initialized event-driven queue notification system");
+
+    spawn_background_tasks(cfg.clone(), background_pool, state_arc.clone(), queue_notifier.clone());
     let mut app = Router::new()
         .route("/status", get(status::status))
         .route("/system_state", post(state::update))
@@ -230,6 +235,11 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/build-jobs/:job_id/logs/stream",
             get(builders::stream_build_logs),
+        )
+        .route("/api/v1/commits/eval-queue", get(commits::list_eval_queue))
+        .route(
+            "/api/v1/commits/eval-queue/reorder",
+            post(commits::reorder_eval_queue),
         )
         .route(
             "/api/v1/commits/:commit_id/eval/stream",

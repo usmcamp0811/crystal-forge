@@ -1,21 +1,156 @@
 //! Commit-related API handlers.
 
 use axum::{
+    Json,
     extract::{
-        ws::{Message, WebSocket},
         Path, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
-use serde::{Serialize, Deserialize};
-use tokio::time::{interval, Duration};
+use serde::{Deserialize, Serialize};
+use tokio::time::{Duration, interval};
 
+use crate::api::models::{ApiError, EvalQueueItem, EvalQueueSummary, ReorderEvalQueueRequest};
 use crate::handlers::agent_request::CFState;
-use crate::handlers::api::rbac::require_viewer_or_above;
+use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 
 const EVAL_LOG_CHANNEL_BUFFER: usize = 1000;
 const MAX_EVAL_LOG_CHANNELS: usize = 1024;
+
+fn parse_id_list(segment: &str) -> Option<Vec<i32>> {
+    let trimmed = segment.trim();
+    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.trim().is_empty() {
+        return Some(Vec::new());
+    }
+
+    inner
+        .split(',')
+        .map(|value| value.trim().parse::<i32>().ok())
+        .collect()
+}
+
+fn reorder_validation_details(message: &str) -> Option<serde_json::Value> {
+    let prefix = "invalid eval queue reorder request: ";
+    let payload = message.strip_prefix(prefix)?;
+
+    let (duplicates_raw, rest) = payload.split_once("; missing IDs: ")?;
+    let duplicates_raw = duplicates_raw.strip_prefix("duplicate IDs: ")?;
+    let (missing_raw, extra_raw) = rest.split_once("; extra IDs: ")?;
+
+    let duplicate_ids = parse_id_list(duplicates_raw)?;
+    let missing_ids = parse_id_list(missing_raw)?;
+    let extra_ids = parse_id_list(extra_raw)?;
+
+    Some(serde_json::json!({
+        "duplicate_ids": duplicate_ids,
+        "missing_ids": missing_ids,
+        "extra_ids": extra_ids,
+    }))
+}
+
+/// List evaluation queue items.
+/// GET /api/v1/commits/eval-queue
+pub async fn list_eval_queue(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if require_viewer_or_above(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    let rows = match crate::queries::commits::list_eval_queue(&state.pool, 200).await {
+        Ok(rows) => rows,
+        Err(err) => {
+            tracing::error!("Failed to list eval queue: {}", err);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut active_count = 0_i64;
+    let mut completed_count = 0_i64;
+
+    let items = rows
+        .into_iter()
+        .map(|row| {
+            if matches!(row.evaluation_status.as_str(), "pending" | "in_progress") {
+                active_count += 1;
+            } else {
+                completed_count += 1;
+            }
+
+            EvalQueueItem {
+                commit_id: row.commit_id,
+                flake_id: row.flake_id,
+                flake_name: row.flake_name,
+                branch: row.branch,
+                commit_hash: row.commit_hash,
+                commit_message: row.commit_message,
+                author: row.author,
+                committed_at: row.committed_at,
+                evaluation_status: row.evaluation_status,
+                queue_position: row.queue_position,
+                systems: row.systems,
+                system_count: row.system_count,
+                passed_count: row.passed_count,
+                policy_failed_count: row.policy_failed_count,
+                eval_failed_count: row.eval_failed_count,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    Json(EvalQueueSummary {
+        active_count,
+        completed_count,
+        items,
+        timestamp: chrono::Utc::now(),
+    })
+    .into_response()
+}
+
+/// Persist evaluation queue order for active commits.
+/// POST /api/v1/commits/eval-queue/reorder
+pub async fn reorder_eval_queue(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+    Json(request): Json<ReorderEvalQueueRequest>,
+) -> impl IntoResponse {
+    if require_operator_or_admin(&state.pool, &headers)
+        .await
+        .is_none()
+    {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    if let Err(err) =
+        crate::queries::commits::reorder_eval_queue(&state.pool, &request.ordered_commit_ids).await
+    {
+        if err
+            .to_string()
+            .starts_with("invalid eval queue reorder request:")
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiError {
+                    error: "validation_error".to_string(),
+                    message: err.to_string(),
+                    details: reorder_validation_details(&err.to_string()),
+                }),
+            )
+                .into_response();
+        }
+
+        tracing::error!("Failed to reorder eval queue: {}", err);
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    StatusCode::OK.into_response()
+}
 
 /// Structured message types for eval log WebSocket
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +158,7 @@ const MAX_EVAL_LOG_CHANNELS: usize = 1024;
 pub enum EvalLogMessage {
     /// Plain text log line
     Log { message: String },
-    
+
     /// Per-system status update
     SystemStatus {
         system: String,
@@ -31,7 +166,7 @@ pub enum EvalLogMessage {
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-    
+
     /// Overall eval status
     EvalStatus {
         status: String,
@@ -47,6 +182,8 @@ pub enum SystemEvalStatus {
     Evaluating,
     Success,
     Failed,
+    PolicyFailed,
+    QueuedForBuild,
 }
 
 /// WebSocket endpoint for streaming evaluation logs
@@ -57,7 +194,10 @@ pub async fn stream_eval_logs(
     State(state): State<CFState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&state.pool, &headers).await.is_none() {
+    if require_viewer_or_above(&state.pool, &headers)
+        .await
+        .is_none()
+    {
         return StatusCode::FORBIDDEN.into_response();
     }
 
@@ -65,8 +205,11 @@ pub async fn stream_eval_logs(
 }
 
 async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFState) {
-    tracing::info!("📡 WebSocket connection established for commit {} evaluation", commit_id);
-    
+    tracing::info!(
+        "📡 WebSocket connection established for commit {} evaluation",
+        commit_id
+    );
+
     // Get or create broadcast channel for this commit
     let Some(tx) = get_or_create_eval_channel(&state, commit_id).await else {
         tracing::warn!(
@@ -84,7 +227,7 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
 
     let mut rx = tx.subscribe();
     let mut keepalive = interval(Duration::from_secs(20));
-    
+
     // Stream messages from the broadcast channel to this WebSocket client
     loop {
         tokio::select! {
@@ -114,7 +257,7 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
             }
         }
     }
-    
+
     tracing::info!("WebSocket connection closed for commit {} eval", commit_id);
 }
 
@@ -138,7 +281,11 @@ pub async fn broadcast_system_status(
     status: SystemEvalStatus,
     error: Option<String>,
 ) {
-    let msg = EvalLogMessage::SystemStatus { system, status, error };
+    let msg = EvalLogMessage::SystemStatus {
+        system,
+        status,
+        error,
+    };
     broadcast_eval_message(state, commit_id, msg).await;
 }
 
@@ -162,7 +309,7 @@ async fn broadcast_eval_message(state: &CFState, commit_id: i32, msg: EvalLogMes
         );
         return;
     };
-    
+
     // Serialize to JSON
     if let Ok(json) = serde_json::to_string(&msg) {
         let _ = tx.send(json);
@@ -241,10 +388,7 @@ mod tests {
 
         let tx = {
             let channels = state.eval_log_channels.lock().await;
-            channels
-                .get(&commit_id)
-                .expect("channel exists")
-                .clone()
+            channels.get(&commit_id).expect("channel exists").clone()
         };
 
         let mut rx1 = tx.subscribe();
@@ -261,5 +405,25 @@ mod tests {
         cleanup_eval_channel(&state, commit_id).await;
         let channels = state.eval_log_channels.lock().await;
         assert!(!channels.contains_key(&commit_id));
+    }
+
+    #[test]
+    fn reorder_validation_details_extracts_structured_ids() {
+        let message = "invalid eval queue reorder request: duplicate IDs: [11, 22]; missing IDs: [33]; extra IDs: [44, 55]";
+        let details = reorder_validation_details(message).expect("details should parse");
+
+        assert_eq!(details["duplicate_ids"], serde_json::json!([11, 22]));
+        assert_eq!(details["missing_ids"], serde_json::json!([33]));
+        assert_eq!(details["extra_ids"], serde_json::json!([44, 55]));
+    }
+
+    #[test]
+    fn reorder_validation_details_handles_empty_lists() {
+        let message = "invalid eval queue reorder request: duplicate IDs: []; missing IDs: []; extra IDs: []";
+        let details = reorder_validation_details(message).expect("details should parse");
+
+        assert_eq!(details["duplicate_ids"], serde_json::json!([]));
+        assert_eq!(details["missing_ids"], serde_json::json!([]));
+        assert_eq!(details["extra_ids"], serde_json::json!([]));
     }
 }
