@@ -4,13 +4,14 @@ title: Fix eval logs visibility and enforce eval queue reordering priority
 status: To Do
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-04 23:22'
+updated_date: '2026-03-04 23:28'
 labels:
   - bug
   - eval-queue
   - web-ui
   - server
-dependencies: []
+dependencies:
+  - TASK-174
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/151'
 priority: high
@@ -70,3 +71,9 @@ Two interconnected regressions are affecting evaluation operations:
 - [ ] #4 Server-side next-commit selection uses deterministic queue ordering that matches displayed queue order.
 - [ ] #5 No regressions in existing eval log UI controls (collapse/expand, maximize modal, concise/verbose toggle, refresh/reconnect).
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Execution order update: TASK-173 is now dependent on TASK-174 so eval-log and queue-ordering bug validation can run against deterministic mock eval/build mode.
+<!-- SECTION:NOTES:END -->
