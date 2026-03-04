@@ -226,6 +226,10 @@ flake-check:
   stage: check
   tags:
     - nix
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
   parallel:
     matrix:
       - CHECK_NAME:
