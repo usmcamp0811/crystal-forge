@@ -1,10 +1,10 @@
 ---
 id: TASK-174
 title: Add deterministic mock eval/build dev mode for fast workflow validation
-status: Done
+status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-07 23:14'
+updated_date: '2026-03-04 23:30'
 labels:
   - dev-experience
   - eval-queue
@@ -67,6 +67,12 @@ This enables rapid, deterministic reproduction/validation for the eval-log-visib
 - [ ] #5 UI/API clearly indicates when mock mode is active.
 - [ ] #6 A short developer guide documents how to enable/disable mock mode and expected behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-174-mock-eval-build-dev-mode
+<!-- SECTION:NOTES:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
