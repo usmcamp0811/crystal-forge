@@ -162,10 +162,9 @@ Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers
 - Dropped receivers (server shutdown) are silently ignored
 - Multiple notifications coalesce into one pending wakeup
 
-**FIFO Ordering**:
-- MPSC channels guarantee insertion order
-- First commit inserted → first evaluation started
-- First build job created → first worker claims it
+**Ordering Scope**:
+- MPSC channels preserve send order for server-internal wakeup delivery.
+- Global work claiming across separate worker processes remains database/poll driven and is not a strict cross-process FIFO guarantee.
 
 **Fallback Polling**:
 - Eval loop: 60s ticker (catches DB corruption, missed signals)
@@ -176,7 +175,7 @@ Eval Complete → create_build_jobs() → notify_build_queue() → Build Workers
 1. **Shared PostgreSQL**: Enables horizontal scaling of servers and builders
 2. **Ed25519 signatures**: Cryptographic verification of all agent communications
 3. **Rust implementation**: Memory safety and performance for security-critical deployment
-4. **Event-driven queues**: Immediate processing with FIFO guarantees and fallback polling
+4. **Event-driven queues**: Immediate processing with coalesced wakeups and fallback polling
 5. **Flake-native**: Direct integration with modern Nix ecosystem
 
 ### Observability Points

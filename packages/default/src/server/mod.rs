@@ -221,10 +221,19 @@ async fn process_pending_commits(
 
                 // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
                 if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
-                    error!(
-                        "❌ Could not mark commit {} evaluation started: {}",
-                        commit.git_commit_hash, e
-                    );
+                    let error_text = e.to_string();
+                    if error_text.contains("another commit is already being evaluated") {
+                        debug!(
+                            "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already claimed in_progress",
+                            commit.id,
+                            commit.git_commit_hash
+                        );
+                    } else {
+                        error!(
+                            "❌ Could not mark commit {} evaluation started: {}",
+                            commit.git_commit_hash, e
+                        );
+                    }
                     continue;
                 }
                 

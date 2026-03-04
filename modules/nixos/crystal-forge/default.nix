@@ -1696,7 +1696,7 @@ in {
 
         # Test attic configuration as the crystal-forge user
         echo "Testing Attic configuration..."
-        runuser -u crystal-forge -- env \
+        ${pkgs.util-linux}/bin/runuser -u crystal-forge -- env \
           HOME="/var/lib/crystal-forge" \
           XDG_CONFIG_HOME="/var/lib/crystal-forge/.config" \
           ATTIC_SERVER_URL="''${ATTIC_SERVER_URL:-}" \

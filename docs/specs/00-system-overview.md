@@ -108,7 +108,7 @@ CF has a **two-stage pipeline** for processing flake commits: Evaluation → Bui
 When a new commit is detected:
 
 1. Commit added to database with `evaluation_status = 'pending'`
-2. Evaluation loop picks up pending commits (FIFO order by default, reorderable via UI)
+2. Evaluation loop picks up pending commits by queue position (reorderable via UI); wakeups are server-internal and cross-process workers are coordinated via database state
 3. **Only one commit can be evaluated at a time** (enforced by DB unique constraint)
 4. Commit marked as `in_progress`
 5. `nix-eval-jobs` evaluates all systems in parallel
