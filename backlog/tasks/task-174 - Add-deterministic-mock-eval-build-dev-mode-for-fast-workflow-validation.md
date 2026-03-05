@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-05 21:37'
+updated_date: '2026-03-05 21:46'
 labels:
   - dev-experience
   - eval-queue
@@ -104,6 +104,12 @@ Adjusted runtime safety for mock mode in server/builder binaries: removed releas
 Verification: `nix develop -c rustfmt --edition 2021 --check src/bin/server.rs src/bin/builder.rs` ✅, `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --dry-run` ✅. Verified generated process-compose config uses `run-server --dev`/`run-builder --dev` and `AUTH_MODE=local` + `CRYSTAL_FORGE__SERVER__EXECUTION_MODE=mock`.
 
 Committed as `edbebc9c` (`fix: allow mock mode with local auth and local db`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Addressed browser instability under mock mode by capping websocket log buffers in UI hooks (`packages/web-ui/src/hooks/websocket.rs`). Added bounded push helper with max 2000 lines for both build and eval streams to prevent unbounded in-memory log growth.
+
+Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `16e5c5f7` (`fix: cap websocket log buffers in evaluations UI`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
