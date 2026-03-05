@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-05 03:04'
+updated_date: '2026-03-05 20:50'
 labels:
   - dev-experience
   - eval-queue
@@ -90,6 +90,12 @@ Nix verification: `nix build .#devScripts.server-stack-mock` ✅, `nix run .#dev
 Committed implementation on branch `TASK-174-mock-eval-build-dev-mode` as `cf6999e2` with conventional commit message `feat: add dev-only mock eval/build execution mode`.
 
 Pushed branch to origin: `git push -u origin TASK-174-mock-eval-build-dev-mode` (upstream set).
+
+Follow-up correction per review: switched mock-mode auth requirement from `server.auth_mode=dev` to `server.auth_mode=local` and aligned `devScripts.server-stack-mock` to force `AUTH_MODE=local` for server and builder.
+
+Verification after correction: `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge config::server::tests` ✅, `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --help` ✅.
+
+Committed fix as `fd930a64` (`fix: require local auth mode for mock execution`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
