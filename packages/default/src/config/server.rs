@@ -205,9 +205,9 @@ impl ServerConfig {
             return Err("build log retention days must be greater than 0".to_string());
         }
 
-        if self.execution_mode.is_mock() && self.auth_mode != "dev" {
+        if self.execution_mode.is_mock() && self.auth_mode != "local" {
             return Err(
-                "server.execution_mode=mock requires server.auth_mode=dev for safety".to_string(),
+                "server.execution_mode=mock requires server.auth_mode=local for safety".to_string(),
             );
         }
 
@@ -226,23 +226,23 @@ mod tests {
     }
 
     #[test]
-    fn mock_mode_requires_dev_auth_mode() {
+    fn mock_mode_requires_local_auth_mode() {
         let mut cfg = ServerConfig::default();
         cfg.execution_mode = ExecutionMode::Mock;
         cfg.auth_mode = "oidc".to_string();
 
         let err = cfg
             .validate()
-            .expect_err("mock mode should require auth_mode=dev");
-        assert!(err.contains("execution_mode=mock requires server.auth_mode=dev"));
+            .expect_err("mock mode should require auth_mode=local");
+        assert!(err.contains("execution_mode=mock requires server.auth_mode=local"));
     }
 
     #[test]
-    fn mock_mode_allows_dev_auth_mode() {
+    fn mock_mode_allows_local_auth_mode() {
         let mut cfg = ServerConfig::default();
         cfg.execution_mode = ExecutionMode::Mock;
-        cfg.auth_mode = "dev".to_string();
+        cfg.auth_mode = "local".to_string();
         cfg.validate()
-            .expect("mock mode should be allowed in dev auth mode");
+            .expect("mock mode should be allowed in local auth mode");
     }
 }

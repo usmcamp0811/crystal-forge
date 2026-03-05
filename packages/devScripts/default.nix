@@ -541,12 +541,12 @@ let
 
   mock-execution-module = {
     settings.processes.server.environment = {
-      AUTH_MODE = mkForce "dev";
+      AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
     };
 
     settings.processes.builder.environment = {
-      AUTH_MODE = mkForce "dev";
+      AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
     };
   };

@@ -5,7 +5,7 @@ Crystal Forge supports a deterministic mock execution mode to speed up local wor
 ## Safety Model
 
 - Default mode is `real`.
-- `mock` mode is only allowed when `server.auth_mode = "dev"`.
+- `mock` mode is only allowed when `server.auth_mode = "local"`.
 - In release builds, the server/builder startup hard-fails if `server.execution_mode = "mock"`.
 
 This prevents accidental mock execution in production.
@@ -16,7 +16,7 @@ Set the following in your config (or equivalent env-backed config):
 
 ```toml
 [server]
-auth_mode = "dev"
+auth_mode = "local"
 execution_mode = "mock"
 ```
 
