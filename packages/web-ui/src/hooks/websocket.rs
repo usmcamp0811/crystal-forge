@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 
 /// System metrics sent by the builder during a build.
@@ -63,6 +63,16 @@ pub enum SystemEvalStatus {
     Failed,
     PolicyFailed,
     QueuedForBuild,
+}
+
+const MAX_STREAM_LOG_LINES: usize = 2000;
+
+fn push_bounded_log(logs: &mut Vec<String>, line: String) {
+    logs.push(line);
+    if logs.len() > MAX_STREAM_LOG_LINES {
+        let overflow = logs.len() - MAX_STREAM_LOG_LINES;
+        logs.drain(0..overflow);
+    }
 }
 
 /// WebSocket connection state.
@@ -303,14 +313,14 @@ fn connect_websocket(
                     }
                 }
                 Ok(BuildStreamMessage::Log { message }) => {
-                    logs_msg.write().push(message);
+                    push_bounded_log(&mut logs_msg.write(), message);
                 }
                 Ok(BuildStreamMessage::Error { message }) => {
-                    logs_msg.write().push(format!("[stream-error] {}", message));
+                    push_bounded_log(&mut logs_msg.write(), format!("[stream-error] {}", message));
                 }
                 Err(_) => {
                     // Temporary backward compatibility with older plain-text streams.
-                    logs_msg.write().push(message);
+                    push_bounded_log(&mut logs_msg.write(), message);
                 }
             }
         }
@@ -410,7 +420,7 @@ fn connect_eval_websocket(
             // Try to parse as structured EvalLogMessage
             match serde_json::from_str::<EvalLogMessage>(&message) {
                 Ok(EvalLogMessage::Log { message: log_msg }) => {
-                    logs_msg.write().push(log_msg);
+                    push_bounded_log(&mut logs_msg.write(), log_msg);
                 }
                 Ok(EvalLogMessage::SystemStatus {
                     system,
@@ -441,7 +451,7 @@ fn connect_eval_websocket(
                             }
                         }
                     };
-                    logs_msg.write().push(log_line);
+                    push_bounded_log(&mut logs_msg.write(), log_line);
                 }
                 Ok(EvalLogMessage::EvalStatus {
                     status,
@@ -452,11 +462,11 @@ fn connect_eval_websocket(
                     } else {
                         format!("📊 Eval {}", status)
                     };
-                    logs_msg.write().push(log_line);
+                    push_bounded_log(&mut logs_msg.write(), log_line);
                 }
                 Err(_) => {
                     // Fallback: treat as plain text log (for backward compatibility)
-                    logs_msg.write().push(message);
+                    push_bounded_log(&mut logs_msg.write(), message);
                 }
             }
         }
