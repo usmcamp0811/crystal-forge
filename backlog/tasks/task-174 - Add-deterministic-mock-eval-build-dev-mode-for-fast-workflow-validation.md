@@ -86,6 +86,10 @@ Targeted verification rerun after helper-test additions: `nix develop -c rustfmt
 Added Nix dev script output `devScripts.server-stack-mock` and shell alias `server-stack-mock` to launch process-compose with mock execution enabled for both server and builder (`AUTH_MODE=dev`, `CRYSTAL_FORGE__SERVER__EXECUTION_MODE=mock`). Updated devshell startup help text to advertise the new command.
 
 Nix verification: `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --help` ✅, `nix flake check` ❌ failed in existing VM checks (`vm-test-run-crystal-forge-attic-cache-integration` and `vm-test-run-crystal-forge-server-integration-test`), not in the new devScripts output build itself.
+
+Committed implementation on branch `TASK-174-mock-eval-build-dev-mode` as `cf6999e2` with conventional commit message `feat: add dev-only mock eval/build execution mode`.
+
+Pushed branch to origin: `git push -u origin TASK-174-mock-eval-build-dev-mode` (upstream set).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
