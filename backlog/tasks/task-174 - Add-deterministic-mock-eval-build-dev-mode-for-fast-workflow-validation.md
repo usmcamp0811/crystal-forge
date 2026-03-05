@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-04 23:54'
+updated_date: '2026-03-05 00:01'
 labels:
   - dev-experience
   - eval-queue
@@ -78,6 +78,10 @@ Progress update: implemented server.execution_mode (real|mock, default real), de
 Verification run in task worktree: `nix develop -c rustfmt --edition 2021 --check <modified rust files>` (pass), `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` (pass), `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge config::server::tests` (pass), `nix develop -c cargo check` in packages/web-ui (pass).
 
 Note: backend checks/tests were run with `SQLX_OFFLINE=true` to avoid requiring a live DB during targeted validation.
+
+Added deterministic helper unit tests: `models::evaluate_with_policies::tests::mock_systems_fallback_and_filtering` and `tests::mock_store_path_is_deterministic_and_sanitized` (in builder bin).
+
+Targeted verification rerun after helper-test additions: `nix develop -c rustfmt --edition 2021 --check src/models/evaluate_with_policies.rs src/bin/builder.rs`, `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge`, and targeted `cargo test` filters for the new tests (all passing).
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
