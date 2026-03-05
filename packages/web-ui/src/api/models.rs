@@ -590,6 +590,7 @@ pub struct BuildQueueItem {
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
+    pub execution_mode: String,
     pub items: Vec<EvalQueueItem>,
     pub timestamp: DateTime<Utc>,
 }

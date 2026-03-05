@@ -5,6 +5,7 @@ use crystal_forge::config::CrystalForgeConfig;
 use crystal_forge::models::builders::{BuildJob, ReportMetricsRequest};
 use crystal_forge::queries::derivations::get_derivation_by_id;
 use crystal_forge::server::memory_monitor_task;
+use std::hash::{Hash, Hasher};
 use tokio::signal;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
@@ -16,7 +17,22 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cfg = CrystalForgeConfig::load()?;
+    cfg.server.validate().map_err(anyhow::Error::msg)?;
     let builder_config = cfg.get_builder_config();
+
+    if cfg.server.execution_mode.is_mock() {
+        #[cfg(not(debug_assertions))]
+        {
+            anyhow::bail!(
+                "server.execution_mode=mock is not allowed in release builds. Use execution_mode=real."
+            );
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            warn!("⚠️  Builder running in MOCK execution mode (dev-only)");
+        }
+    }
 
     // Check if API mode is enabled and configured
     if builder_config.is_api_mode_ready() {
@@ -117,7 +133,13 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
     );
 
     tokio::select! {
-        result = run_api_job_loop(poll_client, poll_interval, build_config.clone(), cache_config.clone()) => {
+        result = run_api_job_loop(
+            poll_client,
+            poll_interval,
+            build_config.clone(),
+            cache_config.clone(),
+            cfg.server.execution_mode,
+        ) => {
             error!("Job loop exited unexpectedly: {:?}", result);
         }
         _ = signal::ctrl_c() => {
@@ -162,15 +184,19 @@ async fn run_api_job_loop(
     poll_interval: std::time::Duration,
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
+    execution_mode: crystal_forge::config::ExecutionMode,
 ) -> anyhow::Result<()> {
     // Create DB pool once and share across all jobs
     let pool = crystal_forge::config::CrystalForgeConfig::db_pool().await?;
     let mut ticker = tokio::time::interval(poll_interval);
-    
+
     // Limit concurrent builds to max_concurrent_jobs
     let max_concurrent = build_config.max_concurrent_derivations;
     let semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-    info!("🔨 Starting job polling loop (max concurrent: {})...", max_concurrent);
+    info!(
+        "🔨 Starting job polling loop (max concurrent: {})...",
+        max_concurrent
+    );
 
     loop {
         ticker.tick().await;
@@ -195,15 +221,23 @@ async fn run_api_job_loop(
 
                 // Acquire semaphore permit for this build
                 let permit = semaphore.clone().acquire_owned().await.unwrap();
-                
+
                 // Execute the build in a spawned task to allow concurrent builds
                 let job_client = client.clone();
                 let job_build_config = build_config.clone();
                 let job_cache_config = cache_config.clone();
                 let job_pool = pool.clone();
-                
+
                 tokio::spawn(async move {
-                    execute_build_job(job, job_client, job_build_config, job_cache_config, job_pool).await;
+                    execute_build_job(
+                        job,
+                        job_client,
+                        job_build_config,
+                        job_cache_config,
+                        job_pool,
+                        execution_mode,
+                    )
+                    .await;
                     drop(permit); // Release semaphore when build completes
                 });
             }
@@ -224,15 +258,22 @@ async fn execute_build_job(
     build_config: crystal_forge::config::BuildConfig,
     cache_config: crystal_forge::config::CacheConfig,
     pool: sqlx::PgPool,
+    execution_mode: crystal_forge::config::ExecutionMode,
 ) {
-    info!("🔨 Starting build for job #{} (derivation: {})", job.id, job.derivation_id);
+    info!(
+        "🔨 Starting build for job #{} (derivation: {})",
+        job.id, job.derivation_id
+    );
 
     // Fetch the derivation from database
     let mut derivation = match get_derivation_by_id(&pool, job.derivation_id).await {
         Ok(deriv) => deriv,
         Err(e) => {
             error!("❌ Failed to fetch derivation {}: {}", job.derivation_id, e);
-            if let Err(e2) = client.fail_job(job.id, &format!("Failed to fetch derivation: {}", e)).await {
+            if let Err(e2) = client
+                .fail_job(job.id, &format!("Failed to fetch derivation: {}", e))
+                .await
+            {
                 error!("❌ Failed to report job failure: {}", e2);
             }
             return;
@@ -256,7 +297,10 @@ async fn execute_build_job(
             Some(stream)
         }
         Err(e) => {
-            warn!("⚠️  WebSocket connection failed, using HTTP fallback: {}", e);
+            warn!(
+                "⚠️  WebSocket connection failed, using HTTP fallback: {}",
+                e
+            );
             None
         }
     };
@@ -272,27 +316,29 @@ async fn execute_build_job(
     let metrics_task = if let Some(ref ws) = ws_shared {
         use sysinfo::System;
         let ws_for_metrics = ws.clone();
-        
+
         Some(tokio::spawn(async move {
             let mut sys = System::new_all();
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(2));
-            
+
             loop {
                 interval.tick().await;
                 sys.refresh_cpu_all();
                 sys.refresh_memory();
-                
+
                 let cpu_percent = sys.global_cpu_usage();
                 let ram_used_mb = sys.used_memory() / 1024 / 1024;
                 let ram_total_mb = sys.total_memory() / 1024 / 1024;
-                
+
                 let mut ws = ws_for_metrics.lock().await;
                 if let Err(e) = crystal_forge::builder::api_client::BuilderApiClient::send_metrics(
                     &mut *ws,
                     cpu_percent,
                     ram_used_mb,
                     ram_total_mb,
-                ).await {
+                )
+                .await
+                {
                     tracing::warn!("Failed to send metrics: {}", e);
                     break;
                 }
@@ -302,11 +348,13 @@ async fn execute_build_job(
         None
     };
 
-    // Execute the build with timeout
-    let build_result = tokio::time::timeout(
-        build_timeout,
-        derivation.build(&pool, &build_config)
-    ).await;
+    // Execute the build with timeout, or deterministic mock execution in dev mode.
+    let build_result = if execution_mode.is_mock() {
+        let mock_result = run_mock_build(&mut derivation, &client, job.id, &mut ws_shared).await;
+        Ok(mock_result)
+    } else {
+        tokio::time::timeout(build_timeout, derivation.build(&pool, &build_config)).await
+    };
 
     match build_result {
         // Build succeeded within timeout
@@ -320,7 +368,10 @@ async fn execute_build_job(
             );
 
             // Send success log
-            let success_msg = format!("✅ Build completed successfully in {:.1}s\n", duration.as_secs_f64());
+            let success_msg = format!(
+                "✅ Build completed successfully in {:.1}s\n",
+                duration.as_secs_f64()
+            );
             let output_msg = format!("   Output: {}\n", store_path);
 
             send_log_with_fallback(&client, job.id, &mut ws_shared, &success_msg).await;
@@ -330,28 +381,46 @@ async fn execute_build_job(
             derivation.store_path = Some(store_path.clone());
 
             // Sign the derivation
-            let _ = client.append_logs(job.id, "🔐 Signing derivation...\n").await;
+            let _ = client
+                .append_logs(job.id, "🔐 Signing derivation...\n")
+                .await;
             if let Err(e) = derivation.sign(&cache_config).await {
-                warn!("⚠️ Signing failed for job #{}, continuing anyway: {}", job.id, e);
-                let _ = client.append_logs(job.id, &format!("⚠️  Signing failed: {}\n", e)).await;
+                warn!(
+                    "⚠️ Signing failed for job #{}, continuing anyway: {}",
+                    job.id, e
+                );
+                let _ = client
+                    .append_logs(job.id, &format!("⚠️  Signing failed: {}\n", e))
+                    .await;
             } else {
                 let _ = client.append_logs(job.id, "✅ Derivation signed\n").await;
             }
 
             // Create cache push job if configured
             if cache_config.push_after_build {
-                let _ = client.append_logs(job.id, "📤 Queuing cache push job...\n").await;
+                let _ = client
+                    .append_logs(job.id, "📤 Queuing cache push job...\n")
+                    .await;
                 if let Some(ref store_path) = derivation.store_path {
                     if let Err(e) = crystal_forge::queries::cache_push::create_cache_push_job(
                         &pool,
                         derivation.id,
                         store_path,
                         cache_config.push_to.as_deref(),
-                    ).await {
-                        warn!("⚠️ Cache queue failed for job #{}, continuing anyway: {}", job.id, e);
-                        let _ = client.append_logs(job.id, &format!("⚠️  Cache push queue failed: {}\n", e)).await;
+                    )
+                    .await
+                    {
+                        warn!(
+                            "⚠️ Cache queue failed for job #{}, continuing anyway: {}",
+                            job.id, e
+                        );
+                        let _ = client
+                            .append_logs(job.id, &format!("⚠️  Cache push queue failed: {}\n", e))
+                            .await;
                     } else {
-                        let _ = client.append_logs(job.id, "✅ Cache push job queued\n").await;
+                        let _ = client
+                            .append_logs(job.id, "✅ Cache push job queued\n")
+                            .await;
                     }
                 }
             }
@@ -363,7 +432,9 @@ async fn execute_build_job(
                         &mut *tx,
                         derivation.id,
                         &store_path,
-                    ).await {
+                    )
+                    .await
+                    {
                         error!("❌ Failed to mark derivation complete: {}", e);
                     } else if let Err(e) = tx.commit().await {
                         error!("❌ Failed to commit transaction: {}", e);
@@ -414,7 +485,9 @@ async fn execute_build_job(
                         &derivation,
                         "build",
                         &e,
-                    ).await {
+                    )
+                    .await
+                    {
                         error!("❌ Failed to mark derivation failed: {}", e2);
                     } else if let Err(e2) = tx.commit().await {
                         error!("❌ Failed to commit transaction: {}", e2);
@@ -461,7 +534,9 @@ async fn execute_build_job(
                         &derivation,
                         "build-timeout",
                         &timeout_error,
-                    ).await {
+                    )
+                    .await
+                    {
                         error!("❌ Failed to mark derivation timeout: {}", e);
                     } else if let Err(e) = tx.commit().await {
                         error!("❌ Failed to commit transaction: {}", e);
@@ -478,11 +553,74 @@ async fn execute_build_job(
             }
         }
     }
-    
+
     // Clean up metrics task if it was spawned
     if let Some(task) = metrics_task {
         task.abort();
     }
+}
+
+async fn run_mock_build(
+    derivation: &mut crystal_forge::derivations::Derivation,
+    client: &BuilderApiClient,
+    job_id: uuid::Uuid,
+    ws_shared: &mut Option<
+        std::sync::Arc<
+            tokio::sync::Mutex<
+                tokio_tungstenite::WebSocketStream<
+                    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+                >,
+            >,
+        >,
+    >,
+) -> anyhow::Result<String> {
+    send_log_with_fallback(
+        client,
+        job_id,
+        ws_shared,
+        "🧪 MOCK MODE: simulating build\n",
+    )
+    .await;
+    send_log_with_fallback(
+        client,
+        job_id,
+        ws_shared,
+        "🔨 Resolving derivation graph...\n",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    send_log_with_fallback(client, job_id, ws_shared, "⚙️  Building outputs...\n").await;
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+    let store_path = mock_store_path(job_id, derivation.id, &derivation.derivation_name);
+
+    send_log_with_fallback(
+        client,
+        job_id,
+        ws_shared,
+        &format!("✅ MOCK build complete: {}\n", store_path),
+    )
+    .await;
+
+    Ok(store_path)
+}
+
+fn mock_store_path(job_id: uuid::Uuid, derivation_id: i32, derivation_name: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{}:{}", job_id, derivation_id).hash(&mut hasher);
+    let short_hash = format!("{:016x}", hasher.finish());
+    let sanitized = derivation_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    format!("/nix/store/{}-{}", short_hash, sanitized)
 }
 
 async fn send_log_with_fallback(
@@ -521,4 +659,21 @@ async fn send_log_with_fallback(
     }
 
     let _ = client.append_logs(job_id, message).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mock_store_path;
+
+    #[test]
+    fn mock_store_path_is_deterministic_and_sanitized() {
+        let job_id = uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555")
+            .expect("uuid should parse");
+
+        let one = mock_store_path(job_id, 7, "web-ui/main@amd64");
+        let two = mock_store_path(job_id, 7, "web-ui/main@amd64");
+        assert_eq!(one, two);
+        assert!(one.starts_with("/nix/store/"));
+        assert!(one.ends_with("-web-ui-main-amd64"));
+    }
 }

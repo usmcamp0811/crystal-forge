@@ -144,6 +144,7 @@ in mkShell {
 
     alias full-stack='sudo echo && nix run $PROJECT_ROOT#devScripts --'
     alias server-stack='nix run $PROJECT_ROOT#devScripts.server-only --'
+    alias server-stack-mock='nix run $PROJECT_ROOT#devScripts.server-stack-mock --'
     alias oidc-stack='nix run $PROJECT_ROOT#devScripts.oidc-stack --'
     alias db-only='nix run $PROJECT_ROOT#devScripts.db-only --'
     alias run-server='nix run $PROJECT_ROOT#devScripts.runServer --'
@@ -162,6 +163,8 @@ in mkShell {
     echo "      - Launches PostgreSQL, the Crystal Forge server and agent in process-compose"
       echo "      server-stack up"
       echo "      - Launches PostgreSQL, Crystal Forge server, and builder in process-compose"
+      echo "      server-stack-mock up"
+      echo "      - Launches PostgreSQL, server, and builder with mock eval/build execution"
       echo "      oidc-stack up"
       echo "      - Launches PostgreSQL, Keycloak OIDC provider, and server in OIDC mode"
       echo "      db-only up"

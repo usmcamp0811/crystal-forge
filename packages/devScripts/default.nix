@@ -522,19 +522,33 @@ let
       AUTH_MODE = "oidc";
 
       # 👇 issuer that remote browsers/clients can resolve
-      CRYSTAL_FORGE_OIDC_ISSUER_URL =
-        "http://HOSTNAME_PLACEHOLDER:${toString oidc_port}/realms/${oidc_realm}";
+      CRYSTAL_FORGE_OIDC_ISSUER_URL = "http://HOSTNAME_PLACEHOLDER:${
+          toString oidc_port
+        }/realms/${oidc_realm}";
 
       CRYSTAL_FORGE_OIDC_CLIENT_ID = oidc_client_id;
       CRYSTAL_FORGE_OIDC_CLIENT_SECRET = oidc_client_secret;
 
       # 👇 callback that matches the host you're visiting from your laptop
-      CRYSTAL_FORGE_OIDC_REDIRECT_URI =
-        "http://HOSTNAME_PLACEHOLDER:${toString cf_port}/api/auth/oidc/callback";
+      CRYSTAL_FORGE_OIDC_REDIRECT_URI = "http://HOSTNAME_PLACEHOLDER:${
+          toString cf_port
+        }/api/auth/oidc/callback";
 
       CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP = "admin";
     };
     settings.processes.server.depends_on."oidc".condition = "process_healthy";
+  };
+
+  mock-execution-module = {
+    settings.processes.server.environment = {
+      AUTH_MODE = mkForce "dev";
+      CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
+    };
+
+    settings.processes.builder.environment = {
+      AUTH_MODE = mkForce "dev";
+      CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
+    };
   };
 
   full-stack = pkgs.process-compose-flake.evalModules {
@@ -555,6 +569,16 @@ let
     ];
   };
 
+  server-stack-mock = pkgs.process-compose-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      server-module
+      builder-module
+      db-module
+      mock-execution-module
+    ];
+  };
+
   dbOnly = pkgs.process-compose-flake.evalModules {
     modules = [ inputs.services-flake.processComposeModules.default db-module ];
   };
@@ -568,18 +592,11 @@ let
       server-oidc-module
     ];
   };
-in
-  full-stack.config.outputs.package
-  // {
-    inherit
-      runServer
-      runAgent
-      runBuilder
-      simulatePush
-      startBuilderApi
-      bootstrapDevBuilder
-      envExports;
-    db-only = dbOnly.config.outputs.package;
-    server-only = server-only.config.outputs.package;
-    oidc-stack = oidc-stack.config.outputs.package;
-  }
+in full-stack.config.outputs.package // {
+  inherit runServer runAgent runBuilder simulatePush startBuilderApi
+    bootstrapDevBuilder envExports;
+  db-only = dbOnly.config.outputs.package;
+  server-only = server-only.config.outputs.package;
+  server-stack-mock = server-stack-mock.config.outputs.package;
+  oidc-stack = oidc-stack.config.outputs.package;
+}

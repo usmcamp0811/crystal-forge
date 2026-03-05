@@ -1,6 +1,7 @@
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
@@ -9,11 +10,11 @@ use tracing::{debug, error, info, warn};
 use crate::config::{BuildConfig, ServerConfig};
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
-    DeploymentPolicy, PolicyCheckResult, build_nix_eval_expression,
+    build_nix_eval_expression, DeploymentPolicy, PolicyCheckResult,
 };
 use crate::models::flakes::Flake;
 use crate::queries::derivations::{
-    EvaluationStatus, insert_derivation_with_target, mark_derivation_dry_run_complete,
+    insert_derivation_with_target, mark_derivation_dry_run_complete,
 };
 
 /// NixEvalJobResult with meta field
@@ -63,15 +64,18 @@ pub async fn evaluate_with_nix_eval_jobs(
         target_system,
         policies.len()
     );
-    
+
     // Broadcast detailed start information
     if let Some(state) = cf_state {
         let start_msg = format!(
             "🚀 Starting evaluation for flake: {}\n   Commit: {}\n   Target: {}\n   Workers: {}",
-            flake.name, &commit_hash[..8.min(commit_hash.len())], target_system, server_config.eval_workers
+            flake.name,
+            &commit_hash[..8.min(commit_hash.len())],
+            target_system,
+            server_config.eval_workers
         );
         crate::handlers::api::commits::broadcast_eval_log(state, commit.id, start_msg).await;
-        
+
         if !policies.is_empty() {
             let policy_msg = format!("📋 Checking {} deployment policies:", policies.len());
             crate::handlers::api::commits::broadcast_eval_log(state, commit.id, policy_msg).await;
@@ -81,17 +85,19 @@ pub async fn evaluate_with_nix_eval_jobs(
                     policy.description(),
                     policy.is_strict()
                 );
-                crate::handlers::api::commits::broadcast_eval_log(state, commit.id, policy_detail).await;
+                crate::handlers::api::commits::broadcast_eval_log(state, commit.id, policy_detail)
+                    .await;
             }
         }
-        
+
         crate::handlers::api::commits::broadcast_eval_log(
             state,
             commit.id,
-            "⏳ Evaluating nixosConfigurations...".to_string()
-        ).await;
+            "⏳ Evaluating nixosConfigurations...".to_string(),
+        )
+        .await;
     }
-    
+
     if !policies.is_empty() {
         info!("   Policies will be evaluated in parallel by nix-eval-jobs:");
         for policy in policies {
@@ -173,7 +179,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                         let log_msg = format!("✅ {} evaluated successfully", system_name);
                                         crate::handlers::api::commits::broadcast_eval_log(state, commit.id, log_msg).await;
                                     }
-                                    
+
                                     // Broadcast in-progress status to WebSocket clients.
                                     crate::handlers::api::commits::broadcast_system_status(
                                         state,
@@ -207,7 +213,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                                 } else {
                                                     warn!("⚠️  {}", warning);
                                                 }
-                                                
+
                                                 // Broadcast policy warnings to logs
                                                 if let Some(state) = cf_state {
                                                     let log_msg = format!("⚠️  {}: {}", system_name, warning);
@@ -216,7 +222,7 @@ pub async fn evaluate_with_nix_eval_jobs(
                                             }
                                         } else if let Some(true) = cf_agent_enabled {
                                             info!("✅ {} has CF agent enabled", system_name);
-                                            
+
                                             // Broadcast policy success to logs
                                             if let Some(state) = cf_state {
                                                 let log_msg = format!("✅ {}: Crystal Forge agent enabled", system_name);
@@ -460,12 +466,12 @@ pub async fn evaluate_with_nix_eval_jobs(
     }
 
     info!("✅ Evaluated {} configurations in parallel", results.len());
-    
+
     // Calculate statistics for summary
     let total_systems = results.len();
     let successful = results.iter().filter(|r| r.error.is_none()).count();
     let failed = total_systems - successful;
-    
+
     let with_agent = policy_checks
         .iter()
         .filter(|c| c.cf_agent_enabled == Some(true))
@@ -475,7 +481,7 @@ pub async fn evaluate_with_nix_eval_jobs(
     } else {
         0.0
     };
-    
+
     if !policies.is_empty() && !policy_checks.is_empty() {
         info!(
             "   CF agent: {}/{} systems enabled ({:.1}%)",
@@ -484,90 +490,230 @@ pub async fn evaluate_with_nix_eval_jobs(
             coverage
         );
     }
-    
+
     // Broadcast comprehensive summary to WebSocket clients
     if let Some(state) = cf_state {
         crate::handlers::api::commits::broadcast_eval_log(
             state,
             commit.id,
-            "".to_string()  // Blank line for readability
-        ).await;
-        
+            "".to_string(), // Blank line for readability
+        )
+        .await;
+
         crate::handlers::api::commits::broadcast_eval_log(
             state,
             commit.id,
-            "═══════════════════════════════════════".to_string()
-        ).await;
-        
+            "═══════════════════════════════════════".to_string(),
+        )
+        .await;
+
         crate::handlers::api::commits::broadcast_eval_log(
             state,
             commit.id,
-            "📊 Evaluation Summary".to_string()
-        ).await;
-        
+            "📊 Evaluation Summary".to_string(),
+        )
+        .await;
+
         crate::handlers::api::commits::broadcast_eval_log(
             state,
             commit.id,
-            "═══════════════════════════════════════".to_string()
-        ).await;
-        
+            "═══════════════════════════════════════".to_string(),
+        )
+        .await;
+
         crate::handlers::api::commits::broadcast_eval_log(
             state,
             commit.id,
-            format!("✅ Successful: {} systems", successful)
-        ).await;
-        
+            format!("✅ Successful: {} systems", successful),
+        )
+        .await;
+
         if failed > 0 {
             crate::handlers::api::commits::broadcast_eval_log(
                 state,
                 commit.id,
-                format!("❌ Failed: {} systems", failed)
-            ).await;
+                format!("❌ Failed: {} systems", failed),
+            )
+            .await;
         }
-        
+
         crate::handlers::api::commits::broadcast_eval_log(
             state,
             commit.id,
-            format!("📦 Total: {} nixosConfigurations", total_systems)
-        ).await;
-        
+            format!("📦 Total: {} nixosConfigurations", total_systems),
+        )
+        .await;
+
         if !policy_checks.is_empty() {
+            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, "".to_string())
+                .await;
+
             crate::handlers::api::commits::broadcast_eval_log(
                 state,
                 commit.id,
-                "".to_string()
-            ).await;
-            
-            crate::handlers::api::commits::broadcast_eval_log(
-                state,
-                commit.id,
-                format!("🔐 Policy Compliance: {:.1}% ({}/{})",
-                    coverage, with_agent, policy_checks.len())
-            ).await;
+                format!(
+                    "🔐 Policy Compliance: {:.1}% ({}/{})",
+                    coverage,
+                    with_agent,
+                    policy_checks.len()
+                ),
+            )
+            .await;
         }
-        
+
         if evaluated_derivations.len() > 0 {
+            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, "".to_string())
+                .await;
+
             crate::handlers::api::commits::broadcast_eval_log(
                 state,
                 commit.id,
-                "".to_string()
-            ).await;
-            
-            crate::handlers::api::commits::broadcast_eval_log(
-                state,
-                commit.id,
-                format!("🚀 {} derivations ready for build queue", evaluated_derivations.len())
-            ).await;
+                format!(
+                    "🚀 {} derivations ready for build queue",
+                    evaluated_derivations.len()
+                ),
+            )
+            .await;
         }
-        
+
         crate::handlers::api::commits::broadcast_eval_log(
             state,
             commit.id,
-            "═══════════════════════════════════════".to_string()
-        ).await;
+            "═══════════════════════════════════════".to_string(),
+        )
+        .await;
     }
 
     Ok((results, policy_checks))
+}
+
+/// Dev-only deterministic mock evaluation path.
+///
+/// This simulates nix-eval-jobs behavior while preserving queue/log/policy/derivation
+/// transitions so UI and process workflows can be validated quickly.
+#[allow(clippy::too_many_arguments)]
+pub async fn evaluate_with_mock_eval_jobs(
+    pool: &PgPool,
+    commit: &Commit,
+    flake: &Flake,
+    repo_url: &str,
+    commit_hash: &str,
+    target_system: &str,
+    _build_config: &BuildConfig,
+    _server_config: &ServerConfig,
+    _policies: &[DeploymentPolicy],
+    configured_systems: &[String],
+    cf_state: Option<&crate::handlers::agent_request::CFState>,
+) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
+    let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
+
+    if let Some(state) = cf_state {
+        crate::handlers::api::commits::broadcast_eval_log(
+            state,
+            commit.id,
+            format!(
+                "🧪 MOCK MODE: evaluating {} system(s) for {}@{}",
+                systems.len(),
+                flake.name,
+                &commit_hash[..8.min(commit_hash.len())]
+            ),
+        )
+        .await;
+    }
+
+    let mut results = Vec::with_capacity(systems.len());
+    let mut checks = Vec::with_capacity(systems.len());
+
+    for (idx, system_name) in systems.iter().enumerate() {
+        if let Some(state) = cf_state {
+            crate::handlers::api::commits::broadcast_system_status(
+                state,
+                commit.id,
+                system_name.clone(),
+                crate::handlers::api::commits::SystemEvalStatus::Evaluating,
+                None,
+            )
+            .await;
+            crate::handlers::api::commits::broadcast_eval_log(
+                state,
+                commit.id,
+                format!("⏳ {}: evaluating...", system_name),
+            )
+            .await;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(120 + (idx as u64 * 40))).await;
+
+        let flake_ref = build_flake_reference(repo_url, commit_hash);
+        let drv_path = format!(
+            "/nix/store/mock-{}-{}.drv",
+            &commit_hash[..8.min(commit_hash.len())],
+            system_name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() || c == '-' {
+                    c
+                } else {
+                    '-'
+                })
+                .collect::<String>()
+        );
+        let derivation_target = format!("{}#nixosConfigurations.{}", flake_ref, system_name);
+
+        let derivation = insert_derivation_with_target(
+            pool,
+            Some(commit),
+            system_name,
+            "nixos",
+            Some(&derivation_target),
+            Some(true),
+        )
+        .await?;
+
+        mark_derivation_dry_run_complete(pool, derivation.id, &drv_path).await?;
+
+        let check = PolicyCheckResult {
+            system_name: system_name.clone(),
+            cf_agent_enabled: Some(true),
+            has_required_packages: None,
+            custom_checks: HashMap::new(),
+            meets_requirements: true,
+            warnings: vec![],
+        };
+        checks.push(check);
+
+        results.push(NixEvalJobResult {
+            attr: system_name.clone(),
+            attr_path: vec!["nixosConfigurations".to_string(), system_name.clone()],
+            name: Some(system_name.clone()),
+            drv_path: Some(drv_path),
+            error: None,
+            cache_status: Some("unknown".to_string()),
+            outputs: None,
+            meta: None,
+        });
+
+        if let Some(state) = cf_state {
+            crate::handlers::api::commits::broadcast_system_status(
+                state,
+                commit.id,
+                system_name.clone(),
+                crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                None,
+            )
+            .await;
+            crate::handlers::api::commits::broadcast_eval_log(
+                state,
+                commit.id,
+                format!(
+                    "✅ {}: policy passed (CF enabled), queued for build",
+                    system_name
+                ),
+            )
+            .await;
+        }
+    }
+
+    Ok((results, checks))
 }
 
 fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
@@ -586,4 +732,65 @@ fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
 fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     format!("{}#nixosConfigurations.{}", flake_ref, system_name)
+}
+
+fn resolve_mock_systems(
+    flake_name: &str,
+    target_system: &str,
+    configured_systems: &[String],
+) -> Result<Vec<String>> {
+    let mut systems = if configured_systems.is_empty() {
+        vec![
+            format!("{}-control-0", flake_name),
+            format!("{}-worker-0", flake_name),
+            format!("{}-worker-1", flake_name),
+        ]
+    } else {
+        configured_systems.to_vec()
+    };
+
+    systems.sort();
+
+    if target_system != "all" {
+        systems.retain(|s| s == target_system);
+    }
+
+    if systems.is_empty() {
+        bail!("mock evaluation has no matching systems to evaluate");
+    }
+
+    Ok(systems)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_mock_systems;
+
+    #[test]
+    fn mock_systems_fallback_and_filtering() {
+        let all =
+            resolve_mock_systems("demo", "all", &[]).expect("fallback systems should resolve");
+        assert_eq!(
+            all,
+            vec![
+                "demo-control-0".to_string(),
+                "demo-worker-0".to_string(),
+                "demo-worker-1".to_string()
+            ]
+        );
+
+        let filtered =
+            resolve_mock_systems("demo", "demo-worker-1", &all).expect("target should filter");
+        assert_eq!(filtered, vec!["demo-worker-1".to_string()]);
+    }
+
+    #[test]
+    fn mock_systems_errors_when_target_missing() {
+        let systems = vec!["alpha".to_string(), "beta".to_string()];
+        let err = resolve_mock_systems("demo", "gamma", &systems)
+            .expect_err("missing target should return error");
+        assert!(err
+            .to_string()
+            .contains("mock evaluation has no matching systems to evaluate"));
+    }
 }

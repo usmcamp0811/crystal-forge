@@ -1,14 +1,14 @@
 use anyhow::Context;
-use axum::Extension;
 use axum::http::{
+    header::{HeaderName, ACCEPT, CONTENT_TYPE},
     HeaderValue, Method,
-    header::{ACCEPT, CONTENT_TYPE, HeaderName},
 };
+use axum::Extension;
 use axum::{
-    Router,
     routing::{delete, get, patch, post, put},
+    Router,
 };
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use crystal_forge::{
     auth::dev_mode::{ensure_bootstrap_oidc_admin_mapping, ensure_dev_users},
     config::CrystalForgeConfig,
@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load and validate config
     let cfg = CrystalForgeConfig::load()?;
+    cfg.server.validate().map_err(anyhow::Error::msg)?;
     CrystalForgeConfig::validate_db_connection().await?;
 
     // Validate auth mode and apply production guard
@@ -68,6 +69,21 @@ async fn main() -> anyhow::Result<()> {
         {
             warn!("⚠️  Running in development auth mode (AUTH_MODE=dev)");
             warn!("⚠️  This mode is insecure and should NEVER be used in production");
+        }
+    }
+
+    if cfg.server.execution_mode.is_mock() {
+        #[cfg(not(debug_assertions))]
+        {
+            anyhow::bail!(
+                "server.execution_mode=mock is not allowed in release builds. Use execution_mode=real."
+            );
+        }
+
+        #[cfg(debug_assertions)]
+        {
+            warn!("⚠️  Running in MOCK execution mode (dev-only)");
+            warn!("⚠️  Eval/build steps are simulated and must never be used in production");
         }
     }
 
@@ -112,7 +128,12 @@ async fn main() -> anyhow::Result<()> {
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
 
-    spawn_background_tasks(cfg.clone(), background_pool, state_arc.clone(), queue_notifier.clone());
+    spawn_background_tasks(
+        cfg.clone(),
+        background_pool,
+        state_arc.clone(),
+        queue_notifier.clone(),
+    );
     let mut app = Router::new()
         .route("/status", get(status::status))
         .route("/system_state", post(state::update))

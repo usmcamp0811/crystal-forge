@@ -9,7 +9,7 @@ use crate::api::{
     models::{EvalQueueItem, EvalQueueSummary},
 };
 use crate::components::layout::Card;
-use crate::hooks::websocket::{ConnectionState, SystemEvalStatus, use_websocket_eval_stream};
+use crate::hooks::websocket::{use_websocket_eval_stream, ConnectionState, SystemEvalStatus};
 use crate::theme;
 
 #[component]
@@ -162,7 +162,17 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
             header {
                 class: "flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between",
                 div {
-                    h1 { class: "{theme::typography::PAGE_TITLE}", "Evaluations" }
+                    div { class: "flex items-center gap-2",
+                        h1 { class: "{theme::typography::PAGE_TITLE}", "Evaluations" }
+                        if let Some(summary) = summary_snapshot.clone() {
+                            if summary.execution_mode == "mock" {
+                                span {
+                                    class: "inline-flex items-center px-2 py-0.5 rounded border border-amber-600 bg-amber-950/60 text-amber-200 text-xs font-medium",
+                                    "MOCK MODE"
+                                }
+                            }
+                        }
+                    }
                     p {
                         class: "text-sm {theme::text::SECONDARY}",
                         "Track commit evaluation order, reorder priority, and monitor policy outcomes in real-time."
@@ -555,7 +565,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                 }
             }
         }
-        
+
         // Modal for maximized logs - OUTSIDE main content div for proper z-index layering
         if *log_modal_open.read() {
             div {
@@ -564,7 +574,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                     div {
                         style: "width: 100%; max-width: 90rem; max-height: 90vh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background-color: rgb(17, 24, 39); border-radius: 0.5rem; border: 1px solid rgb(55, 65, 81); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);",
                     onclick: move |evt| evt.stop_propagation(),
-                    
+
                     // Header
                     div {
                         style: "display: flex; align-items: center; justify-content: space-between; padding: 0.75rem 1rem; border-bottom: 1px solid rgb(55, 65, 81);",
@@ -603,7 +613,7 @@ fn EvaluationsPage(initial_commit_id: Option<i32>) -> Element {
                             }
                         }
                     }
-                    
+
                     // Logs content
                     div {
                         style: "flex: 1; min-height: 0; min-width: 0; max-width: 100%; overflow: auto; padding: 1rem; background-color: rgba(3, 7, 18, 0.6);",
@@ -669,10 +679,10 @@ fn StatCard(label: String, value: String, tone: &'static str) -> Element {
         div {
             class: "rounded-lg border px-3 py-2",
             style: "{style}",
-            p { 
+            p {
                 class: "text-[11px] uppercase tracking-wide",
                 style: "opacity: 0.8;",
-                "{label}" 
+                "{label}"
             }
             p { class: "text-lg font-semibold", "{value}" }
         }
@@ -765,12 +775,18 @@ fn is_high_signal_log(line: &str) -> bool {
 
 fn is_active_eval_status(status: &str) -> bool {
     let normalized = status.trim().to_ascii_lowercase();
-    matches!(normalized.as_str(), "pending" | "in_progress" | "in-progress" | "in progress")
+    matches!(
+        normalized.as_str(),
+        "pending" | "in_progress" | "in-progress" | "in progress"
+    )
 }
 
 fn is_in_progress_eval_status(status: &str) -> bool {
     let normalized = status.trim().to_ascii_lowercase();
-    matches!(normalized.as_str(), "in_progress" | "in-progress" | "in progress")
+    matches!(
+        normalized.as_str(),
+        "in_progress" | "in-progress" | "in progress"
+    )
 }
 
 fn is_pending_eval_status(status: &str) -> bool {

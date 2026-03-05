@@ -1,16 +1,16 @@
 //! Commit-related API handlers.
 
 use axum::{
-    Json,
     extract::{
-        Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
+        Path, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::time::{Duration, interval};
+use tokio::time::{interval, Duration};
 
 use crate::api::models::{ApiError, EvalQueueItem, EvalQueueSummary, ReorderEvalQueueRequest};
 use crate::handlers::agent_request::CFState;
@@ -107,6 +107,7 @@ pub async fn list_eval_queue(
     Json(EvalQueueSummary {
         active_count,
         completed_count,
+        execution_mode: state.server_config.execution_mode.as_str().to_string(),
         items,
         timestamp: chrono::Utc::now(),
     })
@@ -419,7 +420,8 @@ mod tests {
 
     #[test]
     fn reorder_validation_details_handles_empty_lists() {
-        let message = "invalid eval queue reorder request: duplicate IDs: []; missing IDs: []; extra IDs: []";
+        let message =
+            "invalid eval queue reorder request: duplicate IDs: []; missing IDs: []; extra IDs: []";
         let details = reorder_validation_details(message).expect("details should parse");
 
         assert_eq!(details["duplicate_ids"], serde_json::json!([]));
