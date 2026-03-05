@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-05 00:01'
+updated_date: '2026-03-05 03:04'
 labels:
   - dev-experience
   - eval-queue
@@ -82,6 +82,10 @@ Note: backend checks/tests were run with `SQLX_OFFLINE=true` to avoid requiring 
 Added deterministic helper unit tests: `models::evaluate_with_policies::tests::mock_systems_fallback_and_filtering` and `tests::mock_store_path_is_deterministic_and_sanitized` (in builder bin).
 
 Targeted verification rerun after helper-test additions: `nix develop -c rustfmt --edition 2021 --check src/models/evaluate_with_policies.rs src/bin/builder.rs`, `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge`, and targeted `cargo test` filters for the new tests (all passing).
+
+Added Nix dev script output `devScripts.server-stack-mock` and shell alias `server-stack-mock` to launch process-compose with mock execution enabled for both server and builder (`AUTH_MODE=dev`, `CRYSTAL_FORGE__SERVER__EXECUTION_MODE=mock`). Updated devshell startup help text to advertise the new command.
+
+Nix verification: `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --help` ✅, `nix flake check` ❌ failed in existing VM checks (`vm-test-run-crystal-forge-attic-cache-integration` and `vm-test-run-crystal-forge-server-integration-test`), not in the new devScripts output build itself.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
