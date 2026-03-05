@@ -540,11 +540,15 @@ let
   };
 
   mock-execution-module = {
+    settings.processes.server.command =
+      mkForce "${runServer}/bin/run-server --dev";
     settings.processes.server.environment = {
       AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
     };
 
+    settings.processes.builder.command =
+      mkForce "${runBuilder}/bin/run-builder --dev";
     settings.processes.builder.environment = {
       AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";

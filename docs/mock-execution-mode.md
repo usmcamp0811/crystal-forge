@@ -6,7 +6,7 @@ Crystal Forge supports a deterministic mock execution mode to speed up local wor
 
 - Default mode is `real`.
 - `mock` mode is only allowed when `server.auth_mode = "local"`.
-- In release builds, the server/builder startup hard-fails if `server.execution_mode = "mock"`.
+- `mock` mode requires a local database host (`localhost`, `127.0.0.1`, or `::1`).
 
 This prevents accidental mock execution in production.
 

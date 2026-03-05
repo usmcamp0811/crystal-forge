@@ -21,17 +21,13 @@ async fn main() -> anyhow::Result<()> {
     let builder_config = cfg.get_builder_config();
 
     if cfg.server.execution_mode.is_mock() {
-        #[cfg(not(debug_assertions))]
-        {
+        if !is_local_db_host(&cfg.database.host) {
             anyhow::bail!(
-                "server.execution_mode=mock is not allowed in release builds. Use execution_mode=real."
+                "server.execution_mode=mock requires a local database host (localhost/127.0.0.1/::1)"
             );
         }
 
-        #[cfg(debug_assertions)]
-        {
-            warn!("⚠️  Builder running in MOCK execution mode (dev-only)");
-        }
+        warn!("⚠️  Builder running in MOCK execution mode (dev-only)");
     }
 
     // Check if API mode is enabled and configured
@@ -659,6 +655,10 @@ async fn send_log_with_fallback(
     }
 
     let _ = client.append_logs(job_id, message).await;
+}
+
+fn is_local_db_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 #[cfg(test)]
