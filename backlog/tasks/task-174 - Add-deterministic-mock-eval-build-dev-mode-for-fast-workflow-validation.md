@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-05 20:50'
+updated_date: '2026-03-05 21:37'
 labels:
   - dev-experience
   - eval-queue
@@ -96,6 +96,14 @@ Follow-up correction per review: switched mock-mode auth requirement from `serve
 Verification after correction: `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge config::server::tests` ✅, `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --help` ✅.
 
 Committed fix as `fd930a64` (`fix: require local auth mode for mock execution`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Addressed startup failure in `server-stack-mock`: process-compose now forces dev binaries for mock stack (`run-server --dev`, `run-builder --dev`) instead of packaged release binaries.
+
+Adjusted runtime safety for mock mode in server/builder binaries: removed release-only rejection and require local DB host (`localhost`/`127.0.0.1`/`::1`) in addition to config-level `auth_mode=local` requirement.
+
+Verification: `nix develop -c rustfmt --edition 2021 --check src/bin/server.rs src/bin/builder.rs` ✅, `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --dry-run` ✅. Verified generated process-compose config uses `run-server --dev`/`run-builder --dev` and `AUTH_MODE=local` + `CRYSTAL_FORGE__SERVER__EXECUTION_MODE=mock`.
+
+Committed as `edbebc9c` (`fix: allow mock mode with local auth and local db`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
