@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 18:30'
+updated_date: '2026-03-06 18:47'
 labels:
   - dev-experience
   - eval-queue
@@ -202,6 +202,16 @@ Updated mock build simulation to include deterministic failed build outcomes (co
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c cargo check` in `packages/web-ui` ✅, `nix build .#devScripts.server-stack-mock` ✅.
 
 Committed as `929d6e8d` (`feat: add mixed mock eval/build outcomes and shell banners`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Follow-up UI polish fixes: build log maximize now uses explicit fullscreen overlay styles (matching evaluations modal behavior) to prevent inline rendering under existing logs.
+
+Flake build-status chips are now clickable and navigate to Builds view, matching eval chip workflow expectations.
+
+Non-production banners now use explicit inline style colors/typography for reliable text visibility across CSS contexts.
+
+Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `9b43c704` (`fix: correct build log modal and build-chip navigation`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
