@@ -622,6 +622,20 @@ async fn run_mock_build(
     .await;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
+    if should_mock_build_fail(&derivation.derivation_name) {
+        send_log_with_fallback(
+            client,
+            job_id,
+            ws_shared,
+            "❌ MOCK build failed intentionally for UI validation\n",
+        )
+        .await;
+        anyhow::bail!(
+            "MOCK build failure for {}",
+            derivation.derivation_name
+        );
+    }
+
     let store_path = mock_store_path(job_id, derivation.id, &derivation.derivation_name);
 
     send_log_with_fallback(
@@ -650,6 +664,10 @@ fn mock_store_path(job_id: uuid::Uuid, derivation_id: i32, derivation_name: &str
         })
         .collect::<String>();
     format!("/nix/store/{}-{}", short_hash, sanitized)
+}
+
+fn should_mock_build_fail(derivation_name: &str) -> bool {
+    derivation_name.contains("-control-0")
 }
 
 async fn send_log_with_fallback(

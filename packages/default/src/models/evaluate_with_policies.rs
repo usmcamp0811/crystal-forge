@@ -612,6 +612,14 @@ pub async fn evaluate_with_mock_eval_jobs(
     let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
     let stage_delay = mock_eval_stage_delay(systems.len());
 
+    crate::queries::commits_artifacts::upsert_commit_artifact_cache(
+        pool,
+        commit.id,
+        &systems,
+        &[],
+    )
+    .await?;
+
     if let Some(state) = cf_state {
         crate::handlers::api::commits::broadcast_eval_log(
             state,
@@ -685,13 +693,15 @@ pub async fn evaluate_with_mock_eval_jobs(
         );
         let derivation_target = format!("{}#nixosConfigurations.{}", flake_ref, system_name);
 
+        let policy_failed = systems.len() > 1 && idx == 1;
+
         let derivation = insert_derivation_with_target(
             pool,
             Some(commit),
             system_name,
             "nixos",
             Some(&derivation_target),
-            Some(true),
+            Some(!policy_failed),
         )
         .await?;
 
@@ -699,11 +709,15 @@ pub async fn evaluate_with_mock_eval_jobs(
 
         let check = PolicyCheckResult {
             system_name: system_name.clone(),
-            cf_agent_enabled: Some(true),
+            cf_agent_enabled: Some(!policy_failed),
             has_required_packages: None,
             custom_checks: HashMap::new(),
-            meets_requirements: true,
-            warnings: vec![],
+            meets_requirements: !policy_failed,
+            warnings: if policy_failed {
+                vec!["Mock policy failure for UI validation".to_string()]
+            } else {
+                vec![]
+            },
         };
         checks.push(check);
 
@@ -719,23 +733,43 @@ pub async fn evaluate_with_mock_eval_jobs(
         });
 
         if let Some(state) = cf_state {
-            crate::handlers::api::commits::broadcast_system_status(
-                state,
-                commit.id,
-                system_name.clone(),
-                crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
-                None,
-            )
-            .await;
-            crate::handlers::api::commits::broadcast_eval_log(
-                state,
-                commit.id,
-                format!(
-                    "✅ {}: policy passed (CF enabled), queued for build",
-                    system_name
-                ),
-            )
-            .await;
+            if policy_failed {
+                crate::handlers::api::commits::broadcast_system_status(
+                    state,
+                    commit.id,
+                    system_name.clone(),
+                    crate::handlers::api::commits::SystemEvalStatus::PolicyFailed,
+                    Some("Mock policy failure".to_string()),
+                )
+                .await;
+                crate::handlers::api::commits::broadcast_eval_log(
+                    state,
+                    commit.id,
+                    format!(
+                        "⚠️ {}: policy check failed (mock), build skipped",
+                        system_name
+                    ),
+                )
+                .await;
+            } else {
+                crate::handlers::api::commits::broadcast_system_status(
+                    state,
+                    commit.id,
+                    system_name.clone(),
+                    crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                    None,
+                )
+                .await;
+                crate::handlers::api::commits::broadcast_eval_log(
+                    state,
+                    commit.id,
+                    format!(
+                        "✅ {}: policy passed (CF enabled), queued for build",
+                        system_name
+                    ),
+                )
+                .await;
+            }
         }
     }
 

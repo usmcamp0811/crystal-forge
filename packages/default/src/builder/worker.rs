@@ -255,6 +255,13 @@ async fn run_mock_legacy_build(derivation: &Derivation) -> Result<String> {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
     }
 
+    if should_mock_build_fail(&derivation.derivation_name) {
+        anyhow::bail!(
+            "MOCK build failure for {}",
+            derivation.derivation_name
+        );
+    }
+
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     use std::hash::{Hash, Hasher};
     derivation.id.hash(&mut hasher);
@@ -273,6 +280,10 @@ async fn run_mock_legacy_build(derivation: &Derivation) -> Result<String> {
         .collect::<String>();
 
     Ok(format!("/nix/store/{}-{}", short_hash, sanitized))
+}
+
+fn should_mock_build_fail(derivation_name: &str) -> bool {
+    derivation_name.contains("-control-0")
 }
 
 /// Mark build complete and release reservation

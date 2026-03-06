@@ -3,9 +3,9 @@
 use dioxus::prelude::*;
 
 use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
-use crate::components::layout::DevModeBanner;
 use crate::components::layout::SidebarNav;
 use crate::components::layout::TopBar;
+use crate::components::layout::{BannerPlacement, DevModeBanner};
 use crate::routes::Route;
 use crate::state::app_state::{AppState, AuthFetchState};
 use crate::state::auth;
@@ -119,27 +119,34 @@ pub fn AppShell() -> Element {
 
     rsx! {
         div {
-            class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex overflow-x-hidden",
+            class: "min-h-screen {theme::surface::PAGE_BG} {theme::text::PRIMARY} flex flex-col overflow-x-hidden",
 
-            SidebarNav {}
+            DevModeBanner { placement: BannerPlacement::Top }
 
             div {
-                class: "flex-1 flex flex-col min-w-0",
-                TopBar { title: current_route.title() }
-                DevModeBanner {}
-                main {
-                    class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
-                    if should_show_admin_denied(&current_route, &auth_context) {
-                        section {
-                            class: "max-w-3xl mx-auto rounded-xl border border-amber-500/40 bg-amber-900/20 p-6 space-y-2",
-                            h2 { class: "text-xl font-semibold text-amber-100", "Access Denied" }
-                            p { class: "text-sm text-amber-200/90", "Server Management requires an administrator role." }
+                class: "flex-1 flex min-h-0 overflow-x-hidden",
+
+                SidebarNav {}
+
+                div {
+                    class: "flex-1 flex flex-col min-w-0",
+                    TopBar { title: current_route.title() }
+                    main {
+                        class: "flex-1 overflow-auto {theme::spacing::PAGE_PADDING}",
+                        if should_show_admin_denied(&current_route, &auth_context) {
+                            section {
+                                class: "max-w-3xl mx-auto rounded-xl border border-amber-500/40 bg-amber-900/20 p-6 space-y-2",
+                                h2 { class: "text-xl font-semibold text-amber-100", "Access Denied" }
+                                p { class: "text-sm text-amber-200/90", "Server Management requires an administrator role." }
+                            }
+                        } else {
+                            Outlet::<Route> {}
                         }
-                    } else {
-                        Outlet::<Route> {}
                     }
                 }
             }
+
+            DevModeBanner { placement: BannerPlacement::Bottom }
         }
     }
 }

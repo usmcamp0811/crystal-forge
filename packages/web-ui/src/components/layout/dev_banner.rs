@@ -9,6 +9,12 @@ struct EvalQueueModeProbe {
     execution_mode: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BannerPlacement {
+    Top,
+    Bottom,
+}
+
 fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
     if !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081")) {
         return None;
@@ -45,8 +51,8 @@ fn api_base_url() -> String {
 }
 
 #[component]
-fn EnvironmentBanner(position: &'static str, title: &'static str, message: &'static str) -> Element {
-    let border_class = if position == "top" {
+fn EnvironmentBanner(placement: BannerPlacement, title: &'static str, message: &'static str) -> Element {
+    let border_class = if placement == BannerPlacement::Top {
         "border-b"
     } else {
         "border-t"
@@ -54,12 +60,12 @@ fn EnvironmentBanner(position: &'static str, title: &'static str, message: &'sta
 
     rsx! {
         div {
-            class: "bg-amber-500/90 {border_class} border-amber-600 px-4 py-2",
+            class: "bg-orange-600 {border_class} border-orange-800 px-4 py-2",
             "data-environment-banner": "true",
             div {
                 class: "flex items-center justify-center gap-3 max-w-7xl mx-auto",
                 svg {
-                    class: "w-4 h-4 text-amber-950 flex-shrink-0",
+                    class: "w-4 h-4 text-white flex-shrink-0",
                     fill: "none",
                     stroke: "currentColor",
                     view_box: "0 0 24 24",
@@ -71,9 +77,9 @@ fn EnvironmentBanner(position: &'static str, title: &'static str, message: &'sta
                     }
                 }
                 div {
-                    class: "flex flex-wrap items-center justify-center gap-2 text-sm text-amber-950",
+                    class: "flex flex-wrap items-center justify-center gap-2 text-sm text-white",
                     span { class: "font-bold", "{title}" }
-                    span { class: "opacity-90", "{message}" }
+                    span { class: "opacity-95", "{message}" }
                 }
             }
         }
@@ -84,7 +90,7 @@ fn EnvironmentBanner(position: &'static str, title: &'static str, message: &'sta
 ///
 /// This is intentionally reusable for future environment markers beyond mock mode.
 #[component]
-pub fn DevModeBanner() -> Element {
+pub fn DevModeBanner(placement: BannerPlacement) -> Element {
     let mut is_mock_mode = use_signal(|| false);
     let mut checked = use_signal(|| false);
 
@@ -138,14 +144,9 @@ pub fn DevModeBanner() -> Element {
 
     rsx! {
         EnvironmentBanner {
-            position: "top",
+            placement,
             title: "NON-PRODUCTION ENVIRONMENT",
-            message: "Mock/dev environment active. DoD environment requirements apply; production controls are not in effect."
-        }
-        EnvironmentBanner {
-            position: "bottom",
-            title: "NON-PRODUCTION ENVIRONMENT",
-            message: "Mock/dev environment active. DoD environment requirements apply; production controls are not in effect."
+            message: "Mock/dev mode is active. This is not a production environment."
         }
     }
 }
