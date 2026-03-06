@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 15:22'
+updated_date: '2026-03-06 17:12'
 labels:
   - dev-experience
   - eval-queue
@@ -168,6 +168,16 @@ Adjusted API-mode mock build pacing to multi-stage ~8s progression so build jobs
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `80c7b2eb` (`fix: replay eval/build logs and stabilize mock build visibility`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Added build history support for frontend validation: new backend endpoint `GET /api/v1/build-jobs/recent` (viewer+) backed by `fetch_recent_build_history` query over completed/failed jobs, ordered newest-first.
+
+Builds view now renders a `Recent Builds` section under active queue/detail split, populated via new `fetch_recent_build_jobs` client call, so historical build outcomes are visible similarly to evaluations history.
+
+Flakes commit UI now includes build status chips (`build: queued/running/failed/complete/idle`) in both timeline cards and commit detail header; this complements eval chips and makes eval-complete commits show build completion state directly.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `0bed8724` (`feat: add recent build history and build status chips`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
