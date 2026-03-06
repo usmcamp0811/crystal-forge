@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 18:08'
+updated_date: '2026-03-06 18:30'
 labels:
   - dev-experience
   - eval-queue
@@ -192,6 +192,16 @@ Banner text now explicitly communicates: mock/dev environment active, non-produc
 Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `931fd20f` (`feat: add reusable non-production mode banners`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Adjusted non-production banners per UX feedback: now rendered by placement in app shell (single top banner above TopBar, single bottom banner at bottom of full shell), with simplified text and stronger orange background for visibility.
+
+Updated mock eval/build realism for frontend validation: mock eval now upserts `commit_artifacts_cache` with system list (so eval queue shows multi-system chips) and injects deterministic mixed per-system outcomes (one policy-failed when multiple systems).
+
+Updated mock build simulation to include deterministic failed build outcomes (control system naming pattern) in both API builder and legacy worker mock paths, ensuring mock runs include at least one failed build while others can complete.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c cargo check` in `packages/web-ui` ✅, `nix build .#devScripts.server-stack-mock` ✅.
+
+Committed as `929d6e8d` (`feat: add mixed mock eval/build outcomes and shell banners`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
