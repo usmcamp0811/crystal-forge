@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 15:06'
+updated_date: '2026-03-06 15:22'
 labels:
   - dev-experience
   - eval-queue
@@ -158,6 +158,16 @@ Builder binary now hard-fails when `execution_mode=mock` is enabled without API 
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --dry-run` ✅.
 
 Committed as `1fe8b9d0` (`fix: force API-only builder in mock stack`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Fixed direct Evaluations page log gap by making `use_websocket_eval_stream` reconnect when the selected commit ID changes (instead of sticking to initial `0`/mount commit) and resetting local stream buffers on commit switch.
+
+Added build stream replay cache in server state: build log/metrics frames are now recorded and replayed to newly connected viewers, including HTTP append path (fallback when builder WS send fails).
+
+Adjusted API-mode mock build pacing to multi-stage ~8s progression so build jobs remain visible in queue long enough for frontend validation sessions.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `80c7b2eb` (`fix: replay eval/build logs and stabilize mock build visibility`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
