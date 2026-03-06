@@ -48,3 +48,4 @@ execution_mode = "real"
 - Reproduce UI/queue bugs without waiting for real `nix-eval-jobs` and `nix build` runtime.
 - Manual flake sync in mock mode injects a synthetic commit when source has no new commits, so each sync can drive a fresh eval/build run.
 - `server-stack-mock` bootstraps a local admin account on startup: username `admin`, password `password`.
+- `server-stack-mock` runs the builder in API mode only (legacy direct-DB builder mode is deprecated).

@@ -36,7 +36,16 @@ async fn main() -> anyhow::Result<()> {
         return run_api_mode(&cfg).await;
     }
 
-    // Fall back to legacy direct-database mode
+    if cfg.server.execution_mode.is_mock() {
+        anyhow::bail!(
+            "server.execution_mode=mock requires builder API mode. Set builder.enable_api_mode=true with builder_id/private_key_path/server_url"
+        );
+    }
+
+    // Fall back to legacy direct-database mode (deprecated)
+    warn!(
+        "⚠️  Starting builder in deprecated legacy direct-database mode. Migrate to builder API mode."
+    );
     info!("💾 Starting Crystal Forge Builder in legacy database mode...");
     CrystalForgeConfig::validate_db_connection().await?;
 

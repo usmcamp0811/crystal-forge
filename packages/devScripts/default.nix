@@ -555,6 +555,11 @@ let
     settings.processes.builder.environment = {
       AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
+      CRYSTAL_FORGE__BUILDER__ENABLE_API_MODE = "true";
+      CRYSTAL_FORGE__BUILDER__BUILDER_ID =
+        "00000000-0000-0000-0000-000000000001";
+      CRYSTAL_FORGE__BUILDER__SERVER_URL =
+        "http://127.0.0.1:${toString cf_port}";
     };
   };
 
