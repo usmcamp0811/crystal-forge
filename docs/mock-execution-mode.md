@@ -46,3 +46,4 @@ execution_mode = "real"
 
 - Fast validation of queue ordering, websocket log UX, retries, and state transitions.
 - Reproduce UI/queue bugs without waiting for real `nix-eval-jobs` and `nix build` runtime.
+- Manual flake sync in mock mode injects a synthetic commit when source has no new commits, so each sync can drive a fresh eval/build run.

@@ -6,6 +6,7 @@ use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use sqlx::PgPool;
+use std::hash::{Hash, Hasher};
 use std::collections::{HashMap, HashSet};
 use tracing::{error, warn};
 
@@ -14,11 +15,13 @@ use crate::api::models::{
     UpdateFlakeRequest,
 };
 use crate::auth::extractors::{RequireAdmin, RequireOperator};
+use crate::config::CrystalForgeConfig;
 use crate::flake::commits::{
     GitCommitMetadata, branch_exists, get_commit_changed_files, get_commit_diff,
     get_commit_metadata, get_commit_nixos_configurations, infer_default_branch,
     sync_commits_for_repo,
 };
+use crate::queries::commits::insert_commit_with_metadata;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
@@ -772,18 +775,53 @@ pub async fn sync_flake_handler(
     };
 
     match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
-        Ok(new_commits) => (
-            StatusCode::OK,
-            Json(serde_json::json!({
-                "status": "ok",
-                "message": format!(
-                    "Synced {} from source on {} ({} new commits).",
-                    flake.name, flake.branch, new_commits
-                ),
-                "branch": flake.branch,
-            })),
-        )
-            .into_response(),
+        Ok(mut new_commits) => {
+            let mut mock_commit_hash = None::<String>;
+
+            if new_commits == 0 && should_inject_mock_sync_commit() {
+                let now = chrono::Utc::now();
+                let synthetic_hash = synthetic_mock_sync_hash(flake.id, &flake.repo_url, now);
+                let synthetic_message = format!(
+                    "MOCK SYNC: synthetic commit for {} on {} at {}",
+                    flake.name,
+                    flake.branch,
+                    now.to_rfc3339()
+                );
+
+                if let Err(e) = insert_commit_with_metadata(
+                    &pool,
+                    &synthetic_hash,
+                    &flake.repo_url,
+                    now,
+                    Some(&synthetic_message),
+                    Some("mock-sync"),
+                )
+                .await
+                {
+                    warn!(
+                        "Failed to inject mock sync commit for {} ({}): {e:#}",
+                        flake.name, flake.repo_url
+                    );
+                } else {
+                    new_commits = 1;
+                    mock_commit_hash = Some(synthetic_hash);
+                }
+            }
+
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "message": format!(
+                        "Synced {} from source on {} ({} new commits).",
+                        flake.name, flake.branch, new_commits
+                    ),
+                    "branch": flake.branch,
+                    "mock_commit": mock_commit_hash,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             error!(
                 "Failed syncing flake {} ({}): {e:#}",
@@ -800,6 +838,30 @@ pub async fn sync_flake_handler(
                 .into_response()
         }
     }
+}
+
+fn should_inject_mock_sync_commit() -> bool {
+    CrystalForgeConfig::load()
+        .map(|cfg| cfg.server.execution_mode.is_mock())
+        .unwrap_or(false)
+}
+
+fn synthetic_mock_sync_hash(
+    flake_id: i32,
+    repo_url: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let seed = format!("{flake_id}:{repo_url}:{}", now.timestamp_nanos_opt().unwrap_or_default());
+
+    let mut h1 = std::collections::hash_map::DefaultHasher::new();
+    seed.hash(&mut h1);
+    let a = h1.finish();
+
+    let mut h2 = std::collections::hash_map::DefaultHasher::new();
+    (seed.clone() + ":mock").hash(&mut h2);
+    let b = h2.finish();
+
+    format!("{:016x}{:016x}{:08x}", a, b, flake_id as u32)
 }
 fn forbidden_viewer() -> axum::response::Response {
     (
@@ -939,6 +1001,19 @@ mod tests {
         );
         assert_eq!(normalize_author_email(""), None);
         assert_eq!(normalize_author_email("   "), None);
+    }
+
+    #[test]
+    fn synthetic_mock_sync_hash_is_git_like_and_stable() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-03-06T00:00:00Z")
+            .expect("timestamp should parse")
+            .with_timezone(&chrono::Utc);
+        let one = synthetic_mock_sync_hash(7, "https://github.com/org/repo", now);
+        let two = synthetic_mock_sync_hash(7, "https://github.com/org/repo", now);
+
+        assert_eq!(one, two);
+        assert_eq!(one.len(), 40);
+        assert!(one.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     // NOTE: Authorization tests for create_flake, delete_flake moved to extractor-level tests
