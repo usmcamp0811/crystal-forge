@@ -299,6 +299,22 @@ pub async fn prioritize_build_job(
     Ok(StatusCode::OK)
 }
 
+/// GET /api/v1/build-jobs/recent - Recent completed/failed builds (viewer+)
+pub async fn list_recent_build_jobs(
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<crate::api::models::BuildQueueItem>>, StatusCode> {
+    let Some(_viewer) = require_viewer_or_above(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    let items = crate::queries::dashboard::fetch_recent_build_history(&state.pool, 100)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(items))
+}
+
 /// PATCH /api/v1/builders/:id/environments - Update environment assignments (admin-only)
 pub async fn update_builder_environments(
     State(state): State<CFState>,

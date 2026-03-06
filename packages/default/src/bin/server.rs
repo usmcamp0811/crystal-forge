@@ -243,6 +243,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/build-jobs/:id/prioritize",
             post(builders::prioritize_build_job),
         )
+        .route(
+            "/api/v1/build-jobs/recent",
+            get(builders::list_recent_build_jobs),
+        )
         // Builder-authenticated endpoints
         .route(
             "/api/v1/builders/:id/heartbeat",
