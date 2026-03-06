@@ -545,6 +545,9 @@ let
     settings.processes.server.environment = {
       AUTH_MODE = mkForce "local";
       CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
+      CRYSTAL_FORGE_LOCAL_BOOTSTRAP_USERNAME = "admin";
+      CRYSTAL_FORGE_LOCAL_BOOTSTRAP_PASSWORD = "password";
+      CRYSTAL_FORGE_LOCAL_BOOTSTRAP_EMAIL = "admin@crystal-forge.local";
     };
 
     settings.processes.builder.command =

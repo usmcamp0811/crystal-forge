@@ -774,40 +774,41 @@ pub async fn sync_flake_handler(
         }
     };
 
-    match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
-        Ok(mut new_commits) => {
-            let mut mock_commit_hash = None::<String>;
-
-            if new_commits == 0 && should_inject_mock_sync_commit() {
-                let now = chrono::Utc::now();
-                let synthetic_hash = synthetic_mock_sync_hash(flake.id, &flake.repo_url, now);
-                let synthetic_message = format!(
-                    "MOCK SYNC: synthetic commit for {} on {} at {}",
-                    flake.name,
-                    flake.branch,
-                    now.to_rfc3339()
+    if should_inject_mock_sync_commit() {
+        return match inject_mock_sync_commit(&pool, flake.id, &flake.name, &flake.repo_url, &flake.branch).await {
+            Ok(mock_commit_hash) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "status": "ok",
+                    "message": format!(
+                        "Mock-synced {} on {} (1 synthetic commit).",
+                        flake.name, flake.branch
+                    ),
+                    "branch": flake.branch,
+                    "mock_commit": mock_commit_hash,
+                })),
+            )
+                .into_response(),
+            Err(e) => {
+                error!(
+                    "Failed injecting mock sync commit for {} ({}): {e:#}",
+                    flake.name, flake.repo_url
                 );
-
-                if let Err(e) = insert_commit_with_metadata(
-                    &pool,
-                    &synthetic_hash,
-                    &flake.repo_url,
-                    now,
-                    Some(&synthetic_message),
-                    Some("mock-sync"),
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiError {
+                        error: "internal_error".to_string(),
+                        message: format!("Failed to mock-sync {}", flake.name),
+                        details: Some(serde_json::json!({"error": e.to_string()})),
+                    }),
                 )
-                .await
-                {
-                    warn!(
-                        "Failed to inject mock sync commit for {} ({}): {e:#}",
-                        flake.name, flake.repo_url
-                    );
-                } else {
-                    new_commits = 1;
-                    mock_commit_hash = Some(synthetic_hash);
-                }
+                    .into_response()
             }
+        };
+    }
 
+    match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
+        Ok(new_commits) => {
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -817,7 +818,6 @@ pub async fn sync_flake_handler(
                         flake.name, flake.branch, new_commits
                     ),
                     "branch": flake.branch,
-                    "mock_commit": mock_commit_hash,
                 })),
             )
                 .into_response()
@@ -838,6 +838,35 @@ pub async fn sync_flake_handler(
                 .into_response()
         }
     }
+}
+
+async fn inject_mock_sync_commit(
+    pool: &PgPool,
+    flake_id: i32,
+    flake_name: &str,
+    repo_url: &str,
+    branch: &str,
+) -> anyhow::Result<String> {
+    let now = chrono::Utc::now();
+    let synthetic_hash = synthetic_mock_sync_hash(flake_id, repo_url, now);
+    let synthetic_message = format!(
+        "MOCK SYNC: synthetic commit for {} on {} at {}",
+        flake_name,
+        branch,
+        now.to_rfc3339()
+    );
+
+    insert_commit_with_metadata(
+        pool,
+        &synthetic_hash,
+        repo_url,
+        now,
+        Some(&synthetic_message),
+        Some("mock-sync"),
+    )
+    .await?;
+
+    Ok(synthetic_hash)
 }
 
 fn should_inject_mock_sync_commit() -> bool {

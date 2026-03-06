@@ -4,10 +4,13 @@
 //! for Admin, Operator, and Viewer roles without requiring external OIDC setup.
 
 use crate::auth::models::Role;
+use crate::auth::password::hash_password;
 use crate::models::auth_identity::{AuthRole, UserRoleAssignment};
 use crate::models::users::User;
 use crate::queries::auth_identity::{assign_role_to_user, find_user_roles};
-use crate::queries::users::{get_by_email, get_user_by_email, insert_user};
+use crate::queries::users::{
+    get_by_email, get_by_username, get_user_by_email, insert_user, update_username_and_password_hash,
+};
 use anyhow::{Context, Result};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -146,6 +149,51 @@ pub async fn ensure_bootstrap_oidc_admin_mapping(pool: &PgPool) -> Result<()> {
     tracing::info!(
         "   Users in the '{}' OIDC group will now have Admin access",
         admin_group
+    );
+
+    Ok(())
+}
+
+/// Ensure a local bootstrap admin account exists and can authenticate.
+///
+/// Intended for local/mock development stacks where an operator wants a known
+/// username/password without going through the registration flow.
+pub async fn ensure_local_bootstrap_admin(
+    pool: &PgPool,
+    username: &str,
+    email: &str,
+    password: &str,
+) -> Result<()> {
+    if username.trim().is_empty() || email.trim().is_empty() || password.is_empty() {
+        return Ok(());
+    }
+
+    let user = if let Some(existing) = get_by_username(pool, username).await? {
+        existing
+    } else if let Some(existing) = get_by_email(pool, email).await? {
+        existing
+    } else {
+        insert_user(pool, email, Some("Mock Admin"))
+            .await
+            .context("Failed to insert local bootstrap admin user")?
+    };
+
+    let password_hash = hash_password(password).context("Failed to hash local bootstrap password")?;
+    update_username_and_password_hash(pool, user.id, username, &password_hash)
+        .await
+        .context("Failed to set local bootstrap admin credentials")?;
+
+    let roles = find_user_roles(pool, user.id).await?;
+    if !roles.iter().any(|role| role.role == AuthRole::Admin) {
+        assign_role_to_user(pool, user.id, AuthRole::Admin, None)
+            .await
+            .context("Failed to assign admin role to local bootstrap user")?;
+    }
+
+    tracing::info!(
+        "✅ ensured local bootstrap admin user '{}' ({})",
+        username,
+        user.id
     );
 
     Ok(())

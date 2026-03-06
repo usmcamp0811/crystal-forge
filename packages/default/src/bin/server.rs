@@ -10,7 +10,9 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use crystal_forge::{
-    auth::dev_mode::{ensure_bootstrap_oidc_admin_mapping, ensure_dev_users},
+    auth::dev_mode::{
+        ensure_bootstrap_oidc_admin_mapping, ensure_dev_users, ensure_local_bootstrap_admin,
+    },
     config::CrystalForgeConfig,
     flake::commits::initialize_flake_commits,
     handlers::{
@@ -102,6 +104,20 @@ async fn main() -> anyhow::Result<()> {
         ensure_bootstrap_oidc_admin_mapping(&pool)
             .await
             .context("Failed to bootstrap OIDC admin mapping")?;
+    }
+
+    if auth_mode == "local" {
+        if let (Ok(username), Ok(password)) = (
+            std::env::var("CRYSTAL_FORGE_LOCAL_BOOTSTRAP_USERNAME"),
+            std::env::var("CRYSTAL_FORGE_LOCAL_BOOTSTRAP_PASSWORD"),
+        ) {
+            let email = std::env::var("CRYSTAL_FORGE_LOCAL_BOOTSTRAP_EMAIL")
+                .unwrap_or_else(|_| "admin@crystal-forge.local".to_string());
+
+            ensure_local_bootstrap_admin(&pool, &username, &email, &password)
+                .await
+                .context("Failed to initialize local bootstrap admin user")?;
+        }
     }
 
     let background_pool = pool.clone();
