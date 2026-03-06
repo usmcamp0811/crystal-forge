@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 02:31'
+updated_date: '2026-03-06 14:10'
 labels:
   - dev-experience
   - eval-queue
@@ -134,6 +134,14 @@ Fixed missing eval logs for late subscribers: added bounded in-memory per-commit
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge handlers::api::commits::tests` ✅.
 
 Committed as `2b6a2f30` (`fix: replay buffered eval logs on websocket connect`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Addressed mock sync regression: in `execution_mode=mock`, manual `sync_flake_handler` now directly injects a synthetic commit each request (instead of attempting upstream sync first), so repeated "Sync from source" clicks always create a new mock eval/build run.
+
+Added local-auth bootstrap for `server-stack-mock`: server now supports `CRYSTAL_FORGE_LOCAL_BOOTSTRAP_USERNAME/PASSWORD/EMAIL` and seeds or updates that user as Admin at startup in local auth mode. `server-stack-mock` sets defaults to `admin` / `password`.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge synthetic_mock_sync_hash_is_git_like_and_stable` ✅, `nix build .#devScripts.server-stack-mock` ✅.
+
+Committed as `bd0f21e2` (`fix: make mock sync repeatable and seed local admin login`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
