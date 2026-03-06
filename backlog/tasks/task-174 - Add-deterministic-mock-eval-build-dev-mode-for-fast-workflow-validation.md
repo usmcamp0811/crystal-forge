@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 18:02'
+updated_date: '2026-03-06 18:08'
 labels:
   - dev-experience
   - eval-queue
@@ -184,6 +184,14 @@ Added maximize/fullscreen build log modal in `BuildDetailPane`, mirroring evalua
 Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `760a1a7b` (`feat: add maximize modal for build logs`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Updated shell banner semantics per UX guidance: replaced dev-auth-specific wording with reusable non-production environment markers and render both top + bottom banners when server `execution_mode=mock` is detected via eval-queue probe.
+
+Banner text now explicitly communicates: mock/dev environment active, non-production context, and suitability for future DoD environment requirement messaging without layout rework.
+
+Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `931fd20f` (`feat: add reusable non-production mode banners`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
