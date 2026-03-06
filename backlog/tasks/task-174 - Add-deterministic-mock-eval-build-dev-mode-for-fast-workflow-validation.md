@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-05 21:46'
+updated_date: '2026-03-06 02:03'
 labels:
   - dev-experience
   - eval-queue
@@ -110,6 +110,14 @@ Addressed browser instability under mock mode by capping websocket log buffers i
 Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `16e5c5f7` (`fix: cap websocket log buffers in evaluations UI`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Enhanced mock realism based on feedback: eval mock now emits deterministic staged per-system logs with progress percentages and human-observable pacing (~30s total for default 3-system runs).
+
+Extended mock build coverage to legacy builder workers (not only API builder mode): when `execution_mode=mock`, workers simulate build progression and complete with deterministic synthetic store paths while preserving queue/status transitions.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge models::evaluate_with_policies::tests` ✅, `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --dry-run` ✅.
+
+Committed as `497c05c9` (`feat: add realistic paced mock eval and legacy build simulation`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
