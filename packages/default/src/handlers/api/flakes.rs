@@ -23,6 +23,7 @@ use crate::flake::commits::{
 };
 use crate::queries::commits::insert_commit_with_metadata;
 use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_above};
+use crate::handlers::agent_request::CFState;
 use crate::queries::flakes::{
     count_systems_for_flake, delete_flake_by_id, fetch_dashboard_flake_timelines,
     fetch_flake_timelines, get_flake_by_id, get_flake_by_name, insert_flake, list_flake_registry,
@@ -691,8 +692,10 @@ pub async fn delete_flake(
 /// **Authorization**: Requires Operator or Admin role.
 pub async fn sync_all_flakes_handler(
     RequireOperator(_user): RequireOperator,
-    State(pool): State<PgPool>,
+    State(state): State<CFState>,
 ) -> impl IntoResponse {
+    let pool = state.pool.clone();
+
     let flakes = match list_flake_registry(&pool).await {
         Ok(flakes) => flakes,
         Err(e) => {
@@ -735,6 +738,10 @@ pub async fn sync_all_flakes_handler(
         }
     }
 
+    if inserted > 0 {
+        state.queue_notifier.notify_eval_queue();
+    }
+
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -756,9 +763,11 @@ pub async fn sync_all_flakes_handler(
 /// **Authorization**: Requires Operator or Admin role.
 pub async fn sync_flake_handler(
     RequireOperator(_user): RequireOperator,
-    State(pool): State<PgPool>,
+    State(state): State<CFState>,
     Path(flake_id): Path<i32>,
 ) -> impl IntoResponse {
+    let pool = state.pool.clone();
+
     let flake = match get_flake_by_id(&pool, flake_id).await {
         Ok(flake) => flake,
         Err(_) => {
@@ -776,19 +785,22 @@ pub async fn sync_flake_handler(
 
     if should_inject_mock_sync_commit() {
         return match inject_mock_sync_commit(&pool, flake.id, &flake.name, &flake.repo_url, &flake.branch).await {
-            Ok(mock_commit_hash) => (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "ok",
-                    "message": format!(
-                        "Mock-synced {} on {} (1 synthetic commit).",
-                        flake.name, flake.branch
-                    ),
-                    "branch": flake.branch,
-                    "mock_commit": mock_commit_hash,
-                })),
-            )
-                .into_response(),
+            Ok(mock_commit_hash) => {
+                state.queue_notifier.notify_eval_queue();
+                (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "status": "ok",
+                        "message": format!(
+                            "Mock-synced {} on {} (1 synthetic commit).",
+                            flake.name, flake.branch
+                        ),
+                        "branch": flake.branch,
+                        "mock_commit": mock_commit_hash,
+                    })),
+                )
+                    .into_response()
+            }
             Err(e) => {
                 error!(
                     "Failed injecting mock sync commit for {} ({}): {e:#}",
@@ -809,6 +821,9 @@ pub async fn sync_flake_handler(
 
     match sync_commits_for_repo(&pool, &flake.repo_url, &flake.branch).await {
         Ok(new_commits) => {
+            if new_commits > 0 {
+                state.queue_notifier.notify_eval_queue();
+            }
             (
                 StatusCode::OK,
                 Json(serde_json::json!({

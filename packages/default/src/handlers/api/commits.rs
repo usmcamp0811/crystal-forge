@@ -380,13 +380,16 @@ pub async fn re_evaluate_commit(
     State(state): State<CFState>,
 ) -> impl IntoResponse {
     match crate::queries::commits::reset_commit_evaluation(&state.pool, commit_id).await {
-        Ok(_) => (
-            axum::http::StatusCode::OK,
-            axum::Json(serde_json::json!({
-                "status": "ok",
-                "message": format!("Commit {} queued for re-evaluation", commit_id)
-            })),
-        ),
+        Ok(_) => {
+            state.queue_notifier.notify_eval_queue();
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "status": "ok",
+                    "message": format!("Commit {} queued for re-evaluation", commit_id)
+                })),
+            )
+        }
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(serde_json::json!({
@@ -407,7 +410,11 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
             .expect("lazy pool should construct");
-        CFState::new(pool, ServerConfig::default())
+        CFState::new(
+            pool,
+            ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+        )
     }
 
     #[tokio::test]

@@ -133,12 +133,12 @@ async fn main() -> anyhow::Result<()> {
     info!("Host: 0.0.0.0");
     info!("Port: {}", server_cfg.port);
 
-    let state = CFState::new(pool, server_cfg.clone());
-    let state_arc = Arc::new(state.clone());
-
     // Create event-driven queue notifier
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
+
+    let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
+    let state_arc = Arc::new(state.clone());
 
     spawn_background_tasks(
         cfg.clone(),
