@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 02:03'
+updated_date: '2026-03-06 02:18'
 labels:
   - dev-experience
   - eval-queue
@@ -118,6 +118,14 @@ Extended mock build coverage to legacy builder workers (not only API builder mod
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge models::evaluate_with_policies::tests` ✅, `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --dry-run` ✅.
 
 Committed as `497c05c9` (`feat: add realistic paced mock eval and legacy build simulation`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Implemented mock sync simulation for manual flake sync: when `execution_mode=mock` and upstream has no new commits, `sync_flake_handler` now injects a synthetic git-like commit (40-char hex hash) with mock metadata so each sync can trigger a fresh eval/build run.
+
+Added unit test `synthetic_mock_sync_hash_is_git_like_and_stable` and updated mock mode docs to describe synthetic commit injection behavior during manual sync.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge synthetic_mock_sync_hash_is_git_like_and_stable` ✅, `nix build .#devScripts.server-stack-mock` ✅.
+
+Committed as `0ba30001` (`feat: inject synthetic commit on mock flake sync`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
