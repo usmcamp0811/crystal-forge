@@ -134,6 +134,7 @@ pub struct CFState {
     pub pool: PgPool,
     pub server_config: ServerConfig,
     pub eval_log_channels: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>>,
+    pub eval_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, Vec<String>>>>,
     pub build_log_channels: Arc<tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>>,
 }
 
@@ -143,6 +144,7 @@ impl CFState {
             pool,
             server_config,
             eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
