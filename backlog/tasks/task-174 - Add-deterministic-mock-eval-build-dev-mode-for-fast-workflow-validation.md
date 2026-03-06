@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 17:12'
+updated_date: '2026-03-06 18:02'
 labels:
   - dev-experience
   - eval-queue
@@ -178,6 +178,12 @@ Flakes commit UI now includes build status chips (`build: queued/running/failed/
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `0bed8724` (`feat: add recent build history and build status chips`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Added maximize/fullscreen build log modal in `BuildDetailPane`, mirroring evaluations log UX: `⛶ Maximize` button opens overlay with connection status, full scrollable logs, and close actions.
+
+Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `760a1a7b` (`feat: add maximize modal for build logs`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
