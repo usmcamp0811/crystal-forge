@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 02:18'
+updated_date: '2026-03-06 02:31'
 labels:
   - dev-experience
   - eval-queue
@@ -126,6 +126,14 @@ Added unit test `synthetic_mock_sync_hash_is_git_like_and_stable` and updated mo
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge synthetic_mock_sync_hash_is_git_like_and_stable` ✅, `nix build .#devScripts.server-stack-mock` ✅.
 
 Committed as `0ba30001` (`feat: inject synthetic commit on mock flake sync`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Fixed missing eval logs for late subscribers: added bounded in-memory per-commit eval log history in `CFState` and replay on eval websocket connect before live subscribe.
+
+`broadcast_eval_message` now records serialized messages into history (cap 2000 lines), and `cleanup_eval_channel` now clears both channel and stored history for the commit.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge handlers::api::commits::tests` ✅.
+
+Committed as `2b6a2f30` (`fix: replay buffered eval logs on websocket connect`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
