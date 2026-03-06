@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 14:32'
+updated_date: '2026-03-06 15:06'
 labels:
   - dev-experience
   - eval-queue
@@ -150,6 +150,14 @@ This removes the wait-for-fallback-poll behavior so newly queued commits start e
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix build .#devScripts.server-stack-mock` ✅.
 
 Committed as `594eb1ac` (`fix: notify eval workers after sync and re-evaluate`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Enforced API-only builder behavior for mock stack: `server-stack-mock` now sets builder env overrides `CRYSTAL_FORGE__BUILDER__ENABLE_API_MODE=true`, fixed builder UUID, and loopback server URL to guarantee API queue path usage.
+
+Builder binary now hard-fails when `execution_mode=mock` is enabled without API mode readiness, and logs an explicit deprecation warning when falling back to legacy direct-DB mode in non-mock configurations.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix build .#devScripts.server-stack-mock` ✅, `nix run .#devScripts.server-stack-mock -- --dry-run` ✅.
+
+Committed as `1fe8b9d0` (`fix: force API-only builder in mock stack`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
