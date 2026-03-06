@@ -126,22 +126,29 @@ pub fn use_websocket_eval_stream(
     Signal<ConnectionState>,
     Rc<dyn Fn()>,
 ) {
+    let mut commit_id_signal = use_signal(|| commit_id.to_string());
+    if commit_id_signal.read().as_str() != commit_id {
+        commit_id_signal.set(commit_id.to_string());
+    }
+
     let mut logs = use_signal(Vec::<String>::new);
     let mut system_status = use_signal(std::collections::HashMap::<String, SystemEvalStatus>::new);
     let mut connection_state = use_signal(|| ConnectionState::Disconnected);
     let mut active_socket = use_signal(|| None::<WebSocket>);
 
-    let commit_id = commit_id.to_string();
-
     // Reconnect function
-    let reconnect = use_hook(|| {
-        let commit_id = commit_id.clone();
+    let reconnect = {
+        let commit_id_signal = commit_id_signal.clone();
         let logs = logs.clone();
         let system_status = system_status.clone();
         let connection_state = connection_state.clone();
         let active_socket = active_socket.clone();
 
         Rc::new(move || {
+            let commit_id = commit_id_signal();
+            if commit_id.is_empty() || commit_id == "0" {
+                return;
+            }
             connect_eval_websocket(
                 &commit_id,
                 logs,
@@ -150,11 +157,18 @@ pub fn use_websocket_eval_stream(
                 active_socket,
             );
         })
-    });
+    };
 
-    // Auto-connect on mount
+    // Auto-connect whenever selected commit changes.
     use_effect(move || {
-        let commit_id = commit_id.clone();
+        let commit_id = commit_id_signal();
+        if commit_id.is_empty() || commit_id == "0" {
+            connection_state.set(ConnectionState::Disconnected);
+            return;
+        }
+
+        logs.set(Vec::new());
+        system_status.set(std::collections::HashMap::new());
         connect_eval_websocket(
             &commit_id,
             logs,

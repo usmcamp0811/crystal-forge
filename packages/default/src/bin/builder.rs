@@ -590,13 +590,37 @@ async fn run_mock_build(
         client,
         job_id,
         ws_shared,
-        "🔨 Resolving derivation graph...\n",
+        "⏳ [10%] Reserving local sandbox...\n",
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    send_log_with_fallback(client, job_id, ws_shared, "⚙️  Building outputs...\n").await;
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    send_log_with_fallback(
+        client,
+        job_id,
+        ws_shared,
+        "🔨 [35%] Resolving derivation graph...\n",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    send_log_with_fallback(
+        client,
+        job_id,
+        ws_shared,
+        "⚙️  [65%] Building outputs...\n",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    send_log_with_fallback(
+        client,
+        job_id,
+        ws_shared,
+        "📦 [90%] Finalizing store path...\n",
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     let store_path = mock_store_path(job_id, derivation.id, &derivation.derivation_name);
 

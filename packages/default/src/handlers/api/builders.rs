@@ -691,6 +691,14 @@ pub async fn append_job_logs(
             }
         })?;
 
+    if let Some(tx) = get_or_create_build_log_channel(&state, job_id).await {
+        let log_msg = BuildStreamMessage::Log {
+            message: request.logs.clone(),
+        };
+        record_build_stream_message(&state, job_id, &log_msg).await;
+        let _ = broadcast_build_stream_message(&tx, &log_msg);
+    }
+
     Ok((
         StatusCode::ACCEPTED,
         format!(
@@ -708,6 +716,7 @@ pub async fn append_job_logs(
 
 const BUILD_LOG_WS_CHANNEL_BUFFER: usize = 1024;
 const MAX_BUILD_LOG_WS_CHANNELS: usize = 2048;
+const BUILD_LOG_HISTORY_BUFFER: usize = 4000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -795,6 +804,22 @@ async fn handle_log_stream(
         return;
     };
 
+    let history_snapshot = {
+        let history = state.build_log_history.lock().await;
+        history.get(&job_id).cloned().unwrap_or_default()
+    };
+
+    for frame in history_snapshot {
+        if let Err(e) = socket.send(Message::Text(frame.into())).await {
+            tracing::debug!(
+                "Failed to replay build log history to websocket for job {}: {}",
+                job_id,
+                e
+            );
+            return;
+        }
+    }
+
     match principal {
         BuildLogStreamPrincipal::Viewer => {
             let mut rx = tx.subscribe();
@@ -859,10 +884,9 @@ async fn handle_log_stream(
                                     break;
                                 }
 
-                                let _ = broadcast_build_stream_message(
-                                    &tx,
-                                    &BuildStreamMessage::Log { message },
-                                );
+                                let log_msg = BuildStreamMessage::Log { message };
+                                record_build_stream_message(&state, job_id, &log_msg).await;
+                                let _ = broadcast_build_stream_message(&tx, &log_msg);
                             }
                             BuildStreamMessage::Metrics {
                                 cpu_percent,
@@ -870,15 +894,14 @@ async fn handle_log_stream(
                                 ram_total_mb,
                                 timestamp,
                             } => {
-                                let _ = broadcast_build_stream_message(
-                                    &tx,
-                                    &BuildStreamMessage::Metrics {
-                                        cpu_percent,
-                                        ram_used_mb,
-                                        ram_total_mb,
-                                        timestamp,
-                                    },
-                                );
+                                let metrics_msg = BuildStreamMessage::Metrics {
+                                    cpu_percent,
+                                    ram_used_mb,
+                                    ram_total_mb,
+                                    timestamp,
+                                };
+                                record_build_stream_message(&state, job_id, &metrics_msg).await;
+                                let _ = broadcast_build_stream_message(&tx, &metrics_msg);
                             }
                             BuildStreamMessage::Error { .. } => {
                                 let error = BuildStreamMessage::Error {
@@ -954,6 +977,22 @@ async fn get_or_create_build_log_channel(
 async fn cleanup_build_log_channel(state: &CFState, job_id: Uuid) {
     let mut channels = state.build_log_channels.lock().await;
     channels.remove(&job_id);
+    drop(channels);
+
+    let mut history = state.build_log_history.lock().await;
+    history.remove(&job_id);
+}
+
+async fn record_build_stream_message(state: &CFState, job_id: Uuid, msg: &BuildStreamMessage) {
+    if let Ok(json) = serde_json::to_string(msg) {
+        let mut history = state.build_log_history.lock().await;
+        let entry = history.entry(job_id).or_default();
+        entry.push(json);
+        if entry.len() > BUILD_LOG_HISTORY_BUFFER {
+            let overflow = entry.len() - BUILD_LOG_HISTORY_BUFFER;
+            entry.drain(0..overflow);
+        }
+    }
 }
 
 #[cfg(test)]
