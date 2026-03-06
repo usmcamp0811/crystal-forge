@@ -52,20 +52,20 @@ fn api_base_url() -> String {
 
 #[component]
 fn EnvironmentBanner(placement: BannerPlacement, title: &'static str, message: &'static str) -> Element {
-    let border_class = if placement == BannerPlacement::Top {
-        "border-b"
+    let border_style = if placement == BannerPlacement::Top {
+        "border-bottom: 2px solid #9a3412;"
     } else {
-        "border-t"
+        "border-top: 2px solid #9a3412;"
     };
 
     rsx! {
         div {
-            class: "bg-orange-600 {border_class} border-orange-800 px-4 py-2",
+            style: "background-color: #ea580c; {border_style} padding: 0.5rem 1rem;",
             "data-environment-banner": "true",
             div {
-                class: "flex items-center justify-center gap-3 max-w-7xl mx-auto",
+                style: "display: flex; align-items: center; justify-content: center; gap: 0.75rem; max-width: 80rem; margin: 0 auto;",
                 svg {
-                    class: "w-4 h-4 text-white flex-shrink-0",
+                    style: "width: 1rem; height: 1rem; color: #ffffff; flex-shrink: 0;",
                     fill: "none",
                     stroke: "currentColor",
                     view_box: "0 0 24 24",
@@ -77,9 +77,9 @@ fn EnvironmentBanner(placement: BannerPlacement, title: &'static str, message: &
                     }
                 }
                 div {
-                    class: "flex flex-wrap items-center justify-center gap-2 text-sm text-white",
-                    span { class: "font-bold", "{title}" }
-                    span { class: "opacity-95", "{message}" }
+                    style: "display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.5rem; font-size: 0.875rem; color: #ffffff;",
+                    span { style: "font-weight: 700;", "{title}" }
+                    span { style: "opacity: 0.95;", "{message}" }
                 }
             }
         }

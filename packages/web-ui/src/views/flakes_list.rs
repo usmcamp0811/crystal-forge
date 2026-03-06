@@ -1317,9 +1317,14 @@ fn FlakeHistoryExplorer(
                                                                         "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
                                                                     }
                                                                     if let Some(build_status) = commit.build_status.clone() {
-                                                                        span {
+                                                                        button {
                                                                             class: "px-2 py-1 rounded border text-[10px]",
                                                                             style: "{build_badge_style(&build_status)}",
+                                                                            title: "Open Builds view",
+                                                                            onclick: move |evt| {
+                                                                                evt.stop_propagation();
+                                                                                navigator.push(Route::BuildsView {});
+                                                                            },
                                                                             "build: {build_badge_label(&build_status)}"
                                                                         }
                                                                     }
@@ -1378,9 +1383,13 @@ fn FlakeHistoryExplorer(
                                                     "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
                                                 }
                                                 if let Some(build_status) = commit.build_status.clone() {
-                                                    span {
+                                                    button {
                                                         class: "px-2 py-1 rounded border",
                                                         style: "{build_badge_style(&build_status)}",
+                                                        title: "Open Builds view",
+                                                        onclick: move |_| {
+                                                            navigator.push(Route::BuildsView {});
+                                                        },
                                                         "build: {build_badge_label(&build_status)}"
                                                     }
                                                 }

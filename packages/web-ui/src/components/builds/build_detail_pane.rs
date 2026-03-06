@@ -242,11 +242,10 @@ pub fn BuildDetailPane(
 
                     if *tab.read() == DetailTab::Logs && *log_modal_open.read() {
                         div {
-                            class: "fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4",
+                            style: "position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.8); padding: 1rem;",
                             onclick: move |_| log_modal_open.set(false),
                             div {
-                                class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl w-full max-w-6xl max-h-[90vh] flex flex-col",
-                                style: "overflow: hidden;",
+                                style: "width: 100%; max-width: 90rem; max-height: 90vh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background-color: rgb(17, 24, 39); border-radius: 0.5rem; border: 1px solid rgb(55, 65, 81); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);",
                                 onclick: |evt| evt.stop_propagation(),
                                 div {
                                     class: "flex items-center justify-between p-4 border-b border-gray-700",
@@ -286,7 +285,7 @@ pub fn BuildDetailPane(
                                     }
                                 }
                                 div {
-                                    class: "flex-1 min-h-0 min-w-0 overflow-auto p-4 bg-gray-950",
+                                    style: "flex: 1 1 auto; min-height: 0; min-width: 0; overflow: auto; padding: 1rem; background-color: rgb(3, 7, 18);",
                                     pre {
                                         class: "block w-full max-w-full text-xs font-mono text-gray-200",
                                         style: if *wrap_logs.read() { "white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;" } else { "white-space: pre;" },
