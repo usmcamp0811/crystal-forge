@@ -5,6 +5,10 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+
+const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
+const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
+const MOCK_EVAL_STAGE_COUNT: u64 = 5;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
@@ -606,6 +610,7 @@ pub async fn evaluate_with_mock_eval_jobs(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
 ) -> Result<(Vec<NixEvalJobResult>, Vec<PolicyCheckResult>)> {
     let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
+    let stage_delay = mock_eval_stage_delay(systems.len());
 
     if let Some(state) = cf_state {
         crate::handlers::api::commits::broadcast_eval_log(
@@ -637,12 +642,33 @@ pub async fn evaluate_with_mock_eval_jobs(
             crate::handlers::api::commits::broadcast_eval_log(
                 state,
                 commit.id,
-                format!("⏳ {}: evaluating...", system_name),
+                format!(
+                    "⏳ {}: queued in mock pipeline (system {}/{})",
+                    system_name,
+                    idx + 1,
+                    systems.len()
+                ),
             )
             .await;
         }
 
-        tokio::time::sleep(std::time::Duration::from_millis(120 + (idx as u64 * 40))).await;
+        for (progress, stage) in [
+            (10, "resolving flake input graph"),
+            (30, "checking nixosConfigurations outputs"),
+            (55, "expanding module graph"),
+            (80, "running policy prechecks"),
+            (95, "finalizing derivation metadata"),
+        ] {
+            if let Some(state) = cf_state {
+                crate::handlers::api::commits::broadcast_eval_log(
+                    state,
+                    commit.id,
+                    format!("⏳ {} [{}%]: {}", system_name, progress, stage),
+                )
+                .await;
+            }
+            tokio::time::sleep(stage_delay).await;
+        }
 
         let flake_ref = build_flake_reference(repo_url, commit_hash);
         let drv_path = format!(
@@ -762,9 +788,19 @@ fn resolve_mock_systems(
     Ok(systems)
 }
 
+fn mock_eval_stage_delay(system_count: usize) -> std::time::Duration {
+    let systems = std::cmp::max(system_count as u64, 1);
+    let per_system = std::cmp::max(
+        MOCK_EVAL_TOTAL_DURATION_MS / systems,
+        MOCK_EVAL_MIN_PER_SYSTEM_MS,
+    );
+    let per_stage = std::cmp::max(per_system / MOCK_EVAL_STAGE_COUNT, 750);
+    std::time::Duration::from_millis(per_stage)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::resolve_mock_systems;
+    use super::{mock_eval_stage_delay, resolve_mock_systems};
 
     #[test]
     fn mock_systems_fallback_and_filtering() {
@@ -792,5 +828,12 @@ mod tests {
         assert!(err
             .to_string()
             .contains("mock evaluation has no matching systems to evaluate"));
+    }
+
+    #[test]
+    fn mock_eval_stage_delay_targets_human_observable_runtime() {
+        assert_eq!(mock_eval_stage_delay(3).as_millis(), 2000);
+        assert_eq!(mock_eval_stage_delay(1).as_millis(), 6000);
+        assert_eq!(mock_eval_stage_delay(10).as_millis(), 1000);
     }
 }

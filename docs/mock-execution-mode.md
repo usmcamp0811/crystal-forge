@@ -30,11 +30,11 @@ execution_mode = "real"
 ## What Mock Mode Simulates
 
 - Eval phase:
-  - deterministic per-system progression
+  - deterministic per-system progression (~30s total per eval run with default 3 systems)
   - streaming eval logs and status updates
   - derivation rows are inserted and moved to `DryRunComplete`
 - Build phase:
-  - deterministic fast build logs
+  - deterministic fast build progression in both API-builder and legacy-builder modes
   - successful completion path with synthetic store path
   - normal job completion API path remains in use
 

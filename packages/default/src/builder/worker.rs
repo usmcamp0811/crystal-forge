@@ -27,6 +27,7 @@ pub(super) async fn build_worker(
     pool: PgPool,
     build_config: BuildConfig,
     cache_config: CacheConfig,
+    use_mock_build: bool,
 ) {
     update_worker_status(
         worker_id,
@@ -103,9 +104,12 @@ pub(super) async fn build_worker(
                 );
                 info!("  → Step 1: About to call derivation.build()");
 
-                let build_result =
+                let build_result = if use_mock_build {
+                    tokio::time::timeout(build_timeout, run_mock_legacy_build(&derivation)).await
+                } else {
                     tokio::time::timeout(build_timeout, derivation.build(&pool, &build_config))
-                        .await;
+                        .await
+                };
 
                 info!("  → Step 2: derivation.build() returned");
 
@@ -124,35 +128,37 @@ pub(super) async fn build_worker(
                         // update derivation with store_path for signing
                         derivation.store_path = Some(store_path.clone());
 
-                        // sign before cache push
-                        if let Err(e) = derivation.sign(&cache_config).await {
-                            warn!(
-                                "⚠️ signing failed for {}, continuing anyway: {}",
-                                task_description, e
-                            );
-                            // non-fatal - we can still push to cache unsigned
-                        }
-
-                        // TODO: Include the name of the server that built the derivation
-                        if let Some(ref store_path) = derivation.store_path {
-                            if let Err(e) = create_cache_push_job(
-                                &pool,
-                                derivation.id,
-                                store_path,                      // &String coerces to &str
-                                cache_config.push_to.as_deref(), // Option<String> -> Option<&str>
-                            )
-                            .await
-                            {
+                        if !use_mock_build {
+                            // sign before cache push
+                            if let Err(e) = derivation.sign(&cache_config).await {
                                 warn!(
-                                    "⚠️ cache queue failed for {}, continuing anyway: {}",
+                                    "⚠️ signing failed for {}, continuing anyway: {}",
                                     task_description, e
                                 );
+                                // non-fatal - we can still push to cache unsigned
                             }
-                        } else {
-                            warn!(
-                                "⚠️ skipping cache queue for {}: missing store_path on derivation {}",
-                                task_description, derivation.id
-                            );
+
+                            // TODO: Include the name of the server that built the derivation
+                            if let Some(ref store_path) = derivation.store_path {
+                                if let Err(e) = create_cache_push_job(
+                                    &pool,
+                                    derivation.id,
+                                    store_path, // &String coerces to &str
+                                    cache_config.push_to.as_deref(), // Option<String> -> Option<&str>
+                                )
+                                .await
+                                {
+                                    warn!(
+                                        "⚠️ cache queue failed for {}, continuing anyway: {}",
+                                        task_description, e
+                                    );
+                                }
+                            } else {
+                                warn!(
+                                    "⚠️ skipping cache queue for {}: missing store_path on derivation {}",
+                                    task_description, derivation.id
+                                );
+                            }
                         }
 
                         if let Err(e) = mark_build_complete_and_release(
@@ -233,6 +239,42 @@ pub(super) async fn build_worker(
     }
 }
 
+async fn run_mock_legacy_build(derivation: &Derivation) -> Result<String> {
+    info!(
+        "🧪 MOCK MODE: simulating legacy builder build for {}",
+        derivation.derivation_name
+    );
+
+    for step in [
+        "Resolving derivation graph",
+        "Preparing build sandbox",
+        "Building outputs",
+        "Finalizing store path",
+    ] {
+        info!("🧪 MOCK BUILD [{}]: {}", derivation.derivation_name, step);
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    use std::hash::{Hash, Hasher};
+    derivation.id.hash(&mut hasher);
+    derivation.derivation_name.hash(&mut hasher);
+    let short_hash = format!("{:016x}", hasher.finish());
+    let sanitized = derivation
+        .derivation_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+
+    Ok(format!("/nix/store/{}-{}", short_hash, sanitized))
+}
+
 /// Mark build complete and release reservation
 async fn mark_build_complete_and_release(
     pool: &PgPool,
@@ -301,18 +343,18 @@ async fn worker_heartbeat_loop(worker_uuid: String, pool: PgPool) {
 
 pub async fn get_gc_root_path(derivation_id: i32) -> String {
     // Try environment variable first, then fall back to /var/cache, then temp dir
-    let gc_root_dir = std::env::var("CRYSTAL_FORGE_GC_ROOT_DIR")
-        .unwrap_or_else(|_| {
-            // Try /var/cache first
-            if std::path::Path::new("/var/cache/crystal-forge").exists() 
-                || std::fs::create_dir_all("/var/cache/crystal-forge/gc-roots").is_ok() {
-                "/var/cache/crystal-forge/gc-roots".to_string()
-            } else {
-                // Fall back to temp directory
-                format!("{}/crystal-forge/gc-roots", std::env::temp_dir().display())
-            }
-        });
-    
+    let gc_root_dir = std::env::var("CRYSTAL_FORGE_GC_ROOT_DIR").unwrap_or_else(|_| {
+        // Try /var/cache first
+        if std::path::Path::new("/var/cache/crystal-forge").exists()
+            || std::fs::create_dir_all("/var/cache/crystal-forge/gc-roots").is_ok()
+        {
+            "/var/cache/crystal-forge/gc-roots".to_string()
+        } else {
+            // Fall back to temp directory
+            format!("{}/crystal-forge/gc-roots", std::env::temp_dir().display())
+        }
+    });
+
     // Create the directory if it doesn't exist
     if let Err(e) = tokio::fs::create_dir_all(&gc_root_dir).await {
         warn!("Failed to create GC root directory {}: {}", gc_root_dir, e);
@@ -323,7 +365,7 @@ pub async fn get_gc_root_path(derivation_id: i32) -> String {
             .expect("failed to create GC root directory in temp");
         return format!("{}/derivation-{}", temp_gc_dir, derivation_id);
     }
-    
+
     format!("{}/derivation-{}", gc_root_dir, derivation_id)
 }
 
