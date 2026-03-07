@@ -1,10 +1,10 @@
 ---
 id: TASK-173
 title: Fix eval logs visibility and enforce eval queue reordering priority
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-04 23:28'
+updated_date: '2026-03-07 23:36'
 labels:
   - bug
   - eval-queue
@@ -15,6 +15,7 @@ dependencies:
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/151'
 priority: high
+ordinal: 2000
 ---
 
 ## Description
