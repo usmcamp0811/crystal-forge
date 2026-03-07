@@ -1,10 +1,10 @@
 ---
 id: TASK-173
 title: Fix eval logs visibility and enforce eval queue reordering priority
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-07 22:47'
+updated_date: '2026-03-07 23:19'
 labels:
   - bug
   - eval-queue
@@ -93,4 +93,8 @@ Implemented server-side claim-order enforcement in `packages/default/src/server/
 Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge queries::commits::tests::reorder_validation_accepts_full_permutation_and_positions_are_dense` ✅, `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `3ddff7d3` (`fix: claim eval commits in fresh queue-order cycles`) and pushed to `origin/TASK-173-fix-eval-logs-queue-priority`.
+
+Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/153
+
+Moved TASK-173 to Review after implementing server-side eval claim-order fix and running targeted verification commands.
 <!-- SECTION:NOTES:END -->
