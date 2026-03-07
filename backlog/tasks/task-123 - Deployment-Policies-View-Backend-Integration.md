@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: To Do
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-07 23:44'
+updated_date: '2026-03-07 23:45'
 labels:
   - backend
   - api
@@ -277,20 +277,35 @@ Medium
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 All 18 acceptance criteria are checked and verified
-- [ ] #2 Backend GET endpoints return expected JSON responses (verified with curl or similar)
-- [ ] #3 Frontend UI displays policies from backend API (verified in browser with dev tools)
-- [ ] #4 Role-based button visibility works correctly for Admin/Operator/Viewer (manually tested)
-- [ ] #5 Fallback to mock data occurs gracefully on API errors (tested by stopping server)
-- [ ] #6 No console errors or warnings in browser dev tools
-- [ ] #7 cargo fmt --check passes for all modified Rust files
-- [ ] #8 cargo clippy -- -D warnings passes for backend package
-- [ ] #9 nix build .#server completes successfully
-- [ ] #10 nix build .#web-ui completes successfully
-- [ ] #11 All new Rust files are tracked in Git (git status shows no untracked source files)
-- [ ] #12 Code follows existing repository patterns (handlers match builders.rs style, API client matches flakes.rs style)
-- [ ] #13 No unwrap() calls in production code paths
-- [ ] #14 Error responses include helpful messages (tested with invalid IDs, missing auth)
-- [ ] #15 Unit tests exist for both API endpoints and pass
-- [ ] #16 Manual smoke test: server-stack up, navigate to policies page, verify data loads
+- [ ] #1 All 31 acceptance criteria checked and verified
+- [ ] #2 Backend: All 5 CRUD endpoints return correct responses (tested with curl/Postman)
+- [ ] #3 Backend: RBAC enforcement verified for all endpoints (Admin/Operator/Viewer)
+- [ ] #4 Backend: Input validation works (name length, config JSON, policy_type enum)
+- [ ] #5 Backend: Duplicate name prevention returns 409 (tested)
+- [ ] #6 Backend: Referential integrity check prevents deleting in-use policies (409)
+- [ ] #7 Frontend: Policies list displays data from backend API
+- [ ] #8 Frontend: Create Policy modal creates policies successfully
+- [ ] #9 Frontend: Edit Policy modal updates policies successfully
+- [ ] #10 Frontend: Delete confirmation deletes policies successfully
+- [ ] #11 Frontend: Role-based UI shows/hides buttons correctly (Admin/Operator/Viewer tested)
+- [ ] #12 Frontend: 401/403 redirects to login (tested by removing session)
+- [ ] #13 Frontend: 500/network errors fall back gracefully (tested by stopping server)
+- [ ] #14 Frontend: 400/409 validation errors display helpful messages in UI
+- [ ] #15 Frontend: No console errors or warnings in browser dev tools
+- [ ] #16 cargo fmt --check passes for all modified Rust files
+- [ ] #17 cargo clippy -- -D warnings passes for backend package
+- [ ] #18 nix build .#server succeeds
+- [ ] #19 nix build .#web-ui succeeds
+- [ ] #20 All new Rust files tracked in Git (git status clean)
+- [ ] #21 Code follows repository patterns (mirrors builders.rs API style)
+- [ ] #22 No unwrap() calls in production code paths
+- [ ] #23 Backend unit tests exist for all 5 endpoints
+- [ ] #24 Backend unit tests cover RBAC variations
+- [ ] #25 Backend unit tests cover validation and error cases
+- [ ] #26 All backend unit tests pass (cargo test)
+- [ ] #27 Manual E2E test: Admin creates policy via UI → success
+- [ ] #28 Manual E2E test: Operator edits policy → success
+- [ ] #29 Manual E2E test: Viewer cannot create/edit/delete (buttons hidden/disabled)
+- [ ] #30 Manual E2E test: Admin deletes unused policy → success
+- [ ] #31 Manual E2E test: Delete in-use policy → 409 error with clear message
 <!-- DOD:END -->
