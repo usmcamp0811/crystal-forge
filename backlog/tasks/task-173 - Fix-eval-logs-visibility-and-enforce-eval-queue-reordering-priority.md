@@ -4,7 +4,7 @@ title: Fix eval logs visibility and enforce eval queue reordering priority
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-07 23:36'
+updated_date: '2026-03-07 22:38'
 labels:
   - bug
   - eval-queue
@@ -77,4 +77,8 @@ Two interconnected regressions are affecting evaluation operations:
 
 <!-- SECTION:NOTES:BEGIN -->
 Execution order update: TASK-173 is now dependent on TASK-174 so eval-log and queue-ordering bug validation can run against deterministic mock eval/build mode.
+
+LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-173-fix-eval-logs-queue-priority
+
+Execution started from TASK-174 branch state because TASK-173 depends on TASK-174 and TASK-174 is pending merge; this enables immediate validation continuity for mock-backed repros.
 <!-- SECTION:NOTES:END -->
