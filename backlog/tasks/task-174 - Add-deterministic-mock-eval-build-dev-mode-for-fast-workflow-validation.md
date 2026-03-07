@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-06 18:47'
+updated_date: '2026-03-07 02:00'
 labels:
   - dev-experience
   - eval-queue
@@ -212,6 +212,16 @@ Non-production banners now use explicit inline style colors/typography for relia
 Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `9b43c704` (`fix: correct build log modal and build-chip navigation`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Adjusted non-production banners to be viewport-fixed and always visible while scrolling (top and bottom), with thinner height and preserved layout spacing via lightweight placeholders.
+
+Dashboard timeline commit nodes now navigate contextually: build-active statuses route to Builds view, otherwise commits with evaluation status route to commit-specific Evaluations view.
+
+Fixed missing live build/eval logs in split-origin dev setups by teaching websocket hooks to honor `cf_backend_origin` (same behavior pattern as API client), so streams connect to backend on 3445 when UI is served on 8080.
+
+Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `1754948d` (`fix: pin env banners and route timeline nodes`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
