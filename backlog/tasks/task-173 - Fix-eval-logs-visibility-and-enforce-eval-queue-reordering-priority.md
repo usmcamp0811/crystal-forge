@@ -4,7 +4,7 @@ title: Fix eval logs visibility and enforce eval queue reordering priority
 status: Review
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-07 23:19'
+updated_date: '2026-03-07 23:27'
 labels:
   - bug
   - eval-queue
@@ -97,4 +97,12 @@ Committed as `3ddff7d3` (`fix: claim eval commits in fresh queue-order cycles`) 
 Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/153
 
 Moved TASK-173 to Review after implementing server-side eval claim-order fix and running targeted verification commands.
+
+Addressed reviewer-blocking starvation regression in commit `0583cfb4`: added per-cycle pre-claim skip guard in eval claim loop so a poisoned head commit cannot hot-loop and starve later pending commits.
+
+Pre-claim failure paths now skip current head for the remainder of that cycle (`get_flake` failure, config-load failure, non-race claim-start failure) while preserving re-query-per-claim ordering semantics.
+
+Added focused tests in `server/mod.rs`: `select_next_pending_commit_id_skips_failed_heads` and `select_next_pending_commit_id_honors_reordered_head`. Verification rerun: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and both targeted test commands ✅.
+
+Posted MR follow-up review response notes on !153 with fix summary and verification commands.
 <!-- SECTION:NOTES:END -->
