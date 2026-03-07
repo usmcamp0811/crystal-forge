@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: To Do
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-07 23:40'
+updated_date: '2026-03-07 23:44'
 labels:
   - backend
   - api
@@ -20,34 +20,38 @@ priority: high
 <!-- SECTION:DESCRIPTION:BEGIN -->
 ## Problem
 
-The deployment policies feature currently has a database schema and backend models (`DeploymentPolicy` enum, policy evaluation logic), but no API endpoints to expose this data to the frontend. The UI currently uses static/mock policy data, preventing users from viewing or managing real deployment policies stored in the database.
+The deployment policies feature currently has a database schema and backend models (`DeploymentPolicy` enum, policy evaluation logic), but no API endpoints to expose or manage this data. The UI currently uses static/mock policy data, preventing users from:
 
-This creates a gap where:
-- Backend has policies stored in `deployment_policies`, `environment_policies`, and `system_policies` tables
-- Frontend cannot retrieve or display actual policy configurations
-- Users cannot see which policies are enforced on their environments/systems
-- RBAC rules (Admin/Operator/Viewer) cannot be applied to policy visibility and modification
+- Viewing actual deployment policies stored in the database
+- Creating new deployment policies through the UI
+- Modifying existing policy configurations
+- Deleting obsolete or incorrect policies
+- Applying RBAC rules to policy management (Admin/Operator can modify, Viewer is read-only)
+
+This creates a critical gap where the deployment policies infrastructure exists but cannot be managed through the application interface.
 
 ## Goal
 
-Implement two REST API endpoints to expose deployment policies from the backend database, and integrate these endpoints into the frontend using role-based access control. This enables:
+Implement a complete REST API for deployment policy management (full CRUD operations) and integrate it into the frontend with role-based access control. This enables:
 
-1. **Backend**: Expose deployment policy data through GET endpoints with RBAC enforcement
-2. **Frontend**: Replace mock policy data with live API calls, respecting user roles
-3. **Auth**: Only Admin/Operator users see modification actions; Viewer users have read-only access
+1. **Backend**: Full CRUD endpoints (GET, POST, PUT, DELETE) for deployment policies with RBAC enforcement
+2. **Frontend**: Complete policy management UI that replaces mock data with live API calls
+3. **Auth**: Admin/Operator users can create/edit/delete policies; Viewer users have read-only access
+4. **UX**: Graceful error handling with fallback to mock data for read operations when server is unavailable
 
-This establishes the foundational API for future policy CRUD operations (POST, PUT, DELETE) while maintaining backward compatibility through fallback logic.
+Users will be able to fully manage deployment policies through the web interface, with appropriate permissions enforced at both API and UI layers.
 
 ## Non-Goals
 
-- Policy creation/modification/deletion endpoints (POST/PUT/DELETE) - future work
 - Policy evaluation or validation logic - already exists in backend
-- Migration of existing deployment_policies schema - already complete
-- Complex policy filtering or search - simple list/detail retrieval only
+- Migration of existing deployment_policies schema - already complete (migration 0080)
+- Policy assignment to environments/systems - separate feature (uses environment_policies/system_policies tables)
+- Complex policy filtering or advanced search - simple list/detail retrieval only
 - WebSocket or real-time policy updates
-- Policy templates or wizards
-- Bulk policy operations
-- Policy versioning or audit history (beyond existing timestamps)
+- Policy templates or creation wizards (basic form-based creation is sufficient)
+- Bulk policy operations (import/export)
+- Policy versioning or detailed audit history (beyond existing timestamps)
+- Policy scheduling or conditional activation
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Problem Statement
@@ -74,19 +78,19 @@ Expose deployment policies from backend and render dynamically with proper RBAC.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Backend GET /api/v1/deployment-policies endpoint returns all policies with pagination support (limit/offset query params)
-- [ ] #2 Backend GET /api/v1/deployment-policies/:id endpoint returns single policy details or 404
-- [ ] #3 Server-side RBAC: All authenticated users (Admin/Operator/Viewer) can read policies
-- [ ] #4 Server-side RBAC: Endpoint responses include user role in a way that frontend can consume
-- [ ] #5 Frontend packages/web-ui/src/api/deployment_policies.rs module created with fetch_policies() and fetch_policy_by_id() functions
-- [ ] #6 Frontend packages/web-ui/src/models/deployment_policy.rs defines DeploymentPolicyDTO matching backend API response
-- [ ] #7 Frontend adapter layer (packages/web-ui/src/components/policies/adapter.rs) implements fetch-with-fallback: try API first, fall back to mock on error
-- [ ] #8 Frontend policies view (packages/web-ui/src/components/policies/view.rs) uses adapter instead of direct mock data
-- [ ] #9 Role-based UI behavior: Admin/Operator users see 'Edit' and 'Delete' buttons (disabled/hidden for future work)
-- [ ] #10 Role-based UI behavior: Viewer users see policies but no modification actions
-- [ ] #11 401/403 responses redirect to login page using existing auth error handler
-- [ ] #12 500/network errors fall back to mock data without breaking the UI
-- [ ] #13 Backend unit tests verify RBAC enforcement for policy endpoints
+- [ ] #1 Backend GET /api/v1/deployment-policies endpoint returns all policies with pagination (limit/offset)
+- [ ] #2 Backend GET /api/v1/deployment-policies/:id endpoint returns single policy or 404
+- [ ] #3 Backend POST /api/v1/deployment-policies endpoint creates new policy (Admin/Operator only)
+- [ ] #4 Backend PUT /api/v1/deployment-policies/:id endpoint updates existing policy (Admin/Operator only)
+- [ ] #5 Backend DELETE /api/v1/deployment-policies/:id endpoint deletes policy (Admin only)
+- [ ] #6 Server-side RBAC: GET endpoints allow all authenticated users (Admin/Operator/Viewer)
+- [ ] #7 Server-side RBAC: POST/PUT endpoints require Admin or Operator role (403 otherwise)
+- [ ] #8 Server-side RBAC: DELETE endpoint requires Admin role only (403 otherwise)
+- [ ] #9 Input validation: Policy name required, max 255 chars
+- [ ] #10 Input validation: Policy config must be valid JSON matching policy_type schema
+- [ ] #11 Input validation: policy_type must be one of: require_cf_agent, require_packages, custom_check
+- [ ] #12 Duplicate name prevention: POST/PUT returns 409 if policy name already exists
+- [ ] #13 Referential integrity: DELETE returns 409 if policy is assigned to environments/systems
 
 ---
 
@@ -145,11 +149,24 @@ Medium
 - Implement policy create/update operations
 - Add policy validation UI
 
-- [ ] #14 Frontend compiles without errors after integration
-- [ ] #15 cargo fmt --check passes for modified Rust files
-- [ ] #16 cargo clippy -- -D warnings passes for backend changes
-- [ ] #17 nix build .#server succeeds (integration check)
-- [ ] #18 nix build .#web-ui succeeds (integration check)
+- [ ] #14 Frontend API client (packages/web-ui/src/api/deployment_policies.rs) implements all 5 CRUD operations
+- [ ] #15 Frontend models (packages/web-ui/src/models/deployment_policy.rs) include CreatePolicyRequest, UpdatePolicyRequest DTOs
+- [ ] #16 Frontend adapter layer (packages/web-ui/src/components/policies/adapter.rs) implements fetch-with-fallback for read ops
+- [ ] #17 Frontend policies view (packages/web-ui/src/components/policies/view.rs) uses adapter for listing
+- [ ] #18 Frontend Create Policy modal with form (name, description, type selector, config JSON editor)
+- [ ] #19 Frontend Edit Policy modal pre-populated with current values
+- [ ] #20 Frontend Delete confirmation dialog with warning about environment/system assignments
+- [ ] #21 Role-based UI: Admin/Operator see Create/Edit/Delete buttons enabled
+- [ ] #22 Role-based UI: Viewer sees policies but all modification buttons hidden
+- [ ] #23 401/403 responses redirect to login page
+- [ ] #24 500/network errors on read operations fall back to mock data
+- [ ] #25 400/409 validation errors display helpful messages in UI
+- [ ] #26 Backend unit tests for all 5 endpoints covering RBAC, validation, error cases
+- [ ] #27 Frontend compiles without errors
+- [ ] #28 cargo fmt --check passes
+- [ ] #29 cargo clippy -- -D warnings passes
+- [ ] #30 nix build .#server succeeds
+- [ ] #31 nix build .#web-ui succeeds
 <!-- AC:END -->
 
 ## Implementation Plan
