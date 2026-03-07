@@ -4,7 +4,7 @@ title: Fix eval logs visibility and enforce eval queue reordering priority
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-07 22:45'
+updated_date: '2026-03-07 22:47'
 labels:
   - bug
   - eval-queue
@@ -87,4 +87,10 @@ Started implementation after TASK-174 merge. Added server-side eval-claim loop f
 This change keeps deterministic DB queue priority authoritative for subsequent claims, aligning runtime selection behavior with reordered eval queue display.
 
 Verification run: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge queries::commits::tests::reorder_validation_accepts_full_permutation_and_positions_are_dense` ✅.
+
+Implemented server-side claim-order enforcement in `packages/default/src/server/mod.rs`: eval loop now re-queries pending commits and processes one commit per claim cycle, ensuring UI reorder updates affect subsequent commit claims instead of being hidden by stale batch snapshots.
+
+Verification: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge queries::commits::tests::reorder_validation_accepts_full_permutation_and_positions_are_dense` ✅, `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `3ddff7d3` (`fix: claim eval commits in fresh queue-order cycles`) and pushed to `origin/TASK-173-fix-eval-logs-queue-priority`.
 <!-- SECTION:NOTES:END -->
