@@ -223,64 +223,64 @@ async fn process_pending_commits(
         let Some(commit) = pending_commits.into_iter().find(|c| c.id == next_commit_id) else {
             return Ok(());
         };
-                // Get flake info
-                let flake = match commit.get_flake(&pool).await {
-                    Ok(flake) => flake,
-                    Err(e) => {
-                        error!(
-                            "❌ Failed to get flake for commit {}: {}",
-                            commit.git_commit_hash, e
-                        );
-                        skipped_preclaim_commit_ids.insert(commit.id);
-                        continue;
-                    }
-                };
+        // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
+        if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
+            let error_text = e.to_string();
+            if error_text.contains("another commit is already being evaluated") {
+                debug!(
+                    "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already claimed in_progress",
+                    commit.id,
+                    commit.git_commit_hash
+                );
+                return Ok(());
+            } else {
+                error!(
+                    "❌ Could not mark commit {} evaluation started: {}",
+                    commit.git_commit_hash, e
+                );
+                skipped_preclaim_commit_ids.insert(commit.id);
+            }
+            continue;
+        }
 
-                // Load Crystal Forge config to get build settings
-                let cfg = match CrystalForgeConfig::load() {
-                    Ok(cfg) => cfg,
-                    Err(e) => {
-                        error!("❌ Failed to load config: {}", e);
-                        skipped_preclaim_commit_ids.insert(commit.id);
-                        continue;
-                    }
-                };
-                let build_config = cfg.get_build_config();
-                let server_config = cfg.get_server_config();
-                let mock_systems = cfg
-                    .systems
-                    .iter()
-                    .filter(|s| s.flake_name.as_deref() == Some(flake.name.as_str()))
-                    .map(|s| s.hostname.clone())
-                    .collect::<Vec<_>>();
+        // Get flake info (post-claim; failures now go through retry/defer path)
+        let flake = match commit.get_flake(&pool).await {
+            Ok(flake) => flake,
+            Err(e) => {
+                error!(
+                    "❌ Failed to get flake for commit {}: {}",
+                    commit.git_commit_hash, e
+                );
+                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
+                continue;
+            }
+        };
 
-                // Set up deployment policies - check CF agent for all systems
-                // Using non-strict mode to collect data without failing evaluations
-                let policies = vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: false }];
+        // Load Crystal Forge config to get build settings (post-claim retry/defer path)
+        let cfg = match CrystalForgeConfig::load() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("❌ Failed to load config: {}", e);
+                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
+                continue;
+            }
+        };
+        let build_config = cfg.get_build_config();
+        let server_config = cfg.get_server_config();
+        let mock_systems = cfg
+            .systems
+            .iter()
+            .filter(|s| s.flake_name.as_deref() == Some(flake.name.as_str()))
+            .map(|s| s.hostname.clone())
+            .collect::<Vec<_>>();
 
-                // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
-                if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
-                    let error_text = e.to_string();
-                    if error_text.contains("another commit is already being evaluated") {
-                        debug!(
-                            "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already claimed in_progress",
-                            commit.id,
-                            commit.git_commit_hash
-                        );
-                        return Ok(());
-                    } else {
-                        error!(
-                            "❌ Could not mark commit {} evaluation started: {}",
-                            commit.git_commit_hash, e
-                        );
-                        skipped_preclaim_commit_ids.insert(commit.id);
-                    }
-                    continue;
-                }
+        // Set up deployment policies - check CF agent for all systems
+        // Using non-strict mode to collect data without failing evaluations
+        let policies = vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: false }];
 
-                // CRITICAL: Create broadcast channel BEFORE eval starts
-                // This ensures WebSocket clients can subscribe before messages are sent
-                crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
+        // CRITICAL: Create broadcast channel BEFORE eval starts
+        // This ensures WebSocket clients can subscribe before messages are sent
+        crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
 
                 // Broadcast eval start status to WebSocket clients
                 crate::handlers::api::commits::broadcast_eval_status(
