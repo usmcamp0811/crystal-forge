@@ -54,28 +54,6 @@ Users will be able to fully manage deployment policies through the web interface
 - Policy scheduling or conditional activation
 <!-- SECTION:DESCRIPTION:END -->
 
-## Problem Statement
-
-Policies are currently static in UI. There is no real API backing for:
-- Listing deployment policies
-- Viewing policy details
-- RBAC-aware action visibility
-
----
-
-## Goal
-
-Expose deployment policies from backend and render dynamically with proper RBAC.
-
----
-
-## Non-Goals
-
-- Implementing policy create/update operations (future-compatible only)
-- Changing policy visualization UI significantly
-
----
-
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Backend GET /api/v1/deployment-policies endpoint returns all policies with pagination (limit/offset)
@@ -91,64 +69,6 @@ Expose deployment policies from backend and render dynamically with proper RBAC.
 - [ ] #11 Input validation: policy_type must be one of: require_cf_agent, require_packages, custom_check
 - [ ] #12 Duplicate name prevention: POST/PUT returns 409 if policy name already exists
 - [ ] #13 Referential integrity: DELETE returns 409 if policy is assigned to environments/systems
-
----
-
-## Architectural Constraints
-
-- No business logic in UI views
-- All DTOs defined in frontend models.rs
-- All HTTP calls isolated in api.rs
-- All fallback logic isolated in adapter.rs
-- No network calls directly inside view components
-- Server enforces RBAC - no client-side filtering for authorization
-
----
-
-## Verification Plan
-
-Automated:
-
-```
-nix build .#checks.x86_64-linux.default
-nix build .#checks.x86_64-linux.web-ui
-nix develop -c cargo test --package web-ui policies
-```
-
-Manual:
-- Navigate to Policies view and verify real data loads
-- Test as Admin/Operator - verify modify actions visible
-- Test as Viewer - verify modify actions hidden
-- Verify fallback to mock data when backend unavailable
-
----
-
-## Impact Areas
-
-- Backend API
-- Web UI
-- RBAC enforcement
-
----
-
-## Risk Level
-
-Medium
-
----
-
-## Dependencies
-
-- TASK-121 (Systems View Backend Integration)
-
----
-
-## Follow-Up Tasks (if discovered during grooming)
-
-- Add unit tests for policies adapter
-- Implement policy create/update operations
-- Add policy validation UI
-
 - [ ] #14 Frontend API client (packages/web-ui/src/api/deployment_policies.rs) implements all 5 CRUD operations
 - [ ] #15 Frontend models (packages/web-ui/src/models/deployment_policy.rs) include CreatePolicyRequest, UpdatePolicyRequest DTOs
 - [ ] #16 Frontend adapter layer (packages/web-ui/src/components/policies/adapter.rs) implements fetch-with-fallback for read ops
@@ -174,70 +94,122 @@ Medium
 <!-- SECTION:PLAN:BEGIN -->
 ## Implementation Plan
 
-### Phase 1: Backend API Endpoints (packages/default)
+### Phase 1: Backend Queries Layer (packages/default)
 
 1. **Create deployment policies queries module** (`packages/default/src/queries/deployment_policies.rs`)
-   - `list_deployment_policies(pool, limit, offset)` - Returns Vec<DeploymentPolicy>
-   - `get_deployment_policy_by_id(pool, id)` - Returns Option<DeploymentPolicy>
-   - Use existing `deployment_policies` table schema from migration 0080
+   - `list_deployment_policies(pool, limit, offset)` → `Result<Vec<DeploymentPolicy>>`
+   - `get_deployment_policy_by_id(pool, id)` → `Result<Option<DeploymentPolicy>>`
+   - `create_deployment_policy(pool, request)` → `Result<DeploymentPolicy>`
+   - `update_deployment_policy(pool, id, request)` → `Result<DeploymentPolicy>`
+   - `delete_deployment_policy(pool, id)` → `Result<bool>`
+   - `check_policy_name_exists(pool, name, exclude_id)` → `Result<bool>` (for duplicate check)
+   - `check_policy_in_use(pool, id)` → `Result<bool>` (check environment_policies/system_policies)
+   
+2. **Add request/response models** (`packages/default/src/models/deployment_policies.rs` or `api/models.rs`)
+   - `CreateDeploymentPolicyRequest` struct with validation
+   - `UpdateDeploymentPolicyRequest` struct with validation
+   - `DeploymentPolicyResponse` struct for API responses
+   - Validation: name length, config JSON schema matching policy_type
 
-2. **Create API handlers module** (`packages/default/src/handlers/api/deployment_policies.rs`)
-   - `list_deployment_policies()` handler
-     - Extract user with `RequireAuth` (any authenticated role)
-     - Parse query params: `limit` (default 100, max 1000), `offset` (default 0)
-     - Call query layer
-     - Return JSON response with policies array
-   - `get_deployment_policy()` handler
-     - Extract user with `RequireAuth`
-     - Parse UUID from path param
-     - Call query layer
-     - Return 404 if not found, 200 with JSON if found
+### Phase 2: Backend API Handlers (packages/default)
 
-3. **Register routes in router** (`packages/default/src/handlers/api/mod.rs`)
-   - Add `mod deployment_policies;`
-   - Register routes under `/api/v1/deployment-policies`
+3. **Create API handlers module** (`packages/default/src/handlers/api/deployment_policies.rs`)
+   - **GET /api/v1/deployment-policies** (list)
+     - `RequireAuth` - any authenticated role
+     - Query params: limit (default 100, max 1000), offset (default 0)
+     - Returns `{ policies: [...] }`
+   
+   - **GET /api/v1/deployment-policies/:id** (detail)
+     - `RequireAuth` - any authenticated role
+     - Returns 404 if not found
+   
+   - **POST /api/v1/deployment-policies** (create)
+     - `RequireOperator` - Admin or Operator only
+     - Validate name, policy_type, config
+     - Check name uniqueness → 409 if exists
+     - Returns 201 with created policy
+   
+   - **PUT /api/v1/deployment-policies/:id** (update)
+     - `RequireOperator` - Admin or Operator only
+     - Validate input, check name uniqueness (excluding current ID)
+     - Returns 404 if policy doesn't exist, 409 if name conflict
+   
+   - **DELETE /api/v1/deployment-policies/:id** (delete)
+     - `RequireAdmin` - Admin only
+     - Check if policy is in use → 409 if assigned to environments/systems
+     - Returns 204 on success, 404 if not found
 
-4. **Add API response models** (if not already in `packages/default/src/api/models.rs`)
-   - Verify `DeploymentPolicySummary` exists and matches DB schema
-   - Add `DeploymentPoliciesListResponse { policies: Vec<DeploymentPolicySummary> }`
+4. **Register routes** (`packages/default/src/handlers/api/mod.rs`)
+   - Add `mod deployment_policies;` 
+   - Register router with all 5 routes under `/api/v1/deployment-policies`
 
-### Phase 2: Frontend Integration (packages/web-ui)
+### Phase 3: Frontend API Client (packages/web-ui)
 
 5. **Create API client module** (`packages/web-ui/src/api/deployment_policies.rs`)
-   - `fetch_policies(limit, offset) -> Result<Vec<DeploymentPolicyDTO>, ApiError>`
-   - `fetch_policy_by_id(id) -> Result<DeploymentPolicyDTO, ApiError>`
-   - Use existing HTTP client patterns from other API modules (e.g., `api/flakes.rs`)
+   - `fetch_policies(limit, offset)` → `Result<Vec<DeploymentPolicyDTO>>`
+   - `fetch_policy_by_id(id)` → `Result<DeploymentPolicyDTO>`
+   - `create_policy(request)` → `Result<DeploymentPolicyDTO>`
+   - `update_policy(id, request)` → `Result<DeploymentPolicyDTO>`
+   - `delete_policy(id)` → `Result<()>`
+   - Follow patterns from `api/builders.rs` (HTTP client, error handling)
 
-6. **Define frontend models** (`packages/web-ui/src/models/deployment_policy.rs` or update existing)
-   - Verify `DeploymentPolicyDTO` matches backend response
-   - Add `#[derive(Clone, PartialEq, serde::Deserialize)]`
+6. **Define frontend DTOs** (`packages/web-ui/src/models/deployment_policy.rs`)
+   - `DeploymentPolicyDTO` (matches backend response)
+   - `CreatePolicyRequest` struct
+   - `UpdatePolicyRequest` struct
+   - Serde derives for serialization
+
+### Phase 4: Frontend UI Components (packages/web-ui)
 
 7. **Create adapter layer** (`packages/web-ui/src/components/policies/adapter.rs`)
-   - `load_policies_with_fallback() -> Vec<DeploymentPolicyDTO>`
-   - Try `fetch_policies()`, on error log warning and return mock data
-   - Handle 401/403 by redirecting to login (use existing auth helpers)
-   - Handle 5xx/network errors with silent fallback
+   - `load_policies_with_fallback()` - Try API, fallback to mock on error
+   - Handle 401/403 → redirect to login
+   - Handle 5xx/network → silent fallback for reads
 
-8. **Update policies view** (`packages/web-ui/src/components/policies/view.rs`)
-   - Replace direct mock data usage with `load_policies_with_fallback()`
-   - Add conditional rendering for Edit/Delete buttons based on user role
-   - Extract role from auth context (check existing auth state management)
+8. **Update policies list view** (`packages/web-ui/src/components/policies/view.rs`)
+   - Replace mock data with `load_policies_with_fallback()`
+   - Add "Create Policy" button (visible to Admin/Operator only)
+   - Add Edit/Delete buttons per row (role-based visibility)
+   - Extract user role from auth context
 
-### Phase 3: Testing & Verification
+9. **Create Policy modal** (new component or extend existing)
+   - Form fields: name (text), description (textarea), policy_type (select), config (JSON editor)
+   - Validation: required fields, max lengths
+   - Call `create_policy()` on submit
+   - Display 409 conflict errors clearly
 
-9. **Backend unit tests** (`packages/default/src/handlers/api/deployment_policies.rs` inline or separate test module)
-   - Test list endpoint with various auth roles
-   - Test detail endpoint with valid/invalid IDs
-   - Test pagination parameters
+10. **Edit Policy modal** (new component or extend existing)
+    - Pre-populate form with current policy data
+    - Same validation as create
+    - Call `update_policy()` on submit
 
-10. **Integration verification**
-    - Run `cargo fmt --check`
-    - Run `cargo clippy -- -D warnings`
-    - Build server: `nix build .#server`
-    - Build web-ui: `nix build .#web-ui`
-    - Manual test: Start `server-stack up` and verify UI loads policies
+11. **Delete confirmation dialog** (new component or extend existing)
+    - Warning message: "Are you sure? Check if used by environments/systems."
+    - Display 409 error if policy is in use (with helpful message)
+    - Call `delete_policy()` on confirm
 
-## NEW IMPLEMENTATION PLAN (FULL CRUD)
+### Phase 5: Testing & Verification
+
+12. **Backend unit tests** (`packages/default/src/handlers/api/deployment_policies.rs` or separate test file)
+    - Test GET endpoints with different roles (all should succeed)
+    - Test POST with Admin/Operator (succeed) and Viewer (403)
+    - Test PUT with Admin/Operator (succeed) and Viewer (403)
+    - Test DELETE with Admin (succeed) and Operator (403)
+    - Test duplicate name prevention (409)
+    - Test referential integrity (409 on delete in-use policy)
+    - Test validation errors (400)
+
+13. **Integration verification**
+    - `cargo fmt --check` (all Rust files)
+    - `cargo clippy -- -D warnings` (backend package)
+    - `nix build .#server` (backend integration)
+    - `nix build .#web-ui` (frontend integration)
+    - Manual E2E test: Create → Edit → Delete policy via UI
+    - Test all role variations (Admin, Operator, Viewer)
+
+14. **Git tracking verification**
+    - `git status` shows all new files staged
+    - No untracked .rs files remain
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -245,36 +217,68 @@ Medium
 <!-- SECTION:NOTES:BEGIN -->
 ## Architectural Constraints
 
-- **Use Axum extractors for RBAC**: Follow modern pattern with `RequireAuth`, not legacy function guards
-- **No business logic in handlers**: Handlers orchestrate, queries execute DB operations
-- **Module size limit**: Keep handlers under 500 lines; split if needed
-- **Error handling**: Use `Result<T, (StatusCode, String)>` pattern from existing handlers
-- **Pagination**: Default limit 100, max 1000 (prevent DoS)
-- **DTOs match exactly**: Frontend models must match backend API responses (field names, types)
-- **Fallback is silent**: Log errors but don't alert users on fallback to mock data
-- **No unwrap() in handlers**: Use proper error propagation
-- **Follow existing patterns**: Mirror structure from `handlers/api/builders.rs` and `api/flakes.rs`
+- **Use Axum extractors for RBAC**: `RequireAuth` for reads, `RequireOperator` for POST/PUT, `RequireAdmin` for DELETE
+- **No business logic in handlers**: Handlers validate, authorize, orchestrate. Queries execute DB logic.
+- **Module size limit**: Keep handlers under 500 lines; split into submodules if needed
+- **Error handling**: Use `Result<T, (StatusCode, String)>` pattern consistently
+- **Input validation**: Validate at handler layer before calling queries
+- **Pagination**: Default limit 100, max 1000 (prevent resource exhaustion)
+- **DTOs mirror exactly**: Frontend models must match backend API contract
+- **Transaction safety**: Use DB transactions for create/update/delete (atomicity)
+- **No unwrap()**: Use `?` operator or explicit error handling
+- **Referential integrity**: Check environment_policies/system_policies before allowing delete
+- **Idempotency**: PUT should be idempotent (same request = same result)
+- **JSON validation**: Validate config JSON schema matches policy_type (prevent invalid configs)
 
 ## Dependencies
 
-- ✅ TASK-65.1: Identity and RBAC data model (Done) - Required for `RequireAuth` extractor
-- ✅ Migration 0080: `deployment_policies` table schema (Done) - Required for DB queries
+- ✅ TASK-65.1: Identity and RBAC data model (Done) - Required for `RequireAuth`, `RequireOperator`, `RequireAdmin`
+- ✅ Migration 0080: `deployment_policies` table (Done) - Required for CRUD operations
 - ✅ Backend models: `DeploymentPolicy` enum exists in `models/deployment_policies.rs`
-- Frontend auth context: Must have user role available (assumed present from TASK-65.0)
+- ✅ Frontend auth: User role available in auth context (from TASK-65.0)
+- Database FK constraints: `environment_policies` and `system_policies` have foreign keys to `deployment_policies(id)` (verify in schema)
 
 ## Impact Areas
 
-- **Backend**: New API module, new queries module, router registration
-- **Frontend**: New API client, adapter layer, view component updates
-- **Database**: Read-only queries, no schema changes
-- **Auth**: Uses existing RBAC extractors, no new auth logic
-- **Tests**: New unit tests for API endpoints
+- **Backend**: 
+  - New queries module (~200 lines)
+  - New API handlers module (~400 lines)
+  - Router updates
+  - Request/response model additions
+- **Frontend**: 
+  - New API client module (~150 lines)
+  - New/updated DTOs (~100 lines)
+  - Adapter layer (~80 lines)
+  - 3 new modals (Create, Edit, Delete)
+  - Updated policies list view
+- **Database**: 
+  - Read/write queries on `deployment_policies`
+  - Read checks on `environment_policies`, `system_policies`
+  - No schema changes needed
+- **Auth**: 
+  - Uses existing RBAC extractors
+  - Enforces 3-tier permissions (Viewer < Operator < Admin)
+- **Tests**: 
+  - ~8-10 new unit tests for handlers
+  - Manual E2E testing required
 
 ## Related Tasks
 
-- Future: POST/PUT/DELETE endpoints for policy CRUD (create follow-up task)
-- Future: Policy assignment to environments/systems (separate feature)
-- Future: Policy evaluation preview in UI
+- **Environment/System Policy Assignment**: Separate feature using `environment_policies` and `system_policies` tables (future task)
+- **Policy Templates**: Pre-defined policy configurations for common use cases (future enhancement)
+- **Policy Evaluation Preview**: Show which systems pass/fail a policy before assignment (future UX improvement)
+- **Audit Logging**: Track who created/modified/deleted policies (future compliance feature)
+
+## Risk Mitigation
+
+- **Risk**: Complex config JSON validation
+  - **Mitigation**: Start with basic JSON validity, enhance schema validation incrementally
+- **Risk**: Deleting in-use policies breaks environments
+  - **Mitigation**: Strict referential integrity check, clear error messages
+- **Risk**: Large handler module
+  - **Mitigation**: Split into submodules if exceeds 500 lines (e.g., `deployment_policies/create.rs`, `deployment_policies/update.rs`)
+- **Risk**: Frontend modal complexity
+  - **Mitigation**: Reuse existing modal components from builders feature, follow established patterns
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
