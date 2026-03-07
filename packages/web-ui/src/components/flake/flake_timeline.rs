@@ -740,14 +740,14 @@ fn CommitNode(
     let node_bg = commit_node_bg(commit.system_count, commit.commits_behind);
     let build_status = commit.build_status.unwrap_or(BuildStatus::Idle);
     let build_ring = build_ring_style(build_status);
-    let target_route = if build_status != BuildStatus::Idle {
+    let target_route = if build_status == BuildStatus::Building {
         Some(Route::BuildsView {})
-    } else if commit.evaluation_status.is_some() {
+    } else if is_eval_active(commit.evaluation_status.as_deref()) {
         Some(Route::EvaluationsCommitView {
             commit_id: commit.id,
         })
     } else {
-        None
+        Some(Route::FlakesView {})
     };
     let clickable = target_route.is_some();
 
@@ -951,6 +951,18 @@ fn build_ring_style(status: BuildStatus) -> &'static str {
         BuildStatus::Building => "0 0 0 3px var(--cf-timeline-ring-building)",
         _ => "0 0 0 2px var(--cf-timeline-ring-idle)",
     }
+}
+
+fn is_eval_active(status: Option<&str>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+
+    let normalized = status.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "pending" | "queued" | "evaluating" | "in_progress"
+    )
 }
 
 fn segment_color(_prev: &FlakeCommit, next: &FlakeCommit) -> Option<&'static str> {
