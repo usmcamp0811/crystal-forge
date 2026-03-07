@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: To Do
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-02-23 21:18'
+updated_date: '2026-03-07 23:39'
 labels:
   - backend
   - api
@@ -18,63 +18,36 @@ priority: high
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Deployment Policies View: Backend Integration
-Problem
+## Problem
 
-Policies are currently static in UI.
+The deployment policies feature currently has a database schema and backend models (`DeploymentPolicy` enum, policy evaluation logic), but no API endpoints to expose this data to the frontend. The UI currently uses static/mock policy data, preventing users from viewing or managing real deployment policies stored in the database.
 
-Goal
+This creates a gap where:
+- Backend has policies stored in `deployment_policies`, `environment_policies`, and `system_policies` tables
+- Frontend cannot retrieve or display actual policy configurations
+- Users cannot see which policies are enforced on their environments/systems
+- RBAC rules (Admin/Operator/Viewer) cannot be applied to policy visibility and modification
 
-Expose deployment policies from backend and render dynamically.
+## Goal
 
-Backend Scope
-Endpoints
-GET /api/deployment-policies
-GET /api/deployment-policies/:id
+Implement two REST API endpoints to expose deployment policies from the backend database, and integrate these endpoints into the frontend using role-based access control. This enables:
 
-Future-compatible for:
+1. **Backend**: Expose deployment policy data through GET endpoints with RBAC enforcement
+2. **Frontend**: Replace mock policy data with live API calls, respecting user roles
+3. **Auth**: Only Admin/Operator users see modification actions; Viewer users have read-only access
 
-POST /api/deployment-policies
-PUT /api/deployment-policies/:id
-Example Response
-{
-  "policies": [
-    {
-      "id": "policy-1",
-      "name": "prod-approval",
-      "environment": "prod",
-      "requires_approval": true,
-      "min_approvers": 2
-    }
-  ]
-}
-Requirements
+This establishes the foundational API for future policy CRUD operations (POST, PUT, DELETE) while maintaining backward compatibility through fallback logic.
 
-RBAC enforcement server-side.
+## Non-Goals
 
-Only Admin/Operator see modify actions.
-
-Viewer is read-only.
-
-Frontend Scope
-
-Policy DTOs.
-
-Role-aware action visibility driven by auth context.
-
-Fallback to mock data.
-
-Acceptance Criteria
-
-Policies render dynamically.
-
-Role-based UI behavior correct.
-
-Fallback logic intact.
-
-Risk Level
-
-Medium
+- Policy creation/modification/deletion endpoints (POST/PUT/DELETE) - future work
+- Policy evaluation or validation logic - already exists in backend
+- Migration of existing deployment_policies schema - already complete
+- Complex policy filtering or search - simple list/detail retrieval only
+- WebSocket or real-time policy updates
+- Policy templates or wizards
+- Bulk policy operations
+- Policy versioning or audit history (beyond existing timestamps)
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Problem Statement
@@ -101,19 +74,19 @@ Expose deployment policies from backend and render dynamically with proper RBAC.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 #1 Backend GET /api/deployment-policies endpoint implemented
-- [ ] #2 #2 Backend GET /api/deployment-policies/:id endpoint implemented
-- [ ] #3 #3 Server-side RBAC enforcement applied
-- [ ] #4 #4 Only Admin/Operator see modify actions
-- [ ] #5 #5 Viewer role is read-only
-- [ ] #6 #6 Frontend policies/api.rs created
-- [ ] #7 #7 Frontend policies/models.rs created
-- [ ] #8 #8 Frontend policies/adapter.rs created with fallback logic
-- [ ] #9 #9 Frontend policies/view.rs updated to use adapter
-- [ ] #10 #10 Role-based action visibility driven by auth context
-- [ ] #11 #11 401/403 redirects to login
-- [ ] #12 #12 500/network errors fallback to mock data
-- [ ] #13 #13 Verification commands pass
+- [ ] #1 Backend GET /api/v1/deployment-policies endpoint returns all policies with pagination support (limit/offset query params)
+- [ ] #2 Backend GET /api/v1/deployment-policies/:id endpoint returns single policy details or 404
+- [ ] #3 Server-side RBAC: All authenticated users (Admin/Operator/Viewer) can read policies
+- [ ] #4 Server-side RBAC: Endpoint responses include user role in a way that frontend can consume
+- [ ] #5 Frontend packages/web-ui/src/api/deployment_policies.rs module created with fetch_policies() and fetch_policy_by_id() functions
+- [ ] #6 Frontend packages/web-ui/src/models/deployment_policy.rs defines DeploymentPolicyDTO matching backend API response
+- [ ] #7 Frontend adapter layer (packages/web-ui/src/components/policies/adapter.rs) implements fetch-with-fallback: try API first, fall back to mock on error
+- [ ] #8 Frontend policies view (packages/web-ui/src/components/policies/view.rs) uses adapter instead of direct mock data
+- [ ] #9 Role-based UI behavior: Admin/Operator users see 'Edit' and 'Delete' buttons (disabled/hidden for future work)
+- [ ] #10 Role-based UI behavior: Viewer users see policies but no modification actions
+- [ ] #11 401/403 responses redirect to login page using existing auth error handler
+- [ ] #12 500/network errors fall back to mock data without breaking the UI
+- [ ] #13 Backend unit tests verify RBAC enforcement for policy endpoints
 
 ---
 
@@ -171,4 +144,10 @@ Medium
 - Add unit tests for policies adapter
 - Implement policy create/update operations
 - Add policy validation UI
+
+- [ ] #14 Frontend compiles without errors after integration
+- [ ] #15 cargo fmt --check passes for modified Rust files
+- [ ] #16 cargo clippy -- -D warnings passes for backend changes
+- [ ] #17 nix build .#server succeeds (integration check)
+- [ ] #18 nix build .#web-ui succeeds (integration check)
 <!-- AC:END -->
