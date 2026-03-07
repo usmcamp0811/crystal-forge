@@ -4,7 +4,7 @@ title: Fix eval logs visibility and enforce eval queue reordering priority
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-07 22:38'
+updated_date: '2026-03-07 22:45'
 labels:
   - bug
   - eval-queue
@@ -81,4 +81,10 @@ Execution order update: TASK-173 is now dependent on TASK-174 so eval-log and qu
 LOCK: opencode-gpt-5.3-codex on reckless in /home/mcamp/code/crystal-forge/TASK-173-fix-eval-logs-queue-priority
 
 Execution started from TASK-174 branch state because TASK-173 depends on TASK-174 and TASK-174 is pending merge; this enables immediate validation continuity for mock-backed repros.
+
+Started implementation after TASK-174 merge. Added server-side eval-claim loop fix in `server::process_pending_commits`: now re-queries pending commits and processes one commit per claim cycle to honor latest persisted queue ordering between evaluations (prevents stale snapshot ordering after UI reorder).
+
+This change keeps deterministic DB queue priority authoritative for subsequent claims, aligning runtime selection behavior with reordered eval queue display.
+
+Verification run: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge queries::commits::tests::reorder_validation_accepts_full_permutation_and_positions_are_dense` ✅.
 <!-- SECTION:NOTES:END -->
