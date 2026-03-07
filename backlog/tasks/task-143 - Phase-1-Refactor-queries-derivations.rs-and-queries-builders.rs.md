@@ -4,7 +4,7 @@ title: 'Phase 1: Refactor queries/derivations.rs and queries/builders.rs'
 status: Done
 assignee: []
 created_date: '2026-03-01 15:59'
-updated_date: '2026-03-02 04:43'
+updated_date: '2026-03-07 23:14'
 labels:
   - refactoring
   - architecture
@@ -13,6 +13,7 @@ milestone: m-2
 dependencies:
   - TASK-3
 priority: high
+ordinal: 87000
 ---
 
 ## Description

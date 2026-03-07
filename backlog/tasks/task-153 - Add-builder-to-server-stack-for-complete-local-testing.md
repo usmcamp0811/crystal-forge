@@ -4,13 +4,14 @@ title: Add builder to server-stack for complete local testing
 status: Done
 assignee: []
 created_date: '2026-03-01 23:31'
-updated_date: '2026-03-01 23:34'
+updated_date: '2026-03-07 23:14'
 labels:
   - devtools
   - process-compose
   - testing
 dependencies: []
 priority: medium
+ordinal: 88000
 ---
 
 ## Description
