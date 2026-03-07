@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: Review
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-07 02:50'
+updated_date: '2026-03-07 03:04'
 labels:
   - dev-experience
   - eval-queue
@@ -232,6 +232,14 @@ Committed as `3f50a138` (`fix: route dashboard commit nodes by active stage`) an
 Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/152
 
 Task moved to Review per workflow after implementation and verification pass for targeted commands.
+
+Addressed reviewer concerns in `3632a0a6`: API-mode mock builds now explicitly skip signing and cache-push side effects to avoid synthetic store-path noise while retaining normal completion state transitions.
+
+Added deterministic helper coverage: `mock_policy_fail_pattern_is_deterministic` (eval path) and `mock_build_fail_pattern_is_deterministic` (builder path), plus documentation updates clarifying mixed outcomes and skipped post-build side effects in mock mode.
+
+Verification rerun: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge models::evaluate_with_policies::tests` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge tests::mock_store_path_is_deterministic_and_sanitized` ✅, `nix build .#devScripts.server-stack-mock` ✅.
+
+Posted MR follow-up notes on !152 with the review response and command results.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
