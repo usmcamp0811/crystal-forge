@@ -32,10 +32,13 @@ execution_mode = "real"
 - Eval phase:
   - deterministic per-system progression (~30s total per eval run with default 3 systems)
   - streaming eval logs and status updates
+  - deterministic mixed system outcomes (includes policy-failed systems)
   - derivation rows are inserted and moved to `DryRunComplete`
 - Build phase:
   - deterministic fast build progression in both API-builder and legacy-builder modes
-  - successful completion path with synthetic store path
+  - deterministic mixed outcomes (includes failed builds)
+  - synthetic store paths only for successful mock builds
+  - signing and cache-push side effects are skipped for mock API builds
   - normal job completion API path remains in use
 
 ## UI Indicator

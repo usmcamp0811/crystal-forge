@@ -385,47 +385,59 @@ async fn execute_build_job(
             // Update derivation with store_path for signing
             derivation.store_path = Some(store_path.clone());
 
-            // Sign the derivation
-            let _ = client
-                .append_logs(job.id, "🔐 Signing derivation...\n")
-                .await;
-            if let Err(e) = derivation.sign(&cache_config).await {
-                warn!(
-                    "⚠️ Signing failed for job #{}, continuing anyway: {}",
-                    job.id, e
-                );
+            if execution_mode.is_mock() {
                 let _ = client
-                    .append_logs(job.id, &format!("⚠️  Signing failed: {}\n", e))
+                    .append_logs(
+                        job.id,
+                        "🧪 MOCK MODE: skipping signing and cache push for synthetic artifacts\n",
+                    )
                     .await;
             } else {
-                let _ = client.append_logs(job.id, "✅ Derivation signed\n").await;
-            }
-
-            // Create cache push job if configured
-            if cache_config.push_after_build {
+                // Sign the derivation
                 let _ = client
-                    .append_logs(job.id, "📤 Queuing cache push job...\n")
+                    .append_logs(job.id, "🔐 Signing derivation...\n")
                     .await;
-                if let Some(ref store_path) = derivation.store_path {
-                    if let Err(e) = crystal_forge::queries::cache_push::create_cache_push_job(
-                        &pool,
-                        derivation.id,
-                        store_path,
-                        cache_config.push_to.as_deref(),
-                    )
-                    .await
-                    {
-                        warn!(
-                            "⚠️ Cache queue failed for job #{}, continuing anyway: {}",
-                            job.id, e
-                        );
-                        let _ = client
-                            .append_logs(job.id, &format!("⚠️  Cache push queue failed: {}\n", e))
-                            .await;
-                    } else {
-                        let _ = client
-                            .append_logs(job.id, "✅ Cache push job queued\n")
-                            .await;
+                if let Err(e) = derivation.sign(&cache_config).await {
+                    warn!(
+                        "⚠️ Signing failed for job #{}, continuing anyway: {}",
+                        job.id, e
+                    );
+                    let _ = client
+                        .append_logs(job.id, &format!("⚠️  Signing failed: {}\n", e))
+                        .await;
+                } else {
+                    let _ = client.append_logs(job.id, "✅ Derivation signed\n").await;
+                }
+
+                // Create cache push job if configured
+                if cache_config.push_after_build {
+                    let _ = client
+                        .append_logs(job.id, "📤 Queuing cache push job...\n")
+                        .await;
+                    if let Some(ref store_path) = derivation.store_path {
+                        if let Err(e) = crystal_forge::queries::cache_push::create_cache_push_job(
+                            &pool,
+                            derivation.id,
+                            store_path,
+                            cache_config.push_to.as_deref(),
+                        )
+                        .await
+                        {
+                            warn!(
+                                "⚠️ Cache queue failed for job #{}, continuing anyway: {}",
+                                job.id, e
+                            );
+                            let _ = client
+                                .append_logs(
+                                    job.id,
+                                    &format!("⚠️  Cache push queue failed: {}\n", e),
+                                )
+                                .await;
+                        } else {
+                            let _ = client
+                                .append_logs(job.id, "✅ Cache push job queued\n")
+                                .await;
+                        }
                     }
                 }
             }
@@ -714,7 +726,7 @@ fn is_local_db_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::mock_store_path;
+    use super::{mock_store_path, should_mock_build_fail};
 
     #[test]
     fn mock_store_path_is_deterministic_and_sanitized() {
@@ -726,5 +738,11 @@ mod tests {
         assert_eq!(one, two);
         assert!(one.starts_with("/nix/store/"));
         assert!(one.ends_with("-web-ui-main-amd64"));
+    }
+
+    #[test]
+    fn mock_build_fail_pattern_is_deterministic() {
+        assert!(should_mock_build_fail("myflake-control-0"));
+        assert!(!should_mock_build_fail("myflake-worker-0"));
     }
 }

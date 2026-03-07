@@ -693,7 +693,7 @@ pub async fn evaluate_with_mock_eval_jobs(
         );
         let derivation_target = format!("{}#nixosConfigurations.{}", flake_ref, system_name);
 
-        let policy_failed = systems.len() > 1 && idx == 1;
+        let policy_failed = should_mock_policy_fail(systems.len(), idx);
 
         let derivation = insert_derivation_with_target(
             pool,
@@ -832,9 +832,13 @@ fn mock_eval_stage_delay(system_count: usize) -> std::time::Duration {
     std::time::Duration::from_millis(per_stage)
 }
 
+fn should_mock_policy_fail(system_count: usize, idx: usize) -> bool {
+    system_count > 1 && idx == 1
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{mock_eval_stage_delay, resolve_mock_systems};
+    use super::{mock_eval_stage_delay, resolve_mock_systems, should_mock_policy_fail};
 
     #[test]
     fn mock_systems_fallback_and_filtering() {
@@ -869,5 +873,13 @@ mod tests {
         assert_eq!(mock_eval_stage_delay(3).as_millis(), 2000);
         assert_eq!(mock_eval_stage_delay(1).as_millis(), 6000);
         assert_eq!(mock_eval_stage_delay(10).as_millis(), 1000);
+    }
+
+    #[test]
+    fn mock_policy_fail_pattern_is_deterministic() {
+        assert!(!should_mock_policy_fail(1, 0));
+        assert!(!should_mock_policy_fail(3, 0));
+        assert!(should_mock_policy_fail(3, 1));
+        assert!(!should_mock_policy_fail(3, 2));
     }
 }
