@@ -4,7 +4,7 @@ title: Fix eval logs visibility and enforce eval queue reordering priority
 status: Review
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-07 23:37'
+updated_date: '2026-03-07 23:52'
 labels:
   - bug
   - eval-queue
@@ -111,4 +111,10 @@ Additional reviewer follow-up in `e7e14c4e`: moved flake/config setup failure ha
 Verification rerun after this change: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge server::tests::select_next_pending_commit_id_skips_failed_heads` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge server::tests::select_next_pending_commit_id_honors_reordered_head` ✅.
 
 Posted follow-up review response note on MR !153 with fix details and commands.
+
+Applied additional blocker fix in `12883cf0`: inner claim loop now returns to outer notifier/ticker pacing on flake lookup failure, config-load failure, non-race claim-start failure, and eval failure path (after `mark_commit_evaluation_failed`) to prevent same-head hot-loop retries.
+
+Updated MR !153 description to resolve template inconsistency in schema section (`No schema changes` checked; migration/backfill unchecked). Added review note with control-flow clarification.
+
+Verification rerun after final pacing fix: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge queries::commits::tests::reorder_validation_accepts_full_permutation_and_positions_are_dense` ✅.
 <!-- SECTION:NOTES:END -->
