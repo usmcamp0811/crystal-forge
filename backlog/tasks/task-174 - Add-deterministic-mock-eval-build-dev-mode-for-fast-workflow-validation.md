@@ -1,9 +1,10 @@
 ---
 id: TASK-174
 title: Add deterministic mock eval/build dev mode for fast workflow validation
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
+updated_date: '2026-03-07 03:16'
 labels:
   - dev-experience
   - eval-queue
@@ -11,6 +12,7 @@ labels:
   - testing
 dependencies: []
 priority: high
+ordinal: 2000
 ---
 
 ## Description
