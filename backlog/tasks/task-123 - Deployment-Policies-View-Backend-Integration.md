@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: To Do
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-07 23:39'
+updated_date: '2026-03-07 23:40'
 labels:
   - backend
   - api
@@ -151,3 +151,109 @@ Medium
 - [ ] #17 nix build .#server succeeds (integration check)
 - [ ] #18 nix build .#web-ui succeeds (integration check)
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+### Phase 1: Backend API Endpoints (packages/default)
+
+1. **Create deployment policies queries module** (`packages/default/src/queries/deployment_policies.rs`)
+   - `list_deployment_policies(pool, limit, offset)` - Returns Vec<DeploymentPolicy>
+   - `get_deployment_policy_by_id(pool, id)` - Returns Option<DeploymentPolicy>
+   - Use existing `deployment_policies` table schema from migration 0080
+
+2. **Create API handlers module** (`packages/default/src/handlers/api/deployment_policies.rs`)
+   - `list_deployment_policies()` handler
+     - Extract user with `RequireAuth` (any authenticated role)
+     - Parse query params: `limit` (default 100, max 1000), `offset` (default 0)
+     - Call query layer
+     - Return JSON response with policies array
+   - `get_deployment_policy()` handler
+     - Extract user with `RequireAuth`
+     - Parse UUID from path param
+     - Call query layer
+     - Return 404 if not found, 200 with JSON if found
+
+3. **Register routes in router** (`packages/default/src/handlers/api/mod.rs`)
+   - Add `mod deployment_policies;`
+   - Register routes under `/api/v1/deployment-policies`
+
+4. **Add API response models** (if not already in `packages/default/src/api/models.rs`)
+   - Verify `DeploymentPolicySummary` exists and matches DB schema
+   - Add `DeploymentPoliciesListResponse { policies: Vec<DeploymentPolicySummary> }`
+
+### Phase 2: Frontend Integration (packages/web-ui)
+
+5. **Create API client module** (`packages/web-ui/src/api/deployment_policies.rs`)
+   - `fetch_policies(limit, offset) -> Result<Vec<DeploymentPolicyDTO>, ApiError>`
+   - `fetch_policy_by_id(id) -> Result<DeploymentPolicyDTO, ApiError>`
+   - Use existing HTTP client patterns from other API modules (e.g., `api/flakes.rs`)
+
+6. **Define frontend models** (`packages/web-ui/src/models/deployment_policy.rs` or update existing)
+   - Verify `DeploymentPolicyDTO` matches backend response
+   - Add `#[derive(Clone, PartialEq, serde::Deserialize)]`
+
+7. **Create adapter layer** (`packages/web-ui/src/components/policies/adapter.rs`)
+   - `load_policies_with_fallback() -> Vec<DeploymentPolicyDTO>`
+   - Try `fetch_policies()`, on error log warning and return mock data
+   - Handle 401/403 by redirecting to login (use existing auth helpers)
+   - Handle 5xx/network errors with silent fallback
+
+8. **Update policies view** (`packages/web-ui/src/components/policies/view.rs`)
+   - Replace direct mock data usage with `load_policies_with_fallback()`
+   - Add conditional rendering for Edit/Delete buttons based on user role
+   - Extract role from auth context (check existing auth state management)
+
+### Phase 3: Testing & Verification
+
+9. **Backend unit tests** (`packages/default/src/handlers/api/deployment_policies.rs` inline or separate test module)
+   - Test list endpoint with various auth roles
+   - Test detail endpoint with valid/invalid IDs
+   - Test pagination parameters
+
+10. **Integration verification**
+    - Run `cargo fmt --check`
+    - Run `cargo clippy -- -D warnings`
+    - Build server: `nix build .#server`
+    - Build web-ui: `nix build .#web-ui`
+    - Manual test: Start `server-stack up` and verify UI loads policies
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Architectural Constraints
+
+- **Use Axum extractors for RBAC**: Follow modern pattern with `RequireAuth`, not legacy function guards
+- **No business logic in handlers**: Handlers orchestrate, queries execute DB operations
+- **Module size limit**: Keep handlers under 500 lines; split if needed
+- **Error handling**: Use `Result<T, (StatusCode, String)>` pattern from existing handlers
+- **Pagination**: Default limit 100, max 1000 (prevent DoS)
+- **DTOs match exactly**: Frontend models must match backend API responses (field names, types)
+- **Fallback is silent**: Log errors but don't alert users on fallback to mock data
+- **No unwrap() in handlers**: Use proper error propagation
+- **Follow existing patterns**: Mirror structure from `handlers/api/builders.rs` and `api/flakes.rs`
+
+## Dependencies
+
+- ✅ TASK-65.1: Identity and RBAC data model (Done) - Required for `RequireAuth` extractor
+- ✅ Migration 0080: `deployment_policies` table schema (Done) - Required for DB queries
+- ✅ Backend models: `DeploymentPolicy` enum exists in `models/deployment_policies.rs`
+- Frontend auth context: Must have user role available (assumed present from TASK-65.0)
+
+## Impact Areas
+
+- **Backend**: New API module, new queries module, router registration
+- **Frontend**: New API client, adapter layer, view component updates
+- **Database**: Read-only queries, no schema changes
+- **Auth**: Uses existing RBAC extractors, no new auth logic
+- **Tests**: New unit tests for API endpoints
+
+## Related Tasks
+
+- Future: POST/PUT/DELETE endpoints for policy CRUD (create follow-up task)
+- Future: Policy assignment to environments/systems (separate feature)
+- Future: Policy evaluation preview in UI
+<!-- SECTION:NOTES:END -->
