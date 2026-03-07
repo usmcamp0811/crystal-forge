@@ -13,7 +13,6 @@ use crate::queue::QueueNotifier;
 use crate::queries::flakes::get_all_flakes_from_db;
 use anyhow::Result;
 use sqlx::PgPool;
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::time;
 use tokio::time::interval;
@@ -194,8 +193,6 @@ async fn process_pending_commits(
     cf_state: &Arc<crate::handlers::agent_request::CFState>,
     queue_notifier: &Arc<QueueNotifier>,
 ) -> Result<()> {
-    let mut skipped_preclaim_commit_ids = HashSet::new();
-
     loop {
         let pending_commits = match get_commits_pending_evaluation(pool).await {
             Ok(commits) => commits,
@@ -210,17 +207,7 @@ async fn process_pending_commits(
         }
 
         info!("📌 Found {} pending commits", pending_commits.len());
-        let Some(next_commit_id) =
-            select_next_pending_commit_id(pending_commits.iter().map(|c| c.id), &skipped_preclaim_commit_ids)
-        else {
-            debug!(
-                "⏭️ Skipping eval cycle: all pending commits were pre-claim failures in this cycle: {:?}",
-                skipped_preclaim_commit_ids
-            );
-            return Ok(());
-        };
-
-        let Some(commit) = pending_commits.into_iter().find(|c| c.id == next_commit_id) else {
+        let Some(commit) = pending_commits.into_iter().next() else {
             return Ok(());
         };
         // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
@@ -238,9 +225,8 @@ async fn process_pending_commits(
                     "❌ Could not mark commit {} evaluation started: {}",
                     commit.git_commit_hash, e
                 );
-                skipped_preclaim_commit_ids.insert(commit.id);
             }
-            continue;
+            return Ok(());
         }
 
         // Get flake info (post-claim; failures now go through retry/defer path)
@@ -252,7 +238,7 @@ async fn process_pending_commits(
                     commit.git_commit_hash, e
                 );
                 let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
-                continue;
+                return Ok(());
             }
         };
 
@@ -262,7 +248,7 @@ async fn process_pending_commits(
             Err(e) => {
                 error!("❌ Failed to load config: {}", e);
                 let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
-                continue;
+                return Ok(());
             }
         };
         let build_config = cfg.get_build_config();
@@ -464,45 +450,9 @@ async fn process_pending_commits(
                                 commit.git_commit_hash, mark_err
                             );
                         }
+                        return Ok(());
                     }
         }
-    }
-}
-
-fn select_next_pending_commit_id(
-    mut pending_commit_ids: impl Iterator<Item = i32>,
-    skipped_preclaim_commit_ids: &HashSet<i32>,
-) -> Option<i32> {
-    pending_commit_ids.find(|commit_id| !skipped_preclaim_commit_ids.contains(commit_id))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::select_next_pending_commit_id;
-    use std::collections::HashSet;
-
-    #[test]
-    fn select_next_pending_commit_id_skips_failed_heads() {
-        let pending = vec![11, 12, 13];
-        let mut skipped = HashSet::new();
-        skipped.insert(11);
-
-        assert_eq!(
-            select_next_pending_commit_id(pending.into_iter(), &skipped),
-            Some(12)
-        );
-    }
-
-    #[test]
-    fn select_next_pending_commit_id_honors_reordered_head() {
-        let mut skipped = HashSet::new();
-        skipped.insert(11);
-
-        let reordered = vec![13, 11, 12];
-        assert_eq!(
-            select_next_pending_commit_id(reordered.into_iter(), &skipped),
-            Some(13)
-        );
     }
 }
 
