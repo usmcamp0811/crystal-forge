@@ -4,7 +4,7 @@ title: Add deterministic mock eval/build dev mode for fast workflow validation
 status: In Progress
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-07 02:00'
+updated_date: '2026-03-07 02:23'
 labels:
   - dev-experience
   - eval-queue
@@ -222,6 +222,12 @@ Fixed missing live build/eval logs in split-origin dev setups by teaching websoc
 Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `1754948d` (`fix: pin env banners and route timeline nodes`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Adjusted dashboard commit timeline routing semantics per UX request: only actively building commits route to Builds, actively evaluating commits route to commit-specific Evaluations, and all other commits route to Flakes.
+
+Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
+
+Committed as `3f50a138` (`fix: route dashboard commit nodes by active stage`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
