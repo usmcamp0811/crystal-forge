@@ -257,3 +257,23 @@ Medium
 - Future: Policy assignment to environments/systems (separate feature)
 - Future: Policy evaluation preview in UI
 <!-- SECTION:NOTES:END -->
+
+## Definition of Done
+<!-- DOD:BEGIN -->
+- [ ] #1 All 18 acceptance criteria are checked and verified
+- [ ] #2 Backend GET endpoints return expected JSON responses (verified with curl or similar)
+- [ ] #3 Frontend UI displays policies from backend API (verified in browser with dev tools)
+- [ ] #4 Role-based button visibility works correctly for Admin/Operator/Viewer (manually tested)
+- [ ] #5 Fallback to mock data occurs gracefully on API errors (tested by stopping server)
+- [ ] #6 No console errors or warnings in browser dev tools
+- [ ] #7 cargo fmt --check passes for all modified Rust files
+- [ ] #8 cargo clippy -- -D warnings passes for backend package
+- [ ] #9 nix build .#server completes successfully
+- [ ] #10 nix build .#web-ui completes successfully
+- [ ] #11 All new Rust files are tracked in Git (git status shows no untracked source files)
+- [ ] #12 Code follows existing repository patterns (handlers match builders.rs style, API client matches flakes.rs style)
+- [ ] #13 No unwrap() calls in production code paths
+- [ ] #14 Error responses include helpful messages (tested with invalid IDs, missing auth)
+- [ ] #15 Unit tests exist for both API endpoints and pass
+- [ ] #16 Manual smoke test: server-stack up, navigate to policies page, verify data loads
+<!-- DOD:END -->
