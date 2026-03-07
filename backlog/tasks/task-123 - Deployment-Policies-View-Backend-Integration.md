@@ -236,6 +236,8 @@ Medium
     - Build server: `nix build .#server`
     - Build web-ui: `nix build .#web-ui`
     - Manual test: Start `server-stack up` and verify UI loads policies
+
+## NEW IMPLEMENTATION PLAN (FULL CRUD)
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
