@@ -4,7 +4,7 @@ title: Fix eval logs visibility and enforce eval queue reordering priority
 status: Review
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-07 23:27'
+updated_date: '2026-03-07 23:37'
 labels:
   - bug
   - eval-queue
@@ -105,4 +105,10 @@ Pre-claim failure paths now skip current head for the remainder of that cycle (`
 Added focused tests in `server/mod.rs`: `select_next_pending_commit_id_skips_failed_heads` and `select_next_pending_commit_id_honors_reordered_head`. Verification rerun: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and both targeted test commands ✅.
 
 Posted MR follow-up review response notes on !153 with fix summary and verification commands.
+
+Additional reviewer follow-up in `e7e14c4e`: moved flake/config setup failure handling to post-claim path and call `mark_commit_evaluation_failed` on those errors so retry metadata/backoff applies; this prevents head-of-queue hot-loop starvation while preserving re-query-per-claim reorder semantics.
+
+Verification rerun after this change: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge server::tests::select_next_pending_commit_id_skips_failed_heads` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge server::tests::select_next_pending_commit_id_honors_reordered_head` ✅.
+
+Posted follow-up review response note on MR !153 with fix details and commands.
 <!-- SECTION:NOTES:END -->
