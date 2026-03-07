@@ -193,10 +193,23 @@ async fn process_pending_commits(
     cf_state: &Arc<crate::handlers::agent_request::CFState>,
     queue_notifier: &Arc<QueueNotifier>,
 ) -> Result<()> {
-    match get_commits_pending_evaluation(&pool).await {
-        Ok(pending_commits) => {
-            info!("📌 Found {} pending commits", pending_commits.len());
-            for commit in pending_commits {
+    loop {
+        let pending_commits = match get_commits_pending_evaluation(pool).await {
+            Ok(commits) => commits,
+            Err(e) => {
+                error!("❌ Failed to get pending commits: {e}");
+                return Ok(());
+            }
+        };
+
+        if pending_commits.is_empty() {
+            return Ok(());
+        }
+
+        info!("📌 Found {} pending commits", pending_commits.len());
+        let Some(commit) = pending_commits.into_iter().next() else {
+            return Ok(());
+        };
                 // Get flake info
                 let flake = match commit.get_flake(&pool).await {
                     Ok(flake) => flake,
@@ -239,6 +252,7 @@ async fn process_pending_commits(
                             commit.id,
                             commit.git_commit_hash
                         );
+                        return Ok(());
                     } else {
                         error!(
                             "❌ Could not mark commit {} evaluation started: {}",
@@ -435,12 +449,8 @@ async fn process_pending_commits(
                             );
                         }
                     }
-                }
-            }
         }
-        Err(e) => error!("❌ Failed to get pending commits: {e}"),
     }
-    Ok(())
 }
 
 /// Background task to hydrate commit artifact cache (nixosConfigurations + changed files).
