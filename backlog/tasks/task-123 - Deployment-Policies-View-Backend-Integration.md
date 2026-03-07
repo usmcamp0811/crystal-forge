@@ -1,10 +1,10 @@
 ---
 id: TASK-123
 title: Deployment Policies View - Backend Integration
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-07 23:45'
+updated_date: '2026-03-07 23:50'
 labels:
   - backend
   - api
@@ -279,6 +279,8 @@ Users will be able to fully manage deployment policies through the web interface
   - **Mitigation**: Split into submodules if exceeds 500 lines (e.g., `deployment_policies/create.rs`, `deployment_policies/update.rs`)
 - **Risk**: Frontend modal complexity
   - **Mitigation**: Reuse existing modal components from builders feature, follow established patterns
+
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-backend-integration
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
