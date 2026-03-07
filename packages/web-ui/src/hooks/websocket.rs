@@ -7,6 +7,44 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
 
+fn websocket_base() -> (String, String) {
+    let window = web_sys::window().expect("no global window");
+    let page_protocol = window
+        .location()
+        .protocol()
+        .unwrap_or_else(|_| "http:".to_string());
+    let default_ws_protocol = if page_protocol == "https:" {
+        "wss".to_string()
+    } else {
+        "ws".to_string()
+    };
+
+    if let Ok(Some(storage)) = window.local_storage() {
+        if let Ok(Some(origin)) = storage.get_item("cf_backend_origin") {
+            let trimmed = origin.trim();
+            if !trimmed.is_empty() {
+                let ws_origin = if let Some(rest) = trimmed.strip_prefix("https://") {
+                    format!("wss://{rest}")
+                } else if let Some(rest) = trimmed.strip_prefix("http://") {
+                    format!("ws://{rest}")
+                } else {
+                    format!("{}://{}", default_ws_protocol, trimmed)
+                };
+
+                if let Some((proto, host)) = ws_origin.split_once("://") {
+                    return (proto.to_string(), host.to_string());
+                }
+            }
+        }
+    }
+
+    let host = window
+        .location()
+        .host()
+        .unwrap_or_else(|_| "localhost:8080".to_string());
+    (default_ws_protocol, host)
+}
+
 /// System metrics sent by the builder during a build.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct SystemMetrics {
@@ -264,20 +302,7 @@ fn connect_websocket(
     connection_state.set(ConnectionState::Connecting);
 
     // Build WebSocket URL
-    let protocol = if web_sys::window()
-        .and_then(|w| w.location().protocol().ok())
-        .map(|p| p == "https:")
-        .unwrap_or(false)
-    {
-        "wss"
-    } else {
-        "ws"
-    };
-
-    let host = web_sys::window()
-        .and_then(|w| w.location().host().ok())
-        .unwrap_or_else(|| "localhost:8080".to_string());
-
+    let (protocol, host) = websocket_base();
     let ws_url = format!("{protocol}://{host}/api/v1/build-jobs/{job_id}/logs/stream");
 
     // Create WebSocket
@@ -386,20 +411,7 @@ fn connect_eval_websocket(
     connection_state.set(ConnectionState::Connecting);
 
     // Build WebSocket URL
-    let protocol = if web_sys::window()
-        .and_then(|w| w.location().protocol().ok())
-        .map(|p| p == "https:")
-        .unwrap_or(false)
-    {
-        "wss"
-    } else {
-        "ws"
-    };
-
-    let host = web_sys::window()
-        .and_then(|w| w.location().host().ok())
-        .unwrap_or_else(|| "localhost:8080".to_string());
-
+    let (protocol, host) = websocket_base();
     let ws_url = format!("{protocol}://{host}/api/v1/commits/{commit_id}/eval/stream");
 
     // Create WebSocket

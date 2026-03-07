@@ -52,20 +52,20 @@ fn api_base_url() -> String {
 
 #[component]
 fn EnvironmentBanner(placement: BannerPlacement, title: &'static str, message: &'static str) -> Element {
-    let border_style = if placement == BannerPlacement::Top {
-        "border-bottom: 2px solid #9a3412;"
+    let (edge_style, border_style) = if placement == BannerPlacement::Top {
+        ("top: 0;", "border-bottom: 2px solid #9a3412;")
     } else {
-        "border-top: 2px solid #9a3412;"
+        ("bottom: 0;", "border-top: 2px solid #9a3412;")
     };
 
     rsx! {
         div {
-            style: "background-color: #ea580c; {border_style} padding: 0.5rem 1rem;",
+            style: "position: fixed; left: 0; right: 0; {edge_style} z-index: 1000; background-color: #ea580c; {border_style} padding: 0.25rem 0.75rem;",
             "data-environment-banner": "true",
             div {
                 style: "display: flex; align-items: center; justify-content: center; gap: 0.75rem; max-width: 80rem; margin: 0 auto;",
                 svg {
-                    style: "width: 1rem; height: 1rem; color: #ffffff; flex-shrink: 0;",
+                    style: "width: 0.9rem; height: 0.9rem; color: #ffffff; flex-shrink: 0;",
                     fill: "none",
                     stroke: "currentColor",
                     view_box: "0 0 24 24",
@@ -77,7 +77,7 @@ fn EnvironmentBanner(placement: BannerPlacement, title: &'static str, message: &
                     }
                 }
                 div {
-                    style: "display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.5rem; font-size: 0.875rem; color: #ffffff;",
+                    style: "display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 0.4rem; font-size: 0.75rem; line-height: 1.1; color: #ffffff;",
                     span { style: "font-weight: 700;", "{title}" }
                     span { style: "opacity: 0.95;", "{message}" }
                 }
@@ -143,6 +143,9 @@ pub fn DevModeBanner(placement: BannerPlacement) -> Element {
     }
 
     rsx! {
+        div {
+            style: "height: 1.75rem;"
+        }
         EnvironmentBanner {
             placement,
             title: "NON-PRODUCTION ENVIRONMENT",
