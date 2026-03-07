@@ -4,11 +4,11 @@ title: Enable Codex code review in GitLab CI
 status: Done
 assignee: []
 created_date: '2026-02-27 01:08'
-updated_date: '2026-02-27 22:14'
+updated_date: '2026-03-07 23:14'
 labels: []
 dependencies: []
 priority: high
-ordinal: 82000
+ordinal: 84000
 ---
 
 ## Description

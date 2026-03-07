@@ -4,11 +4,11 @@ title: Add explicit branch field for flake registry entries
 status: Done
 assignee: []
 created_date: '2026-02-26 21:57'
-updated_date: '2026-02-28 00:31'
+updated_date: '2026-03-07 23:14'
 labels: []
 dependencies: []
 priority: high
-ordinal: 84000
+ordinal: 86000
 ---
 
 ## Description
