@@ -45,7 +45,7 @@ pub use cve_worker::run_cve_scan_loop;
 pub use worker::{create_gc_root, get_gc_root_path, remove_gc_root};
 
 use crate::config::CrystalForgeConfig;
-use crate::log::{WorkerState, WorkerStatus, get_build_status};
+use crate::log::{get_build_status, WorkerState, WorkerStatus};
 use sqlx::PgPool;
 use tracing::{info, warn};
 
@@ -82,6 +82,7 @@ pub async fn run_build_loop(pool: PgPool) {
     });
     let build_config = cfg.get_build_config();
     let cache_config = cfg.get_cache_config();
+    let use_mock_build = cfg.server.execution_mode.is_mock();
     let num_workers = build_config.max_concurrent_derivations;
 
     info!("🏗 Starting {} continuous build workers...", num_workers);
@@ -118,9 +119,18 @@ pub async fn run_build_loop(pool: PgPool) {
         let build_config = build_config.clone();
         let cache_config = cache_config.clone();
         let worker_uuid = format!("{}-worker-{}", hostname, worker_id);
+        let use_mock_build = use_mock_build;
 
         let handle = tokio::spawn(async move {
-            worker::build_worker(worker_id, worker_uuid, pool, build_config, cache_config).await;
+            worker::build_worker(
+                worker_id,
+                worker_uuid,
+                pool,
+                build_config,
+                cache_config,
+                use_mock_build,
+            )
+            .await;
         });
         handles.push(handle);
     }

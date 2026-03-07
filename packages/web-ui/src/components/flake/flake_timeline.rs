@@ -7,6 +7,7 @@ use dioxus::prelude::*;
 use std::collections::HashSet;
 
 use crate::api::models::{BuildStatus, FlakeCommit, FlakeTimeline};
+use crate::routes::Route;
 use crate::theme;
 use chrono::TimeZone;
 
@@ -633,7 +634,7 @@ fn TimelineGraph(
     let node_center = node_top + (node_size / 2); // Center at y=14
     let line_thickness = 5;
     let line_top = node_center - 2; // Line at y=12, 5px thick, centers at y=14
-    // Height for node + text labels only
+                                    // Height for node + text labels only
     let container_height = 65;
 
     rsx! {
@@ -734,10 +735,21 @@ fn CommitNode(
     node_top: i32,
     node_size: i32,
 ) -> Element {
+    let navigator = navigator();
     let short_hash = commit.hash.chars().take(7).collect::<String>();
     let node_bg = commit_node_bg(commit.system_count, commit.commits_behind);
     let build_status = commit.build_status.unwrap_or(BuildStatus::Idle);
     let build_ring = build_ring_style(build_status);
+    let target_route = if build_status == BuildStatus::Building {
+        Some(Route::BuildsView {})
+    } else if is_eval_active(commit.evaluation_status.as_deref()) {
+        Some(Route::EvaluationsCommitView {
+            commit_id: commit.id,
+        })
+    } else {
+        Some(Route::FlakesView {})
+    };
+    let clickable = target_route.is_some();
 
     let behind_text = if commit.commits_behind == 0 {
         "Latest".to_string()
@@ -780,9 +792,18 @@ fn CommitNode(
 
             // Main node - colored circle with system count, centered ON the line
             div {
-                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center cursor-pointer {node_bg} border-2",
+                class: "absolute left-1/2 -translate-x-1/2 rounded-full flex items-center justify-center {node_bg} border-2",
+                class: if clickable { "cursor-pointer" } else { "cursor-default" },
                 style: "width: {node_size}px; height: {node_size}px; top: {badge_top}px; box-shadow: {build_ring}; {node_border_style}",
                 title: "{build_status.label()}",
+                onclick: {
+                    let target_route = target_route.clone();
+                    move |_| {
+                        if let Some(route) = target_route.clone() {
+                            navigator.push(route);
+                        }
+                    }
+                },
                 span {
                     class: "text-[9px] font-bold",
                     style: "{node_text_style}",
@@ -864,8 +885,17 @@ fn CommitNode(
 
             // Text content below the node
             div {
-                class: "absolute left-1/2 -translate-x-1/2 flex flex-col items-center cursor-pointer",
+                class: "absolute left-1/2 -translate-x-1/2 flex flex-col items-center",
+                class: if clickable { "cursor-pointer" } else { "cursor-default" },
                 style: "top: {text_top}px; min-width: 50px;",
+                onclick: {
+                    let target_route = target_route.clone();
+                    move |_| {
+                        if let Some(route) = target_route.clone() {
+                            navigator.push(route);
+                        }
+                    }
+                },
 
                 // Commit hash
                 span {
@@ -921,6 +951,18 @@ fn build_ring_style(status: BuildStatus) -> &'static str {
         BuildStatus::Building => "0 0 0 3px var(--cf-timeline-ring-building)",
         _ => "0 0 0 2px var(--cf-timeline-ring-idle)",
     }
+}
+
+fn is_eval_active(status: Option<&str>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+
+    let normalized = status.trim().to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "pending" | "queued" | "evaluating" | "in_progress"
+    )
 }
 
 fn segment_color(_prev: &FlakeCommit, next: &FlakeCommit) -> Option<&'static str> {

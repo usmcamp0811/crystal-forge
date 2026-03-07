@@ -1,16 +1,18 @@
 use anyhow::Context;
-use axum::Extension;
 use axum::http::{
+    header::{HeaderName, ACCEPT, CONTENT_TYPE},
     HeaderValue, Method,
-    header::{ACCEPT, CONTENT_TYPE, HeaderName},
 };
+use axum::Extension;
 use axum::{
-    Router,
     routing::{delete, get, patch, post, put},
+    Router,
 };
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use crystal_forge::{
-    auth::dev_mode::{ensure_bootstrap_oidc_admin_mapping, ensure_dev_users},
+    auth::dev_mode::{
+        ensure_bootstrap_oidc_admin_mapping, ensure_dev_users, ensure_local_bootstrap_admin,
+    },
     config::CrystalForgeConfig,
     flake::commits::initialize_flake_commits,
     handlers::{
@@ -51,6 +53,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load and validate config
     let cfg = CrystalForgeConfig::load()?;
+    cfg.server.validate().map_err(anyhow::Error::msg)?;
     CrystalForgeConfig::validate_db_connection().await?;
 
     // Validate auth mode and apply production guard
@@ -69,6 +72,17 @@ async fn main() -> anyhow::Result<()> {
             warn!("⚠️  Running in development auth mode (AUTH_MODE=dev)");
             warn!("⚠️  This mode is insecure and should NEVER be used in production");
         }
+    }
+
+    if cfg.server.execution_mode.is_mock() {
+        if !is_local_db_host(&cfg.database.host) {
+            anyhow::bail!(
+                "server.execution_mode=mock requires a local database host (localhost/127.0.0.1/::1)"
+            );
+        }
+
+        warn!("⚠️  Running in MOCK execution mode (dev-only)");
+        warn!("⚠️  Eval/build steps are simulated and must never be used in production");
     }
 
     debug!("======== INITIALIZING DATABASE ========");
@@ -92,6 +106,20 @@ async fn main() -> anyhow::Result<()> {
             .context("Failed to bootstrap OIDC admin mapping")?;
     }
 
+    if auth_mode == "local" {
+        if let (Ok(username), Ok(password)) = (
+            std::env::var("CRYSTAL_FORGE_LOCAL_BOOTSTRAP_USERNAME"),
+            std::env::var("CRYSTAL_FORGE_LOCAL_BOOTSTRAP_PASSWORD"),
+        ) {
+            let email = std::env::var("CRYSTAL_FORGE_LOCAL_BOOTSTRAP_EMAIL")
+                .unwrap_or_else(|_| "admin@crystal-forge.local".to_string());
+
+            ensure_local_bootstrap_admin(&pool, &username, &email, &password)
+                .await
+                .context("Failed to initialize local bootstrap admin user")?;
+        }
+    }
+
     let background_pool = pool.clone();
     let deployment_pool = pool.clone();
     let flake_init_pool = pool.clone();
@@ -105,14 +133,19 @@ async fn main() -> anyhow::Result<()> {
     info!("Host: 0.0.0.0");
     info!("Port: {}", server_cfg.port);
 
-    let state = CFState::new(pool, server_cfg.clone());
-    let state_arc = Arc::new(state.clone());
-
     // Create event-driven queue notifier
     let queue_notifier = Arc::new(QueueNotifier::new());
     info!("🔔 Initialized event-driven queue notification system");
 
-    spawn_background_tasks(cfg.clone(), background_pool, state_arc.clone(), queue_notifier.clone());
+    let state = CFState::new(pool, server_cfg.clone(), queue_notifier.clone());
+    let state_arc = Arc::new(state.clone());
+
+    spawn_background_tasks(
+        cfg.clone(),
+        background_pool,
+        state_arc.clone(),
+        queue_notifier.clone(),
+    );
     let mut app = Router::new()
         .route("/status", get(status::status))
         .route("/system_state", post(state::update))
@@ -209,6 +242,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/build-jobs/:id/prioritize",
             post(builders::prioritize_build_job),
+        )
+        .route(
+            "/api/v1/build-jobs/recent",
+            get(builders::list_recent_build_jobs),
         )
         // Builder-authenticated endpoints
         .route(
@@ -351,6 +388,10 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+fn is_local_db_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Parses base64-encoded public keys from config and converts them to `VerifyingKey`s.

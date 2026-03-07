@@ -263,3 +263,98 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
         timestamp: Utc::now(),
     })
 }
+
+/// Fetch recent completed/failed builds for history views.
+pub async fn fetch_recent_build_history(pool: &PgPool, limit: i64) -> Result<Vec<BuildQueueItem>> {
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            String,
+            Option<String>,
+            DateTime<Utc>,
+            Option<DateTime<Utc>>,
+            Option<i64>,
+            Option<String>,
+        ),
+    >(
+        r#"
+        SELECT
+            bj.id AS job_id,
+            s.id AS system_id,
+            COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS hostname,
+            f.name AS flake_name,
+            c.git_commit_hash AS commit_hash,
+            NULL::TEXT AS commit_message,
+            bj.status,
+            b.name AS builder_name,
+            bj.created_at AS queued_at,
+            bj.started_at,
+            CASE
+                WHEN bj.started_at IS NULL OR bj.completed_at IS NULL THEN NULL
+                ELSE EXTRACT(EPOCH FROM (bj.completed_at - bj.started_at))::BIGINT
+            END AS elapsed_secs,
+            bj.logs
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        LEFT JOIN commits c ON c.id = d.commit_id
+        LEFT JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN systems s ON s.hostname = d.derivation_target
+        LEFT JOIN builders b ON b.id = bj.builder_id
+        WHERE bj.status IN ('success', 'failed')
+        ORDER BY COALESCE(bj.completed_at, bj.updated_at, bj.created_at) DESC
+        LIMIT $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(
+            |(
+                job_id,
+                system_id,
+                hostname,
+                flake_name,
+                commit_hash,
+                commit_message,
+                status,
+                builder_name,
+                queued_at,
+                started_at,
+                elapsed_secs,
+                logs,
+            )| {
+                let status = match status.as_str() {
+                    "failed" => BuildStatus::Failed,
+                    "success" => BuildStatus::Complete,
+                    "building" => BuildStatus::Building,
+                    "queued" => BuildStatus::Queued,
+                    _ => BuildStatus::Idle,
+                };
+
+                BuildQueueItem {
+                    job_id,
+                    system_id,
+                    hostname: hostname.unwrap_or_else(|| "unknown".to_string()),
+                    flake_name: flake_name.unwrap_or_else(|| "unknown".to_string()),
+                    commit_hash: commit_hash.unwrap_or_else(|| "unknown".to_string()),
+                    commit_message,
+                    status,
+                    builder_name,
+                    queued_at,
+                    started_at,
+                    elapsed_secs,
+                    logs,
+                }
+            },
+        )
+        .collect())
+}

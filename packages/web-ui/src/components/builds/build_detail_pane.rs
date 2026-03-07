@@ -39,6 +39,8 @@ pub fn BuildDetailPane(
     wrap_logs: Signal<bool>,
     log_query: Signal<String>,
 ) -> Element {
+    let mut log_modal_open = use_signal(|| false);
+
     let Some(build) = selected else {
         return rsx! {
             Card {
@@ -114,7 +116,7 @@ pub fn BuildDetailPane(
                             class: "space-y-3",
 
                             // WebSocket connection status and metrics
-                            if let Some(state) = ws_state {
+                            if let Some(state) = ws_state.as_ref() {
                                 div {
                                     class: "flex items-center justify-between gap-3 p-3 rounded-lg border border-gray-700 bg-gray-900/60",
                                     div {
@@ -167,6 +169,11 @@ pub fn BuildDetailPane(
                                 TogglePill { label: "Pause", value: pause_logs }
                                 TogglePill { label: "Wrap", value: wrap_logs }
                                 button {
+                                    class: "text-xs text-white rounded px-3 py-1 {theme::interactive::PRIMARY_BTN}",
+                                    onclick: move |_| log_modal_open.set(true),
+                                    "⛶ Maximize"
+                                }
+                                button {
                                     class: "text-xs text-gray-300 border border-gray-700 rounded px-2 py-1 hover:bg-gray-700",
                                     onclick: move |_| log_query.set(String::new()),
                                     "Clear"
@@ -185,7 +192,7 @@ pub fn BuildDetailPane(
                                 if logs.is_empty() {
                                     "No log lines match your filter."
                                 } else {
-                                    for line in logs {
+                                    for line in logs.iter() {
                                         "{line}\n"
                                     }
                                 }
@@ -227,6 +234,76 @@ pub fn BuildDetailPane(
                                             p { class: "text-xs text-gray-500 font-mono", "{artifact.hash}" }
                                         }
                                         p { class: "text-xs text-gray-400", "{artifact.size}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if *tab.read() == DetailTab::Logs && *log_modal_open.read() {
+                        div {
+                            style: "position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center; background-color: rgba(0, 0, 0, 0.8); padding: 1rem;",
+                            onclick: move |_| log_modal_open.set(false),
+                            div {
+                                style: "width: 100%; max-width: 90rem; max-height: 90vh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; background-color: rgb(17, 24, 39); border-radius: 0.5rem; border: 1px solid rgb(55, 65, 81); box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);",
+                                onclick: |evt| evt.stop_propagation(),
+                                div {
+                                    class: "flex items-center justify-between p-4 border-b border-gray-700",
+                                    div {
+                                        h3 { class: "text-lg font-semibold text-white", "Build Logs" }
+                                        p { class: "text-sm text-gray-400", "{build.hostname} · {short_commit(&build.commit)}" }
+                                    }
+                                    button {
+                                        class: "text-gray-400 hover:text-white transition-colors",
+                                        onclick: move |_| log_modal_open.set(false),
+                                        "✕"
+                                    }
+                                }
+                                div {
+                                    class: "p-4 border-b border-gray-700 bg-gray-900/70",
+                                    div {
+                                        class: "flex items-center gap-2 text-xs",
+                                        if let Some(state) = ws_state.as_ref() {
+                                            div {
+                                                class: match *state.read() {
+                                                    ConnectionState::Connected => "w-2 h-2 rounded-full bg-green-500",
+                                                    ConnectionState::Connecting => "w-2 h-2 rounded-full bg-yellow-500 animate-pulse",
+                                                    ConnectionState::Disconnected => "w-2 h-2 rounded-full bg-gray-500",
+                                                    ConnectionState::Error(_) => "w-2 h-2 rounded-full bg-red-500",
+                                                }
+                                            }
+                                            span {
+                                                class: "text-gray-300",
+                                                match state.read().clone() {
+                                                    ConnectionState::Connected => "Live streaming",
+                                                    ConnectionState::Connecting => "Connecting...",
+                                                    ConnectionState::Disconnected => "Disconnected",
+                                                    ConnectionState::Error(ref e) => e.as_str(),
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                div {
+                                    style: "flex: 1 1 auto; min-height: 0; min-width: 0; overflow: auto; padding: 1rem; background-color: rgb(3, 7, 18);",
+                                    pre {
+                                        class: "block w-full max-w-full text-xs font-mono text-gray-200",
+                                        style: if *wrap_logs.read() { "white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-all;" } else { "white-space: pre;" },
+                                        if logs.is_empty() {
+                                            "No log lines match your filter."
+                                        } else {
+                                            for line in logs.iter() {
+                                                "{line}\n"
+                                            }
+                                        }
+                                    }
+                                }
+                                div {
+                                    class: "p-4 border-t border-gray-700 flex justify-end",
+                                    button {
+                                        class: "px-4 py-2 rounded-lg font-medium text-sm text-white {theme::interactive::PRIMARY_BTN}",
+                                        onclick: move |_| log_modal_open.set(false),
+                                        "Close"
                                     }
                                 }
                             }

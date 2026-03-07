@@ -5,8 +5,10 @@ use dioxus::prelude::*;
 
 use crate::api::{
     self,
+    client::fetch_recent_build_jobs,
     models::{BuildStatus as ApiBuildStatus, BuilderStatus},
 };
+use crate::components::layout::Card;
 use crate::components::builds::{
     BuildAction, BuildDetailPane, BuildItem, BuildQueuePane, BuildStatus, ConfirmActionModal,
     DetailTab, MetricsRow, PendingAction, QueueAction, QueueActionButton, WorkerAction, WorkerItem,
@@ -24,10 +26,16 @@ pub fn BuildsView() -> Element {
         let _ = refresh_trigger();
         api::client::fetch_builders().await
     });
+    let recent_builds = use_resource(move || async move {
+        let _ = refresh_trigger();
+        fetch_recent_build_jobs().await
+    });
     let dashboard = use_resource(move || async move {
         let _ = refresh_trigger();
         api::client::fetch_dashboard().await
     });
+
+    let mut build_history = use_signal(Vec::<BuildItem>::new);
 
     use_effect(move || {
         if let Some(Ok(builder_list)) = &*builders.read() {
@@ -100,6 +108,54 @@ pub fn BuildsView() -> Element {
                     .collect::<Vec<_>>();
                 builds.set(mapped);
             }
+        }
+    });
+
+    use_effect(move || {
+        if let Some(Ok(items)) = &*recent_builds.read() {
+            let mapped = items
+                .iter()
+                .enumerate()
+                .map(|(idx, item)| {
+                    let finished_for = item
+                        .elapsed_secs
+                        .map(|secs| format!("completed in {}s", secs))
+                        .unwrap_or_else(|| "completed".to_string());
+
+                    BuildItem {
+                        id: -((idx as i32) + 1),
+                        job_id: item.job_id,
+                        system_id: item.system_id,
+                        hostname: item.hostname.clone(),
+                        flake: item.flake_name.clone(),
+                        commit: item.commit_hash.clone(),
+                        branch: "main".to_string(),
+                        worker_id: item
+                            .builder_name
+                            .clone()
+                            .unwrap_or_else(|| "unassigned".to_string()),
+                        queued_for: finished_for,
+                        runtime: item.elapsed_secs.map(|secs| format!("{}s", secs)),
+                        started_by: "scheduler".to_string(),
+                        status: match item.status {
+                            ApiBuildStatus::Failed => BuildStatus::Failed,
+                            ApiBuildStatus::Complete => BuildStatus::Complete,
+                            ApiBuildStatus::Building => BuildStatus::Building,
+                            ApiBuildStatus::Queued => BuildStatus::Queued,
+                            ApiBuildStatus::Idle => BuildStatus::Queued,
+                        },
+                        summary: item.commit_message.clone().unwrap_or_else(|| {
+                            format!(
+                                "job {}",
+                                item.job_id
+                                    .map(|id| id.to_string())
+                                    .unwrap_or_else(|| "unknown".to_string())
+                            )
+                        }),
+                    }
+                })
+                .collect::<Vec<_>>();
+            build_history.set(mapped);
         }
     });
 
@@ -202,6 +258,49 @@ pub fn BuildsView() -> Element {
                         pause_logs: pause_logs,
                         wrap_logs: wrap_logs,
                         log_query: log_query,
+                    }
+                }
+            }
+
+            Card {
+                title: Some("Recent Builds".to_string()),
+                children: rsx! {
+                    if build_history.read().is_empty() {
+                        p { class: "text-sm {theme::text::SECONDARY}", "No completed builds yet." }
+                    } else {
+                        div { class: "space-y-2",
+                            for item in build_history.read().iter().take(25) {
+                                {
+                                    let status_class = match item.status {
+                                        BuildStatus::Complete => "px-2 py-1 text-[10px] rounded border border-emerald-500/60 bg-emerald-900/30 text-emerald-100",
+                                        BuildStatus::Failed => "px-2 py-1 text-[10px] rounded border border-red-500/60 bg-red-900/30 text-red-100",
+                                        _ => "px-2 py-1 text-[10px] rounded border border-slate-600 bg-slate-800/30 text-slate-200",
+                                    };
+                                    let status_label = match item.status {
+                                        BuildStatus::Complete => "complete",
+                                        BuildStatus::Failed => "failed",
+                                        BuildStatus::Building => "building",
+                                        BuildStatus::Queued => "queued",
+                                        BuildStatus::Stopping => "stopping",
+                                        BuildStatus::Restarting => "restarting",
+                                        BuildStatus::Canceled => "canceled",
+                                    };
+                                    rsx! {
+                                        div {
+                                            key: "recent-{item.id}",
+                                            class: "flex flex-wrap items-center justify-between gap-2 rounded border {theme::surface::CARD_BORDER} bg-gray-900/40 px-3 py-2",
+                                            div { class: "flex flex-wrap items-center gap-2 min-w-0",
+                                                span { class: "font-mono text-xs text-gray-300", "{item.hostname}" }
+                                                span { class: "text-xs text-gray-500", "{item.flake}" }
+                                                span { class: "text-xs text-gray-500", "{item.commit.chars().take(8).collect::<String>()}" }
+                                                span { class: "text-xs text-gray-400", "{item.queued_for}" }
+                                            }
+                                            span { class: "{status_class}", "{status_label}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

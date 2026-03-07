@@ -132,6 +132,12 @@ pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientEr
     send_empty_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Fetch recent completed/failed build jobs.
+pub async fn fetch_recent_build_jobs() -> Result<Vec<BuildQueueItem>, ApiClientError> {
+    let url = format!("{}/build-jobs/recent", base_url());
+    fetch_json(&url).await
+}
+
 pub async fn request_system_rollback(
     id: &uuid::Uuid,
     request: &SystemRollbackRequest,

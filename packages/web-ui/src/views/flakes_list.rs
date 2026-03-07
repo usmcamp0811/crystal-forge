@@ -21,7 +21,8 @@ use crate::api::client::{
     request_sync_all_flakes, request_sync_flake, update_flake,
 };
 use crate::api::models::{
-    CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline, UpdateFlakeRequest,
+    BuildStatus as ApiBuildStatus, CreateFlakeRequest, FlakeRegistryItem, FlakeTimeline,
+    UpdateFlakeRequest,
 };
 use crate::components::layout::Card;
 use crate::routes::Route;
@@ -163,6 +164,7 @@ struct FlakeHistoryCommit {
     deletions: usize,
     diff: String,
     systems: Vec<String>,
+    build_status: Option<ApiBuildStatus>,
     evaluation_status: Option<String>,
 }
 
@@ -1314,6 +1316,18 @@ fn FlakeHistoryExplorer(
                                                                         },
                                                                         "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
                                                                     }
+                                                                    if let Some(build_status) = commit.build_status.clone() {
+                                                                        button {
+                                                                            class: "px-2 py-1 rounded border text-[10px]",
+                                                                            style: "{build_badge_style(&build_status)}",
+                                                                            title: "Open Builds view",
+                                                                            onclick: move |evt| {
+                                                                                evt.stop_propagation();
+                                                                                navigator.push(Route::BuildsView {});
+                                                                            },
+                                                                            "build: {build_badge_label(&build_status)}"
+                                                                        }
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -1367,6 +1381,17 @@ fn FlakeHistoryExplorer(
                                                         navigator.push(Route::EvaluationsCommitView { commit_id: commit.id });
                                                     },
                                                     "eval: {eval_badge_label(commit.evaluation_status.as_deref())}"
+                                                }
+                                                if let Some(build_status) = commit.build_status.clone() {
+                                                    button {
+                                                        class: "px-2 py-1 rounded border",
+                                                        style: "{build_badge_style(&build_status)}",
+                                                        title: "Open Builds view",
+                                                        onclick: move |_| {
+                                                            navigator.push(Route::BuildsView {});
+                                                        },
+                                                        "build: {build_badge_label(&build_status)}"
+                                                    }
                                                 }
                                                 span { class: "px-2 py-1 rounded bg-slate-700/70 text-slate-200", "{commit.systems.len()} configs" }
                                             }
@@ -2451,6 +2476,7 @@ fn build_flake_history(timelines: &[FlakeTimeline]) -> HashMap<i32, Vec<FlakeHis
                     deletions: 0,
                     diff: String::new(),
                     systems: commit.systems.clone(),
+                    build_status: commit.build_status.clone(),
                     evaluation_status: commit.evaluation_status.clone(),
                 }
             })
@@ -2479,6 +2505,34 @@ fn eval_badge_style(status: Option<&str>) -> &'static str {
         Some("failed") => "background-color: #472726; border-color: #ef4444; color: #fee2e2;",
         Some("complete") => "background-color: #1f3a2f; border-color: #22c55e; color: #dcfce7;",
         _ => "background-color: #2b303b; border-color: #495264; color: #cbd5e1;",
+    }
+}
+
+fn build_badge_label(status: &ApiBuildStatus) -> &'static str {
+    match status {
+        ApiBuildStatus::Queued => "queued",
+        ApiBuildStatus::Building => "running",
+        ApiBuildStatus::Failed => "failed",
+        ApiBuildStatus::Complete => "complete",
+        ApiBuildStatus::Idle => "idle",
+    }
+}
+
+fn build_badge_style(status: &ApiBuildStatus) -> &'static str {
+    match status {
+        ApiBuildStatus::Queued => {
+            "background-color: #3a3120; border-color: #d97706; color: #fef3c7;"
+        }
+        ApiBuildStatus::Building => {
+            "background-color: #1f3d52; border-color: #3b82f6; color: #dbeafe;"
+        }
+        ApiBuildStatus::Failed => {
+            "background-color: #472726; border-color: #ef4444; color: #fee2e2;"
+        }
+        ApiBuildStatus::Complete => {
+            "background-color: #1f3a2f; border-color: #22c55e; color: #dcfce7;"
+        }
+        ApiBuildStatus::Idle => "background-color: #2b303b; border-color: #495264; color: #cbd5e1;",
     }
 }
 

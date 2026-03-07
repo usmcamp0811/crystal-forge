@@ -4,7 +4,9 @@ use crate::flake::commits::sync_all_watched_flakes_commits;
 use crate::log::log_builder_worker_status;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::DeploymentPolicy;
-use crate::models::evaluate_with_policies::evaluate_with_nix_eval_jobs;
+use crate::models::evaluate_with_policies::{
+    evaluate_with_mock_eval_jobs, evaluate_with_nix_eval_jobs,
+};
 use crate::models::flakes::Flake;
 use crate::queue::QueueNotifier;
 // NOTE: removed increment_commit_list_attempt_count – we now rely on the new evaluation_* fields
@@ -13,9 +15,9 @@ use anyhow::Result;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::time;
+use tokio::time::interval;
 use tokio::time::Duration;
 use tokio::time::Instant;
-use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
@@ -116,7 +118,10 @@ async fn run_flake_polling_loop(
                     match sync_all_watched_flakes_commits(&pool, &db_flakes).await {
                         Ok(total_inserted) => {
                             if total_inserted > 0 {
-                                info!("📥 Inserted {} new commits, notifying eval queue", total_inserted);
+                                info!(
+                                    "📥 Inserted {} new commits, notifying eval queue",
+                                    total_inserted
+                                );
                                 queue_notifier.notify_eval_queue();
                             }
                         }
@@ -214,6 +219,12 @@ async fn process_pending_commits(
                 };
                 let build_config = cfg.get_build_config();
                 let server_config = cfg.get_server_config();
+                let mock_systems = cfg
+                    .systems
+                    .iter()
+                    .filter(|s| s.flake_name.as_deref() == Some(flake.name.as_str()))
+                    .map(|s| s.hostname.clone())
+                    .collect::<Vec<_>>();
 
                 // Set up deployment policies - check CF agent for all systems
                 // Using non-strict mode to collect data without failing evaluations
@@ -236,23 +247,31 @@ async fn process_pending_commits(
                     }
                     continue;
                 }
-                
+
                 // CRITICAL: Create broadcast channel BEFORE eval starts
                 // This ensures WebSocket clients can subscribe before messages are sent
                 crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
-                
+
                 // Broadcast eval start status to WebSocket clients
                 crate::handlers::api::commits::broadcast_eval_status(
                     &cf_state,
                     commit.id,
                     "started".to_string(),
-                    Some(format!("Starting evaluation for commit {}", &commit.git_commit_hash[..7.min(commit.git_commit_hash.len())])),
-                ).await;
+                    Some(format!(
+                        "Starting evaluation for commit {}",
+                        &commit.git_commit_hash[..7.min(commit.git_commit_hash.len())]
+                    )),
+                )
+                .await;
                 crate::handlers::api::commits::broadcast_eval_log(
                     &cf_state,
                     commit.id,
-                    format!("🚀 Starting evaluation for commit {}", commit.git_commit_hash)
-                ).await;
+                    format!(
+                        "🚀 Starting evaluation for commit {}",
+                        commit.git_commit_hash
+                    ),
+                )
+                .await;
 
                 // Use nix-eval-jobs to discover AND evaluate all nixosConfigurations
                 // This will:
@@ -260,20 +279,42 @@ async fn process_pending_commits(
                 // 2. Check deployment policies (CF agent status) for each system
                 // 3. Store policy results in database (cf_agent_enabled column)
                 // 4. Insert/update derivation records
-                match evaluate_with_nix_eval_jobs(
-                    pool,
-                    &commit,
-                    &flake,
-                    &flake.repo_url,
-                    &commit.git_commit_hash,
-                    "all", // Evaluate all systems
-                    &build_config,
-                    &server_config,
-                    &policies, // Check deployment policies
-                    Some(&cf_state), // Pass CFState for WebSocket broadcasting
-                )
-                .await
-                {
+                let eval_result = if server_config.execution_mode.is_mock() {
+                    info!(
+                        "🧪 Using MOCK evaluation mode for commit {}",
+                        commit.git_commit_hash
+                    );
+                    evaluate_with_mock_eval_jobs(
+                        pool,
+                        &commit,
+                        &flake,
+                        &flake.repo_url,
+                        &commit.git_commit_hash,
+                        "all",
+                        &build_config,
+                        &server_config,
+                        &policies,
+                        &mock_systems,
+                        Some(&cf_state),
+                    )
+                    .await
+                } else {
+                    evaluate_with_nix_eval_jobs(
+                        pool,
+                        &commit,
+                        &flake,
+                        &flake.repo_url,
+                        &commit.git_commit_hash,
+                        "all", // Evaluate all systems
+                        &build_config,
+                        &server_config,
+                        &policies,       // Check deployment policies
+                        Some(&cf_state), // Pass CFState for WebSocket broadcasting
+                    )
+                    .await
+                };
+
+                match eval_result {
                     Ok((results, policy_checks)) => {
                         // Broadcast completion status
                         crate::handlers::api::commits::broadcast_eval_status(
@@ -281,16 +322,22 @@ async fn process_pending_commits(
                             commit.id,
                             "complete".to_string(),
                             Some(format!("Evaluated {} systems", results.len())),
-                        ).await;
+                        )
+                        .await;
                         crate::handlers::api::commits::broadcast_eval_log(
                             &cf_state,
                             commit.id,
-                            format!("✅ Evaluation complete for commit {}", commit.git_commit_hash)
-                        ).await;
-                        
+                            format!(
+                                "✅ Evaluation complete for commit {}",
+                                commit.git_commit_hash
+                            ),
+                        )
+                        .await;
+
                         // Cleanup WebSocket broadcast channel
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
-                        
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
+
                         // ⬇️ mark COMPLETE
                         if let Err(e) = mark_commit_evaluation_complete(pool, commit.id).await {
                             error!(
@@ -357,22 +404,25 @@ async fn process_pending_commits(
                             "❌ Failed to evaluate commit {}: {}",
                             commit.git_commit_hash, e
                         );
-                        
+
                         // Broadcast failure status
                         crate::handlers::api::commits::broadcast_eval_status(
                             &cf_state,
                             commit.id,
                             "failed".to_string(),
                             Some(format!("Evaluation failed: {}", e)),
-                        ).await;
+                        )
+                        .await;
                         crate::handlers::api::commits::broadcast_eval_log(
                             &cf_state,
                             commit.id,
-                            format!("❌ Evaluation failed: {}", e)
-                        ).await;
-                        
+                            format!("❌ Evaluation failed: {}", e),
+                        )
+                        .await;
+
                         // Cleanup WebSocket broadcast channel
-                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                        crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id)
+                            .await;
 
                         // ⬇️ mark FAILED (function will set 'pending' or terminal 'failed'
                         // depending on attempt limit inside your SQL)

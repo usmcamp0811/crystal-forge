@@ -522,19 +522,45 @@ let
       AUTH_MODE = "oidc";
 
       # 👇 issuer that remote browsers/clients can resolve
-      CRYSTAL_FORGE_OIDC_ISSUER_URL =
-        "http://HOSTNAME_PLACEHOLDER:${toString oidc_port}/realms/${oidc_realm}";
+      CRYSTAL_FORGE_OIDC_ISSUER_URL = "http://HOSTNAME_PLACEHOLDER:${
+          toString oidc_port
+        }/realms/${oidc_realm}";
 
       CRYSTAL_FORGE_OIDC_CLIENT_ID = oidc_client_id;
       CRYSTAL_FORGE_OIDC_CLIENT_SECRET = oidc_client_secret;
 
       # 👇 callback that matches the host you're visiting from your laptop
-      CRYSTAL_FORGE_OIDC_REDIRECT_URI =
-        "http://HOSTNAME_PLACEHOLDER:${toString cf_port}/api/auth/oidc/callback";
+      CRYSTAL_FORGE_OIDC_REDIRECT_URI = "http://HOSTNAME_PLACEHOLDER:${
+          toString cf_port
+        }/api/auth/oidc/callback";
 
       CRYSTAL_FORGE_OIDC_BOOTSTRAP_ADMIN_GROUP = "admin";
     };
     settings.processes.server.depends_on."oidc".condition = "process_healthy";
+  };
+
+  mock-execution-module = {
+    settings.processes.server.command =
+      mkForce "${runServer}/bin/run-server --dev";
+    settings.processes.server.environment = {
+      AUTH_MODE = mkForce "local";
+      CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
+      CRYSTAL_FORGE_LOCAL_BOOTSTRAP_USERNAME = "admin";
+      CRYSTAL_FORGE_LOCAL_BOOTSTRAP_PASSWORD = "password";
+      CRYSTAL_FORGE_LOCAL_BOOTSTRAP_EMAIL = "admin@crystal-forge.local";
+    };
+
+    settings.processes.builder.command =
+      mkForce "${runBuilder}/bin/run-builder --dev";
+    settings.processes.builder.environment = {
+      AUTH_MODE = mkForce "local";
+      CRYSTAL_FORGE__SERVER__EXECUTION_MODE = "mock";
+      CRYSTAL_FORGE__BUILDER__ENABLE_API_MODE = "true";
+      CRYSTAL_FORGE__BUILDER__BUILDER_ID =
+        "00000000-0000-0000-0000-000000000001";
+      CRYSTAL_FORGE__BUILDER__SERVER_URL =
+        "http://127.0.0.1:${toString cf_port}";
+    };
   };
 
   full-stack = pkgs.process-compose-flake.evalModules {
@@ -555,6 +581,16 @@ let
     ];
   };
 
+  server-stack-mock = pkgs.process-compose-flake.evalModules {
+    modules = [
+      inputs.services-flake.processComposeModules.default
+      server-module
+      builder-module
+      db-module
+      mock-execution-module
+    ];
+  };
+
   dbOnly = pkgs.process-compose-flake.evalModules {
     modules = [ inputs.services-flake.processComposeModules.default db-module ];
   };
@@ -568,18 +604,11 @@ let
       server-oidc-module
     ];
   };
-in
-  full-stack.config.outputs.package
-  // {
-    inherit
-      runServer
-      runAgent
-      runBuilder
-      simulatePush
-      startBuilderApi
-      bootstrapDevBuilder
-      envExports;
-    db-only = dbOnly.config.outputs.package;
-    server-only = server-only.config.outputs.package;
-    oidc-stack = oidc-stack.config.outputs.package;
-  }
+in full-stack.config.outputs.package // {
+  inherit runServer runAgent runBuilder simulatePush startBuilderApi
+    bootstrapDevBuilder envExports;
+  db-only = dbOnly.config.outputs.package;
+  server-only = server-only.config.outputs.package;
+  server-stack-mock = server-stack-mock.config.outputs.package;
+  oidc-stack = oidc-stack.config.outputs.package;
+}

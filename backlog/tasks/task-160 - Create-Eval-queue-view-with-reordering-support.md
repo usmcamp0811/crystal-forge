@@ -4,10 +4,11 @@ title: Create Eval queue view with reordering support
 status: In Progress
 assignee: []
 created_date: '2026-03-02 16:22'
-updated_date: '2026-03-03 18:14'
+updated_date: '2026-03-07 03:16'
 labels: []
 dependencies: []
 priority: medium
+ordinal: 1000
 ---
 
 ## Description

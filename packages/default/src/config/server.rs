@@ -1,5 +1,31 @@
 use serde::Deserialize;
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Real,
+    Mock,
+}
+
+impl Default for ExecutionMode {
+    fn default() -> Self {
+        Self::Real
+    }
+}
+
+impl ExecutionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Real => "real",
+            Self::Mock => "mock",
+        }
+    }
+
+    pub fn is_mock(self) -> bool {
+        matches!(self, Self::Mock)
+    }
+}
+
 /// Configuration for the server itself.
 ///
 /// This section is loaded from `[server]` in `config.toml`.
@@ -29,6 +55,12 @@ pub struct ServerConfig {
     /// Default: "oidc" (read from AUTH_MODE env var)
     #[serde(default = "default_auth_mode")]
     pub auth_mode: String,
+
+    /// Eval/build execution mode.
+    /// - real: uses nix-eval-jobs and nix build paths
+    /// - mock: deterministic dev-only mock execution
+    #[serde(default)]
+    pub execution_mode: ExecutionMode,
 
     /// Whether to allow new user registration (for local auth mode).
     /// When false, only the initial admin can be registered (when no users exist).
@@ -101,6 +133,7 @@ impl Default for ServerConfig {
             eval_max_memory_mb: default_eval_max_memory_mb(),
             eval_check_cache: default_eval_check_cache(),
             auth_mode: default_auth_mode(),
+            execution_mode: ExecutionMode::default(),
             allow_registration: false,
             max_build_log_size_mb: default_max_build_log_size_mb(),
             max_build_log_chunk_mb: default_max_build_log_chunk_mb(),
@@ -172,6 +205,44 @@ impl ServerConfig {
             return Err("build log retention days must be greater than 0".to_string());
         }
 
+        if self.execution_mode.is_mock() && self.auth_mode != "local" {
+            return Err(
+                "server.execution_mode=mock requires server.auth_mode=local for safety".to_string(),
+            );
+        }
+
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn execution_mode_defaults_to_real() {
+        let cfg = ServerConfig::default();
+        assert_eq!(cfg.execution_mode, ExecutionMode::Real);
+    }
+
+    #[test]
+    fn mock_mode_requires_local_auth_mode() {
+        let mut cfg = ServerConfig::default();
+        cfg.execution_mode = ExecutionMode::Mock;
+        cfg.auth_mode = "oidc".to_string();
+
+        let err = cfg
+            .validate()
+            .expect_err("mock mode should require auth_mode=local");
+        assert!(err.contains("execution_mode=mock requires server.auth_mode=local"));
+    }
+
+    #[test]
+    fn mock_mode_allows_local_auth_mode() {
+        let mut cfg = ServerConfig::default();
+        cfg.execution_mode = ExecutionMode::Mock;
+        cfg.auth_mode = "local".to_string();
+        cfg.validate()
+            .expect("mock mode should be allowed in local auth mode");
     }
 }

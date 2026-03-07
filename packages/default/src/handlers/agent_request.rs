@@ -127,23 +127,30 @@ pub async fn authenticate_agent_request(
 }
 
 use crate::config::ServerConfig;
+use crate::queue::QueueNotifier;
 
 /// Shared server state containing authorized signing keys for current-system auth
 #[derive(Clone)]
 pub struct CFState {
     pub pool: PgPool,
     pub server_config: ServerConfig,
+    pub queue_notifier: Arc<QueueNotifier>,
     pub eval_log_channels: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>>,
+    pub eval_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, Vec<String>>>>,
     pub build_log_channels: Arc<tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>>,
+    pub build_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<Uuid, Vec<String>>>>,
 }
 
 impl CFState {
-    pub fn new(pool: PgPool, server_config: ServerConfig) -> Self {
+    pub fn new(pool: PgPool, server_config: ServerConfig, queue_notifier: Arc<QueueNotifier>) -> Self {
         Self {
             pool,
             server_config,
+            queue_notifier,
             eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            build_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 

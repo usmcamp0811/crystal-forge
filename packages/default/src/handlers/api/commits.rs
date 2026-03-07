@@ -1,16 +1,16 @@
 //! Commit-related API handlers.
 
 use axum::{
-    Json,
     extract::{
-        Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
+        Path, State, WebSocketUpgrade,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
+    Json,
 };
 use serde::{Deserialize, Serialize};
-use tokio::time::{Duration, interval};
+use tokio::time::{interval, Duration};
 
 use crate::api::models::{ApiError, EvalQueueItem, EvalQueueSummary, ReorderEvalQueueRequest};
 use crate::handlers::agent_request::CFState;
@@ -18,6 +18,7 @@ use crate::handlers::api::rbac::{require_operator_or_admin, require_viewer_or_ab
 
 const EVAL_LOG_CHANNEL_BUFFER: usize = 1000;
 const MAX_EVAL_LOG_CHANNELS: usize = 1024;
+const EVAL_LOG_HISTORY_BUFFER: usize = 2000;
 
 fn parse_id_list(segment: &str) -> Option<Vec<i32>> {
     let trimmed = segment.trim();
@@ -107,6 +108,7 @@ pub async fn list_eval_queue(
     Json(EvalQueueSummary {
         active_count,
         completed_count,
+        execution_mode: state.server_config.execution_mode.as_str().to_string(),
         items,
         timestamp: chrono::Utc::now(),
     })
@@ -225,6 +227,22 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
         return;
     };
 
+    let history_snapshot = {
+        let history = state.eval_log_history.lock().await;
+        history.get(&commit_id).cloned().unwrap_or_default()
+    };
+
+    for log_line in history_snapshot {
+        if let Err(e) = socket.send(Message::Text(log_line.into())).await {
+            tracing::error!(
+                "Failed to replay eval log history to WebSocket client for commit {}: {}",
+                commit_id,
+                e
+            );
+            return;
+        }
+    }
+
     let mut rx = tx.subscribe();
     let mut keepalive = interval(Duration::from_secs(20));
 
@@ -312,6 +330,15 @@ async fn broadcast_eval_message(state: &CFState, commit_id: i32, msg: EvalLogMes
 
     // Serialize to JSON
     if let Ok(json) = serde_json::to_string(&msg) {
+        {
+            let mut history = state.eval_log_history.lock().await;
+            let entry = history.entry(commit_id).or_default();
+            entry.push(json.clone());
+            if entry.len() > EVAL_LOG_HISTORY_BUFFER {
+                let overflow = entry.len() - EVAL_LOG_HISTORY_BUFFER;
+                entry.drain(0..overflow);
+            }
+        }
         let _ = tx.send(json);
     }
 }
@@ -339,6 +366,10 @@ async fn get_or_create_eval_channel(
 pub async fn cleanup_eval_channel(state: &CFState, commit_id: i32) {
     let mut channels = state.eval_log_channels.lock().await;
     channels.remove(&commit_id);
+    drop(channels);
+
+    let mut history = state.eval_log_history.lock().await;
+    history.remove(&commit_id);
     tracing::debug!("Cleaned up broadcast channel for commit {}", commit_id);
 }
 
@@ -349,13 +380,16 @@ pub async fn re_evaluate_commit(
     State(state): State<CFState>,
 ) -> impl IntoResponse {
     match crate::queries::commits::reset_commit_evaluation(&state.pool, commit_id).await {
-        Ok(_) => (
-            axum::http::StatusCode::OK,
-            axum::Json(serde_json::json!({
-                "status": "ok",
-                "message": format!("Commit {} queued for re-evaluation", commit_id)
-            })),
-        ),
+        Ok(_) => {
+            state.queue_notifier.notify_eval_queue();
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "status": "ok",
+                    "message": format!("Commit {} queued for re-evaluation", commit_id)
+                })),
+            )
+        }
         Err(e) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(serde_json::json!({
@@ -376,7 +410,11 @@ mod tests {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/cf_test")
             .expect("lazy pool should construct");
-        CFState::new(pool, ServerConfig::default())
+        CFState::new(
+            pool,
+            ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+        )
     }
 
     #[tokio::test]
@@ -405,6 +443,26 @@ mod tests {
         cleanup_eval_channel(&state, commit_id).await;
         let channels = state.eval_log_channels.lock().await;
         assert!(!channels.contains_key(&commit_id));
+
+        drop(channels);
+        let history = state.eval_log_history.lock().await;
+        assert!(!history.contains_key(&commit_id));
+    }
+
+    #[tokio::test]
+    async fn eval_log_history_is_buffered() {
+        let state = test_state();
+        let commit_id = 77;
+
+        for i in 0..3 {
+            broadcast_eval_log(&state, commit_id, format!("line-{i}")).await;
+        }
+
+        let history = state.eval_log_history.lock().await;
+        let entries = history.get(&commit_id).expect("history should exist");
+        assert_eq!(entries.len(), 3);
+        assert!(entries[0].contains("line-0"));
+        assert!(entries[2].contains("line-2"));
     }
 
     #[test]
@@ -419,7 +477,8 @@ mod tests {
 
     #[test]
     fn reorder_validation_details_handles_empty_lists() {
-        let message = "invalid eval queue reorder request: duplicate IDs: []; missing IDs: []; extra IDs: []";
+        let message =
+            "invalid eval queue reorder request: duplicate IDs: []; missing IDs: []; extra IDs: []";
         let details = reorder_validation_details(message).expect("details should parse");
 
         assert_eq!(details["duplicate_ids"], serde_json::json!([]));

@@ -3,9 +3,47 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::rc::Rc;
-use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use web_sys::{CloseEvent, ErrorEvent, MessageEvent, WebSocket};
+
+fn websocket_base() -> (String, String) {
+    let window = web_sys::window().expect("no global window");
+    let page_protocol = window
+        .location()
+        .protocol()
+        .unwrap_or_else(|_| "http:".to_string());
+    let default_ws_protocol = if page_protocol == "https:" {
+        "wss".to_string()
+    } else {
+        "ws".to_string()
+    };
+
+    if let Ok(Some(storage)) = window.local_storage() {
+        if let Ok(Some(origin)) = storage.get_item("cf_backend_origin") {
+            let trimmed = origin.trim();
+            if !trimmed.is_empty() {
+                let ws_origin = if let Some(rest) = trimmed.strip_prefix("https://") {
+                    format!("wss://{rest}")
+                } else if let Some(rest) = trimmed.strip_prefix("http://") {
+                    format!("ws://{rest}")
+                } else {
+                    format!("{}://{}", default_ws_protocol, trimmed)
+                };
+
+                if let Some((proto, host)) = ws_origin.split_once("://") {
+                    return (proto.to_string(), host.to_string());
+                }
+            }
+        }
+    }
+
+    let host = window
+        .location()
+        .host()
+        .unwrap_or_else(|_| "localhost:8080".to_string());
+    (default_ws_protocol, host)
+}
 
 /// System metrics sent by the builder during a build.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -65,6 +103,16 @@ pub enum SystemEvalStatus {
     QueuedForBuild,
 }
 
+const MAX_STREAM_LOG_LINES: usize = 2000;
+
+fn push_bounded_log(logs: &mut Vec<String>, line: String) {
+    logs.push(line);
+    if logs.len() > MAX_STREAM_LOG_LINES {
+        let overflow = logs.len() - MAX_STREAM_LOG_LINES;
+        logs.drain(0..overflow);
+    }
+}
+
 /// WebSocket connection state.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ConnectionState {
@@ -116,22 +164,29 @@ pub fn use_websocket_eval_stream(
     Signal<ConnectionState>,
     Rc<dyn Fn()>,
 ) {
+    let mut commit_id_signal = use_signal(|| commit_id.to_string());
+    if commit_id_signal.read().as_str() != commit_id {
+        commit_id_signal.set(commit_id.to_string());
+    }
+
     let mut logs = use_signal(Vec::<String>::new);
     let mut system_status = use_signal(std::collections::HashMap::<String, SystemEvalStatus>::new);
     let mut connection_state = use_signal(|| ConnectionState::Disconnected);
     let mut active_socket = use_signal(|| None::<WebSocket>);
 
-    let commit_id = commit_id.to_string();
-
     // Reconnect function
-    let reconnect = use_hook(|| {
-        let commit_id = commit_id.clone();
+    let reconnect = {
+        let commit_id_signal = commit_id_signal.clone();
         let logs = logs.clone();
         let system_status = system_status.clone();
         let connection_state = connection_state.clone();
         let active_socket = active_socket.clone();
 
         Rc::new(move || {
+            let commit_id = commit_id_signal();
+            if commit_id.is_empty() || commit_id == "0" {
+                return;
+            }
             connect_eval_websocket(
                 &commit_id,
                 logs,
@@ -140,11 +195,18 @@ pub fn use_websocket_eval_stream(
                 active_socket,
             );
         })
-    });
+    };
 
-    // Auto-connect on mount
+    // Auto-connect whenever selected commit changes.
     use_effect(move || {
-        let commit_id = commit_id.clone();
+        let commit_id = commit_id_signal();
+        if commit_id.is_empty() || commit_id == "0" {
+            connection_state.set(ConnectionState::Disconnected);
+            return;
+        }
+
+        logs.set(Vec::new());
+        system_status.set(std::collections::HashMap::new());
         connect_eval_websocket(
             &commit_id,
             logs,
@@ -240,20 +302,7 @@ fn connect_websocket(
     connection_state.set(ConnectionState::Connecting);
 
     // Build WebSocket URL
-    let protocol = if web_sys::window()
-        .and_then(|w| w.location().protocol().ok())
-        .map(|p| p == "https:")
-        .unwrap_or(false)
-    {
-        "wss"
-    } else {
-        "ws"
-    };
-
-    let host = web_sys::window()
-        .and_then(|w| w.location().host().ok())
-        .unwrap_or_else(|| "localhost:8080".to_string());
-
+    let (protocol, host) = websocket_base();
     let ws_url = format!("{protocol}://{host}/api/v1/build-jobs/{job_id}/logs/stream");
 
     // Create WebSocket
@@ -303,14 +352,14 @@ fn connect_websocket(
                     }
                 }
                 Ok(BuildStreamMessage::Log { message }) => {
-                    logs_msg.write().push(message);
+                    push_bounded_log(&mut logs_msg.write(), message);
                 }
                 Ok(BuildStreamMessage::Error { message }) => {
-                    logs_msg.write().push(format!("[stream-error] {}", message));
+                    push_bounded_log(&mut logs_msg.write(), format!("[stream-error] {}", message));
                 }
                 Err(_) => {
                     // Temporary backward compatibility with older plain-text streams.
-                    logs_msg.write().push(message);
+                    push_bounded_log(&mut logs_msg.write(), message);
                 }
             }
         }
@@ -362,20 +411,7 @@ fn connect_eval_websocket(
     connection_state.set(ConnectionState::Connecting);
 
     // Build WebSocket URL
-    let protocol = if web_sys::window()
-        .and_then(|w| w.location().protocol().ok())
-        .map(|p| p == "https:")
-        .unwrap_or(false)
-    {
-        "wss"
-    } else {
-        "ws"
-    };
-
-    let host = web_sys::window()
-        .and_then(|w| w.location().host().ok())
-        .unwrap_or_else(|| "localhost:8080".to_string());
-
+    let (protocol, host) = websocket_base();
     let ws_url = format!("{protocol}://{host}/api/v1/commits/{commit_id}/eval/stream");
 
     // Create WebSocket
@@ -410,7 +446,7 @@ fn connect_eval_websocket(
             // Try to parse as structured EvalLogMessage
             match serde_json::from_str::<EvalLogMessage>(&message) {
                 Ok(EvalLogMessage::Log { message: log_msg }) => {
-                    logs_msg.write().push(log_msg);
+                    push_bounded_log(&mut logs_msg.write(), log_msg);
                 }
                 Ok(EvalLogMessage::SystemStatus {
                     system,
@@ -441,7 +477,7 @@ fn connect_eval_websocket(
                             }
                         }
                     };
-                    logs_msg.write().push(log_line);
+                    push_bounded_log(&mut logs_msg.write(), log_line);
                 }
                 Ok(EvalLogMessage::EvalStatus {
                     status,
@@ -452,11 +488,11 @@ fn connect_eval_websocket(
                     } else {
                         format!("📊 Eval {}", status)
                     };
-                    logs_msg.write().push(log_line);
+                    push_bounded_log(&mut logs_msg.write(), log_line);
                 }
                 Err(_) => {
                     // Fallback: treat as plain text log (for backward compatibility)
-                    logs_msg.write().push(message);
+                    push_bounded_log(&mut logs_msg.write(), message);
                 }
             }
         }
