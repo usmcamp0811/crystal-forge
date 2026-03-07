@@ -1,10 +1,10 @@
 ---
 id: TASK-174
 title: Add deterministic mock eval/build dev mode for fast workflow validation
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-04 23:28'
-updated_date: '2026-03-07 02:23'
+updated_date: '2026-03-07 02:50'
 labels:
   - dev-experience
   - eval-queue
@@ -228,6 +228,10 @@ Adjusted dashboard commit timeline routing semantics per UX request: only active
 Verification: `nix develop -c cargo check` in `packages/web-ui` ✅.
 
 Committed as `3f50a138` (`fix: route dashboard commit nodes by active stage`) and pushed to `origin/TASK-174-mock-eval-build-dev-mode`.
+
+Opened MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/152
+
+Task moved to Review per workflow after implementation and verification pass for targeted commands.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
