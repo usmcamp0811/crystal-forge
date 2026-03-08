@@ -139,3 +139,147 @@ impl CreateCacheDestination {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_attic_requires_cache_name() {
+        let create = CreateCacheDestination {
+            name: "test".to_string(),
+            cache_type: "Attic".to_string(),
+            push_to: None,
+            attic_cache_name: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("attic_cache_name"));
+    }
+
+    #[test]
+    fn test_validate_s3_requires_push_to() {
+        let create = CreateCacheDestination {
+            name: "test".to_string(),
+            cache_type: "S3".to_string(),
+            push_to: None,
+            attic_cache_name: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("push_to"));
+    }
+
+    #[test]
+    fn test_validate_attic_succeeds_with_cache_name() {
+        let create = CreateCacheDestination {
+            name: "test-attic".to_string(),
+            cache_type: "Attic".to_string(),
+            push_to: None,
+            attic_cache_name: Some("my-cache".to_string()),
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_cache_type() {
+        let create = CreateCacheDestination {
+            name: "test".to_string(),
+            cache_type: "InvalidType".to_string(),
+            push_to: None,
+            attic_cache_name: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid cache_type"));
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_name() {
+        let create = CreateCacheDestination {
+            name: "   ".to_string(),
+            cache_type: "Nix".to_string(),
+            push_to: Some("https://cache.example.com".to_string()),
+            attic_cache_name: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("name cannot be empty"));
+    }
+}
