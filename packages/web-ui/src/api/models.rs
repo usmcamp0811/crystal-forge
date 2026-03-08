@@ -442,6 +442,58 @@ pub struct DeploymentPolicySummary {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Deployment Policies CRUD DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Full deployment policy record with timestamps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPolicyRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Response for listing deployment policies with pagination.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeploymentPoliciesListResponse {
+    pub policies: Vec<DeploymentPolicyRecord>,
+    pub total: usize,
+    pub limit: i64,
+    pub offset: i64,
+}
+
+/// Request to create a new deployment policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreateDeploymentPolicyRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+/// Request to update an existing deployment policy.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateDeploymentPolicyRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Flake Commit Timeline DTOs
 // ─────────────────────────────────────────────────────────────────────────────
 
