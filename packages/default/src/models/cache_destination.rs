@@ -1,0 +1,141 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+
+/// Cache destination configuration stored in database
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CacheDestination {
+    pub id: i32,
+    pub name: String,
+    pub cache_type: String, // 'S3', 'Attic', 'Http', 'Nix'
+
+    // Common fields
+    pub push_to: Option<String>,
+    pub enabled: bool,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+
+    // S3-specific
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+
+    // Attic-specific
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+
+    // Performance tuning
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+
+    // Push behavior
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+
+    // Timestamps
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// DTO for creating a new cache destination
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCacheDestination {
+    pub name: String,
+    pub cache_type: String,
+    pub push_to: Option<String>,
+    pub enabled: Option<bool>,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+}
+
+/// DTO for updating an existing cache destination
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCacheDestination {
+    pub name: Option<String>,
+    pub cache_type: Option<String>,
+    pub push_to: Option<String>,
+    pub enabled: Option<bool>,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+}
+
+impl CreateCacheDestination {
+    /// Validate the cache destination based on cache type
+    pub fn validate(&self) -> Result<(), String> {
+        // Validate cache type
+        match self.cache_type.as_str() {
+            "S3" | "Attic" | "Http" | "Nix" => {}
+            _ => {
+                return Err(format!(
+                    "Invalid cache_type: {}. Must be one of: S3, Attic, Http, Nix",
+                    self.cache_type
+                ))
+            }
+        }
+
+        // Validate name is not empty
+        if self.name.trim().is_empty() {
+            return Err("Cache destination name cannot be empty".to_string());
+        }
+
+        // Type-specific validation
+        match self.cache_type.as_str() {
+            "Attic" => {
+                if self.attic_cache_name.is_none()
+                    || self
+                        .attic_cache_name
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err("attic_cache_name is required for Attic cache type".to_string());
+                }
+            }
+            "S3" | "Http" | "Nix" => {
+                if self.push_to.is_none()
+                    || self
+                        .push_to
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err(format!(
+                        "push_to URL is required for {} cache type",
+                        self.cache_type
+                    ));
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
