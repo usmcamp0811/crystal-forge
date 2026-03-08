@@ -177,22 +177,22 @@ pub fn PolicyEditorModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-6 cf-modal-overlay-z50",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-3 sm:p-6 cf-modal-overlay-z50 overflow-y-auto",
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "{theme::surface::CARD_BG} border border-violet-500/30 rounded-2xl p-6 shadow-xl shadow-violet-900/20 cf-modal-panel-wide",
+                class: "{theme::surface::CARD_BG} border border-violet-500/30 rounded-2xl p-4 sm:p-6 shadow-xl shadow-violet-900/20 cf-modal-panel-wide w-full max-w-6xl max-h-[90vh] flex flex-col",
                 onclick: |evt| evt.stop_propagation(),
 
                 // Header
                 div {
-                    class: "flex items-center justify-between",
+                    class: "flex items-center justify-between gap-3 shrink-0",
                     div {
                         class: "flex items-center gap-3",
                         div {
-                            class: "w-10 h-10 rounded-lg bg-violet-500/20 flex items-center justify-center",
+                            class: "w-8 h-8 rounded-lg bg-violet-500/20 flex items-center justify-center",
                             svg {
-                                class: "w-5 h-5 text-violet-400",
+                                class: "w-4 h-4 text-violet-400",
                                 fill: "none",
                                 stroke: "currentColor",
                                 view_box: "0 0 24 24",
@@ -206,7 +206,7 @@ pub fn PolicyEditorModal(
                         }
                         div {
                             h3 { class: "text-white text-lg font-semibold", "{title}" }
-                            p { class: "text-xs {theme::text::MUTED}", "Define the policy metadata and TOML/JSON body." }
+                            p { class: "text-xs {theme::text::MUTED}", "Define metadata and policy payload." }
                         }
                     }
                     button {
@@ -229,11 +229,11 @@ pub fn PolicyEditorModal(
 
                 // Form content
                 div {
-                    class: "grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6 items-start",
+                    class: "grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start mt-4 flex-1 min-h-0 overflow-hidden",
 
                     // Left column - metadata
                     div {
-                        class: "space-y-4",
+                        class: "space-y-3 overflow-y-auto pr-1 min-h-0",
                         div {
                             class: "space-y-2",
                             label { class: "text-xs text-violet-300/70 font-medium", "Policy Name" }
@@ -332,13 +332,13 @@ pub fn PolicyEditorModal(
 
                     // Right column - code editor
                     div {
-                        class: "space-y-3 flex flex-col",
+                        class: "space-y-2 flex flex-col min-h-0",
                         label { class: "text-xs text-violet-300/70 font-medium", "Policy Definition" }
                         div {
-                            class: "rounded-lg border border-gray-700 bg-gray-950/70 overflow-hidden",
+                            class: "rounded-lg border border-gray-700 bg-gray-950/70 overflow-hidden flex-1 min-h-0",
                             textarea {
                                 class: "w-full bg-transparent px-3 py-3 text-sm text-gray-100 font-mono focus:outline-none resize-none",
-                                style: "min-height: 280px;",
+                                style: "height: clamp(220px, 42vh, 420px);",
                                 rows: "12",
                                 value: "{edit_body}",
                                 oninput: move |event| {
@@ -369,7 +369,7 @@ pub fn PolicyEditorModal(
 
                 // Footer
                 div {
-                    class: "flex justify-end items-center gap-3 pt-4 border-t border-gray-800",
+                    class: "flex justify-end items-center gap-3 pt-3 mt-4 border-t border-gray-800 shrink-0",
                     button {
                         class: "px-4 py-2 rounded-lg text-sm text-gray-300 border border-gray-700 hover:bg-gray-800 transition-colors",
                         onclick: move |_| on_close.call(()),
