@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-08 15:01'
+updated_date: '2026-03-08 15:34'
 labels:
   - ui
   - web-ui
@@ -258,6 +258,18 @@ This is a UI/API feature addition that doesn't modify Nix packaging, build infra
 - packages/default/tests/integration/cache_destinations_test.rs (new)
 
 LOCK: Claude (agent) on gray in /home/mcamp/code/crystal-forge/TASK-42-cache-view
+
+## Progress Update - Backend Complete
+
+✅ Phase 1: Database migrations created (0091, 0092)
+✅ Phase 2: Models and queries complete with full CRUD + retry/cancel/bulk operations
+✅ Phase 3: API handlers complete with proper error handling
+✅ All 27 ApiError formatting issues resolved
+✅ Code compiles successfully
+
+⚠️ Next: SQLx metadata sync (cargo sqlx prepare) once database is running
+
+Then: Phase 4 (UI), Phase 5 (cache worker integration), Phase 6 (testing)
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
