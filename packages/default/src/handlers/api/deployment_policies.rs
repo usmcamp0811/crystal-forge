@@ -414,6 +414,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live postgres"]
     async fn test_list_deployment_policies_empty() {
         let pool = test_pool().await;
         let policies = deployment_policies::list_deployment_policies(&pool, 100, 0)
@@ -425,6 +426,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live postgres"]
     async fn test_create_deployment_policy() {
         let pool = test_pool().await;
         let request = CreateDeploymentPolicyRequest {
@@ -445,6 +447,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live postgres"]
     async fn test_get_deployment_policy_by_id() {
         let pool = test_pool().await;
         let policy_id = create_test_policy(&pool, "Get Test Policy").await;
@@ -459,6 +462,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live postgres"]
     async fn test_update_deployment_policy() {
         let pool = test_pool().await;
         let policy_id = create_test_policy(&pool, "Original Name").await;
@@ -482,6 +486,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live postgres"]
     async fn test_delete_deployment_policy() {
         let pool = test_pool().await;
         let policy_id = create_test_policy(&pool, "To Be Deleted").await;
@@ -501,6 +506,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live postgres"]
     async fn test_duplicate_name_prevention() {
         let pool = test_pool().await;
         create_test_policy(&pool, "Duplicate Test").await;
@@ -520,6 +526,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires live postgres"]
     async fn test_check_policy_in_use() {
         let pool = test_pool().await;
         let policy_id = create_test_policy(&pool, "Usage Test").await;
