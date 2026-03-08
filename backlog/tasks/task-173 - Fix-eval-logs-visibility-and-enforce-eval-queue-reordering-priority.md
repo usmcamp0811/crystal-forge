@@ -4,7 +4,7 @@ title: Fix eval logs visibility and enforce eval queue reordering priority
 status: Review
 assignee: []
 created_date: '2026-03-04 23:22'
-updated_date: '2026-03-07 23:52'
+updated_date: '2026-03-08 02:03'
 labels:
   - bug
   - eval-queue
@@ -117,4 +117,12 @@ Applied additional blocker fix in `12883cf0`: inner claim loop now returns to ou
 Updated MR !153 description to resolve template inconsistency in schema section (`No schema changes` checked; migration/backfill unchecked). Added review note with control-flow clarification.
 
 Verification rerun after final pacing fix: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅ and `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge queries::commits::tests::reorder_validation_accepts_full_permutation_and_positions_are_dense` ✅.
+
+Implemented latest review-requested loop semantics in `ef5c358e`: successful eval claim path continues inner cycle to re-query next pending head immediately, while failure paths yield back to outer notifier/ticker pacing to avoid hot retries.
+
+Added focused helper tests in `server/mod.rs`: `select_next_pending_commit_id_honors_latest_reordered_snapshot` and `select_next_pending_commit_id_allows_progress_when_prior_head_is_deferred`, alongside rerun of reorder validation test.
+
+Verification rerun: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` ✅, `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge queries::commits::tests::reorder_validation_accepts_full_permutation_and_positions_are_dense` ✅, plus both new server helper tests ✅.
+
+Posted MR follow-up note on !153 with behavior summary and verification command list.
 <!-- SECTION:NOTES:END -->
