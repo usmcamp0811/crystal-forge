@@ -150,6 +150,54 @@ pub async fn check_policy_name_exists(
     Ok(count > 0)
 }
 
+/// Check if a policy with equivalent semantic content already exists.
+///
+/// A duplicate is defined as same policy_type and same config JSON payload.
+/// exclude_id: Optional policy ID to exclude from the check (for updates).
+pub async fn check_policy_content_exists(
+    pool: &PgPool,
+    policy_type: &str,
+    config: &serde_json::Value,
+    exclude_id: Option<&Uuid>,
+) -> Result<bool> {
+    let count: i64 = match exclude_id {
+        Some(id) => {
+            sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)
+                FROM deployment_policies
+                WHERE policy_type = $1
+                  AND config = $2
+                  AND id != $3
+                "#,
+            )
+            .bind(policy_type)
+            .bind(config)
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .context("Failed to check policy content existence")?
+        }
+        None => {
+            sqlx::query_scalar(
+                r#"
+                SELECT COUNT(*)
+                FROM deployment_policies
+                WHERE policy_type = $1
+                  AND config = $2
+                "#,
+            )
+            .bind(policy_type)
+            .bind(config)
+            .fetch_one(pool)
+            .await
+            .context("Failed to check policy content existence")?
+        }
+    };
+
+    Ok(count > 0)
+}
+
 /// Check if a policy is in use by any environments or systems
 pub async fn check_policy_in_use(pool: &PgPool, policy_id: &Uuid) -> Result<bool> {
     let env_count: i64 = sqlx::query_scalar(

@@ -222,6 +222,29 @@ pub async fn create_deployment_policy(
         ));
     }
 
+    // Check for duplicate policy semantics (same type + same config)
+    let content_exists = deployment_policies::check_policy_content_exists(
+        &state.pool,
+        &request.policy_type,
+        &request.config,
+        None,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to check duplicate policy content: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to validate policy content".to_string(),
+        )
+    })?;
+
+    if content_exists {
+        return Err((
+            StatusCode::CONFLICT,
+            "A policy with the same type and configuration already exists".to_string(),
+        ));
+    }
+
     // Core policy is always enabled
     if request.policy_type == "require_cf_agent" {
         request.enabled = Some(true);
@@ -358,6 +381,38 @@ pub async fn update_deployment_policy(
                 "Policy config cannot be null".to_string(),
             ));
         }
+    }
+
+    let candidate_policy_type = request
+        .policy_type
+        .clone()
+        .unwrap_or_else(|| existing.policy_type.clone());
+    let candidate_config = request
+        .config
+        .clone()
+        .unwrap_or_else(|| existing.config.clone());
+
+    // Check for duplicate policy semantics (same type + same config)
+    let content_exists = deployment_policies::check_policy_content_exists(
+        &state.pool,
+        &candidate_policy_type,
+        &candidate_config,
+        Some(&policy_id),
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to check duplicate policy content: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to validate policy content".to_string(),
+        )
+    })?;
+
+    if content_exists {
+        return Err((
+            StatusCode::CONFLICT,
+            "A policy with the same type and configuration already exists".to_string(),
+        ));
     }
 
     // Update policy
