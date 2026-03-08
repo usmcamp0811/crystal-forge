@@ -163,6 +163,17 @@ pub fn PolicyEditorModal(
     };
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
+    let current_validation_error = {
+        let name = edit_name.read().trim().to_string();
+        if name.is_empty() {
+            Some("Policy name is required".to_string())
+        } else {
+            let body = edit_body.read().clone();
+            let format = *edit_format.read();
+            parse_policy_payload(&body, format).err()
+        }
+    };
+    let can_save = current_validation_error.is_none() && !*is_saving.read();
 
     rsx! {
         div {
@@ -230,7 +241,10 @@ pub fn PolicyEditorModal(
                                 class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50",
                                 placeholder: "e.g., Require SSH Enabled",
                                 value: "{edit_name}",
-                                oninput: move |event| edit_name.set(event.value()),
+                                oninput: move |event| {
+                                    edit_name.set(event.value());
+                                    save_error.set(String::new());
+                                },
                             }
                         }
                         div {
@@ -241,7 +255,10 @@ pub fn PolicyEditorModal(
                                 placeholder: "Describe what this policy enforces...",
                                 rows: "4",
                                 value: "{edit_description}",
-                                oninput: move |event| edit_description.set(event.value()),
+                                oninput: move |event| {
+                                    edit_description.set(event.value());
+                                    save_error.set(String::new());
+                                },
                             }
                         }
                         div {
@@ -256,7 +273,10 @@ pub fn PolicyEditorModal(
                                     } else {
                                         "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
                                     },
-                                    onclick: move |_| edit_format.set(PolicyFormat::Toml),
+                                    onclick: move |_| {
+                                        edit_format.set(PolicyFormat::Toml);
+                                        save_error.set(String::new());
+                                    },
                                     "TOML"
                                 }
                                 button {
@@ -266,7 +286,10 @@ pub fn PolicyEditorModal(
                                     } else {
                                         "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
                                     },
-                                    onclick: move |_| edit_format.set(PolicyFormat::Json),
+                                    onclick: move |_| {
+                                        edit_format.set(PolicyFormat::Json);
+                                        save_error.set(String::new());
+                                    },
                                     "JSON"
                                 }
                             }
@@ -281,6 +304,7 @@ pub fn PolicyEditorModal(
                                     onclick: move |_| {
                                         edit_format.set(PolicyFormat::Json);
                                         edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
+                                        save_error.set(String::new());
                                     },
                                     "Custom check"
                                 }
@@ -289,6 +313,7 @@ pub fn PolicyEditorModal(
                                     onclick: move |_| {
                                         edit_format.set(PolicyFormat::Json);
                                         edit_body.set(REQUIRE_PACKAGES_JSON_TEMPLATE.to_string());
+                                        save_error.set(String::new());
                                     },
                                     "Require packages"
                                 }
@@ -297,6 +322,7 @@ pub fn PolicyEditorModal(
                                     onclick: move |_| {
                                         edit_format.set(PolicyFormat::Json);
                                         edit_body.set(REQUIRE_CF_AGENT_JSON_TEMPLATE.to_string());
+                                        save_error.set(String::new());
                                     },
                                     "Require CF agent"
                                 }
@@ -315,13 +341,22 @@ pub fn PolicyEditorModal(
                                 style: "min-height: 280px;",
                                 rows: "12",
                                 value: "{edit_body}",
-                                oninput: move |event| edit_body.set(event.value()),
+                                oninput: move |event| {
+                                    edit_body.set(event.value());
+                                    save_error.set(String::new());
+                                },
                                 spellcheck: "false",
                             }
                         }
                         p {
                             class: "text-[11px] {theme::text::MUTED}",
                             "Tip: prefer JSON with policy_type + config for reliable saves."
+                        }
+                        if let Some(message) = current_validation_error.clone() {
+                            div {
+                                class: "text-xs text-amber-300 bg-amber-950/40 border border-amber-700/40 rounded px-3 py-2",
+                                "{message}"
+                            }
                         }
                         if !save_error.read().is_empty() {
                             div {
@@ -342,8 +377,9 @@ pub fn PolicyEditorModal(
                     }
                     button {
                         class: "px-4 py-2 rounded-lg text-sm font-semibold bg-violet-600 hover:bg-violet-500 text-white transition-colors shadow-lg shadow-violet-900/30",
-                        disabled: *is_saving.read(),
+                        disabled: !can_save,
                         onclick: move |_| {
+                            let validation_error_for_submit = current_validation_error.clone();
                             let name = edit_name.read().clone();
                             let description = edit_description.read().clone();
                             let body = edit_body.read().clone();
@@ -354,8 +390,8 @@ pub fn PolicyEditorModal(
                             let mut save_error = save_error;
                             let mut is_saving = is_saving;
 
-                            if name.trim().is_empty() {
-                                save_error.set("Policy name is required".to_string());
+                            if let Some(message) = validation_error_for_submit {
+                                save_error.set(message);
                                 return;
                             }
                             save_error.set(String::new());
