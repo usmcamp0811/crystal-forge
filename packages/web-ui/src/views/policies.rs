@@ -63,6 +63,7 @@ pub fn PoliciesView() -> Element {
     let mut edit_format = use_signal(|| PolicyFormat::Toml);
     let mut search_query = use_signal(String::new);
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut help_collapsed = use_signal(|| false);
 
     let query = search_query.read().to_lowercase();
     let filtered_policies: Vec<PolicyDefinition> = policy_library
@@ -117,6 +118,42 @@ pub fn PoliciesView() -> Element {
                         }
                     }
                     "New Policy"
+                }
+            }
+
+            // Lightweight authoring help (visible but unobtrusive)
+            Card {
+                children: rsx! {
+                    div {
+                        class: "space-y-3",
+                        div {
+                            class: "flex items-center justify-between gap-3",
+                            div {
+                                class: "text-sm font-medium text-violet-200",
+                                "Policy authoring quick guide"
+                            }
+                            button {
+                                class: "text-xs px-2 py-1 rounded border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                onclick: move |_| {
+                                    let next = !*help_collapsed.read();
+                                    help_collapsed.set(next);
+                                },
+                                if *help_collapsed.read() { "Show" } else { "Hide" }
+                            }
+                        }
+
+                        if !*help_collapsed.read() {
+                            div {
+                                class: "text-xs {theme::text::SECONDARY} leading-6 space-y-1",
+                                p { "- Use JSON format for best reliability in editor save." }
+                                p { "- Required fields: policy_type + config." }
+                                p { "- custom_check config expects: expression, description, strict." }
+                                p { "- require_packages config expects: packages (array), strict." }
+                                p { "- require_cf_agent is core and always on (protected)." }
+                                p { "- Duplicate name or duplicate policy_type+config is rejected." }
+                            }
+                        }
+                    }
                 }
             }
 
