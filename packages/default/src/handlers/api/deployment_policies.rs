@@ -396,7 +396,6 @@ pub async fn delete_deployment_policy(
 mod tests {
     use super::*;
     use crate::test_utils::db::test_pool;
-    use sqlx::PgPool;
 
     async fn create_test_policy(pool: &PgPool, name: &str) -> Uuid {
         let request = CreateDeploymentPolicyRequest {
@@ -413,8 +412,9 @@ mod tests {
             .id
     }
 
-    #[sqlx::test]
-    async fn test_list_deployment_policies_empty(pool: PgPool) {
+    #[tokio::test]
+    async fn test_list_deployment_policies_empty() {
+        let pool = test_pool().await;
         let policies = deployment_policies::list_deployment_policies(&pool, 100, 0)
             .await
             .unwrap();
@@ -423,8 +423,9 @@ mod tests {
         assert!(policies.len() >= 0);
     }
 
-    #[sqlx::test]
-    async fn test_create_deployment_policy(pool: PgPool) {
+    #[tokio::test]
+    async fn test_create_deployment_policy() {
+        let pool = test_pool().await;
         let request = CreateDeploymentPolicyRequest {
             name: "Test Policy".to_string(),
             description: Some("Test description".to_string()),
@@ -442,8 +443,9 @@ mod tests {
         assert_eq!(policy.enabled, true);
     }
 
-    #[sqlx::test]
-    async fn test_get_deployment_policy_by_id(pool: PgPool) {
+    #[tokio::test]
+    async fn test_get_deployment_policy_by_id() {
+        let pool = test_pool().await;
         let policy_id = create_test_policy(&pool, "Get Test Policy").await;
 
         let policy = deployment_policies::get_deployment_policy_by_id(&pool, &policy_id)
@@ -455,8 +457,9 @@ mod tests {
         assert_eq!(policy.name, "Get Test Policy");
     }
 
-    #[sqlx::test]
-    async fn test_update_deployment_policy(pool: PgPool) {
+    #[tokio::test]
+    async fn test_update_deployment_policy() {
+        let pool = test_pool().await;
         let policy_id = create_test_policy(&pool, "Original Name").await;
 
         let update_request = UpdateDeploymentPolicyRequest {
@@ -476,8 +479,9 @@ mod tests {
         assert_eq!(updated.enabled, false);
     }
 
-    #[sqlx::test]
-    async fn test_delete_deployment_policy(pool: PgPool) {
+    #[tokio::test]
+    async fn test_delete_deployment_policy() {
+        let pool = test_pool().await;
         let policy_id = create_test_policy(&pool, "To Be Deleted").await;
 
         let deleted = deployment_policies::delete_deployment_policy(&pool, &policy_id)
@@ -494,8 +498,9 @@ mod tests {
         assert!(policy.is_none());
     }
 
-    #[sqlx::test]
-    async fn test_duplicate_name_prevention(pool: PgPool) {
+    #[tokio::test]
+    async fn test_duplicate_name_prevention() {
+        let pool = test_pool().await;
         create_test_policy(&pool, "Duplicate Test").await;
 
         let request = CreateDeploymentPolicyRequest {
@@ -512,8 +517,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[sqlx::test]
-    async fn test_check_policy_in_use(pool: PgPool) {
+    #[tokio::test]
+    async fn test_check_policy_in_use() {
+        let pool = test_pool().await;
         let policy_id = create_test_policy(&pool, "Usage Test").await;
 
         let in_use = deployment_policies::check_policy_in_use(&pool, &policy_id)
