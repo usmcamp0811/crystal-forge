@@ -34,9 +34,7 @@ pub async fn list_cache_destinations(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to list cache destinations".to_string(),
-                    details: None,
+                    error: "Failed to list cache destinations".to_string(),
                 }),
             )
                 .into_response()
@@ -54,9 +52,7 @@ pub async fn get_cache_destination(
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
-                error: "not_found".to_string(),
-                message: format!("Cache destination with id {} not found", id),
-                details: None,
+                error: format!("Cache destination with id {} not found", id),
             }),
         )
             .into_response(),
@@ -65,9 +61,7 @@ pub async fn get_cache_destination(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to get cache destination".to_string(),
-                    details: None,
+                    error: "Failed to get cache destination".to_string(),
                 }),
             )
                 .into_response()
@@ -102,7 +96,7 @@ pub async fn create_cache_destination(
                 error: "error".to_string(),
                 message: e,
                 details: None,
-            })
+            }),
         )
             .into_response();
     }
@@ -118,11 +112,11 @@ pub async fn create_cache_destination(
             };
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError {
+                Json(ApiError {
                 error: "error".to_string(),
                 message: error_msg,
                 details: None,
-            })
+            }),
             )
                 .into_response()
         }
@@ -154,9 +148,7 @@ pub async fn update_cache_destination(
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
-                error: "not_found".to_string(),
-                message: format!("Cache destination with id {} not found", id),
-                details: None,
+                error: format!("Cache destination with id {} not found", id),
             }),
         )
             .into_response(),
@@ -165,9 +157,7 @@ pub async fn update_cache_destination(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                message: e.to_string(),
-                details: None,
+                    error: e.to_string(),
                 }),
             )
                 .into_response()
@@ -199,9 +189,7 @@ pub async fn delete_cache_destination(
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
-                error: "not_found".to_string(),
-                message: format!("Cache destination with id {} not found", id),
-                details: None,
+                error: format!("Cache destination with id {} not found", id),
             }),
         )
             .into_response(),
@@ -210,9 +198,7 @@ pub async fn delete_cache_destination(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to delete cache destination".to_string(),
-                    details: None,
+                    error: "Failed to delete cache destination".to_string(),
                 }),
             )
                 .into_response()
@@ -258,9 +244,7 @@ pub async fn list_cache_push_jobs(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to list cache push jobs".to_string(),
-                    details: None,
+                    error: "Failed to list cache push jobs".to_string(),
                 }),
             )
                 .into_response()
@@ -278,9 +262,7 @@ pub async fn get_cache_push_job(
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
-                error: "not_found".to_string(),
-                message: format!("Cache push job with id {} not found", id),
-                details: None,
+                error: format!("Cache push job with id {} not found", id),
             }),
         )
             .into_response(),
@@ -289,9 +271,7 @@ pub async fn get_cache_push_job(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to get cache push job".to_string(),
-                    details: None,
+                    error: "Failed to get cache push job".to_string(),
                 }),
             )
                 .into_response()
@@ -329,9 +309,7 @@ pub async fn retry_cache_push_job(
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
-                error: "error".to_string(),
-                message: format!("Cache push job {} not found or not in a retryable state", id),
-                details: None,
+                error: format!("Cache push job {} not found or not in a retryable state", id),
             }),
         )
             .into_response(),
@@ -340,9 +318,7 @@ pub async fn retry_cache_push_job(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to retry cache push job".to_string(),
-                    details: None,
+                    error: "Failed to retry cache push job".to_string(),
                 }),
             )
                 .into_response()
@@ -380,9 +356,7 @@ pub async fn cancel_cache_push_job(
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
-                error: "error".to_string(),
-                message: format!("Cache push job {} not found or not in a cancellable state", id),
-                details: None,
+                error: format!("Cache push job {} not found or not in a cancellable state", id),
             }),
         )
             .into_response(),
@@ -391,9 +365,7 @@ pub async fn cancel_cache_push_job(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to cancel cache push job".to_string(),
-                    details: None,
+                    error: "Failed to cancel cache push job".to_string(),
                 }),
             )
                 .into_response()
@@ -429,9 +401,7 @@ pub async fn bulk_retry_cache_push_jobs(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
-                error: "validation_error".to_string(),
-                message: "No job IDs provided".to_string(),
-                details: None,
+                error: "No job IDs provided".to_string(),
             }),
         )
             .into_response();
@@ -451,9 +421,7 @@ pub async fn bulk_retry_cache_push_jobs(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to bulk retry cache push jobs".to_string(),
-                    details: None,
+                    error: "Failed to bulk retry cache push jobs".to_string(),
                 }),
             )
                 .into_response()
@@ -484,9 +452,7 @@ pub async fn bulk_cancel_cache_push_jobs(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiError {
-                error: "validation_error".to_string(),
-                message: "No job IDs provided".to_string(),
-                details: None,
+                error: "No job IDs provided".to_string(),
             }),
         )
             .into_response();
@@ -506,9 +472,7 @@ pub async fn bulk_cancel_cache_push_jobs(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                    message: "Failed to bulk cancel cache push jobs".to_string(),
-                    details: None,
+                    error: "Failed to bulk cancel cache push jobs".to_string(),
                 }),
             )
                 .into_response()

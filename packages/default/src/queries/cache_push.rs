@@ -1,10 +1,11 @@
 use crate::builder::remove_gc_root;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use sqlx::{FromRow, PgPool};
 use tracing::{debug, warn};
 
-#[derive(Debug, FromRow, Clone)]
+#[derive(Debug, FromRow, Clone, Serialize)]
 pub struct CachePushJob {
     pub id: i32,
     pub derivation_id: i32,
