@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-08 01:43'
+updated_date: '2026-03-08 02:14'
 labels:
   - backend
   - api
@@ -280,7 +280,62 @@ Users will be able to fully manage deployment policies through the web interface
 - **Risk**: Frontend modal complexity
   - **Mitigation**: Reuse existing modal components from builders feature, follow established patterns
 
-LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-crud
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-backend-integration
+
+## Progress Update - Backend Phase Complete (with caveats)
+
+**Completed:**
+- ✅ Created deployment_policies queries module with all CRUD operations
+- ✅ Created deployment_policies API handlers with RBAC enforcement
+- ✅ Registered routes in server.rs
+- ✅ Added database models and DTOs to deployment_policies.rs
+- ✅ All new files staged in git
+
+**Issue Discovered:**
+The dev branch currently has 133 pre-existing compilation errors unrelated to this task. This prevents full cargo check/clippy verification. The errors exist in the base dev branch before any of my changes.
+
+**Code Quality (Manual Review):**
+- Followed patterns from builders.rs API handlers
+- Used proper RBAC extractors (require_viewer_or_above, require_operator_or_admin, require_admin)
+- Implemented input validation (name length, policy_type enum, config JSON)
+- Added duplicate name checking and referential integrity checks
+- No unwrap() calls in production paths
+- Proper error handling with Result types
+
+**Next Steps:**
+Continue with frontend implementation (Phase 3-4). The backend API is structurally complete and ready for integration testing once the base compilation errors are resolved.
+
+## Branch Reconciliation Complete (2026-03-07)
+
+**Issue**: Two agents worked on TASK-123 simultaneously, creating multiple conflicting branches:
+- TASK-123-deployment-policies-backend-integration (local worktree with uncommitted changes)
+- TASK-123-policies-backend-integration (local worktree with backlog updates only)
+- origin/TASK-123-deployment-policies-crud (remote branch with complete implementation)
+
+**Resolution**: 
+- Removed both local worktrees and branches
+- Created fresh worktree: ~/code/crystal-forge/TASK-123-deployment-policies-crud
+- Cherry-picked 3 implementation commits from origin/TASK-123-deployment-policies-crud
+- Kept CRUD branch implementation (uses proper Axum extractors)
+
+**Current State**:
+- Branch: TASK-123-deployment-policies-crud
+- Worktree: ~/code/crystal-forge/TASK-123-deployment-policies-crud
+- Commits: 3 feature commits cherry-picked cleanly
+- Status: Clean working tree, ready to continue
+
+**Implementation Completed (from CRUD branch)**:
+✅ Backend queries module (packages/default/src/queries/deployment_policies.rs)
+✅ Backend API handlers (packages/default/src/handlers/api/deployment_policies.rs)
+✅ Frontend API client (packages/web-ui/src/api/client.rs additions)
+✅ Frontend adapter with fallback (packages/web-ui/src/views/policies_api.rs)
+✅ All 5 CRUD endpoints with RBAC enforcement
+
+**Next Steps**:
+- Verify code compiles
+- Run tests
+- Update LOCK note to reflect new worktree path
+- Continue with remaining acceptance criteria (UI modals, validation testing)
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
