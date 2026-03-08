@@ -26,24 +26,23 @@ pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
                 .collect()
         }
         Err(ApiClientError::Status { code, body }) => {
-            // Log API errors but fall back gracefully
-            web_sys::console::warn_1(&format!("API returned {}: {} - falling back to mock data", code, body).into());
-            
-            // For auth errors (401/403), we might want to redirect to login
-            // but for now, just log and use mock data
-            if code == 401 || code == 403 {
-                web_sys::console::warn_1(&"Authentication required - user may need to log in".into());
+            // Only use mock fallback for server-side failures (5xx).
+            // For auth/client errors (401/403/404/etc.), do not mask with mock data.
+            if (500..600).contains(&code) {
+                web_sys::console::warn_1(&format!("API returned {}: {} - falling back to mock data", code, body).into());
+                mock_policies()
+            } else {
+                web_sys::console::warn_1(&format!("API returned {}: {} - showing empty policies", code, body).into());
+                Vec::new()
             }
-            
-            mock_policies()
         }
         Err(ApiClientError::Network(msg)) => {
             web_sys::console::warn_1(&format!("Network error: {} - falling back to mock data", msg).into());
             mock_policies()
         }
         Err(ApiClientError::Deserialize(msg)) => {
-            web_sys::console::error_1(&format!("Failed to deserialize API response: {} - falling back to mock data", msg).into());
-            mock_policies()
+            web_sys::console::error_1(&format!("Failed to deserialize API response: {} - showing empty policies", msg).into());
+            Vec::new()
         }
     }
 }
