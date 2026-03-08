@@ -653,6 +653,39 @@ html, body {
   gap: 1.5rem;
 }
 
+/* Policy modal explicit theming (strong override to avoid utility drift) */
+.cf-policy-modal-panel {
+  background-color: var(--cf-card-bg) !important;
+  border-color: var(--cf-card-border) !important;
+}
+
+.cf-policy-modal-field {
+  background-color: rgba(3, 7, 18, 0.72) !important;
+  border-color: #1f2937 !important;
+  color: var(--cf-text-primary) !important;
+}
+
+.cf-policy-modal-field:focus,
+.cf-policy-modal-field:focus-visible {
+  border-color: var(--cf-input-border-focus) !important;
+  box-shadow: 0 0 0 2px var(--cf-focus-ring-color) !important;
+}
+
+.cf-policy-modal-editor-surface {
+  background-color: rgba(3, 7, 18, 0.78) !important;
+  border-color: #1f2937 !important;
+}
+
+:root[data-theme="light"] .cf-policy-modal-field {
+  background-color: var(--cf-subtle-bg) !important;
+  border-color: var(--cf-card-border) !important;
+}
+
+:root[data-theme="light"] .cf-policy-modal-editor-surface {
+  background-color: var(--cf-subtle-bg) !important;
+  border-color: var(--cf-card-border) !important;
+}
+
 .cf-flakes-history-split {
   display: grid;
   grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
