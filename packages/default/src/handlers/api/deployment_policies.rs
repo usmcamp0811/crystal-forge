@@ -167,6 +167,8 @@ pub async fn create_deployment_policy(
     State(state): State<CFState>,
     Json(request): Json<CreateDeploymentPolicyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
+    let mut request = request;
+
     // Input validation
     if request.name.is_empty() {
         return Err((
@@ -220,6 +222,11 @@ pub async fn create_deployment_policy(
         ));
     }
 
+    // Core policy is always enabled
+    if request.policy_type == "require_cf_agent" {
+        request.enabled = Some(true);
+    }
+
     // Create policy
     let policy = deployment_policies::create_deployment_policy(&state.pool, &request)
         .await
@@ -258,6 +265,41 @@ pub async fn update_deployment_policy(
     Path(policy_id): Path<Uuid>,
     Json(request): Json<UpdateDeploymentPolicyRequest>,
 ) -> Result<Json<DeploymentPolicyRecord>, (StatusCode, String)> {
+    let mut request = request;
+
+    let existing = deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch deployment policy {}: {}", policy_id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to retrieve deployment policy".to_string(),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Deployment policy not found".to_string(),
+        ))?;
+
+    // Core require_cf_agent policy is immutable except name/description/config updates.
+    if existing.policy_type == "require_cf_agent" {
+        if let Some(ref policy_type) = request.policy_type {
+            if policy_type != "require_cf_agent" {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "Core require_cf_agent policy type cannot be changed".to_string(),
+                ));
+            }
+        }
+        if request.enabled == Some(false) {
+            return Err((
+                StatusCode::CONFLICT,
+                "Core require_cf_agent policy is always enabled".to_string(),
+            ));
+        }
+        request.enabled = Some(true);
+    }
+
     // Validate name if provided
     if let Some(ref name) = request.name {
         if name.is_empty() {
@@ -348,6 +390,27 @@ pub async fn delete_deployment_policy(
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, String)> {
+    let existing = deployment_policies::get_deployment_policy_by_id(&state.pool, &policy_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to fetch deployment policy {}: {}", policy_id, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to retrieve deployment policy".to_string(),
+            )
+        })?
+        .ok_or((
+            StatusCode::NOT_FOUND,
+            "Deployment policy not found".to_string(),
+        ))?;
+
+    if existing.policy_type == "require_cf_agent" {
+        return Err((
+            StatusCode::CONFLICT,
+            "Core require_cf_agent policy cannot be deleted".to_string(),
+        ));
+    }
+
     // Check if policy is in use
     let in_use = deployment_policies::check_policy_in_use(&state.pool, &policy_id)
         .await

@@ -19,6 +19,10 @@ pub fn PolicyCard(
     on_delete: EventHandler<Uuid>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
+    let is_core_policy = policy.body.contains("type = \"require_cf_agent\"")
+        || policy
+            .body
+            .contains("type = \"require_crystal_forge_agent\"");
 
     let format_badge = match policy.format {
         PolicyFormat::Toml => ("TOML", "bg-orange-500/20 text-orange-400"),
@@ -67,6 +71,12 @@ pub fn PolicyCard(
                 span {
                     class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded {format_badge.1}",
                     "{format_badge.0}"
+                }
+                if is_core_policy {
+                    span {
+                        class: "shrink-0 text-xs font-medium px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 border border-emerald-400/40",
+                        "Core · Always On"
+                    }
                 }
             }
 
@@ -121,17 +131,24 @@ pub fn PolicyCard(
                     class: "text-xs text-gray-500",
                     "{line_count} lines"
                 }
-                div {
-                    class: "flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity",
-                    button {
-                        class: "text-xs text-violet-400 hover:text-violet-300 px-2 py-1 rounded hover:bg-violet-500/10 transition-colors",
-                        onclick: move |_| on_edit.call(policy_for_edit.clone()),
-                        "Edit"
+                if is_core_policy {
+                    div {
+                        class: "text-xs text-emerald-300",
+                        "Protected policy"
                     }
-                    button {
-                        class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
-                        onclick: move |_| on_delete.call(policy_id),
-                        "Delete"
+                } else {
+                    div {
+                        class: "flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity",
+                        button {
+                            class: "text-xs text-violet-400 hover:text-violet-300 px-2 py-1 rounded hover:bg-violet-500/10 transition-colors",
+                            onclick: move |_| on_edit.call(policy_for_edit.clone()),
+                            "Edit"
+                        }
+                        button {
+                            class: "text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors",
+                            onclick: move |_| on_delete.call(policy_id),
+                            "Delete"
+                        }
                     }
                 }
             }
