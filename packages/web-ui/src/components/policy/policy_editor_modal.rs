@@ -34,6 +34,13 @@ const REQUIRE_CF_AGENT_JSON_TEMPLATE: &str = r#"{
   }
 }"#;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BasicPolicyKind {
+    CustomCheck,
+    RequirePackages,
+    RequireCfAgent,
+}
+
 fn parse_policy_payload(
     body: &str,
     format: PolicyFormat,
@@ -164,10 +171,33 @@ pub fn PolicyEditorModal(
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
     let mut advanced_mode = use_signal(|| is_editing);
+    let mut basic_kind = use_signal(|| BasicPolicyKind::CustomCheck);
+    let mut basic_expression = use_signal(String::new);
+    let mut basic_rule_description = use_signal(|| "Custom rule".to_string());
+    let mut basic_packages = use_signal(|| "git, vim".to_string());
+    let mut basic_strict = use_signal(|| true);
     let current_validation_error = {
         let name = edit_name.read().trim().to_string();
         if name.is_empty() {
             Some("Policy name is required".to_string())
+        } else if !*advanced_mode.read() {
+            match *basic_kind.read() {
+                BasicPolicyKind::CustomCheck => {
+                    if basic_expression.read().trim().is_empty() {
+                        Some("Custom check expression is required in Basic mode".to_string())
+                    } else {
+                        None
+                    }
+                }
+                BasicPolicyKind::RequirePackages => {
+                    if basic_packages.read().trim().is_empty() {
+                        Some("At least one package is required in Basic mode".to_string())
+                    } else {
+                        None
+                    }
+                }
+                BasicPolicyKind::RequireCfAgent => None,
+            }
         } else {
             let body = edit_body.read().clone();
             let format = *edit_format.read();
@@ -182,7 +212,7 @@ pub fn PolicyEditorModal(
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "{theme::surface::CARD_BG} border border-violet-500/30 rounded-2xl p-4 sm:p-6 shadow-xl shadow-violet-900/20 cf-modal-panel-wide w-full max-w-6xl max-h-[90vh] flex flex-col",
+                class: "{theme::surface::CARD_BG} border border-violet-500/30 rounded-2xl p-3 sm:p-4 shadow-xl shadow-violet-900/20 cf-modal-panel-wide w-full max-w-6xl max-h-[84vh] flex flex-col",
                 onclick: |evt| evt.stop_propagation(),
 
                 // Header
@@ -256,11 +286,11 @@ pub fn PolicyEditorModal(
 
                 // Form content
                 div {
-                    class: "grid grid-cols-1 lg:grid-cols-[260px_1fr] gap-4 items-start mt-4 flex-1 min-h-0 overflow-hidden",
+                    class: "grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-3 items-start mt-3 flex-1 min-h-0 overflow-y-auto pr-1",
 
                     // Left column - metadata
                     div {
-                        class: "space-y-3 overflow-y-auto pr-1 min-h-0",
+                        class: "space-y-3 min-h-0",
                         div {
                             class: "space-y-2",
                             label { class: "text-xs text-violet-300/70 font-medium", "Policy Name" }
@@ -325,35 +355,137 @@ pub fn PolicyEditorModal(
                         }
                         div {
                             class: "space-y-2",
-                            label { class: "text-xs text-violet-300/70 font-medium", "Templates" }
-                            div {
-                                class: "grid grid-cols-1 gap-2",
-                                button {
-                                    class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
-                                    onclick: move |_| {
-                                        edit_format.set(PolicyFormat::Json);
-                                        edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
-                                        save_error.set(String::new());
-                                    },
-                                    "Custom check"
+                            if *advanced_mode.read() {
+                                label { class: "text-xs text-violet-300/70 font-medium", "Templates" }
+                                div {
+                                    class: "grid grid-cols-1 gap-2",
+                                    button {
+                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                        onclick: move |_| {
+                                            edit_format.set(PolicyFormat::Json);
+                                            edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
+                                            save_error.set(String::new());
+                                        },
+                                        "Custom check"
+                                    }
+                                    button {
+                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                        onclick: move |_| {
+                                            edit_format.set(PolicyFormat::Json);
+                                            edit_body.set(REQUIRE_PACKAGES_JSON_TEMPLATE.to_string());
+                                            save_error.set(String::new());
+                                        },
+                                        "Require packages"
+                                    }
+                                    button {
+                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                        onclick: move |_| {
+                                            edit_format.set(PolicyFormat::Json);
+                                            edit_body.set(REQUIRE_CF_AGENT_JSON_TEMPLATE.to_string());
+                                            save_error.set(String::new());
+                                        },
+                                        "Require CF agent"
+                                    }
                                 }
-                                button {
-                                    class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
-                                    onclick: move |_| {
-                                        edit_format.set(PolicyFormat::Json);
-                                        edit_body.set(REQUIRE_PACKAGES_JSON_TEMPLATE.to_string());
-                                        save_error.set(String::new());
-                                    },
-                                    "Require packages"
+                            } else {
+                                label { class: "text-xs text-violet-300/70 font-medium", "Policy Type" }
+                                div {
+                                    class: "grid grid-cols-1 gap-2",
+                                    button {
+                                        class: "px-3 py-1.5 rounded-md text-xs border text-left transition-colors",
+                                        class: if *basic_kind.read() == BasicPolicyKind::CustomCheck {
+                                            "bg-violet-500/20 border-violet-500 text-violet-300"
+                                        } else {
+                                            "border-gray-700 text-gray-300 hover:bg-gray-800"
+                                        },
+                                        onclick: move |_| {
+                                            basic_kind.set(BasicPolicyKind::CustomCheck);
+                                            save_error.set(String::new());
+                                        },
+                                        "Custom check"
+                                    }
+                                    button {
+                                        class: "px-3 py-1.5 rounded-md text-xs border text-left transition-colors",
+                                        class: if *basic_kind.read() == BasicPolicyKind::RequirePackages {
+                                            "bg-violet-500/20 border-violet-500 text-violet-300"
+                                        } else {
+                                            "border-gray-700 text-gray-300 hover:bg-gray-800"
+                                        },
+                                        onclick: move |_| {
+                                            basic_kind.set(BasicPolicyKind::RequirePackages);
+                                            save_error.set(String::new());
+                                        },
+                                        "Require packages"
+                                    }
+                                    button {
+                                        class: "px-3 py-1.5 rounded-md text-xs border text-left transition-colors",
+                                        class: if *basic_kind.read() == BasicPolicyKind::RequireCfAgent {
+                                            "bg-violet-500/20 border-violet-500 text-violet-300"
+                                        } else {
+                                            "border-gray-700 text-gray-300 hover:bg-gray-800"
+                                        },
+                                        onclick: move |_| {
+                                            basic_kind.set(BasicPolicyKind::RequireCfAgent);
+                                            save_error.set(String::new());
+                                        },
+                                        "Require CF agent"
+                                    }
                                 }
-                                button {
-                                    class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
-                                    onclick: move |_| {
-                                        edit_format.set(PolicyFormat::Json);
-                                        edit_body.set(REQUIRE_CF_AGENT_JSON_TEMPLATE.to_string());
-                                        save_error.set(String::new());
-                                    },
-                                    "Require CF agent"
+
+                                if *basic_kind.read() == BasicPolicyKind::CustomCheck {
+                                    div { class: "space-y-2",
+                                        label { class: "text-xs text-violet-300/70 font-medium", "Expression" }
+                                        input {
+                                            class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
+                                            placeholder: "config.networking.firewall.enable",
+                                            value: "{basic_expression}",
+                                            oninput: move |event| {
+                                                basic_expression.set(event.value());
+                                                save_error.set(String::new());
+                                            },
+                                        }
+                                        label { class: "text-xs text-violet-300/70 font-medium", "Rule description" }
+                                        input {
+                                            class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
+                                            value: "{basic_rule_description}",
+                                            oninput: move |event| {
+                                                basic_rule_description.set(event.value());
+                                                save_error.set(String::new());
+                                            },
+                                        }
+                                    }
+                                }
+
+                                if *basic_kind.read() == BasicPolicyKind::RequirePackages {
+                                    div { class: "space-y-2",
+                                        label { class: "text-xs text-violet-300/70 font-medium", "Packages (comma separated)" }
+                                        input {
+                                            class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
+                                            placeholder: "git, vim, htop",
+                                            value: "{basic_packages}",
+                                            oninput: move |event| {
+                                                basic_packages.set(event.value());
+                                                save_error.set(String::new());
+                                            },
+                                        }
+                                    }
+                                }
+
+                                div {
+                                    class: "flex items-center gap-2",
+                                    input {
+                                        r#type: "checkbox",
+                                        checked: *basic_strict.read(),
+                                        onchange: move |_| {
+                                            let next = {
+                                                let current = *basic_strict.read();
+                                                !current
+                                            };
+                                            basic_strict.set(next);
+                                            save_error.set(String::new());
+                                        }
+                                    }
+                                    span { class: "text-xs text-gray-300", "Strict mode" }
                                 }
                             }
                         }
@@ -368,7 +500,7 @@ pub fn PolicyEditorModal(
                                 class: "rounded-lg border border-gray-700 bg-gray-950/70 overflow-hidden flex-1 min-h-0",
                                 textarea {
                                     class: "w-full bg-transparent px-3 py-3 text-sm text-gray-100 font-mono focus:outline-none resize-none",
-                                    style: "height: clamp(220px, 42vh, 420px);",
+                                    style: "height: clamp(180px, 30vh, 300px);",
                                     rows: "12",
                                     value: "{edit_body}",
                                     oninput: move |event| {
@@ -407,7 +539,7 @@ pub fn PolicyEditorModal(
 
                 // Footer
                 div {
-                    class: "flex justify-end items-center gap-3 pt-3 mt-4 border-t border-gray-800 shrink-0",
+                    class: "flex justify-end items-center gap-3 pt-2 mt-3 border-t border-gray-800 shrink-0",
                     button {
                         class: "px-4 py-2 rounded-lg text-sm text-gray-300 border border-gray-700 hover:bg-gray-800 transition-colors",
                         onclick: move |_| on_close.call(()),
@@ -422,6 +554,12 @@ pub fn PolicyEditorModal(
                             let description = edit_description.read().clone();
                             let body = edit_body.read().clone();
                             let format = *edit_format.read();
+                            let in_basic_mode = !*advanced_mode.read();
+                            let kind = *basic_kind.read();
+                            let expression = basic_expression.read().clone();
+                            let rule_description = basic_rule_description.read().clone();
+                            let packages_raw = basic_packages.read().clone();
+                            let strict = *basic_strict.read();
                             let editing_id = *editing_policy_id.read();
                             let mut policy_library = policy_library;
                             let on_close = on_close;
@@ -436,13 +574,43 @@ pub fn PolicyEditorModal(
                             is_saving.set(true);
 
                             spawn(async move {
-                                let parsed = parse_policy_payload(&body, format);
-                                let (policy_type, config) = match parsed {
-                                    Ok(values) => values,
-                                    Err(message) => {
-                                        save_error.set(format!("Policy parse error: {message}"));
-                                        is_saving.set(false);
-                                        return;
+                                let (policy_type, config) = if in_basic_mode {
+                                    match kind {
+                                        BasicPolicyKind::CustomCheck => {
+                                            let cfg = serde_json::json!({
+                                                "expression": expression,
+                                                "description": rule_description,
+                                                "strict": strict,
+                                            });
+                                            ("custom_check".to_string(), cfg)
+                                        }
+                                        BasicPolicyKind::RequirePackages => {
+                                            let packages = packages_raw
+                                                .split(',')
+                                                .map(|p| p.trim())
+                                                .filter(|p| !p.is_empty())
+                                                .map(|p| p.to_string())
+                                                .collect::<Vec<_>>();
+                                            let cfg = serde_json::json!({
+                                                "packages": packages,
+                                                "strict": strict,
+                                            });
+                                            ("require_packages".to_string(), cfg)
+                                        }
+                                        BasicPolicyKind::RequireCfAgent => {
+                                            let cfg = serde_json::json!({ "strict": strict });
+                                            ("require_cf_agent".to_string(), cfg)
+                                        }
+                                    }
+                                } else {
+                                    let parsed = parse_policy_payload(&body, format);
+                                    match parsed {
+                                        Ok(values) => values,
+                                        Err(message) => {
+                                            save_error.set(format!("Policy parse error: {message}"));
+                                            is_saving.set(false);
+                                            return;
+                                        }
                                     }
                                 };
 
