@@ -396,6 +396,7 @@ pub async fn delete_deployment_policy(
 mod tests {
     use super::*;
     use crate::test_utils::db::test_pool;
+    use sqlx::PgPool;
 
     async fn create_test_policy(pool: &PgPool, name: &str) -> Uuid {
         let request = CreateDeploymentPolicyRequest {
@@ -472,7 +473,8 @@ mod tests {
 
         let updated = deployment_policies::update_deployment_policy(&pool, &policy_id, &update_request)
             .await
-            .unwrap();
+            .unwrap()
+            .expect("Policy should exist after update");
 
         assert_eq!(updated.name, "Updated Name");
         assert_eq!(updated.description, Some("Updated description".to_string()));
