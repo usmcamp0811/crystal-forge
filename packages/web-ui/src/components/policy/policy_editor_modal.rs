@@ -163,6 +163,7 @@ pub fn PolicyEditorModal(
     };
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
+    let mut advanced_mode = use_signal(|| is_editing);
     let current_validation_error = {
         let name = edit_name.read().trim().to_string();
         if name.is_empty() {
@@ -209,19 +210,45 @@ pub fn PolicyEditorModal(
                             p { class: "text-xs {theme::text::MUTED}", "Define metadata and policy payload." }
                         }
                     }
-                    button {
-                        class: "p-2 rounded-lg text-gray-400 hover:text-white hover:bg-violet-500/10 transition-colors",
-                        onclick: move |_| on_close.call(()),
-                        svg {
-                            class: "w-5 h-5",
-                            fill: "none",
-                            stroke: "currentColor",
-                            view_box: "0 0 24 24",
-                            path {
-                                stroke_linecap: "round",
-                                stroke_linejoin: "round",
-                                stroke_width: "2",
-                                d: "M6 18L18 6M6 6l12 12"
+                    div {
+                        class: "flex items-center gap-2",
+                        div {
+                            class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
+                            button {
+                                class: "px-2 py-1 rounded text-xs transition-colors",
+                                class: if !*advanced_mode.read() {
+                                    "bg-violet-500/20 text-violet-300"
+                                } else {
+                                    "text-gray-400 hover:text-gray-200"
+                                },
+                                onclick: move |_| advanced_mode.set(false),
+                                "Basic"
+                            }
+                            button {
+                                class: "px-2 py-1 rounded text-xs transition-colors",
+                                class: if *advanced_mode.read() {
+                                    "bg-violet-500/20 text-violet-300"
+                                } else {
+                                    "text-gray-400 hover:text-gray-200"
+                                },
+                                onclick: move |_| advanced_mode.set(true),
+                                "Advanced"
+                            }
+                        }
+                        button {
+                            class: "p-2 rounded-lg text-gray-400 hover:text-white hover:bg-violet-500/10 transition-colors",
+                            onclick: move |_| on_close.call(()),
+                            svg {
+                                class: "w-5 h-5",
+                                fill: "none",
+                                stroke: "currentColor",
+                                view_box: "0 0 24 24",
+                                path {
+                                    stroke_linecap: "round",
+                                    stroke_linejoin: "round",
+                                    stroke_width: "2",
+                                    d: "M6 18L18 6M6 6l12 12"
+                                }
                             }
                         }
                     }
@@ -261,36 +288,38 @@ pub fn PolicyEditorModal(
                                 },
                             }
                         }
-                        div {
-                            class: "space-y-2",
-                            label { class: "text-xs text-violet-300/70 font-medium", "Format" }
+                        if *advanced_mode.read() {
                             div {
-                                class: "flex gap-2",
-                                button {
-                                    class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                    class: if *edit_format.read() == PolicyFormat::Toml {
-                                        "bg-violet-500/20 border-violet-500 text-violet-300"
-                                    } else {
-                                        "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
-                                    },
-                                    onclick: move |_| {
-                                        edit_format.set(PolicyFormat::Toml);
-                                        save_error.set(String::new());
-                                    },
-                                    "TOML"
-                                }
-                                button {
-                                    class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                    class: if *edit_format.read() == PolicyFormat::Json {
-                                        "bg-violet-500/20 border-violet-500 text-violet-300"
-                                    } else {
-                                        "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
-                                    },
-                                    onclick: move |_| {
-                                        edit_format.set(PolicyFormat::Json);
-                                        save_error.set(String::new());
-                                    },
-                                    "JSON"
+                                class: "space-y-2",
+                                label { class: "text-xs text-violet-300/70 font-medium", "Format" }
+                                div {
+                                    class: "flex gap-2",
+                                    button {
+                                        class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
+                                        class: if *edit_format.read() == PolicyFormat::Toml {
+                                            "bg-violet-500/20 border-violet-500 text-violet-300"
+                                        } else {
+                                            "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
+                                        },
+                                        onclick: move |_| {
+                                            edit_format.set(PolicyFormat::Toml);
+                                            save_error.set(String::new());
+                                        },
+                                        "TOML"
+                                    }
+                                    button {
+                                        class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
+                                        class: if *edit_format.read() == PolicyFormat::Json {
+                                            "bg-violet-500/20 border-violet-500 text-violet-300"
+                                        } else {
+                                            "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
+                                        },
+                                        onclick: move |_| {
+                                            edit_format.set(PolicyFormat::Json);
+                                            save_error.set(String::new());
+                                        },
+                                        "JSON"
+                                    }
                                 }
                             }
                         }
@@ -333,24 +362,33 @@ pub fn PolicyEditorModal(
                     // Right column - code editor
                     div {
                         class: "space-y-2 flex flex-col min-h-0",
-                        label { class: "text-xs text-violet-300/70 font-medium", "Policy Definition" }
-                        div {
-                            class: "rounded-lg border border-gray-700 bg-gray-950/70 overflow-hidden flex-1 min-h-0",
-                            textarea {
-                                class: "w-full bg-transparent px-3 py-3 text-sm text-gray-100 font-mono focus:outline-none resize-none",
-                                style: "height: clamp(220px, 42vh, 420px);",
-                                rows: "12",
-                                value: "{edit_body}",
-                                oninput: move |event| {
-                                    edit_body.set(event.value());
-                                    save_error.set(String::new());
-                                },
-                                spellcheck: "false",
+                        if *advanced_mode.read() {
+                            label { class: "text-xs text-violet-300/70 font-medium", "Policy Definition" }
+                            div {
+                                class: "rounded-lg border border-gray-700 bg-gray-950/70 overflow-hidden flex-1 min-h-0",
+                                textarea {
+                                    class: "w-full bg-transparent px-3 py-3 text-sm text-gray-100 font-mono focus:outline-none resize-none",
+                                    style: "height: clamp(220px, 42vh, 420px);",
+                                    rows: "12",
+                                    value: "{edit_body}",
+                                    oninput: move |event| {
+                                        edit_body.set(event.value());
+                                        save_error.set(String::new());
+                                    },
+                                    spellcheck: "false",
+                                }
                             }
-                        }
-                        p {
-                            class: "text-[11px] {theme::text::MUTED}",
-                            "Tip: prefer JSON with policy_type + config for reliable saves."
+                            p {
+                                class: "text-[11px] {theme::text::MUTED}",
+                                "Tip: prefer JSON with policy_type + config for reliable saves."
+                            }
+                        } else {
+                            div {
+                                class: "rounded-lg border border-gray-700 bg-gray-950/40 p-3 space-y-2",
+                                p { class: "text-xs text-gray-300", "Basic mode uses template-driven policies." }
+                                p { class: "text-xs {theme::text::MUTED}", "Choose a template on the left, set name/description, then save." }
+                                p { class: "text-xs {theme::text::MUTED}", "Switch to Advanced for full JSON/TOML editing." }
+                            }
                         }
                         if let Some(message) = current_validation_error.clone() {
                             div {
