@@ -10,26 +10,108 @@ use crate::views::policies_api;
 
 use super::types::{PolicyDefinition, PolicyFormat};
 
-fn infer_policy_type(body: &str) -> String {
-    if body.contains("require_packages") {
-        "require_packages".to_string()
-    } else if body.contains("require_cf_agent") || body.contains("require_crystal_forge_agent") {
-        "require_cf_agent".to_string()
-    } else {
-        "custom_check".to_string()
-    }
-}
+fn parse_policy_payload(
+    body: &str,
+    format: PolicyFormat,
+) -> Result<(String, serde_json::Value), String> {
+    let normalize_policy_type = |raw: &str| match raw {
+        "require_crystal_forge_agent" => "require_cf_agent".to_string(),
+        other => other.to_string(),
+    };
 
-fn config_from_body(body: &str, format: PolicyFormat) -> serde_json::Value {
     match format {
-        PolicyFormat::Json => serde_json::from_str(body).unwrap_or_else(|_| {
-            serde_json::json!({
-                "definition": body,
-            })
-        }),
-        PolicyFormat::Toml => serde_json::json!({
-            "definition": body,
-        }),
+        PolicyFormat::Json => {
+            let value: serde_json::Value =
+                serde_json::from_str(body).map_err(|e| format!("Invalid JSON body: {e}"))?;
+
+            let obj = value
+                .as_object()
+                .ok_or_else(|| "JSON body must be an object".to_string())?;
+
+            let policy_type = obj
+                .get("policy_type")
+                .or_else(|| obj.get("type"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "JSON body must include 'policy_type' (or 'type')".to_string())?;
+
+            let config = obj.get("config").cloned().unwrap_or_else(|| {
+                let mut cloned = obj.clone();
+                cloned.remove("policy_type");
+                cloned.remove("type");
+                cloned.remove("enabled");
+                serde_json::Value::Object(cloned)
+            });
+
+            Ok((normalize_policy_type(policy_type), config))
+        }
+        PolicyFormat::Toml => {
+            let mut in_policy_block = false;
+            let mut json_map = serde_json::Map::new();
+
+            for raw_line in body.lines() {
+                let line = raw_line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+
+                if line == "[[policy]]" {
+                    if in_policy_block && !json_map.is_empty() {
+                        break;
+                    }
+                    in_policy_block = true;
+                    continue;
+                }
+
+                if !in_policy_block {
+                    continue;
+                }
+
+                let Some((key_raw, value_raw)) = line.split_once('=') else {
+                    continue;
+                };
+
+                let key = key_raw.trim().to_string();
+                let value_str = value_raw.trim();
+
+                let value = if value_str.starts_with('"')
+                    && value_str.ends_with('"')
+                    && value_str.len() >= 2
+                {
+                    serde_json::Value::String(value_str[1..value_str.len() - 1].to_string())
+                } else if value_str == "true" || value_str == "false" {
+                    serde_json::Value::Bool(value_str == "true")
+                } else if value_str.starts_with('[') && value_str.ends_with(']') {
+                    let inner = &value_str[1..value_str.len() - 1];
+                    let items = inner
+                        .split(',')
+                        .map(|part| part.trim())
+                        .filter(|part| !part.is_empty())
+                        .map(|part| serde_json::Value::String(part.trim_matches('"').to_string()))
+                        .collect::<Vec<_>>();
+                    serde_json::Value::Array(items)
+                } else {
+                    serde_json::Value::String(value_str.to_string())
+                };
+
+                json_map.insert(key, value);
+            }
+
+            let policy_type = json_map
+                .get("policy_type")
+                .or_else(|| json_map.get("type"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| "TOML policy must include 'type'".to_string())?
+                .to_string();
+
+            json_map.remove("policy_type");
+            json_map.remove("type");
+            json_map.remove("enabled");
+
+            Ok((
+                normalize_policy_type(&policy_type),
+                serde_json::Value::Object(json_map),
+            ))
+        }
     }
 }
 
@@ -203,8 +285,16 @@ pub fn PolicyEditorModal(
                             let on_close = on_close;
 
                             spawn(async move {
-                                let policy_type = infer_policy_type(&body);
-                                let config = config_from_body(&body, format);
+                                let parsed = parse_policy_payload(&body, format);
+                                let (policy_type, config) = match parsed {
+                                    Ok(values) => values,
+                                    Err(message) => {
+                                        web_sys::console::error_1(
+                                            &format!("Policy parse error: {message}").into(),
+                                        );
+                                        return;
+                                    }
+                                };
 
                                 let result = if let Some(policy_id) = editing_id {
                                     let request = UpdateDeploymentPolicyRequest {

@@ -28,6 +28,123 @@ use crate::queries::commits::{
     mark_commit_evaluation_started, reset_stuck_commit_evaluations,
 };
 use crate::queries::derivations::{cleanup_partial_derivations, reset_stuck_builds};
+use crate::queries::deployment_policies::list_enabled_deployment_policies;
+
+fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
+    let mut slug = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while slug.contains("__") {
+        slug = slug.replace("__", "_");
+    }
+    let slug = slug.trim_matches('_');
+    let short_id = id.to_string();
+    let short_id = &short_id[..8.min(short_id.len())];
+    if slug.is_empty() {
+        format!("custom_{}", short_id)
+    } else {
+        format!("{}_{}", slug, short_id)
+    }
+}
+
+fn parse_deployment_policy_record(
+    record: &crate::models::deployment_policies::DeploymentPolicyRecord,
+) -> Option<DeploymentPolicy> {
+    let cfg = &record.config;
+    match record.policy_type.as_str() {
+        "require_cf_agent" => {
+            let strict = cfg.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
+            Some(DeploymentPolicy::RequireCrystalForgeAgent { strict })
+        }
+        "require_packages" => {
+            let strict = cfg.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
+            let packages = cfg
+                .get("packages")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            Some(DeploymentPolicy::RequirePackages { packages, strict })
+        }
+        "custom_check" => {
+            let expression = cfg
+                .get("expression")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let Some(expression) = expression else {
+                warn!(
+                    "Skipping custom_check policy '{}' ({}): missing config.expression",
+                    record.name, record.id
+                );
+                return None;
+            };
+
+            let description = cfg
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| record.description.clone())
+                .unwrap_or_else(|| format!("Custom policy: {}", record.name));
+
+            let field_name = cfg
+                .get("field_name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| custom_field_name(&record.name, record.id));
+
+            let strict = cfg.get("strict").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            Some(DeploymentPolicy::CustomCheck {
+                expression,
+                description,
+                field_name,
+                strict,
+            })
+        }
+        other => {
+            warn!(
+                "Skipping unsupported deployment policy type '{}' for policy '{}' ({})",
+                other, record.name, record.id
+            );
+            None
+        }
+    }
+}
+
+async fn load_deployment_policies_for_eval(pool: &PgPool) -> Vec<DeploymentPolicy> {
+    match list_enabled_deployment_policies(pool).await {
+        Ok(records) => {
+            let mut policies = records
+                .iter()
+                .filter_map(parse_deployment_policy_record)
+                .collect::<Vec<_>>();
+
+            if policies.is_empty() {
+                warn!("No valid deployment policies found in DB, falling back to CF agent check");
+                policies.push(DeploymentPolicy::RequireCrystalForgeAgent { strict: false });
+            }
+
+            policies
+        }
+        Err(err) => {
+            error!(
+                "Failed to load deployment policies from DB for evaluation: {:#}. Falling back to CF agent check",
+                err
+            );
+            vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: false }]
+        }
+    }
+}
 
 pub fn spawn_background_tasks(
     cfg: CrystalForgeConfig,
@@ -226,9 +343,8 @@ async fn process_pending_commits(
                     .map(|s| s.hostname.clone())
                     .collect::<Vec<_>>();
 
-                // Set up deployment policies - check CF agent for all systems
-                // Using non-strict mode to collect data without failing evaluations
-                let policies = vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: false }];
+                // Load enabled deployment policies from DB for nix-eval-jobs policy checks.
+                let policies = load_deployment_policies_for_eval(pool).await;
 
                 // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
                 if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {

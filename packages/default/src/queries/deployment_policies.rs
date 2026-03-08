@@ -32,6 +32,23 @@ pub async fn list_deployment_policies(
     Ok(policies)
 }
 
+/// List all enabled deployment policies for evaluator execution.
+pub async fn list_enabled_deployment_policies(pool: &PgPool) -> Result<Vec<DeploymentPolicyRecord>> {
+    let policies = sqlx::query_as::<_, DeploymentPolicyRecord>(
+        r#"
+        SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
+        FROM deployment_policies
+        WHERE enabled = true
+        ORDER BY name ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("Failed to list enabled deployment policies")?;
+
+    Ok(policies)
+}
+
 /// Get a deployment policy by ID
 pub async fn get_deployment_policy_by_id(
     pool: &PgPool,
