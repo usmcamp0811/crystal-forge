@@ -18,7 +18,7 @@ use crate::components::policy::PolicyDefinition;
 pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
     match fetch_deployment_policies(Some(100), Some(0)).await {
         Ok(response) => {
-            tracing::info!("Loaded {} policies from API", response.policies.len());
+            web_sys::console::log_1(&format!("✅ API Success: Loaded {} policies from database", response.policies.len()).into());
             response
                 .policies
                 .into_iter()
@@ -27,22 +27,19 @@ pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
         }
         Err(ApiClientError::Status { code, body }) => {
             // Log API errors but fall back gracefully
-            tracing::warn!("API returned {}: {} - falling back to mock data", code, body);
-            
-            // For auth errors (401/403), we might want to redirect to login
-            // but for now, just log and use mock data
-            if code == 401 || code == 403 {
-                tracing::warn!("Authentication required - user may need to log in");
-            }
+            let msg = format!("❌ API ERROR: Status {}: {} - falling back to mock data", code, body);
+            web_sys::console::error_1(&msg.into());
             
             mock_policies()
         }
         Err(ApiClientError::Network(msg)) => {
-            tracing::warn!("Network error: {} - falling back to mock data", msg);
+            let error_msg = format!("❌ NETWORK ERROR: {} - falling back to mock data", msg);
+            web_sys::console::error_1(&error_msg.into());
             mock_policies()
         }
         Err(ApiClientError::Deserialize(msg)) => {
-            tracing::error!("Failed to deserialize API response: {} - falling back to mock data", msg);
+            let error_msg = format!("❌ DESERIALIZE ERROR: {} - falling back to mock data", msg);
+            web_sys::console::error_1(&error_msg.into());
             mock_policies()
         }
     }
