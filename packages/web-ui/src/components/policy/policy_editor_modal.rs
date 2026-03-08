@@ -354,7 +354,7 @@ pub fn PolicyEditorModal(
                             class: "space-y-2",
                             label { class: "text-xs text-violet-300/70 font-medium", "Policy Name" }
                             input {
-                                class: "w-full rounded-lg border cf-input px-3 py-2 text-sm cf-text-primary focus:outline-none cf-focus-ring",
+                                class: "w-full rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-2 text-sm text-gray-100 shadow-inner shadow-black/30 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50",
                                 placeholder: "e.g., Require SSH Enabled",
                                 value: "{edit_name}",
                                 oninput: move |event| {
@@ -367,7 +367,7 @@ pub fn PolicyEditorModal(
                             class: "space-y-2",
                             label { class: "text-xs text-violet-300/70 font-medium", "Description" }
                             textarea {
-                                class: "w-full rounded-lg border cf-input px-3 py-2 text-sm cf-text-primary focus:outline-none cf-focus-ring resize-none",
+                                class: "w-full rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-2 text-sm text-gray-100 shadow-inner shadow-black/30 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50 resize-none",
                                 placeholder: "Describe what this policy enforces...",
                                 rows: "3",
                                 value: "{edit_description}",
@@ -509,7 +509,7 @@ pub fn PolicyEditorModal(
                                     div { class: "space-y-2",
                                         label { class: "text-xs text-violet-300/70 font-medium", "Expression" }
                                         input {
-                                            class: "w-full rounded-lg border cf-input px-3 py-2 text-xs cf-text-primary focus:outline-none cf-focus-ring",
+                                            class: "w-full rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-2 text-xs text-gray-100 shadow-inner shadow-black/30 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50",
                                             placeholder: "config.networking.firewall.enable",
                                             value: "{basic_expression}",
                                             oninput: move |event| {
@@ -519,7 +519,7 @@ pub fn PolicyEditorModal(
                                         }
                                         label { class: "text-xs text-violet-300/70 font-medium", "Rule description" }
                                         input {
-                                            class: "w-full rounded-lg border cf-input px-3 py-2 text-xs cf-text-primary focus:outline-none cf-focus-ring",
+                                            class: "w-full rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-2 text-xs text-gray-100 shadow-inner shadow-black/30 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50",
                                             value: "{basic_rule_description}",
                                             oninput: move |event| {
                                                 basic_rule_description.set(event.value());
@@ -533,7 +533,7 @@ pub fn PolicyEditorModal(
                                     div { class: "space-y-2",
                                         label { class: "text-xs text-violet-300/70 font-medium", "Packages (comma separated)" }
                                         input {
-                                            class: "w-full rounded-lg border cf-input px-3 py-2 text-xs cf-text-primary focus:outline-none cf-focus-ring",
+                                            class: "w-full rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-2 text-xs text-gray-100 shadow-inner shadow-black/30 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50",
                                             placeholder: "git, vim, htop",
                                             value: "{basic_packages}",
                                             oninput: move |event| {
@@ -548,7 +548,7 @@ pub fn PolicyEditorModal(
                                     div { class: "space-y-2",
                                         label { class: "text-xs text-violet-300/70 font-medium", "Service option path" }
                                         input {
-                                            class: "w-full rounded-lg border cf-input px-3 py-2 text-xs cf-text-primary focus:outline-none cf-focus-ring",
+                                            class: "w-full rounded-lg border border-gray-800 bg-gray-950/70 px-3 py-2 text-xs text-gray-100 shadow-inner shadow-black/30 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50",
                                             placeholder: "config.services.openssh.enable",
                                             value: "{basic_service_option}",
                                             oninput: move |event| {
@@ -610,7 +610,7 @@ pub fn PolicyEditorModal(
                         class: "space-y-2 flex flex-col min-h-0",
                             label { class: "text-xs text-violet-300/70 font-medium", "Policy Definition" }
                             div {
-                                class: "rounded-lg border {theme::surface::CARD_BORDER} cf-subtle-bg overflow-hidden flex-1 min-h-0",
+                                class: "rounded-lg border border-gray-800 bg-gray-950/70 overflow-hidden flex-1 min-h-0",
                                 textarea {
                                     class: "w-full bg-transparent px-3 py-2 text-xs text-gray-100 font-mono focus:outline-none resize-none",
                                     style: "height: clamp(100px, 20vh, 180px);",
