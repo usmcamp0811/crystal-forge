@@ -10,6 +10,7 @@ pub mod commits_artifacts;
 pub mod cve_scans;
 pub mod dashboard;
 pub mod deployment;
+pub mod deployment_policies;
 pub mod derivations;
 pub mod environments;
 pub mod flakes;
