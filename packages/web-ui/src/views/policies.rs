@@ -8,9 +8,10 @@ use uuid::Uuid;
 
 use crate::components::layout::Card;
 use crate::components::policy::{
-    POLICY_TOML_SAMPLE, PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat,
+    PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat, POLICY_TOML_SAMPLE,
 };
 use crate::theme;
+use crate::views::policies_api;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -44,8 +45,16 @@ struct PolicyPresetMeta {
 /// The policies page for global policy management.
 #[component]
 pub fn PoliciesView() -> Element {
-    let mut policy_library = use_signal(initial_policy_definitions);
+    let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
     let mut show_editor = use_signal(|| false);
+    
+    // Load policies from API on mount
+    use_effect(move || {
+        spawn(async move {
+            let policies = policies_api::load_policies_with_fallback().await;
+            policy_library.set(policies);
+        });
+    });
     let mut editing_policy_id: Signal<Option<Uuid>> = use_signal(|| None);
     let mut edit_name = use_signal(String::new);
     let mut edit_description = use_signal(String::new);
