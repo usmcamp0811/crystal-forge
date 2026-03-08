@@ -1090,6 +1090,100 @@ You MUST return to BACKLOG-FIRST EXECUTION.
 
 <CRITICAL_INSTRUCTION>
 
+# SHELL OUTPUT DISTILLATION RULE (MANDATORY)
+
+To reduce noisy command output and improve signal extraction, agents MUST use `distill` when reading large non-interactive shell output.
+
+## DEFAULT RULE
+
+When running commands that may produce substantial stdout/stderr, the agent SHOULD pipe the output through `distill` and ask a narrow extraction question.
+
+Examples:
+
+- `nix flake check 2>&1 | distill "output exactly 3 lines: status, first failing check, root cause"`
+- `cargo test 2>&1 | distill "list only failing tests and the first error for each"`
+- `cargo clippy --all-targets --all-features 2>&1 | distill "show only actionable warnings that block merge"`
+- `git diff origin/dev...HEAD 2>&1 | distill "summarize risky behavior changes in 5 bullets max"`
+- `journalctl -u <service> -n 400 2>&1 | distill "give only the repeated error pattern and likely root cause"`
+
+## PROMPTING REQUIREMENT
+
+When using `distill`, the agent MUST use constrained prompts that request compact structured output.
+
+Preferred prompt patterns:
+
+- `answer in 2 lines`
+- `output only`
+- `one sentence only`
+- `exactly 3 lines: status, failing item, root cause`
+- `return JSON with ...`
+
+Agents MUST prefer extraction prompts over open-ended explanation prompts.
+
+## REQUIRED USE CASES
+
+Agents SHOULD use `distill` for:
+
+- `nix build`, `nix flake check`, `nixos-rebuild`, and other verbose Nix commands
+- compiler output
+- test output
+- lint output
+- long logs
+- large diffs
+- audit and scan output
+- search output such as `rg` when answering targeted codebase questions
+
+## DO NOT USE DISTILL WHEN
+
+Agents MUST NOT use `distill` when exact raw output is required, including:
+
+- commands whose exact output must be copied verbatim
+- interactive or TUI commands
+- commands producing machine-readable output that will be parsed directly
+- cases where truncation or summarization could hide required evidence
+- pre-flight proof commands whose full raw output must be pasted exactly
+
+Examples that MUST remain raw:
+
+- `pwd`
+- `git rev-parse --abbrev-ref HEAD`
+- `git rev-parse --show-toplevel`
+- `git status --porcelain`
+- `git worktree list`
+
+## VERIFICATION AND HONESTY REQUIREMENT
+
+`distill` is a lossy summarizer.
+Agents MUST treat it as a reading aid, not as proof that a command succeeded.
+
+If a command is used for mandatory verification, the agent MUST still determine the real exit status of the underlying command.
+The agent MUST NOT claim success based only on a `distill` summary.
+
+If there is any ambiguity, the agent MUST inspect the raw output or rerun the command without `distill`.
+
+## FAILURE HANDLING
+
+If `distill` is unavailable, misconfigured, or appears to pass input through unchanged, the agent MUST:
+
+1. Report that `distill` is not functioning correctly
+2. Fall back to raw command inspection
+3. Continue work without fabricating summarized results
+
+Agents MUST NOT pretend that `distill` produced a valid summary if it did not.
+
+## MODEL SELECTION GUIDANCE
+
+For general shell summarization, prefer a fast general-purpose local model.
+For code-heavy output, a code-oriented model MAY be used.
+
+The repository or user may define the preferred `distill` model separately.
+
+</CRITICAL_INSTRUCTION>
+
+---
+
+<CRITICAL_INSTRUCTION>
+
 # STATE MACHINE EXECUTION MODEL
 
 All work must follow this execution flow:
