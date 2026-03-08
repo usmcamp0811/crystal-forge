@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-08 02:22'
+updated_date: '2026-03-08 03:07'
 labels:
   - backend
   - api
@@ -325,6 +325,42 @@ LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-
 - Frontend has read-only API integration (fetch with fallback works)
 - Frontend write operations fall back to local-only mode (graceful degradation)
 - This provides value even without full CRUD UI
+
+## Investigation: API Not Being Called (2026-03-07)
+
+**User Report**: Deleted all policies from database, refreshed UI, and all policies reappeared
+
+**Root Cause**: Frontend is silently falling back to mock data instead of calling the API
+
+**Actions Taken:**
+1. ✅ Added console logging to show when API succeeds vs falls back to mock
+2. ✅ Fixed test compilation errors (changed from sqlx::test to tokio::test)
+3. ❌ Cannot start server to test - blocked by pre-existing compilation errors
+
+**Blockers Found:**
+- 4 pre-existing compilation errors in test code (E0412, E0609)
+- These errors prevent `nix build` and `server-stack-mock` from working
+- Errors exist in base dev branch, not introduced by this task
+
+**Next Steps to Debug:**
+1. Run server from dev worktree (or use existing running server)
+2. Open browser console when loading policies view
+3. Look for either:
+   - ✅ `✅ API Success: Loaded X policies from database`
+   - ❌ `❌ API ERROR: Status XXX: ...`
+   - ❌ `❌ NETWORK ERROR: ...`
+   - ❌ `❌ DESERIALIZE ERROR: ...`
+4. Check Network tab for `/api/v1/deployment-policies` request and response
+
+**Likely Causes:**
+- Server not running
+- Auth/CORS error (401/403)
+- Server doesn't have routes registered (404)
+- Backend compilation failed
+
+**Resolution Path:**
+- Once we see the console error, we can fix the specific issue
+- May need to address pre-existing compilation errors first in separate task
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
