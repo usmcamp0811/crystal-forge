@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-08 15:53'
+updated_date: '2026-03-08 16:09'
 labels:
   - ui
   - web-ui
@@ -288,6 +288,25 @@ Then: Phase 4 (UI), Phase 5 (cache worker integration), Phase 6 (testing)
 - Form validation and error handling
 
 Next: Phase 5 (cache worker integration)
+
+## Phase 5 Completed (Cache Worker Integration)
+
+**Completed:**
+- Updated cache_worker.rs to query cache_destinations table on startup
+- Implemented database-first config with server.toml fallback (backward compatibility)
+- Added last_used_at timestamp updates when successfully pushing to a cache destination
+- Created helper function to convert CacheDestination → CacheConfig
+- Both run_cache_push_workers() and run_cache_push_loop() now use database config
+- Fixed Dioxus RSX date formatting errors (can't call methods in format strings)
+- Added PartialEq derives to CacheDestination and CachePushJob models
+
+**Verification:**
+- Backend compiles successfully: `nix develop -c bash -c "cd packages/default && cargo check"`
+- All 3 files modified cleanly committed
+
+**Acceptance Criteria Progress:** 3/16 → 13/16 (database integration + worker reading from DB + last_used tracking)
+
+**Next:** Phase 6 - Testing & Final Verification
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
