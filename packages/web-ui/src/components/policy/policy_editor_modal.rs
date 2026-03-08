@@ -179,6 +179,7 @@ pub fn PolicyEditorModal(
     let mut basic_packages = use_signal(|| "git, vim".to_string());
     let mut basic_service_option = use_signal(|| "config.services.openssh.enable".to_string());
     let mut basic_strict = use_signal(|| true);
+    let mut show_strict_info = use_signal(|| false);
     let current_validation_error = {
         let name = edit_name.read().trim().to_string();
         if name.is_empty() {
@@ -371,9 +372,9 @@ pub fn PolicyEditorModal(
                             if *advanced_mode.read() {
                                 label { class: "text-xs text-violet-300/70 font-medium", "Templates" }
                                 div {
-                                    class: "grid grid-cols-1 gap-2",
+                                    class: "flex flex-wrap gap-2",
                                     button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
                                         onclick: move |_| {
                                             edit_format.set(PolicyFormat::Json);
                                             edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
@@ -382,7 +383,7 @@ pub fn PolicyEditorModal(
                                         "Custom check"
                                     }
                                     button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
                                         onclick: move |_| {
                                             edit_format.set(PolicyFormat::Json);
                                             edit_body.set(REQUIRE_PACKAGES_JSON_TEMPLATE.to_string());
@@ -391,7 +392,7 @@ pub fn PolicyEditorModal(
                                         "Require packages"
                                     }
                                     button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
                                         onclick: move |_| {
                                             edit_format.set(PolicyFormat::Json);
                                             edit_body.set(REQUIRE_SERVICE_JSON_TEMPLATE.to_string());
@@ -514,10 +515,23 @@ pub fn PolicyEditorModal(
                                         }
                                     }
                                     span { class: "text-xs text-gray-300", "Strict mode" }
+                                    button {
+                                        class: "w-4 h-4 rounded-full border border-gray-600 text-[10px] text-gray-300 hover:text-white hover:border-gray-400 inline-flex items-center justify-center",
+                                        onclick: move |_| {
+                                            let next = {
+                                                let current = *show_strict_info.read();
+                                                !current
+                                            };
+                                            show_strict_info.set(next);
+                                        },
+                                        "i"
+                                    }
                                 }
-                                p {
-                                    class: "text-[11px] {theme::text::MUTED}",
-                                    "Strict mode fails evaluation when this policy check is false. Disabled strict mode records the check result without failing overall evaluation."
+                                if *show_strict_info.read() {
+                                    div {
+                                        class: "text-[11px] {theme::text::MUTED} bg-gray-900/60 border border-gray-700 rounded px-2 py-1",
+                                        "Strict mode fails evaluation when this check is false. Non-strict mode records the result but does not fail overall evaluation."
+                                    }
                                 }
                             }
                         }
@@ -540,8 +554,8 @@ pub fn PolicyEditorModal(
                                 class: "rounded-lg border border-gray-700 bg-gray-950/70 overflow-hidden flex-1 min-h-0",
                                 textarea {
                                     class: "w-full bg-transparent px-3 py-2 text-xs text-gray-100 font-mono focus:outline-none resize-none",
-                                    style: "height: clamp(120px, 24vh, 220px);",
-                                    rows: "10",
+                                    style: "height: clamp(100px, 20vh, 180px);",
+                                    rows: "8",
                                     value: "{edit_body}",
                                     oninput: move |event| {
                                         edit_body.set(event.value());
