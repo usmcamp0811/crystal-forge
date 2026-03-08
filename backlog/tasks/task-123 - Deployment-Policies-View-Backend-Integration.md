@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-08 00:04'
+updated_date: '2026-03-08 01:43'
 labels:
   - backend
   - api
@@ -280,30 +280,7 @@ Users will be able to fully manage deployment policies through the web interface
 - **Risk**: Frontend modal complexity
   - **Mitigation**: Reuse existing modal components from builders feature, follow established patterns
 
-LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-backend-integration
-
-## Progress Update - Backend Phase Complete (with caveats)
-
-**Completed:**
-- ✅ Created deployment_policies queries module with all CRUD operations
-- ✅ Created deployment_policies API handlers with RBAC enforcement
-- ✅ Registered routes in server.rs
-- ✅ Added database models and DTOs to deployment_policies.rs
-- ✅ All new files staged in git
-
-**Issue Discovered:**
-The dev branch currently has 133 pre-existing compilation errors unrelated to this task. This prevents full cargo check/clippy verification. The errors exist in the base dev branch before any of my changes.
-
-**Code Quality (Manual Review):**
-- Followed patterns from builders.rs API handlers
-- Used proper RBAC extractors (require_viewer_or_above, require_operator_or_admin, require_admin)
-- Implemented input validation (name length, policy_type enum, config JSON)
-- Added duplicate name checking and referential integrity checks
-- No unwrap() calls in production paths
-- Proper error handling with Result types
-
-**Next Steps:**
-Continue with frontend implementation (Phase 3-4). The backend API is structurally complete and ready for integration testing once the base compilation errors are resolved.
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-crud
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
