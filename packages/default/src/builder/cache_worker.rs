@@ -5,6 +5,8 @@
 
 use crate::config::{BuildConfig, CacheConfig, CacheType, CrystalForgeConfig};
 use crate::log::{WorkerState, WorkerStatus, get_build_status};
+use crate::models::cache_destination::CacheDestination;
+use crate::queries::cache_destinations::{list_cache_destinations, update_cache_destination_last_used};
 use crate::queries::cache_push::{
     CachePushJob, cleanup_stale_cache_push_jobs, get_pending_cache_push_jobs,
     mark_cache_push_completed, mark_cache_push_failed, mark_cache_push_in_progress,
@@ -16,16 +18,81 @@ use sqlx::PgPool;
 use tokio::time::{Duration, sleep, timeout};
 use tracing::{debug, error, info, warn};
 
-/// Runs cache push workers with parallel uploads and job creation
-pub async fn run_cache_push_workers(pool: PgPool) {
-    let cfg = CrystalForgeConfig::load().unwrap_or_default();
-    let cache_cfg = cfg.get_cache_config();
+/// Convert a database CacheDestination to a CacheConfig
+fn cache_destination_to_config(dest: &CacheDestination) -> CacheConfig {
+    let cache_type = match dest.cache_type.as_str() {
+        "S3" => CacheType::S3,
+        "Attic" => CacheType::Attic,
+        "Http" => CacheType::Http,
+        "Nix" => CacheType::Nix,
+        _ => CacheType::Nix, // fallback
+    };
 
-    if cache_cfg.push_to.is_none() {
-        info!("📤 Cache push disabled (no destination configured)");
-        return;
+    CacheConfig {
+        cache_type,
+        push_to: dest.push_to.clone(),
+        push_after_build: true, // Always true for database-configured caches
+        signing_key: dest.signing_key_path.clone(),
+        compression: dest.compression.clone(),
+        push_filter: None, // Not stored in database (legacy field)
+        parallel_uploads: dest.parallel_uploads.unwrap_or(1) as u32,
+        s3_region: dest.s3_region.clone(),
+        s3_profile: dest.s3_profile.clone(),
+        attic_token: dest.attic_token.clone(),
+        attic_cache_name: dest.attic_cache_name.clone(),
+        attic_ignore_upstream_cache_filter: dest.attic_ignore_upstream_cache_filter.unwrap_or(true),
+        attic_jobs: dest.attic_jobs.unwrap_or(5) as u32,
+        max_retries: dest.max_retries.unwrap_or(3) as u32,
+        retry_delay_seconds: dest.retry_delay_seconds.unwrap_or(5) as u64,
+        poll_interval: Duration::from_secs(30), // Use default poll interval
+        push_timeout_seconds: dest.push_timeout_seconds.unwrap_or(3600) as u64,
+        force_repush: dest.force_repush.unwrap_or(false),
+        require_sigs: dest.require_sigs.unwrap_or(true),
+    }
+}
+
+/// Load cache configuration from database, falling back to server.toml
+async fn load_cache_config(pool: &PgPool) -> Option<(CacheConfig, Option<String>)> {
+    // Try database first
+    match list_cache_destinations(pool, true).await {
+        Ok(destinations) if !destinations.is_empty() => {
+            // Use the first enabled destination
+            let dest = &destinations[0];
+            info!("📦 Using cache destination from database: {}", dest.name);
+            let config = cache_destination_to_config(dest);
+            return Some((config, Some(dest.name.clone())));
+        }
+        Ok(_) => {
+            debug!("No enabled cache destinations in database, falling back to server.toml");
+        }
+        Err(e) => {
+            warn!("Failed to query cache destinations from database: {:#}", e);
+        }
     }
 
+    // Fallback to server.toml
+    let cfg = CrystalForgeConfig::load().unwrap_or_default();
+    let cache_cfg = cfg.get_cache_config().clone();
+    
+    if cache_cfg.push_to.is_some() {
+        info!("📦 Using cache configuration from server.toml (fallback)");
+        Some((cache_cfg, None))
+    } else {
+        None
+    }
+}
+
+/// Runs cache push workers with parallel uploads and job creation
+pub async fn run_cache_push_workers(pool: PgPool) {
+    let (cache_cfg, cache_dest_name) = match load_cache_config(&pool).await {
+        Some(config) => config,
+        None => {
+            info!("📤 Cache push disabled (no destination configured)");
+            return;
+        }
+    };
+
+    let cfg = CrystalForgeConfig::load().unwrap_or_default();
     let build_cfg = cfg.get_build_config();
     let worker_count = cache_cfg.parallel_uploads.max(1) as usize;
 
@@ -45,7 +112,7 @@ pub async fn run_cache_push_workers(pool: PgPool) {
     }
     {
         let pool = pool.clone();
-        let destination = cache_cfg.push_to.clone().unwrap(); // Safe because we checked above
+        let destination = cache_cfg.push_to.clone().unwrap_or_default();
         tokio::spawn(async move {
             info!("📤 Starting cache job creation loop (every 30s)...");
             loop {
@@ -70,6 +137,7 @@ pub async fn run_cache_push_workers(pool: PgPool) {
         let pool = pool.clone();
         let cache_cfg = cache_cfg.clone();
         let build_cfg = build_cfg.clone();
+        let dest_name = cache_dest_name.clone();
 
         // Pre-register worker status (reuse build status list, or make a dedicated one)
         {
@@ -83,7 +151,7 @@ pub async fn run_cache_push_workers(pool: PgPool) {
         }
 
         handles.push(tokio::spawn(async move {
-            cache_worker(worker_id, pool, cache_cfg, build_cfg).await;
+            cache_worker(worker_id, pool, cache_cfg, build_cfg, dest_name).await;
         }));
     }
 
@@ -94,13 +162,13 @@ pub async fn run_cache_push_workers(pool: PgPool) {
 
 /// Runs the periodic cache push loop with robust error handling
 pub async fn run_cache_push_loop(pool: PgPool) {
-    let cfg = CrystalForgeConfig::load().unwrap_or_default();
-    let cache_cfg = cfg.get_cache_config();
-
-    if cache_cfg.push_to.is_none() {
-        info!("📤 Cache push disabled (no destination configured)");
-        return;
-    }
+    let (cache_cfg, cache_dest_name) = match load_cache_config(&pool).await {
+        Some(config) => config,
+        None => {
+            info!("📤 Cache push disabled (no destination configured)");
+            return;
+        }
+    };
 
     let worker_count = match cache_cfg.cache_type {
         CacheType::S3 => cache_cfg.parallel_uploads.max(1) as usize,
@@ -108,6 +176,7 @@ pub async fn run_cache_push_loop(pool: PgPool) {
         CacheType::Http | CacheType::Nix => cache_cfg.parallel_uploads.max(1) as usize,
     };
 
+    let cfg = CrystalForgeConfig::load().unwrap_or_default();
     let build_cfg = cfg.get_build_config();
 
     info!("🚚 starting {} cache-push worker(s)…", worker_count);
@@ -130,6 +199,7 @@ pub async fn run_cache_push_loop(pool: PgPool) {
         let pool = pool.clone();
         let cache_cfg = cache_cfg.clone();
         let build_cfg = build_cfg.clone();
+        let dest_name = cache_dest_name.clone();
 
         // Pre-register worker status (reuse build status list, or make a dedicated one)
         {
@@ -143,7 +213,7 @@ pub async fn run_cache_push_loop(pool: PgPool) {
         }
 
         handles.push(tokio::spawn(async move {
-            cache_worker(worker_id, pool, cache_cfg, build_cfg).await;
+            cache_worker(worker_id, pool, cache_cfg, build_cfg, dest_name).await;
         }));
     }
 
@@ -157,6 +227,7 @@ async fn cache_worker(
     pool: PgPool,
     cache_cfg: CacheConfig,
     build_cfg: BuildConfig,
+    cache_dest_name: Option<String>,
 ) {
     let status_id = 10_000 + worker_id;
     let tick = cache_cfg.poll_interval;
@@ -216,7 +287,7 @@ async fn cache_worker(
         }
 
         if let Err(e) =
-            process_one_job(&pool, &cache_cfg, &build_cfg, job, worker_id, status_id).await
+            process_one_job(&pool, &cache_cfg, &build_cfg, job, worker_id, status_id, cache_dest_name.as_deref()).await
         {
             error!("cache-worker {worker_id}: job failed: {e:#}");
         }
@@ -230,6 +301,7 @@ async fn process_one_job(
     job: CachePushJob,
     worker_id: usize,
     status_id: usize,
+    cache_dest_name: Option<&str>,
 ) -> Result<()> {
     // update status for visibility
     {
@@ -271,6 +343,14 @@ async fn process_one_job(
         Ok(()) => {
             let duration_ms = (started.elapsed().as_millis() as i32).max(0);
             mark_cache_push_completed(pool, job.id, None, Some(duration_ms)).await?;
+            
+            // Update last_used_at for the cache destination if using database config
+            if let Some(dest_name) = cache_dest_name {
+                if let Err(e) = update_cache_destination_last_used(pool, dest_name).await {
+                    warn!("Failed to update last_used_at for cache destination {}: {:#}", dest_name, e);
+                }
+            }
+            
             info!(
                 "✅ cache-worker {worker_id}: pushed {} (job {})",
                 derivation.derivation_name, job.id

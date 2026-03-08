@@ -1174,7 +1174,7 @@ pub struct BuilderMetrics {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Cache destination configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CacheDestination {
     pub id: i32,
     pub name: String,
@@ -1247,7 +1247,7 @@ pub struct UpdateCacheDestination {
 }
 
 /// Cache push job status and details
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CachePushJob {
     pub id: i32,
     pub derivation_id: i32,

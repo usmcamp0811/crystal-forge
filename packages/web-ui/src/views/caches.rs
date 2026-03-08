@@ -138,6 +138,9 @@ fn CacheDestinationCard(destination: CacheDestination) -> Element {
     } else {
         "bg-gray-700/20 text-gray-400"
     };
+    
+    let last_used_str = destination.last_used_at.map(|d| d.format("%Y-%m-%d %H:%M").to_string());
+    let created_str = destination.created_at.format("%Y-%m-%d").to_string();
 
     rsx! {
         div {
@@ -173,12 +176,12 @@ fn CacheDestinationCard(destination: CacheDestination) -> Element {
                     
                     div {
                         class: "flex gap-4 mt-2 text-xs text-slate-500",
-                        if let Some(last_used) = destination.last_used_at {
-                            span { "Last used: {last_used.format(\"%Y-%m-%d %H:%M\")}" }
+                        if let Some(ref last_used) = last_used_str {
+                            span { "Last used: {last_used}" }
                         } else {
                             span { "Never used" }
                         }
-                        span { "Created: {destination.created_at.format(\"%Y-%m-%d\")}" }
+                        span { "Created: {created_str}" }
                     }
                 }
                 
@@ -304,6 +307,8 @@ fn CachePushJobRow(job: CachePushJob) -> Element {
         "cancelled" => "text-gray-400",
         _ => "text-slate-400",
     };
+    
+    let scheduled_str = job.scheduled_at.format("%Y-%m-%d %H:%M").to_string();
 
     rsx! {
         tr {
@@ -321,7 +326,7 @@ fn CachePushJobRow(job: CachePushJob) -> Element {
             td { class: "px-4 py-3 text-sm text-slate-300", "{job.attempts}" }
             td {
                 class: "px-4 py-3 text-sm text-slate-400",
-                "{job.scheduled_at.format(\"%Y-%m-%d %H:%M\")}"
+                "{scheduled_str}"
             }
             td {
                 class: "px-4 py-3 text-sm",
