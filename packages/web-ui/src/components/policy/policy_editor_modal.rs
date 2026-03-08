@@ -457,7 +457,7 @@ pub fn PolicyEditorModal(
                                             edit_body.set(REQUIRE_SERVICE_JSON_TEMPLATE.to_string());
                                             save_error.set(String::new());
                                         },
-                                        "Require service"
+                                        "Service check"
                                     }
                                 }
                             } else {
@@ -501,7 +501,7 @@ pub fn PolicyEditorModal(
                                             basic_kind.set(BasicPolicyKind::RequireService);
                                             save_error.set(String::new());
                                         },
-                                        "Require service"
+                                        "Service check"
                                     }
                                 }
 
@@ -575,7 +575,7 @@ pub fn PolicyEditorModal(
                                     }
                                     span { class: "text-xs text-gray-300", "Strict mode" }
                                     button {
-                                        class: "w-4 h-4 rounded-full border border-gray-600 text-[10px] text-gray-300 hover:text-white hover:border-gray-400 inline-flex items-center justify-center",
+                                        class: "w-5 h-5 rounded-full border border-violet-400/60 bg-violet-500/10 text-xs font-semibold text-violet-200 hover:text-white hover:border-violet-300 inline-flex items-center justify-center",
                                         onclick: move |_| {
                                             let next = {
                                                 let current = *show_strict_info.read();
@@ -583,13 +583,19 @@ pub fn PolicyEditorModal(
                                             };
                                             show_strict_info.set(next);
                                         },
-                                        "i"
+                                        "?"
                                     }
                                 }
                                 if *show_strict_info.read() {
                                     div {
                                         class: "text-[11px] {theme::text::MUTED} bg-gray-900/60 border border-gray-700 rounded px-2 py-1",
                                         "Strict mode fails evaluation when this check is false. Non-strict mode records the result but does not fail overall evaluation."
+                                    }
+                                }
+                                if *basic_kind.read() == BasicPolicyKind::RequireService {
+                                    p {
+                                        class: "text-[11px] {theme::text::MUTED}",
+                                        "Service check is a guided custom check. It creates a custom_check policy from the service option path."
                                     }
                                 }
                             }
