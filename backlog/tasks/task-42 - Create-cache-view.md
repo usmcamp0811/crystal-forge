@@ -1,11 +1,11 @@
 ---
 id: TASK-42
 title: Create cache view
-status: Backlog
+status: To Do
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-08 14:59'
+updated_date: '2026-03-08 15:00'
 labels:
   - ui
   - web-ui
@@ -165,6 +165,97 @@ This view consolidates cache operations that are currently scattered across CLI-
 - **Migration Rollback**: Plan for rolling back cache_destinations migration if needed
 - **Secrets Management**: Signing keys and tokens stored in database - consider encryption at rest (future enhancement)
 - **Server Restart**: Changes to cache config may require cache worker restart (document this in UI)
+
+## Verification Plan
+
+**Tier 1: Feature-Level Integration** (Required for this task)
+
+This task requires runtime verification of UI + API + database integration.
+
+### Phase 1: Database & API Verification
+```bash
+# Format and lint
+cargo fmt -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Unit tests (targeted)
+cargo test --package crystal-forge models::cache_destination
+cargo test --package crystal-forge queries::cache_destinations
+cargo test --package crystal-forge handlers::api::caches
+
+# SQLx metadata sync (REQUIRED if schema changes)
+db-only up
+cargo sqlx prepare
+```
+
+### Phase 2: UI Integration Testing
+```bash
+# Start full stack with database
+full-stack up
+
+# Manual verification:
+# 1. Navigate to /caches route
+# 2. Verify cache destinations table renders
+# 3. Add a new Attic cache destination with all fields
+# 4. Edit the cache destination
+# 5. View cache push jobs list
+# 6. Filter jobs by status
+# 7. Retry a failed job (if any exist, or create test data)
+# 8. Test bulk selection and bulk retry
+# 9. Delete the test cache destination
+# 10. Verify admin-only authorization (test with non-admin user)
+```
+
+### Phase 3: Cache Worker Integration
+```bash
+# Verify cache worker reads from database
+# 1. Add cache destination via UI
+# 2. Trigger a build that creates cache push jobs
+# 3. Verify cache worker picks up jobs and uses correct destination
+# 4. Check last_used_at timestamp updates
+```
+
+**Why not Tier 2 (nix flake check)?**
+This is a UI/API feature addition that doesn't modify Nix packaging, build infrastructure, or cross-package interfaces. Tier 1 verification with targeted tests and full-stack integration testing is sufficient.
+
+## Dependencies
+
+- None (all dependencies are already available)
+
+## Impact Areas
+
+- Database schema (new table + migration)
+- API handlers (new routes)
+- Web UI (new view)
+- Cache worker (modified to read from database)
+- Navigation (new menu item)
+
+## Files Expected to Change
+
+**Database:**
+- packages/default/migrations/XXXX_create_cache_destinations.sql
+- packages/default/migrations/XXXX_add_cache_destination_fk_to_push_jobs.sql
+
+**Backend:**
+- packages/default/src/models/cache_destination.rs (new)
+- packages/default/src/models/mod.rs (add cache_destination)
+- packages/default/src/queries/cache_destinations.rs (new)
+- packages/default/src/queries/mod.rs (add cache_destinations)
+- packages/default/src/queries/cache_push.rs (update to join cache_destinations)
+- packages/default/src/handlers/api/caches.rs (new)
+- packages/default/src/handlers/api/mod.rs (register caches routes)
+- packages/default/src/builder/cache_worker.rs (read from db)
+
+**Frontend:**
+- packages/web-ui/src/views/caches.rs (new)
+- packages/web-ui/src/views/mod.rs (add caches)
+- packages/web-ui/src/components/cache_*.rs (new, as needed)
+- packages/web-ui/src/App.rs (add route)
+- packages/web-ui/src/api/caches.rs (new API client)
+- packages/web-ui/src/api/mod.rs (add caches module)
+
+**Tests:**
+- packages/default/tests/integration/cache_destinations_test.rs (new)
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
