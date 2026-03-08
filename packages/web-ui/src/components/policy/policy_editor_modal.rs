@@ -27,9 +27,11 @@ const REQUIRE_PACKAGES_JSON_TEMPLATE: &str = r#"{
   }
 }"#;
 
-const REQUIRE_CF_AGENT_JSON_TEMPLATE: &str = r#"{
-  "policy_type": "require_cf_agent",
+const REQUIRE_SERVICE_JSON_TEMPLATE: &str = r#"{
+  "policy_type": "custom_check",
   "config": {
+    "expression": "config.services.openssh.enable",
+    "description": "OpenSSH service must be enabled",
     "strict": true
   }
 }"#;
@@ -38,7 +40,7 @@ const REQUIRE_CF_AGENT_JSON_TEMPLATE: &str = r#"{
 enum BasicPolicyKind {
     CustomCheck,
     RequirePackages,
-    RequireCfAgent,
+    RequireService,
 }
 
 fn parse_policy_payload(
@@ -175,6 +177,7 @@ pub fn PolicyEditorModal(
     let mut basic_expression = use_signal(String::new);
     let mut basic_rule_description = use_signal(|| "Custom rule".to_string());
     let mut basic_packages = use_signal(|| "git, vim".to_string());
+    let mut basic_service_option = use_signal(|| "config.services.openssh.enable".to_string());
     let mut basic_strict = use_signal(|| true);
     let current_validation_error = {
         let name = edit_name.read().trim().to_string();
@@ -196,7 +199,13 @@ pub fn PolicyEditorModal(
                         None
                     }
                 }
-                BasicPolicyKind::RequireCfAgent => None,
+                BasicPolicyKind::RequireService => {
+                    if basic_service_option.read().trim().is_empty() {
+                        Some("Service option path is required in Basic mode".to_string())
+                    } else {
+                        None
+                    }
+                }
             }
         } else {
             let body = edit_body.read().clone();
@@ -208,11 +217,11 @@ pub fn PolicyEditorModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-3 sm:p-6 cf-modal-overlay-z50 overflow-y-auto",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-2 sm:p-4 cf-modal-overlay-z50 overflow-y-auto",
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "{theme::surface::CARD_BG} border border-violet-500/30 rounded-2xl p-3 sm:p-4 shadow-xl shadow-violet-900/20 cf-modal-panel-wide w-full max-w-6xl max-h-[84vh] flex flex-col",
+                class: "{theme::surface::CARD_BG} border border-violet-500/30 rounded-2xl p-3 shadow-xl shadow-violet-900/20 cf-modal-panel-wide w-full max-w-5xl max-h-[78vh] flex flex-col",
                 onclick: |evt| evt.stop_propagation(),
 
                 // Header
@@ -286,7 +295,11 @@ pub fn PolicyEditorModal(
 
                 // Form content
                 div {
-                    class: "grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-3 items-start mt-3 flex-1 min-h-0 overflow-y-auto pr-1",
+                    class: if *advanced_mode.read() {
+                        "grid grid-cols-1 lg:grid-cols-[230px_1fr] gap-3 items-start mt-3 flex-1 min-h-0 overflow-y-auto pr-1"
+                    } else {
+                        "grid grid-cols-1 gap-2 items-start mt-2 flex-1 min-h-0 overflow-y-auto pr-1"
+                    },
 
                     // Left column - metadata
                     div {
@@ -310,7 +323,7 @@ pub fn PolicyEditorModal(
                             textarea {
                                 class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50 resize-none",
                                 placeholder: "Describe what this policy enforces...",
-                                rows: "4",
+                                rows: "3",
                                 value: "{edit_description}",
                                 oninput: move |event| {
                                     edit_description.set(event.value());
@@ -381,18 +394,18 @@ pub fn PolicyEditorModal(
                                         class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
                                         onclick: move |_| {
                                             edit_format.set(PolicyFormat::Json);
-                                            edit_body.set(REQUIRE_CF_AGENT_JSON_TEMPLATE.to_string());
+                                            edit_body.set(REQUIRE_SERVICE_JSON_TEMPLATE.to_string());
                                             save_error.set(String::new());
                                         },
-                                        "Require CF agent"
+                                        "Require service"
                                     }
                                 }
                             } else {
                                 label { class: "text-xs text-violet-300/70 font-medium", "Policy Type" }
                                 div {
-                                    class: "grid grid-cols-1 gap-2",
+                                    class: "flex flex-wrap gap-2",
                                     button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border text-left transition-colors",
+                                        class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
                                         class: if *basic_kind.read() == BasicPolicyKind::CustomCheck {
                                             "bg-violet-500/20 border-violet-500 text-violet-300"
                                         } else {
@@ -405,7 +418,7 @@ pub fn PolicyEditorModal(
                                         "Custom check"
                                     }
                                     button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border text-left transition-colors",
+                                        class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
                                         class: if *basic_kind.read() == BasicPolicyKind::RequirePackages {
                                             "bg-violet-500/20 border-violet-500 text-violet-300"
                                         } else {
@@ -418,17 +431,17 @@ pub fn PolicyEditorModal(
                                         "Require packages"
                                     }
                                     button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border text-left transition-colors",
-                                        class: if *basic_kind.read() == BasicPolicyKind::RequireCfAgent {
+                                        class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
+                                        class: if *basic_kind.read() == BasicPolicyKind::RequireService {
                                             "bg-violet-500/20 border-violet-500 text-violet-300"
                                         } else {
                                             "border-gray-700 text-gray-300 hover:bg-gray-800"
                                         },
                                         onclick: move |_| {
-                                            basic_kind.set(BasicPolicyKind::RequireCfAgent);
+                                            basic_kind.set(BasicPolicyKind::RequireService);
                                             save_error.set(String::new());
                                         },
-                                        "Require CF agent"
+                                        "Require service"
                                     }
                                 }
 
@@ -471,6 +484,21 @@ pub fn PolicyEditorModal(
                                     }
                                 }
 
+                                if *basic_kind.read() == BasicPolicyKind::RequireService {
+                                    div { class: "space-y-2",
+                                        label { class: "text-xs text-violet-300/70 font-medium", "Service option path" }
+                                        input {
+                                            class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
+                                            placeholder: "config.services.openssh.enable",
+                                            value: "{basic_service_option}",
+                                            oninput: move |event| {
+                                                basic_service_option.set(event.value());
+                                                save_error.set(String::new());
+                                            },
+                                        }
+                                    }
+                                }
+
                                 div {
                                     class: "flex items-center gap-2",
                                     input {
@@ -487,21 +515,33 @@ pub fn PolicyEditorModal(
                                     }
                                     span { class: "text-xs text-gray-300", "Strict mode" }
                                 }
+                                p {
+                                    class: "text-[11px] {theme::text::MUTED}",
+                                    "Strict mode fails evaluation when this policy check is false. Disabled strict mode records the check result without failing overall evaluation."
+                                }
+                            }
+                        }
+
+                        if !*advanced_mode.read() {
+                            div {
+                                class: "rounded-lg border border-gray-700 bg-gray-950/40 p-3 space-y-1",
+                                p { class: "text-xs text-gray-300", "Basic mode keeps policy creation compact." }
+                                p { class: "text-xs {theme::text::MUTED}", "Use Advanced for free-form JSON/TOML." }
                             }
                         }
                     }
 
                     // Right column - code editor
-                    div {
+                    if *advanced_mode.read() {
+                        div {
                         class: "space-y-2 flex flex-col min-h-0",
-                        if *advanced_mode.read() {
                             label { class: "text-xs text-violet-300/70 font-medium", "Policy Definition" }
                             div {
                                 class: "rounded-lg border border-gray-700 bg-gray-950/70 overflow-hidden flex-1 min-h-0",
                                 textarea {
-                                    class: "w-full bg-transparent px-3 py-3 text-sm text-gray-100 font-mono focus:outline-none resize-none",
-                                    style: "height: clamp(180px, 30vh, 300px);",
-                                    rows: "12",
+                                    class: "w-full bg-transparent px-3 py-2 text-xs text-gray-100 font-mono focus:outline-none resize-none",
+                                    style: "height: clamp(120px, 24vh, 220px);",
+                                    rows: "10",
                                     value: "{edit_body}",
                                     oninput: move |event| {
                                         edit_body.set(event.value());
@@ -514,25 +554,19 @@ pub fn PolicyEditorModal(
                                 class: "text-[11px] {theme::text::MUTED}",
                                 "Tip: prefer JSON with policy_type + config for reliable saves."
                             }
-                        } else {
-                            div {
-                                class: "rounded-lg border border-gray-700 bg-gray-950/40 p-3 space-y-2",
-                                p { class: "text-xs text-gray-300", "Basic mode uses template-driven policies." }
-                                p { class: "text-xs {theme::text::MUTED}", "Choose a template on the left, set name/description, then save." }
-                                p { class: "text-xs {theme::text::MUTED}", "Switch to Advanced for full JSON/TOML editing." }
-                            }
                         }
-                        if let Some(message) = current_validation_error.clone() {
-                            div {
-                                class: "text-xs text-amber-300 bg-amber-950/40 border border-amber-700/40 rounded px-3 py-2",
-                                "{message}"
-                            }
+                    }
+
+                    if let Some(message) = current_validation_error.clone() {
+                        div {
+                            class: "text-xs text-amber-300 bg-amber-950/40 border border-amber-700/40 rounded px-3 py-2",
+                            "{message}"
                         }
-                        if !save_error.read().is_empty() {
-                            div {
-                                class: "text-xs text-red-300 bg-red-950/40 border border-red-700/40 rounded px-3 py-2",
-                                "{save_error}"
-                            }
+                    }
+                    if !save_error.read().is_empty() {
+                        div {
+                            class: "text-xs text-red-300 bg-red-950/40 border border-red-700/40 rounded px-3 py-2",
+                            "{save_error}"
                         }
                     }
                 }
@@ -559,6 +593,7 @@ pub fn PolicyEditorModal(
                             let expression = basic_expression.read().clone();
                             let rule_description = basic_rule_description.read().clone();
                             let packages_raw = basic_packages.read().clone();
+                            let service_option_raw = basic_service_option.read().clone();
                             let strict = *basic_strict.read();
                             let editing_id = *editing_policy_id.read();
                             let mut policy_library = policy_library;
@@ -597,9 +632,14 @@ pub fn PolicyEditorModal(
                                             });
                                             ("require_packages".to_string(), cfg)
                                         }
-                                        BasicPolicyKind::RequireCfAgent => {
-                                            let cfg = serde_json::json!({ "strict": strict });
-                                            ("require_cf_agent".to_string(), cfg)
+                                        BasicPolicyKind::RequireService => {
+                                            let option = service_option_raw.trim().to_string();
+                                            let cfg = serde_json::json!({
+                                                "expression": option,
+                                                "description": format!("Service option must be enabled: {option}"),
+                                                "strict": strict,
+                                            });
+                                            ("custom_check".to_string(), cfg)
                                         }
                                     }
                                 } else {
