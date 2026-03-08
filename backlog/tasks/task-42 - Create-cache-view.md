@@ -1,11 +1,11 @@
 ---
 id: TASK-42
 title: Create cache view
-status: To Do
+status: In Progress
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-08 15:00'
+updated_date: '2026-03-08 15:01'
 labels:
   - ui
   - web-ui
@@ -256,6 +256,8 @@ This is a UI/API feature addition that doesn't modify Nix packaging, build infra
 
 **Tests:**
 - packages/default/tests/integration/cache_destinations_test.rs (new)
+
+LOCK: Claude (agent) on gray in /home/mcamp/code/crystal-forge/TASK-42-cache-view
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
