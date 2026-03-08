@@ -57,6 +57,116 @@ This view consolidates cache operations that are currently scattered across CLI-
 - [ ] #16 UI follows existing Crystal Forge design patterns and component structure
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation Plan
+
+### Phase 1: Database Schema & Migrations
+1. Create migration for `cache_destinations` table with columns:
+   - id (serial primary key)
+   - name (text, unique, not null)
+   - cache_type (text, not null) - 'S3', 'Attic', 'Http', 'Nix'
+   - push_to (text) - destination URL
+   - enabled (boolean, default true)
+   - signing_key_path (text)
+   - compression (text)
+   - s3_region, s3_profile (text)
+   - attic_token, attic_cache_name (text)
+   - attic_ignore_upstream_cache_filter (boolean)
+   - attic_jobs (integer)
+   - parallel_uploads (integer)
+   - max_retries (integer)
+   - retry_delay_seconds (bigint)
+   - push_timeout_seconds (bigint)
+   - force_repush (boolean)
+   - require_sigs (boolean)
+   - created_at, updated_at, last_used_at (timestamptz)
+2. Add foreign key to cache_push_jobs.cache_destination referencing cache_destinations.name
+
+### Phase 2: API Models & Queries
+1. Create `packages/default/src/models/cache_destination.rs` with CacheDestination struct
+2. Create `packages/default/src/queries/cache_destinations.rs` with CRUD operations
+3. Update existing cache_push queries to join with cache_destinations table
+
+### Phase 3: API Handlers
+1. Create `packages/default/src/handlers/api/caches.rs` with:
+   - list_cache_destinations (GET /api/caches)
+   - get_cache_destination (GET /api/caches/:id)
+   - create_cache_destination (POST /api/caches) - admin only
+   - update_cache_destination (PUT /api/caches/:id) - admin only
+   - delete_cache_destination (DELETE /api/caches/:id) - admin only
+   - list_cache_push_jobs (GET /api/cache-push-jobs?status=&cache_id=)
+   - retry_cache_push_job (POST /api/cache-push-jobs/:id/retry) - admin only
+   - cancel_cache_push_job (POST /api/cache-push-jobs/:id/cancel) - admin only
+   - bulk_retry_jobs (POST /api/cache-push-jobs/bulk-retry) - admin only
+   - bulk_cancel_jobs (POST /api/cache-push-jobs/bulk-cancel) - admin only
+2. Register routes in handlers/api/mod.rs
+
+### Phase 4: Web UI Components
+1. Create `packages/web-ui/src/views/caches.rs` with:
+   - CacheList component (table of cache destinations)
+   - CacheForm component (add/edit cache destination)
+   - CachePushJobsList component (table of push jobs)
+   - CachePushJobDetail component (modal or detail view)
+2. Create `packages/web-ui/src/components/cache_*.rs` for reusable sub-components
+3. Add route to navigation in App.rs
+4. Add API client functions in api module
+
+### Phase 5: Cache Worker Integration
+1. Update `packages/default/src/builder/cache_worker.rs` to:
+   - Query cache_destinations table on startup
+   - Use database config with server.toml fallback
+   - Update last_used_at timestamp when pushing to a destination
+2. Add config migration helper to seed initial cache_destinations from server.toml
+
+### Phase 6: Testing & Verification
+1. Write unit tests for cache destination CRUD
+2. Write integration tests for cache push job endpoints
+3. Manual UI testing for all CRUD operations
+4. Test cache worker reads from database correctly
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Architectural Constraints
+
+1. **Database-First Design**: Cache destinations are stored in PostgreSQL, not TOML config. The server.toml cache config becomes a fallback/seed for initial setup.
+
+2. **Backward Compatibility**: Cache worker must gracefully fall back to server.toml if cache_destinations table is empty or migration hasn't run.
+
+3. **Authorization**: All write operations (create/update/delete cache destinations, retry/cancel jobs) require admin role. Read operations may be accessible to authenticated users.
+
+4. **UI Layer Separation**: 
+   - Views must not contain business logic
+   - API calls through dedicated client module
+   - Form validation in both frontend (UX) and backend (security)
+
+5. **Error Handling**:
+   - No unwrap() in production paths
+   - User-facing error messages must be actionable
+   - API returns structured error responses
+
+6. **Component Reusability**:
+   - Extract form fields into reusable components (CacheTypeSelector, S3ConfigFields, AtticConfigFields)
+   - Follow existing patterns from systems_list.rs, flakes_list.rs
+
+## Technical Decisions
+
+- **Multiple Cache Destinations**: The database schema supports multiple named caches. Future work can add per-flake or per-derivation cache selection.
+- **Migration Strategy**: Provide a CLI command or admin UI button to seed cache_destinations from server.toml for initial setup.
+- **Job Cancellation**: Cancelled jobs are marked as 'cancelled' status and excluded from retry logic.
+- **Bulk Operations**: Use JSON array of job IDs in request body for bulk retry/cancel.
+
+## Risk Areas
+
+- **Cache Worker Compatibility**: Ensure cache_worker.rs doesn't break if database config is missing
+- **Migration Rollback**: Plan for rolling back cache_destinations migration if needed
+- **Secrets Management**: Signing keys and tokens stored in database - consider encryption at rest (future enhancement)
+- **Server Restart**: Changes to cache config may require cache worker restart (document this in UI)
+<!-- SECTION:NOTES:END -->
+
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 Database migration created and tested for cache_destinations table
