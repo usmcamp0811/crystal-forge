@@ -3,9 +3,35 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use crate::api::client::{create_deployment_policy, update_deployment_policy};
+use crate::api::models::{CreateDeploymentPolicyRequest, UpdateDeploymentPolicyRequest};
 use crate::theme;
+use crate::views::policies_api;
 
 use super::types::{PolicyDefinition, PolicyFormat};
+
+fn infer_policy_type(body: &str) -> String {
+    if body.contains("require_packages") {
+        "require_packages".to_string()
+    } else if body.contains("require_cf_agent") || body.contains("require_crystal_forge_agent") {
+        "require_cf_agent".to_string()
+    } else {
+        "custom_check".to_string()
+    }
+}
+
+fn config_from_body(body: &str, format: PolicyFormat) -> serde_json::Value {
+    match format {
+        PolicyFormat::Json => serde_json::from_str(body).unwrap_or_else(|_| {
+            serde_json::json!({
+                "definition": body,
+            })
+        }),
+        PolicyFormat::Toml => serde_json::json!({
+            "definition": body,
+        }),
+    }
+}
 
 /// Modal for creating or editing a policy definition.
 #[component]
@@ -172,38 +198,49 @@ pub fn PolicyEditorModal(
                             let description = edit_description.read().clone();
                             let body = edit_body.read().clone();
                             let format = *edit_format.read();
-                            let new_id = editing_policy_id.read().unwrap_or_else(Uuid::new_v4);
-                            let mut library = policy_library.read().clone();
-                            let is_existing = library.iter().any(|policy| policy.id == new_id);
+                            let editing_id = *editing_policy_id.read();
+                            let mut policy_library = policy_library;
+                            let on_close = on_close;
 
-                            if is_existing {
-                                library = library
-                                    .into_iter()
-                                    .map(|policy| {
-                                        if policy.id == new_id {
-                                            PolicyDefinition {
-                                                id: new_id,
-                                                name: name.clone(),
-                                                description: description.clone(),
-                                                format,
-                                                body: body.clone(),
-                                            }
-                                        } else {
-                                            policy
-                                        }
-                                    })
-                                    .collect();
-                            } else {
-                                library.push(PolicyDefinition {
-                                    id: new_id,
-                                    name: name.clone(),
-                                    description: description.clone(),
-                                    format,
-                                    body: body.clone(),
-                                });
-                            }
-                            policy_library.set(library);
-                            on_close.call(());
+                            spawn(async move {
+                                let policy_type = infer_policy_type(&body);
+                                let config = config_from_body(&body, format);
+
+                                let result = if let Some(policy_id) = editing_id {
+                                    let request = UpdateDeploymentPolicyRequest {
+                                        name: Some(name.clone()),
+                                        description: Some(description.clone()),
+                                        policy_type: Some(policy_type),
+                                        config: Some(config),
+                                        enabled: Some(true),
+                                    };
+                                    update_deployment_policy(&policy_id, &request)
+                                        .await
+                                        .map(|_| ())
+                                } else {
+                                    let request = CreateDeploymentPolicyRequest {
+                                        name: name.clone(),
+                                        description: Some(description.clone()),
+                                        policy_type,
+                                        config,
+                                        enabled: Some(true),
+                                    };
+                                    create_deployment_policy(&request).await.map(|_| ())
+                                };
+
+                                match result {
+                                    Ok(()) => {
+                                        let latest = policies_api::load_policies_with_fallback().await;
+                                        policy_library.set(latest);
+                                        on_close.call(());
+                                    }
+                                    Err(error) => {
+                                        web_sys::console::error_1(
+                                            &format!("Failed to save policy: {error}").into(),
+                                        );
+                                    }
+                                }
+                            });
                         },
                         "{action_label}"
                     }

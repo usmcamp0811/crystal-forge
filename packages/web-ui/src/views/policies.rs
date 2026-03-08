@@ -6,6 +6,7 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use crate::api::client::delete_deployment_policy;
 use crate::components::layout::Card;
 use crate::components::policy::{
     PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat, POLICY_TOML_SAMPLE,
@@ -243,10 +244,22 @@ pub fn PoliciesView() -> Element {
                     policy_id: id,
                     policy_name: policy_library.read().iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
                     on_confirm: move |_| {
-                        let mut lib = policy_library.read().clone();
-                        lib.retain(|p| p.id != id);
-                        policy_library.set(lib);
-                        delete_confirm.set(None);
+                        let mut policy_library = policy_library;
+                        let mut delete_confirm = delete_confirm;
+                        spawn(async move {
+                            match delete_deployment_policy(&id).await {
+                                Ok(()) => {
+                                    let latest = policies_api::load_policies_with_fallback().await;
+                                    policy_library.set(latest);
+                                }
+                                Err(error) => {
+                                    web_sys::console::error_1(
+                                        &format!("Failed to delete policy: {error}").into(),
+                                    );
+                                }
+                            }
+                            delete_confirm.set(None);
+                        });
                     },
                     on_cancel: move |_| {
                         delete_confirm.set(None);
