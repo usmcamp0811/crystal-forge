@@ -207,7 +207,13 @@ async fn process_pending_commits(
         }
 
         info!("📌 Found {} pending commits", pending_commits.len());
-        let Some(commit) = pending_commits.into_iter().next() else {
+        let Some(next_commit_id) =
+            select_next_pending_commit_id_for_cycle(pending_commits.iter().map(|c| c.id))
+        else {
+            return Ok(());
+        };
+
+        let Some(commit) = pending_commits.into_iter().find(|c| c.id == next_commit_id) else {
             return Ok(());
         };
         // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
@@ -453,6 +459,43 @@ async fn process_pending_commits(
                         return Ok(());
                     }
         }
+    }
+}
+
+fn select_next_pending_commit_id_for_cycle(
+    mut pending_commit_ids: impl Iterator<Item = i32>,
+) -> Option<i32> {
+    pending_commit_ids.next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_next_pending_commit_id_for_cycle;
+
+    #[test]
+    fn select_next_pending_commit_id_honors_latest_reordered_snapshot() {
+        let first_cycle = vec![10, 20, 30];
+        assert_eq!(
+            select_next_pending_commit_id_for_cycle(first_cycle.into_iter()),
+            Some(10)
+        );
+
+        // Simulate DB reorder before next cycle re-query.
+        let reordered_cycle = vec![30, 20];
+        assert_eq!(
+            select_next_pending_commit_id_for_cycle(reordered_cycle.into_iter()),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn select_next_pending_commit_id_allows_progress_when_prior_head_is_deferred() {
+        // Simulate prior head being deferred by failure handling before next cycle.
+        let next_cycle = vec![22, 23, 24];
+        assert_eq!(
+            select_next_pending_commit_id_for_cycle(next_cycle.into_iter()),
+            Some(22)
+        );
     }
 }
 
