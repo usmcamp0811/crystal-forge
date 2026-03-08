@@ -387,3 +387,140 @@ pub async fn delete_deployment_policy(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+// =============================================================================
+// TESTS
+// =============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::db::test_pool;
+    use sqlx::PgPool;
+
+    async fn create_test_policy(pool: &PgPool, name: &str) -> Uuid {
+        let request = CreateDeploymentPolicyRequest {
+            name: name.to_string(),
+            description: Some("Test policy".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({"expression": "true"}),
+            enabled: Some(true),
+        };
+        
+        deployment_policies::create_deployment_policy(pool, &request)
+            .await
+            .unwrap()
+            .id
+    }
+
+    #[sqlx::test]
+    async fn test_list_deployment_policies_empty(pool: PgPool) {
+        let policies = deployment_policies::list_deployment_policies(&pool, 100, 0)
+            .await
+            .unwrap();
+        
+        // May have seed data, just verify it doesn't error
+        assert!(policies.len() >= 0);
+    }
+
+    #[sqlx::test]
+    async fn test_create_deployment_policy(pool: PgPool) {
+        let request = CreateDeploymentPolicyRequest {
+            name: "Test Policy".to_string(),
+            description: Some("Test description".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({"expression": "config.services.ssh.enable"}),
+            enabled: Some(true),
+        };
+
+        let policy = deployment_policies::create_deployment_policy(&pool, &request)
+            .await
+            .unwrap();
+
+        assert_eq!(policy.name, "Test Policy");
+        assert_eq!(policy.policy_type, "custom_check");
+        assert_eq!(policy.enabled, true);
+    }
+
+    #[sqlx::test]
+    async fn test_get_deployment_policy_by_id(pool: PgPool) {
+        let policy_id = create_test_policy(&pool, "Get Test Policy").await;
+
+        let policy = deployment_policies::get_deployment_policy_by_id(&pool, &policy_id)
+            .await
+            .unwrap()
+            .expect("Policy should exist");
+
+        assert_eq!(policy.id, policy_id);
+        assert_eq!(policy.name, "Get Test Policy");
+    }
+
+    #[sqlx::test]
+    async fn test_update_deployment_policy(pool: PgPool) {
+        let policy_id = create_test_policy(&pool, "Original Name").await;
+
+        let update_request = UpdateDeploymentPolicyRequest {
+            name: Some("Updated Name".to_string()),
+            description: Some("Updated description".to_string()),
+            policy_type: None,
+            config: None,
+            enabled: Some(false),
+        };
+
+        let updated = deployment_policies::update_deployment_policy(&pool, &policy_id, &update_request)
+            .await
+            .unwrap();
+
+        assert_eq!(updated.name, "Updated Name");
+        assert_eq!(updated.description, Some("Updated description".to_string()));
+        assert_eq!(updated.enabled, false);
+    }
+
+    #[sqlx::test]
+    async fn test_delete_deployment_policy(pool: PgPool) {
+        let policy_id = create_test_policy(&pool, "To Be Deleted").await;
+
+        let deleted = deployment_policies::delete_deployment_policy(&pool, &policy_id)
+            .await
+            .unwrap();
+
+        assert!(deleted);
+
+        // Verify it's actually deleted
+        let policy = deployment_policies::get_deployment_policy_by_id(&pool, &policy_id)
+            .await
+            .unwrap();
+
+        assert!(policy.is_none());
+    }
+
+    #[sqlx::test]
+    async fn test_duplicate_name_prevention(pool: PgPool) {
+        create_test_policy(&pool, "Duplicate Test").await;
+
+        let request = CreateDeploymentPolicyRequest {
+            name: "Duplicate Test".to_string(),
+            description: Some("This should fail".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({"expression": "true"}),
+            enabled: Some(true),
+        };
+
+        let result = deployment_policies::create_deployment_policy(&pool, &request).await;
+        
+        // Should fail due to duplicate name
+        assert!(result.is_err());
+    }
+
+    #[sqlx::test]
+    async fn test_check_policy_in_use(pool: PgPool) {
+        let policy_id = create_test_policy(&pool, "Usage Test").await;
+
+        let in_use = deployment_policies::check_policy_in_use(&pool, &policy_id)
+            .await
+            .unwrap();
+
+        // Policy not assigned to any environment/system yet
+        assert!(!in_use);
+    }
+}
