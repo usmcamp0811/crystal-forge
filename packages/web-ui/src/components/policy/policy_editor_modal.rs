@@ -148,6 +148,51 @@ fn parse_policy_payload(
     }
 }
 
+fn toml_literal(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Array(arr) => {
+            let items = arr
+                .iter()
+                .filter_map(|v| {
+                    v.as_str()
+                        .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
+                })
+                .collect::<Vec<_>>();
+            format!("[{}]", items.join(", "))
+        }
+        _ => format!("\"{}\"", value),
+    }
+}
+
+fn format_policy_payload(
+    policy_type: &str,
+    config: &serde_json::Value,
+    format: PolicyFormat,
+) -> String {
+    match format {
+        PolicyFormat::Json => serde_json::to_string_pretty(&serde_json::json!({
+            "policy_type": policy_type,
+            "config": config,
+        }))
+        .unwrap_or_else(|_| "{}".to_string()),
+        PolicyFormat::Toml => {
+            let mut out = String::from("[[policy]]\n");
+            out.push_str(&format!("type = \"{}\"\n", policy_type));
+
+            if let Some(obj) = config.as_object() {
+                for (k, v) in obj {
+                    out.push_str(&format!("{} = {}\n", k, toml_literal(v)));
+                }
+            }
+
+            out
+        }
+    }
+}
+
 /// Modal for creating or editing a policy definition.
 #[component]
 pub fn PolicyEditorModal(
@@ -309,7 +354,7 @@ pub fn PolicyEditorModal(
                             class: "space-y-2",
                             label { class: "text-xs text-violet-300/70 font-medium", "Policy Name" }
                             input {
-                                class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50",
+                                class: "w-full rounded-lg border border-gray-800 bg-black/70 px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50",
                                 placeholder: "e.g., Require SSH Enabled",
                                 value: "{edit_name}",
                                 oninput: move |event| {
@@ -322,7 +367,7 @@ pub fn PolicyEditorModal(
                             class: "space-y-2",
                             label { class: "text-xs text-violet-300/70 font-medium", "Description" }
                             textarea {
-                                class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50 resize-none",
+                                class: "w-full rounded-lg border border-gray-800 bg-black/70 px-3 py-2 text-sm text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40 focus:border-violet-500/50 resize-none",
                                 placeholder: "Describe what this policy enforces...",
                                 rows: "3",
                                 value: "{edit_description}",
@@ -346,6 +391,13 @@ pub fn PolicyEditorModal(
                                             "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
                                         },
                                         onclick: move |_| {
+                                            let current_body = edit_body.read().clone();
+                                            let current_format = *edit_format.read();
+                                            if current_format != PolicyFormat::Toml {
+                                                if let Ok((policy_type, config)) = parse_policy_payload(&current_body, current_format) {
+                                                    edit_body.set(format_policy_payload(&policy_type, &config, PolicyFormat::Toml));
+                                                }
+                                            }
                                             edit_format.set(PolicyFormat::Toml);
                                             save_error.set(String::new());
                                         },
@@ -359,6 +411,13 @@ pub fn PolicyEditorModal(
                                             "bg-gray-950/50 border-gray-700 text-gray-400 hover:border-gray-600"
                                         },
                                         onclick: move |_| {
+                                            let current_body = edit_body.read().clone();
+                                            let current_format = *edit_format.read();
+                                            if current_format != PolicyFormat::Json {
+                                                if let Ok((policy_type, config)) = parse_policy_payload(&current_body, current_format) {
+                                                    edit_body.set(format_policy_payload(&policy_type, &config, PolicyFormat::Json));
+                                                }
+                                            }
                                             edit_format.set(PolicyFormat::Json);
                                             save_error.set(String::new());
                                         },
@@ -450,7 +509,7 @@ pub fn PolicyEditorModal(
                                     div { class: "space-y-2",
                                         label { class: "text-xs text-violet-300/70 font-medium", "Expression" }
                                         input {
-                                            class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
+                                            class: "w-full rounded-lg border border-gray-800 bg-black/70 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
                                             placeholder: "config.networking.firewall.enable",
                                             value: "{basic_expression}",
                                             oninput: move |event| {
@@ -460,7 +519,7 @@ pub fn PolicyEditorModal(
                                         }
                                         label { class: "text-xs text-violet-300/70 font-medium", "Rule description" }
                                         input {
-                                            class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
+                                            class: "w-full rounded-lg border border-gray-800 bg-black/70 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
                                             value: "{basic_rule_description}",
                                             oninput: move |event| {
                                                 basic_rule_description.set(event.value());
@@ -474,7 +533,7 @@ pub fn PolicyEditorModal(
                                     div { class: "space-y-2",
                                         label { class: "text-xs text-violet-300/70 font-medium", "Packages (comma separated)" }
                                         input {
-                                            class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
+                                            class: "w-full rounded-lg border border-gray-800 bg-black/70 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
                                             placeholder: "git, vim, htop",
                                             value: "{basic_packages}",
                                             oninput: move |event| {
@@ -489,7 +548,7 @@ pub fn PolicyEditorModal(
                                     div { class: "space-y-2",
                                         label { class: "text-xs text-violet-300/70 font-medium", "Service option path" }
                                         input {
-                                            class: "w-full rounded-lg border border-gray-700 bg-gray-950/50 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
+                                            class: "w-full rounded-lg border border-gray-800 bg-black/70 px-3 py-2 text-xs text-gray-100 focus:outline-none focus:ring-2 focus:ring-violet-500/40",
                                             placeholder: "config.services.openssh.enable",
                                             value: "{basic_service_option}",
                                             oninput: move |event| {
@@ -551,7 +610,7 @@ pub fn PolicyEditorModal(
                         class: "space-y-2 flex flex-col min-h-0",
                             label { class: "text-xs text-violet-300/70 font-medium", "Policy Definition" }
                             div {
-                                class: "rounded-lg border border-gray-700 bg-gray-950/70 overflow-hidden flex-1 min-h-0",
+                                class: "rounded-lg border border-gray-800 bg-black/80 overflow-hidden flex-1 min-h-0",
                                 textarea {
                                     class: "w-full bg-transparent px-3 py-2 text-xs text-gray-100 font-mono focus:outline-none resize-none",
                                     style: "height: clamp(100px, 20vh, 180px);",
