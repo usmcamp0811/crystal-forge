@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::api::client::delete_deployment_policy;
 use crate::components::layout::Card;
 use crate::components::policy::{
-    PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat, POLICY_TOML_SAMPLE,
+    PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat,
 };
 use crate::theme;
 use crate::views::policies_api;
@@ -39,6 +39,15 @@ struct PolicyPresetMeta {
     body: String,
 }
 
+const POLICY_JSON_TEMPLATE: &str = r#"{
+  "policy_type": "custom_check",
+  "config": {
+    "expression": "config.networking.firewall.enable",
+    "description": "Firewall must be enabled",
+    "strict": true
+  }
+}"#;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main View
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,7 +72,7 @@ pub fn PoliciesView() -> Element {
     let mut edit_format = use_signal(|| PolicyFormat::Toml);
     let mut search_query = use_signal(String::new);
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
-    let mut help_collapsed = use_signal(|| false);
+    let mut help_collapsed = use_signal(|| true);
 
     let query = search_query.read().to_lowercase();
     let filtered_policies: Vec<PolicyDefinition> = policy_library
@@ -101,8 +110,8 @@ pub fn PoliciesView() -> Element {
                         editing_policy_id.set(None);
                         edit_name.set(String::new());
                         edit_description.set(String::new());
-                        edit_body.set(POLICY_TOML_SAMPLE.to_string());
-                        edit_format.set(PolicyFormat::Toml);
+                        edit_body.set(POLICY_JSON_TEMPLATE.to_string());
+                        edit_format.set(PolicyFormat::Json);
                         show_editor.set(true);
                     },
                     svg {
@@ -151,6 +160,7 @@ pub fn PoliciesView() -> Element {
                                 p { "- require_packages config expects: packages (array), strict." }
                                 p { "- require_cf_agent is core and always on (protected)." }
                                 p { "- Duplicate name or duplicate policy_type+config is rejected." }
+                                p { class: "mt-2 text-[11px] text-gray-400", "Use the modal template buttons for copy-ready JSON examples." }
                             }
                         }
                     }

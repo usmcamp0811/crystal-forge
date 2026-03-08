@@ -10,6 +10,30 @@ use crate::views::policies_api;
 
 use super::types::{PolicyDefinition, PolicyFormat};
 
+const CUSTOM_CHECK_JSON_TEMPLATE: &str = r#"{
+  "policy_type": "custom_check",
+  "config": {
+    "expression": "config.networking.firewall.enable",
+    "description": "Firewall must be enabled",
+    "strict": true
+  }
+}"#;
+
+const REQUIRE_PACKAGES_JSON_TEMPLATE: &str = r#"{
+  "policy_type": "require_packages",
+  "config": {
+    "packages": ["git", "vim"],
+    "strict": true
+  }
+}"#;
+
+const REQUIRE_CF_AGENT_JSON_TEMPLATE: &str = r#"{
+  "policy_type": "require_cf_agent",
+  "config": {
+    "strict": true
+  }
+}"#;
+
 fn parse_policy_payload(
     body: &str,
     format: PolicyFormat,
@@ -137,6 +161,8 @@ pub fn PolicyEditorModal(
     } else {
         "Create Policy"
     };
+    let mut save_error = use_signal(String::new);
+    let mut is_saving = use_signal(|| false);
 
     rsx! {
         div {
@@ -245,6 +271,37 @@ pub fn PolicyEditorModal(
                                 }
                             }
                         }
+                        div {
+                            class: "space-y-2",
+                            label { class: "text-xs text-violet-300/70 font-medium", "Templates" }
+                            div {
+                                class: "grid grid-cols-1 gap-2",
+                                button {
+                                    class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                    onclick: move |_| {
+                                        edit_format.set(PolicyFormat::Json);
+                                        edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
+                                    },
+                                    "Custom check"
+                                }
+                                button {
+                                    class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                    onclick: move |_| {
+                                        edit_format.set(PolicyFormat::Json);
+                                        edit_body.set(REQUIRE_PACKAGES_JSON_TEMPLATE.to_string());
+                                    },
+                                    "Require packages"
+                                }
+                                button {
+                                    class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800 text-left",
+                                    onclick: move |_| {
+                                        edit_format.set(PolicyFormat::Json);
+                                        edit_body.set(REQUIRE_CF_AGENT_JSON_TEMPLATE.to_string());
+                                    },
+                                    "Require CF agent"
+                                }
+                            }
+                        }
                     }
 
                     // Right column - code editor
@@ -262,6 +319,16 @@ pub fn PolicyEditorModal(
                                 spellcheck: "false",
                             }
                         }
+                        p {
+                            class: "text-[11px] {theme::text::MUTED}",
+                            "Tip: prefer JSON with policy_type + config for reliable saves."
+                        }
+                        if !save_error.read().is_empty() {
+                            div {
+                                class: "text-xs text-red-300 bg-red-950/40 border border-red-700/40 rounded px-3 py-2",
+                                "{save_error}"
+                            }
+                        }
                     }
                 }
 
@@ -275,6 +342,7 @@ pub fn PolicyEditorModal(
                     }
                     button {
                         class: "px-4 py-2 rounded-lg text-sm font-semibold bg-violet-600 hover:bg-violet-500 text-white transition-colors shadow-lg shadow-violet-900/30",
+                        disabled: *is_saving.read(),
                         onclick: move |_| {
                             let name = edit_name.read().clone();
                             let description = edit_description.read().clone();
@@ -283,15 +351,23 @@ pub fn PolicyEditorModal(
                             let editing_id = *editing_policy_id.read();
                             let mut policy_library = policy_library;
                             let on_close = on_close;
+                            let mut save_error = save_error;
+                            let mut is_saving = is_saving;
+
+                            if name.trim().is_empty() {
+                                save_error.set("Policy name is required".to_string());
+                                return;
+                            }
+                            save_error.set(String::new());
+                            is_saving.set(true);
 
                             spawn(async move {
                                 let parsed = parse_policy_payload(&body, format);
                                 let (policy_type, config) = match parsed {
                                     Ok(values) => values,
                                     Err(message) => {
-                                        web_sys::console::error_1(
-                                            &format!("Policy parse error: {message}").into(),
-                                        );
+                                        save_error.set(format!("Policy parse error: {message}"));
+                                        is_saving.set(false);
                                         return;
                                     }
                                 };
@@ -322,17 +398,17 @@ pub fn PolicyEditorModal(
                                     Ok(()) => {
                                         let latest = policies_api::load_policies_with_fallback().await;
                                         policy_library.set(latest);
+                                        is_saving.set(false);
                                         on_close.call(());
                                     }
                                     Err(error) => {
-                                        web_sys::console::error_1(
-                                            &format!("Failed to save policy: {error}").into(),
-                                        );
+                                        save_error.set(format!("Failed to save policy: {error}"));
+                                        is_saving.set(false);
                                     }
                                 }
                             });
                         },
-                        "{action_label}"
+                        if *is_saving.read() { "Saving..." } else { "{action_label}" }
                     }
                 }
             }
