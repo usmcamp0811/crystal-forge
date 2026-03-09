@@ -1,10 +1,10 @@
 ---
 id: TASK-123.1
 title: Fix list_deployment_policies to return all policies for CRUD management
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-09 20:59'
-updated_date: '2026-03-09 20:59'
+updated_date: '2026-03-09 21:03'
 labels:
   - backend
   - api
@@ -39,15 +39,21 @@ Remove the `WHERE enabled = true` filter from the main `list_deployment_policies
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 list_deployment_policies() query removes WHERE enabled = true filter
-- [ ] #2 GET /api/v1/deployment-policies returns both enabled and disabled policies
-- [ ] #3 list_enabled_deployment_policies() query remains unchanged (still filters enabled only)
-- [ ] #4 Backend tests verify all policies are returned regardless of enabled status
-- [ ] #5 cargo test passes for deployment_policies module
+- [x] #1 list_deployment_policies() query removes WHERE enabled = true filter
+- [x] #2 GET /api/v1/deployment-policies returns both enabled and disabled policies
+- [x] #3 list_enabled_deployment_policies() query remains unchanged (still filters enabled only)
+- [x] #4 Backend tests verify all policies are returned regardless of enabled status
+- [x] #5 cargo test passes for deployment_policies module
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-crud
+
+Fixed: Removed WHERE enabled = true filter from list_deployment_policies query
+
+Added test to verify both enabled and disabled policies are returned
+
+Changes committed: 8976cbe8
 <!-- SECTION:NOTES:END -->
