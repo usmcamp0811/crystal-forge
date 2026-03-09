@@ -371,11 +371,12 @@ pub fn PolicyEditorModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-start justify-center p-2 sm:p-3 cf-modal-overlay-z50 overflow-y-auto",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-2 sm:p-3 cf-modal-overlay-z50 overflow-y-auto",
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-3 shadow-2xl cf-modal-panel-wide cf-policy-modal-panel w-full max-w-5xl max-h-[70vh] flex flex-col",
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-3 shadow-2xl cf-modal-panel-wide cf-policy-modal-panel w-full max-w-5xl flex flex-col overflow-hidden",
+                style: "max-height: calc(100dvh - 1rem);",
                 onclick: |evt| evt.stop_propagation(),
 
                 // Header
