@@ -27,20 +27,10 @@ const REQUIRE_PACKAGES_JSON_TEMPLATE: &str = r#"{
   }
 }"#;
 
-const REQUIRE_SERVICE_JSON_TEMPLATE: &str = r#"{
-  "policy_type": "custom_check",
-  "config": {
-    "expression": "config.services.openssh.enable",
-    "description": "OpenSSH service must be enabled",
-    "strict": true
-  }
-}"#;
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BasicPolicyKind {
     CustomCheck,
     RequirePackages,
-    RequireService,
 }
 
 fn parse_policy_payload(
@@ -222,7 +212,6 @@ pub fn PolicyEditorModal(
     let mut basic_expression = use_signal(String::new);
     let mut basic_rule_description = use_signal(String::new);
     let mut basic_packages = use_signal(String::new);
-    let mut basic_service_option = use_signal(String::new);
     let mut basic_strict = use_signal(|| true);
     let mut show_strict_info = use_signal(|| false);
     let current_validation_error = {
@@ -241,13 +230,6 @@ pub fn PolicyEditorModal(
                 BasicPolicyKind::RequirePackages => {
                     if basic_packages.read().trim().is_empty() {
                         Some("At least one package is required in Basic mode".to_string())
-                    } else {
-                        None
-                    }
-                }
-                BasicPolicyKind::RequireService => {
-                    if basic_service_option.read().trim().is_empty() {
-                        Some("Service option path is required in Basic mode".to_string())
                     } else {
                         None
                     }
@@ -454,10 +436,10 @@ pub fn PolicyEditorModal(
                                         class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
                                         onclick: move |_| {
                                             edit_format.set(PolicyFormat::Json);
-                                            edit_body.set(REQUIRE_SERVICE_JSON_TEMPLATE.to_string());
+                                            edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
                                             save_error.set(String::new());
                                         },
-                                        "Service check"
+                                        "Custom rule"
                                     }
                                 }
                             } else {
@@ -475,7 +457,7 @@ pub fn PolicyEditorModal(
                                             basic_kind.set(BasicPolicyKind::CustomCheck);
                                             save_error.set(String::new());
                                         },
-                                        "Custom check"
+                                        "Custom rule"
                                     }
                                     button {
                                         class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
@@ -490,19 +472,6 @@ pub fn PolicyEditorModal(
                                         },
                                         "Require packages"
                                     }
-                                    button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                        class: if *basic_kind.read() == BasicPolicyKind::RequireService {
-                                            "bg-violet-500/20 border-violet-500 text-violet-300"
-                                        } else {
-                                            "border-gray-700 text-gray-300 hover:bg-gray-800"
-                                        },
-                                        onclick: move |_| {
-                                            basic_kind.set(BasicPolicyKind::RequireService);
-                                            save_error.set(String::new());
-                                        },
-                                        "Service check"
-                                    }
                                 }
 
                                 if *basic_kind.read() == BasicPolicyKind::CustomCheck {
@@ -516,6 +485,30 @@ pub fn PolicyEditorModal(
                                                 basic_expression.set(event.value());
                                                 save_error.set(String::new());
                                             },
+                                        }
+                                        div { class: "flex flex-wrap gap-2",
+                                            button {
+                                                class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                                onclick: move |_| {
+                                                    basic_expression.set("config.services.openssh.enable".to_string());
+                                                    if basic_rule_description.read().trim().is_empty() {
+                                                        basic_rule_description.set("OpenSSH service must be enabled".to_string());
+                                                    }
+                                                    save_error.set(String::new());
+                                                },
+                                                "Preset: OpenSSH"
+                                            }
+                                            button {
+                                                class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                                onclick: move |_| {
+                                                    basic_expression.set("config.networking.firewall.enable".to_string());
+                                                    if basic_rule_description.read().trim().is_empty() {
+                                                        basic_rule_description.set("Firewall must be enabled".to_string());
+                                                    }
+                                                    save_error.set(String::new());
+                                                },
+                                                "Preset: Firewall"
+                                            }
                                         }
                                         label { class: "text-xs text-violet-300/70 font-medium", "Rule description" }
                                         input {
@@ -539,21 +532,6 @@ pub fn PolicyEditorModal(
                                             value: "{basic_packages}",
                                             oninput: move |event| {
                                                 basic_packages.set(event.value());
-                                                save_error.set(String::new());
-                                            },
-                                        }
-                                    }
-                                }
-
-                                if *basic_kind.read() == BasicPolicyKind::RequireService {
-                                    div { class: "space-y-2",
-                                        label { class: "text-xs text-violet-300/70 font-medium", "Service option path" }
-                                        input {
-                                            class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                            placeholder: "config.services.openssh.enable",
-                                            value: "{basic_service_option}",
-                                            oninput: move |event| {
-                                                basic_service_option.set(event.value());
                                                 save_error.set(String::new());
                                             },
                                         }
@@ -591,12 +569,6 @@ pub fn PolicyEditorModal(
                                             class: "text-[10px] text-violet-200 bg-violet-500/15 border border-violet-400/40 rounded-full px-2 py-0.5 whitespace-nowrap",
                                             "false => fail eval, non-strict => record only"
                                         }
-                                    }
-                                }
-                                if *basic_kind.read() == BasicPolicyKind::RequireService {
-                                    p {
-                                        class: "text-[11px] {theme::text::MUTED}",
-                                        "Service check is a guided custom check. It creates a custom_check policy from the service option path."
                                     }
                                 }
                             }
@@ -673,7 +645,6 @@ pub fn PolicyEditorModal(
                             let expression = basic_expression.read().clone();
                             let rule_description = basic_rule_description.read().clone();
                             let packages_raw = basic_packages.read().clone();
-                            let service_option_raw = basic_service_option.read().clone();
                             let strict = *basic_strict.read();
                             let editing_id = *editing_policy_id.read();
                             let mut policy_library = policy_library;
@@ -711,15 +682,6 @@ pub fn PolicyEditorModal(
                                                 "strict": strict,
                                             });
                                             ("require_packages".to_string(), cfg)
-                                        }
-                                        BasicPolicyKind::RequireService => {
-                                            let option = service_option_raw.trim().to_string();
-                                            let cfg = serde_json::json!({
-                                                "expression": option,
-                                                "description": format!("Service option must be enabled: {option}"),
-                                                "strict": strict,
-                                            });
-                                            ("custom_check".to_string(), cfg)
                                         }
                                     }
                                 } else {
