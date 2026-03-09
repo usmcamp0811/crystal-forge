@@ -130,18 +130,24 @@ async fn load_deployment_policies_for_eval(pool: &PgPool) -> Vec<DeploymentPolic
                 .collect::<Vec<_>>();
 
             if policies.is_empty() {
-                warn!("No valid deployment policies found in DB, falling back to CF agent check");
-                policies.push(DeploymentPolicy::RequireCrystalForgeAgent { strict: false });
+                warn!("No valid deployment policies found in DB, falling back to strict CF agent check");
+                // Use strict mode in fallback to enforce core security policy even in error scenarios.
+                // This ensures systems without the agent package cannot pass evaluation when policy
+                // loading fails, maintaining the "always enforce core policy" safety model.
+                policies.push(DeploymentPolicy::RequireCrystalForgeAgent { strict: true });
             }
 
             policies
         }
         Err(err) => {
             error!(
-                "Failed to load deployment policies from DB for evaluation: {:#}. Falling back to CF agent check",
+                "Failed to load deployment policies from DB for evaluation: {:#}. Falling back to strict CF agent check",
                 err
             );
-            vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: false }]
+            // Use strict mode in fallback to enforce core security policy even in error scenarios.
+            // This ensures systems without the agent package cannot pass evaluation when policy
+            // loading fails, maintaining the "always enforce core policy" safety model.
+            vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: true }]
         }
     }
 }
