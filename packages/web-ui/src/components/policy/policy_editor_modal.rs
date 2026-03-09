@@ -212,20 +212,106 @@ pub fn PolicyEditorModal(
     } else {
         "Create Policy"
     };
+    let initial_parsed = parse_policy_payload(&edit_body.read().clone(), *edit_format.read()).ok();
+    let initial_policy_type = initial_parsed
+        .as_ref()
+        .map(|(policy_type, _)| policy_type.as_str())
+        .unwrap_or("custom_check");
+    let initial_config = initial_parsed
+        .as_ref()
+        .map(|(_, config)| config.clone())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let initial_expression = initial_config
+        .get("expression")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+
     let mut save_error = use_signal(String::new);
     let mut is_saving = use_signal(|| false);
-    let mut advanced_mode = use_signal(|| is_editing);
-    let mut basic_kind = use_signal(|| BasicPolicyKind::CustomCheck);
-    let mut basic_custom_builder = use_signal(|| BasicCustomBuilder::CustomExpression);
-    let mut basic_expression = use_signal(String::new);
-    let mut basic_rule_description = use_signal(String::new);
-    let mut basic_packages = use_signal(String::new);
-    let mut basic_service_name = use_signal(String::new);
-    let mut basic_service_expectation = use_signal(|| "enabled".to_string());
-    let mut basic_firewall_port = use_signal(String::new);
-    let mut basic_firewall_protocol = use_signal(|| "tcp".to_string());
-    let mut basic_firewall_expectation = use_signal(|| "allowed".to_string());
-    let mut basic_strict = use_signal(|| true);
+    let mut advanced_mode = use_signal(|| false);
+    let mut basic_kind = use_signal(|| {
+        if initial_policy_type == "require_packages" {
+            BasicPolicyKind::RequirePackages
+        } else {
+            BasicPolicyKind::CustomCheck
+        }
+    });
+    let mut basic_custom_builder = use_signal(|| {
+        if initial_expression.contains("builtins.elem")
+            && initial_expression.contains("config.networking.firewall")
+        {
+            BasicCustomBuilder::FirewallPortAllowed
+        } else if (initial_expression.starts_with("config.services.")
+            || initial_expression.starts_with("!config.services."))
+            && initial_expression.ends_with(".enable")
+        {
+            BasicCustomBuilder::ServiceEnabled
+        } else {
+            BasicCustomBuilder::CustomExpression
+        }
+    });
+    let mut basic_expression = use_signal(|| initial_expression.clone());
+    let mut basic_rule_description = use_signal(|| {
+        initial_config
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    });
+    let mut basic_packages = use_signal(|| {
+        initial_config
+            .get("packages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
+            .unwrap_or_default()
+    });
+    let mut basic_service_name = use_signal(|| {
+        initial_expression
+            .trim_start_matches('!')
+            .trim_start_matches("config.services.")
+            .trim_end_matches(".enable")
+            .to_string()
+    });
+    let mut basic_service_expectation = use_signal(|| {
+        if initial_expression.starts_with('!') {
+            "disabled".to_string()
+        } else {
+            "enabled".to_string()
+        }
+    });
+    let mut basic_firewall_port = use_signal(|| {
+        initial_expression
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or_default()
+            .to_string()
+    });
+    let mut basic_firewall_protocol = use_signal(|| {
+        if initial_expression.contains("allowedUDPPorts") {
+            "udp".to_string()
+        } else {
+            "tcp".to_string()
+        }
+    });
+    let mut basic_firewall_expectation = use_signal(|| {
+        if initial_expression.contains("!builtins.elem") {
+            "denied".to_string()
+        } else {
+            "allowed".to_string()
+        }
+    });
+    let mut basic_strict = use_signal(|| {
+        initial_config
+            .get("strict")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    });
     let mut show_strict_info = use_signal(|| false);
     let current_validation_error = {
         let name = edit_name.read().trim().to_string();
