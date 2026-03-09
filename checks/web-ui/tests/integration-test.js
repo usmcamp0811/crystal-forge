@@ -161,6 +161,45 @@ const steps = [
       await page.waitForTimeout(2000);
     },
   },
+  {
+    name: "14-policies",
+    description: "Policies view",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+      await page.locator("main h1:has-text('Deployment Policies')").first().waitFor({ timeout: 5000 });
+    },
+  },
+  {
+    name: "15-policies-new-modal-basic",
+    description: "Policies new modal in basic mode",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+      const newPolicyBtn = page.locator("button:has-text('New Policy')").first();
+      await newPolicyBtn.waitFor({ timeout: 5000 });
+      await newPolicyBtn.click();
+      await page.waitForTimeout(1200);
+      await page.getByRole("heading", { name: "Create Policy" }).waitFor({ timeout: 5000 });
+    },
+  },
+  {
+    name: "16-policies-new-modal-advanced",
+    description: "Policies new modal in advanced mode",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+      const newPolicyBtn = page.locator("button:has-text('New Policy')").first();
+      await newPolicyBtn.waitFor({ timeout: 5000 });
+      await newPolicyBtn.click();
+      await page.waitForTimeout(700);
+      const advancedBtn = page.getByRole("button", { name: "Advanced" });
+      await advancedBtn.waitFor({ timeout: 5000 });
+      await advancedBtn.click();
+      await page.waitForTimeout(1200);
+      await page.getByText("Policy Definition").first().waitFor({ timeout: 5000 });
+    },
+  },
 ];
 
 (async () => {
