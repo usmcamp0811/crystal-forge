@@ -811,15 +811,6 @@ pub fn PolicyEditorModal(
                                             "Require packages"
                                         }
                                     }
-                                } else {
-                                    p {
-                                        class: "text-xs {theme::text::MUTED}",
-                                        if *basic_kind.read() == BasicPolicyKind::CustomCheck {
-                                            "Editing type: Custom rule"
-                                        } else {
-                                            "Editing type: Require packages"
-                                        }
-                                    }
                                 }
 
                                 if *basic_kind.read() == BasicPolicyKind::CustomCheck {
@@ -849,17 +840,6 @@ pub fn PolicyEditorModal(
                                                         save_error.set(String::new());
                                                     },
                                                     "Custom expression"
-                                                }
-                                            }
-                                        } else {
-                                            p {
-                                                class: "text-xs {theme::text::MUTED}",
-                                                if *basic_custom_builder.read() == BasicCustomBuilder::ServiceEnabled {
-                                                    "Editing builder: Service state"
-                                                } else if *basic_custom_builder.read() == BasicCustomBuilder::FirewallPortAllowed {
-                                                    "Editing builder: Firewall port state"
-                                                } else {
-                                                    "Editing builder: Custom expression"
                                                 }
                                             }
                                         }
