@@ -371,11 +371,11 @@ pub fn PolicyEditorModal(
 
     rsx! {
         div {
-            class: "fixed inset-0 z-50 bg-black/60 flex items-start sm:items-center justify-center p-2 sm:p-4 cf-modal-overlay-z50 overflow-y-auto",
+            class: "fixed inset-0 z-50 bg-black/60 flex items-start justify-center p-2 sm:p-3 cf-modal-overlay-z50 overflow-y-auto",
             onclick: move |_| on_close.call(()),
 
             div {
-                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-3 shadow-2xl cf-modal-panel-wide cf-policy-modal-panel w-full max-w-5xl max-h-[78vh] flex flex-col",
+                class: "{theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl p-3 shadow-2xl cf-modal-panel-wide cf-policy-modal-panel w-full max-w-5xl max-h-[70vh] flex flex-col",
                 onclick: |evt| evt.stop_propagation(),
 
                 // Header
@@ -400,7 +400,7 @@ pub fn PolicyEditorModal(
                         }
                         div {
                             h3 { class: "text-white text-lg font-semibold", "{title}" }
-                            p { class: "text-xs {theme::text::MUTED}", "Define metadata and policy payload." }
+                            p { class: "text-[11px] {theme::text::MUTED}", "Policy metadata + payload" }
                         }
                     }
                     div {
@@ -659,7 +659,7 @@ pub fn PolicyEditorModal(
                 // Form content
                 div {
                     class: if *advanced_mode.read() {
-                        "grid grid-cols-1 lg:grid-cols-[230px_1fr] gap-3 items-start mt-3 flex-1 min-h-0 overflow-y-auto pr-1"
+                        "grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-2 items-start mt-2 flex-1 min-h-0 overflow-y-auto pr-1"
                     } else {
                         "grid grid-cols-1 gap-2 items-start mt-2 flex-1 min-h-0 overflow-y-auto pr-1"
                     },
@@ -1027,8 +1027,8 @@ pub fn PolicyEditorModal(
                                 class: "rounded-lg border overflow-hidden flex-1 min-h-0 cf-policy-modal-editor-surface",
                                 textarea {
                                     class: "w-full bg-transparent px-3 py-2 text-xs text-gray-100 font-mono focus:outline-none resize-none",
-                                    style: "height: clamp(100px, 20vh, 180px);",
-                                    rows: "8",
+                                    style: "height: clamp(84px, 16vh, 140px);",
+                                    rows: "6",
                                     value: "{edit_body}",
                                     oninput: move |event| {
                                         edit_body.set(event.value());
@@ -1060,7 +1060,7 @@ pub fn PolicyEditorModal(
 
                 // Footer
                 div {
-                    class: "flex justify-end items-center gap-3 pt-2 mt-3 border-t border-gray-800 shrink-0",
+                    class: "flex justify-end items-center gap-3 pt-2 mt-2 border-t border-gray-800 shrink-0",
                     button {
                         class: "px-4 py-2 rounded-lg text-sm text-gray-300 border border-gray-700 hover:bg-gray-800 transition-colors",
                         onclick: move |_| on_close.call(()),
