@@ -220,9 +220,9 @@ pub fn PolicyEditorModal(
     let mut advanced_mode = use_signal(|| is_editing);
     let mut basic_kind = use_signal(|| BasicPolicyKind::CustomCheck);
     let mut basic_expression = use_signal(String::new);
-    let mut basic_rule_description = use_signal(|| "Custom rule".to_string());
-    let mut basic_packages = use_signal(|| "git, vim".to_string());
-    let mut basic_service_option = use_signal(|| "config.services.openssh.enable".to_string());
+    let mut basic_rule_description = use_signal(String::new);
+    let mut basic_packages = use_signal(String::new);
+    let mut basic_service_option = use_signal(String::new);
     let mut basic_strict = use_signal(|| true);
     let mut show_strict_info = use_signal(|| false);
     let current_validation_error = {
@@ -521,6 +521,7 @@ pub fn PolicyEditorModal(
                                         input {
                                             class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
                                             value: "{basic_rule_description}",
+                                            placeholder: "Firewall must be enabled",
                                             oninput: move |event| {
                                                 basic_rule_description.set(event.value());
                                                 save_error.set(String::new());
@@ -585,11 +586,11 @@ pub fn PolicyEditorModal(
                                         },
                                         "?"
                                     }
-                                }
-                                if *show_strict_info.read() {
-                                    div {
-                                        class: "text-[11px] {theme::text::MUTED} bg-gray-900/60 border border-gray-700 rounded px-2 py-1",
-                                        "Strict mode fails evaluation when this check is false. Non-strict mode records the result but does not fail overall evaluation."
+                                    if *show_strict_info.read() {
+                                        span {
+                                            class: "text-[10px] text-violet-200 bg-violet-500/15 border border-violet-400/40 rounded-full px-2 py-0.5 whitespace-nowrap",
+                                            "false => fail eval, non-strict => record only"
+                                        }
                                     }
                                 }
                                 if *basic_kind.read() == BasicPolicyKind::RequireService {
