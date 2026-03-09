@@ -676,6 +676,12 @@ html, body {
   border-color: #1f2937 !important;
 }
 
+.cf-policy-modal-error {
+  color: #fca5a5 !important;
+  background-color: rgba(127, 29, 29, 0.38) !important;
+  border: 1px solid rgba(248, 113, 113, 0.55) !important;
+}
+
 :root[data-theme="light"] .cf-policy-modal-field {
   background-color: var(--cf-subtle-bg) !important;
   border-color: var(--cf-card-border) !important;
