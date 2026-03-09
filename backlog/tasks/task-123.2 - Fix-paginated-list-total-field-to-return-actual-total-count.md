@@ -1,9 +1,10 @@
 ---
 id: TASK-123.2
 title: Fix paginated list total field to return actual total count
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-09 20:59'
+updated_date: '2026-03-09 20:59'
 labels:
   - backend
   - api
@@ -45,3 +46,9 @@ Add a separate COUNT query to return the actual total number of matching rows, i
 - [ ] #5 Backend tests verify correct total across multiple pages
 - [ ] #6 cargo test passes for deployment_policies module
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-crud
+<!-- SECTION:NOTES:END -->
