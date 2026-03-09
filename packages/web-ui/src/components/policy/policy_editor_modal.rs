@@ -669,7 +669,7 @@ pub fn PolicyEditorModal(
                         }
                         div {
                             class: "space-y-2",
-                            if *advanced_mode.read() {
+                            if *advanced_mode.read() && !is_editing {
                                 label { class: "text-xs text-violet-300/70 font-medium", "Templates" }
                                 div {
                                     class: "flex flex-wrap gap-2",
