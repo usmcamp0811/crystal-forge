@@ -1,9 +1,10 @@
 ---
 id: TASK-123.4
 title: Harden evaluator fallback to use strict mode for core policy
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-09 22:47'
+updated_date: '2026-03-09 22:47'
 labels:
   - backend
   - evaluator
@@ -45,3 +46,9 @@ Change the evaluator fallback to use `RequireCrystalForgeAgent { strict: true }`
 - [ ] #3 Backend test verifies fallback policy is strict
 - [ ] #4 Manual test: Force DB failure, verify evaluator uses strict fallback
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-crud
+<!-- SECTION:NOTES:END -->
