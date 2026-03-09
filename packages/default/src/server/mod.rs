@@ -310,63 +310,85 @@ async fn process_pending_commits(
     cf_state: &Arc<crate::handlers::agent_request::CFState>,
     queue_notifier: &Arc<QueueNotifier>,
 ) -> Result<()> {
-    match get_commits_pending_evaluation(&pool).await {
-        Ok(pending_commits) => {
-            info!("📌 Found {} pending commits", pending_commits.len());
-            for commit in pending_commits {
-                // Get flake info
-                let flake = match commit.get_flake(&pool).await {
-                    Ok(flake) => flake,
-                    Err(e) => {
-                        error!(
-                            "❌ Failed to get flake for commit {}: {}",
-                            commit.git_commit_hash, e
-                        );
-                        continue;
-                    }
-                };
+    loop {
+        let pending_commits = match get_commits_pending_evaluation(pool).await {
+            Ok(commits) => commits,
+            Err(e) => {
+                error!("❌ Failed to get pending commits: {e}");
+                return Ok(());
+            }
+        };
 
-                // Load Crystal Forge config to get build settings
-                let cfg = match CrystalForgeConfig::load() {
-                    Ok(cfg) => cfg,
-                    Err(e) => {
-                        error!("❌ Failed to load config: {}", e);
-                        continue;
-                    }
-                };
-                let build_config = cfg.get_build_config();
-                let server_config = cfg.get_server_config();
-                let mock_systems = cfg
-                    .systems
-                    .iter()
-                    .filter(|s| s.flake_name.as_deref() == Some(flake.name.as_str()))
-                    .map(|s| s.hostname.clone())
-                    .collect::<Vec<_>>();
+        if pending_commits.is_empty() {
+            return Ok(());
+        }
 
-                // Load enabled deployment policies from DB for nix-eval-jobs policy checks.
-                let policies = load_deployment_policies_for_eval(pool).await;
+        info!("📌 Found {} pending commits", pending_commits.len());
+        let Some(next_commit_id) =
+            select_next_pending_commit_id_for_cycle(pending_commits.iter().map(|c| c.id))
+        else {
+            return Ok(());
+        };
 
-                // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
-                if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
-                    let error_text = e.to_string();
-                    if error_text.contains("another commit is already being evaluated") {
-                        debug!(
-                            "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already claimed in_progress",
-                            commit.id,
-                            commit.git_commit_hash
-                        );
-                    } else {
-                        error!(
-                            "❌ Could not mark commit {} evaluation started: {}",
-                            commit.git_commit_hash, e
-                        );
-                    }
-                    continue;
-                }
+        let Some(commit) = pending_commits.into_iter().find(|c| c.id == next_commit_id) else {
+            return Ok(());
+        };
+        // ⬇️ mark STARTED (bumps evaluation_attempt_count internally)
+        if let Err(e) = mark_commit_evaluation_started(pool, commit.id).await {
+            let error_text = e.to_string();
+            if error_text.contains("another commit is already being evaluated") {
+                debug!(
+                    "⏭️ Eval start race for commit {} ({}): another worker/loop iteration already claimed in_progress",
+                    commit.id,
+                    commit.git_commit_hash
+                );
+                return Ok(());
+            } else {
+                error!(
+                    "❌ Could not mark commit {} evaluation started: {}",
+                    commit.git_commit_hash, e
+                );
+            }
+            return Ok(());
+        }
 
-                // CRITICAL: Create broadcast channel BEFORE eval starts
-                // This ensures WebSocket clients can subscribe before messages are sent
-                crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
+        // Get flake info (post-claim; failures now go through retry/defer path)
+        let flake = match commit.get_flake(&pool).await {
+            Ok(flake) => flake,
+            Err(e) => {
+                error!(
+                    "❌ Failed to get flake for commit {}: {}",
+                    commit.git_commit_hash, e
+                );
+                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
+                return Ok(());
+            }
+        };
+
+        // Load Crystal Forge config to get build settings (post-claim retry/defer path)
+        let cfg = match CrystalForgeConfig::load() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                error!("❌ Failed to load config: {}", e);
+                let _ = mark_commit_evaluation_failed(pool, commit.id, &e.to_string()).await;
+                return Ok(());
+            }
+        };
+        let build_config = cfg.get_build_config();
+        let server_config = cfg.get_server_config();
+        let mock_systems = cfg
+            .systems
+            .iter()
+            .filter(|s| s.flake_name.as_deref() == Some(flake.name.as_str()))
+            .map(|s| s.hostname.clone())
+            .collect::<Vec<_>>();
+
+        // Load enabled deployment policies from DB for nix-eval-jobs policy checks.
+        let policies = load_deployment_policies_for_eval(pool).await;
+
+        // CRITICAL: Create broadcast channel BEFORE eval starts
+        // This ensures WebSocket clients can subscribe before messages are sent
+        crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
 
                 // Broadcast eval start status to WebSocket clients
                 crate::handlers::api::commits::broadcast_eval_status(
@@ -550,13 +572,47 @@ async fn process_pending_commits(
                                 commit.git_commit_hash, mark_err
                             );
                         }
+                        return Ok(());
                     }
-                }
-            }
         }
-        Err(e) => error!("❌ Failed to get pending commits: {e}"),
     }
-    Ok(())
+}
+
+fn select_next_pending_commit_id_for_cycle(
+    mut pending_commit_ids: impl Iterator<Item = i32>,
+) -> Option<i32> {
+    pending_commit_ids.next()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_next_pending_commit_id_for_cycle;
+
+    #[test]
+    fn select_next_pending_commit_id_honors_latest_reordered_snapshot() {
+        let first_cycle = vec![10, 20, 30];
+        assert_eq!(
+            select_next_pending_commit_id_for_cycle(first_cycle.into_iter()),
+            Some(10)
+        );
+
+        // Simulate DB reorder before next cycle re-query.
+        let reordered_cycle = vec![30, 20];
+        assert_eq!(
+            select_next_pending_commit_id_for_cycle(reordered_cycle.into_iter()),
+            Some(30)
+        );
+    }
+
+    #[test]
+    fn select_next_pending_commit_id_allows_progress_when_prior_head_is_deferred() {
+        // Simulate prior head being deferred by failure handling before next cycle.
+        let next_cycle = vec![22, 23, 24];
+        assert_eq!(
+            select_next_pending_commit_id_for_cycle(next_cycle.into_iter()),
+            Some(22)
+        );
+    }
 }
 
 /// Background task to hydrate commit artifact cache (nixosConfigurations + changed files).
