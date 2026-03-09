@@ -19,10 +19,12 @@ pub fn PolicyCard(
     on_delete: EventHandler<Uuid>,
 ) -> Element {
     let mut expanded = use_signal(|| false);
-    let is_core_policy = policy.body.contains("type = \"require_cf_agent\"")
-        || policy
-            .body
-            .contains("type = \"require_crystal_forge_agent\"");
+    // Check if this is a core policy by examining the policy_type field
+    // instead of string matching in the body, to work correctly with both
+    // TOML and JSON formats from API
+    let is_core_policy = policy.policy_type.as_ref().map_or(false, |pt| {
+        pt == "require_cf_agent" || pt == "require_crystal_forge_agent"
+    });
 
     let format_badge = match policy.format {
         PolicyFormat::Toml => ("TOML", "bg-orange-500/20 text-orange-400"),

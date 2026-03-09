@@ -63,6 +63,7 @@ fn policy_record_to_definition(record: DeploymentPolicyRecord) -> PolicyDefiniti
         description: record.description.unwrap_or_else(|| "No description".to_string()),
         format: PolicyFormat::Json,
         body,
+        policy_type: Some(record.policy_type),
     }
 }
 
@@ -80,6 +81,7 @@ fn mock_policies() -> Vec<PolicyDefinition> {
 type = "require_crystal_forge_agent"
 strict = true
 "#.to_string(),
+            policy_type: Some("require_crystal_forge_agent".to_string()),
         },
         PolicyDefinition {
             id: Uuid::from_u128(2),
@@ -92,6 +94,7 @@ expression = "config.networking.firewall.enable"
 description = "Firewall must be enabled"
 strict = true
 "#.to_string(),
+            policy_type: Some("custom_check".to_string()),
         },
         PolicyDefinition {
             id: Uuid::from_u128(3),
@@ -104,6 +107,7 @@ expression = "!config.services.openssh.settings.PasswordAuthentication"
 description = "Password authentication must be disabled"
 strict = false
 "#.to_string(),
+            policy_type: Some("custom_check".to_string()),
         },
         PolicyDefinition {
             id: Uuid::from_u128(4),
@@ -116,6 +120,7 @@ expression = "config.services.auditd.enable or false"
 description = "Audit daemon should be enabled"
 strict = false
 "#.to_string(),
+            policy_type: Some("custom_check".to_string()),
         },
     ]
 }

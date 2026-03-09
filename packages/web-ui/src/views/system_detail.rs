@@ -1181,6 +1181,7 @@ struct PolicyDefinition {
     description: String,
     format: PolicyFormat,
     body: String,
+    policy_type: Option<String>,
 }
 
 fn policy_presets() -> Vec<PolicyPresetMeta> {
@@ -1479,6 +1480,7 @@ fn PolicyEditorModal(
                                                     description: description.clone(),
                                                     format,
                                                     body: body.clone(),
+                                                    policy_type: extract_policy_type_from_body(&body),
                                                 }
                                             } else {
                                                 policy
@@ -1492,6 +1494,7 @@ fn PolicyEditorModal(
                                         description: description.clone(),
                                         format,
                                         body: body.clone(),
+                                        policy_type: extract_policy_type_from_body(&body),
                                     });
                                 }
                                 policy_library.set(library);
@@ -1595,6 +1598,32 @@ fn build_policy_library_rows(
         .collect()
 }
 
+fn extract_policy_type_from_body(body: &str) -> Option<String> {
+    if body.contains("type = \"require_crystal_forge_agent\"") {
+        Some("require_crystal_forge_agent".to_string())
+    } else if body.contains("type = \"require_cf_agent\"") {
+        Some("require_cf_agent".to_string())
+    } else if body.contains("type = \"require_packages\"") {
+        Some("require_packages".to_string())
+    } else if body.contains("type = \"custom_check\"") {
+        Some("custom_check".to_string())
+    } else if body.contains("\"policy_type\"") {
+        // Try to extract from JSON
+        body.lines()
+            .find(|line| line.contains("\"policy_type\""))
+            .and_then(|line| {
+                line.split(':')
+                    .nth(1)?
+                    .trim()
+                    .trim_matches(|c| c == '"' || c == ',' || c == ' ')
+                    .parse()
+                    .ok()
+            })
+    } else {
+        None
+    }
+}
+
 fn initial_policy_definitions() -> Vec<PolicyDefinition> {
     policy_presets()
         .into_iter()
@@ -1603,7 +1632,8 @@ fn initial_policy_definitions() -> Vec<PolicyDefinition> {
             name: preset.title.to_string(),
             description: preset.description.to_string(),
             format: preset.format,
-            body: preset.body,
+            body: preset.body.clone(),
+            policy_type: extract_policy_type_from_body(&preset.body),
         })
         .collect()
 }

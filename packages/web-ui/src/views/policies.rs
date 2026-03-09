@@ -462,12 +462,28 @@ strict = false
 fn initial_policy_definitions() -> Vec<PolicyDefinition> {
     policy_presets()
         .into_iter()
-        .map(|preset| PolicyDefinition {
-            id: preset.id,
-            name: preset.title.to_string(),
-            description: preset.description.to_string(),
-            format: preset.format,
-            body: preset.body,
+        .map(|preset| {
+            // Extract policy_type from TOML body for core policy detection
+            let policy_type = if preset.body.contains("type = \"require_crystal_forge_agent\"") {
+                Some("require_crystal_forge_agent".to_string())
+            } else if preset.body.contains("type = \"require_cf_agent\"") {
+                Some("require_cf_agent".to_string())
+            } else if preset.body.contains("type = \"require_packages\"") {
+                Some("require_packages".to_string())
+            } else if preset.body.contains("type = \"custom_check\"") {
+                Some("custom_check".to_string())
+            } else {
+                None
+            };
+            
+            PolicyDefinition {
+                id: preset.id,
+                name: preset.title.to_string(),
+                description: preset.description.to_string(),
+                format: preset.format,
+                body: preset.body,
+                policy_type,
+            }
         })
         .collect()
 }
