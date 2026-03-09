@@ -318,7 +318,84 @@ pub fn PolicyEditorModal(
                                 } else {
                                     "text-gray-400 hover:text-gray-200"
                                 },
-                                onclick: move |_| advanced_mode.set(false),
+                                onclick: move |_| {
+                                    if *advanced_mode.read() {
+                                        let body = edit_body.read().clone();
+                                        let format = *edit_format.read();
+                                        if let Ok((policy_type, config)) = parse_policy_payload(&body, format) {
+                                            let strict = config
+                                                .get("strict")
+                                                .and_then(|v| v.as_bool())
+                                                .unwrap_or(true);
+                                            basic_strict.set(strict);
+
+                                            if policy_type == "require_packages" {
+                                                basic_kind.set(BasicPolicyKind::RequirePackages);
+                                                let packages = config
+                                                    .get("packages")
+                                                    .and_then(|v| v.as_array())
+                                                    .map(|arr| {
+                                                        arr.iter()
+                                                            .filter_map(|v| v.as_str())
+                                                            .collect::<Vec<_>>()
+                                                            .join(", ")
+                                                    })
+                                                    .unwrap_or_default();
+                                                basic_packages.set(packages);
+                                            } else {
+                                                basic_kind.set(BasicPolicyKind::CustomCheck);
+                                                let expression = config
+                                                    .get("expression")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string();
+                                                let result_message = config
+                                                    .get("description")
+                                                    .and_then(|v| v.as_str())
+                                                    .unwrap_or_default()
+                                                    .to_string();
+
+                                                basic_expression.set(expression.clone());
+                                                basic_rule_description.set(result_message);
+
+                                                if expression.starts_with("config.services.")
+                                                    && expression.ends_with(".enable")
+                                                {
+                                                    basic_custom_builder
+                                                        .set(BasicCustomBuilder::ServiceEnabled);
+                                                    let service_name = expression
+                                                        .trim_start_matches("config.services.")
+                                                        .trim_end_matches(".enable")
+                                                        .to_string();
+                                                    basic_service_name.set(service_name);
+                                                } else if expression.contains("builtins.elem")
+                                                    && expression.contains("config.networking.firewall")
+                                                {
+                                                    basic_custom_builder.set(
+                                                        BasicCustomBuilder::FirewallPortAllowed,
+                                                    );
+                                                    let maybe_port = expression
+                                                        .split_whitespace()
+                                                        .nth(1)
+                                                        .unwrap_or_default()
+                                                        .to_string();
+                                                    basic_firewall_port.set(maybe_port);
+                                                    if expression.contains("allowedUDPPorts") {
+                                                        basic_firewall_protocol
+                                                            .set("udp".to_string());
+                                                    } else {
+                                                        basic_firewall_protocol
+                                                            .set("tcp".to_string());
+                                                    }
+                                                } else {
+                                                    basic_custom_builder
+                                                        .set(BasicCustomBuilder::CustomExpression);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    advanced_mode.set(false)
+                                },
                                 "Basic"
                             }
                             button {
@@ -328,7 +405,107 @@ pub fn PolicyEditorModal(
                                 } else {
                                     "text-gray-400 hover:text-gray-200"
                                 },
-                                onclick: move |_| advanced_mode.set(true),
+                                onclick: move |_| {
+                                    if !*advanced_mode.read() {
+                                        let strict = *basic_strict.read();
+                                        let (policy_type, config) = match *basic_kind.read() {
+                                            BasicPolicyKind::RequirePackages => {
+                                                let packages = basic_packages
+                                                    .read()
+                                                    .split(',')
+                                                    .map(|p| p.trim())
+                                                    .filter(|p| !p.is_empty())
+                                                    .map(|p| p.to_string())
+                                                    .collect::<Vec<_>>();
+                                                (
+                                                    "require_packages".to_string(),
+                                                    serde_json::json!({
+                                                        "packages": packages,
+                                                        "strict": strict,
+                                                    }),
+                                                )
+                                            }
+                                            BasicPolicyKind::CustomCheck => {
+                                                let (expr, default_msg) =
+                                                    match *basic_custom_builder.read() {
+                                                        BasicCustomBuilder::CustomExpression => (
+                                                            basic_expression
+                                                                .read()
+                                                                .trim()
+                                                                .to_string(),
+                                                            "Custom rule failed".to_string(),
+                                                        ),
+                                                        BasicCustomBuilder::ServiceEnabled => {
+                                                            let svc = basic_service_name
+                                                                .read()
+                                                                .trim()
+                                                                .to_string();
+                                                            (
+                                                                format!(
+                                                                    "config.services.{svc}.enable"
+                                                                ),
+                                                                format!(
+                                                                    "Service must be enabled: {svc}"
+                                                                ),
+                                                            )
+                                                        }
+                                                        BasicCustomBuilder::FirewallPortAllowed => {
+                                                            let port: u16 = basic_firewall_port
+                                                                .read()
+                                                                .trim()
+                                                                .parse()
+                                                                .unwrap_or(0);
+                                                            let proto = basic_firewall_protocol
+                                                                .read()
+                                                                .trim()
+                                                                .to_lowercase();
+                                                            let list_attr = if proto == "udp" {
+                                                                "allowedUDPPorts"
+                                                            } else {
+                                                                "allowedTCPPorts"
+                                                            };
+                                                            (
+                                                                format!(
+                                                                    "builtins.elem {port} (config.networking.firewall.{list_attr} or [])"
+                                                                ),
+                                                                format!(
+                                                                    "Firewall must allow {proto}/{port}"
+                                                                ),
+                                                            )
+                                                        }
+                                                    };
+                                                let msg = if basic_rule_description
+                                                    .read()
+                                                    .trim()
+                                                    .is_empty()
+                                                {
+                                                    default_msg
+                                                } else {
+                                                    basic_rule_description
+                                                        .read()
+                                                        .trim()
+                                                        .to_string()
+                                                };
+                                                (
+                                                    "custom_check".to_string(),
+                                                    serde_json::json!({
+                                                        "expression": expr,
+                                                        "description": msg,
+                                                        "strict": strict,
+                                                    }),
+                                                )
+                                            }
+                                        };
+
+                                        edit_format.set(PolicyFormat::Json);
+                                        edit_body.set(format_policy_payload(
+                                            &policy_type,
+                                            &config,
+                                            PolicyFormat::Json,
+                                        ));
+                                    }
+                                    advanced_mode.set(true)
+                                },
                                 "Advanced"
                             }
                         }
