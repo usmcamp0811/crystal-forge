@@ -33,6 +33,13 @@ enum BasicPolicyKind {
     RequirePackages,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BasicCustomBuilder {
+    CustomExpression,
+    ServiceEnabled,
+    FirewallPortAllowed,
+}
+
 fn parse_policy_payload(
     body: &str,
     format: PolicyFormat,
@@ -209,9 +216,13 @@ pub fn PolicyEditorModal(
     let mut is_saving = use_signal(|| false);
     let mut advanced_mode = use_signal(|| is_editing);
     let mut basic_kind = use_signal(|| BasicPolicyKind::CustomCheck);
+    let mut basic_custom_builder = use_signal(|| BasicCustomBuilder::CustomExpression);
     let mut basic_expression = use_signal(String::new);
     let mut basic_rule_description = use_signal(String::new);
     let mut basic_packages = use_signal(String::new);
+    let mut basic_service_name = use_signal(String::new);
+    let mut basic_firewall_port = use_signal(String::new);
+    let mut basic_firewall_protocol = use_signal(|| "tcp".to_string());
     let mut basic_strict = use_signal(|| true);
     let mut show_strict_info = use_signal(|| false);
     let current_validation_error = {
@@ -220,13 +231,32 @@ pub fn PolicyEditorModal(
             Some("Policy name is required".to_string())
         } else if !*advanced_mode.read() {
             match *basic_kind.read() {
-                BasicPolicyKind::CustomCheck => {
-                    if basic_expression.read().trim().is_empty() {
-                        Some("Custom check expression is required in Basic mode".to_string())
-                    } else {
-                        None
+                BasicPolicyKind::CustomCheck => match *basic_custom_builder.read() {
+                    BasicCustomBuilder::CustomExpression => {
+                        if basic_expression.read().trim().is_empty() {
+                            Some("Custom expression is required in Basic mode".to_string())
+                        } else {
+                            None
+                        }
                     }
-                }
+                    BasicCustomBuilder::ServiceEnabled => {
+                        if basic_service_name.read().trim().is_empty() {
+                            Some("Service name is required in Basic mode".to_string())
+                        } else {
+                            None
+                        }
+                    }
+                    BasicCustomBuilder::FirewallPortAllowed => {
+                        let port_text = basic_firewall_port.read().trim().to_string();
+                        if port_text.is_empty() {
+                            Some("Firewall port is required in Basic mode".to_string())
+                        } else if port_text.parse::<u16>().map(|p| p == 0).unwrap_or(true) {
+                            Some("Firewall port must be a valid number (1-65535)".to_string())
+                        } else {
+                            None
+                        }
+                    }
+                },
                 BasicPolicyKind::RequirePackages => {
                     if basic_packages.read().trim().is_empty() {
                         Some("At least one package is required in Basic mode".to_string())
@@ -421,7 +451,7 @@ pub fn PolicyEditorModal(
                                             edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
                                             save_error.set(String::new());
                                         },
-                                        "Custom check"
+                                        "Custom rule"
                                     }
                                     button {
                                         class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
@@ -431,15 +461,6 @@ pub fn PolicyEditorModal(
                                             save_error.set(String::new());
                                         },
                                         "Require packages"
-                                    }
-                                    button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                        onclick: move |_| {
-                                            edit_format.set(PolicyFormat::Json);
-                                            edit_body.set(CUSTOM_CHECK_JSON_TEMPLATE.to_string());
-                                            save_error.set(String::new());
-                                        },
-                                        "Custom rule"
                                     }
                                 }
                             } else {
@@ -476,45 +497,100 @@ pub fn PolicyEditorModal(
 
                                 if *basic_kind.read() == BasicPolicyKind::CustomCheck {
                                     div { class: "space-y-2",
-                                        label { class: "text-xs text-violet-300/70 font-medium", "Expression" }
-                                        input {
-                                            class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
-                                            placeholder: "config.networking.firewall.enable",
-                                            value: "{basic_expression}",
-                                            oninput: move |event| {
-                                                basic_expression.set(event.value());
-                                                save_error.set(String::new());
-                                            },
-                                        }
                                         div { class: "flex flex-wrap gap-2",
                                             button {
                                                 class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
                                                 onclick: move |_| {
-                                                    basic_expression.set("config.services.openssh.enable".to_string());
-                                                    if basic_rule_description.read().trim().is_empty() {
-                                                        basic_rule_description.set("OpenSSH service must be enabled".to_string());
-                                                    }
+                                                    basic_custom_builder.set(BasicCustomBuilder::ServiceEnabled);
                                                     save_error.set(String::new());
                                                 },
-                                                "Preset: OpenSSH"
+                                                "Service enabled"
                                             }
                                             button {
                                                 class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
                                                 onclick: move |_| {
-                                                    basic_expression.set("config.networking.firewall.enable".to_string());
-                                                    if basic_rule_description.read().trim().is_empty() {
-                                                        basic_rule_description.set("Firewall must be enabled".to_string());
-                                                    }
+                                                    basic_custom_builder.set(BasicCustomBuilder::FirewallPortAllowed);
                                                     save_error.set(String::new());
                                                 },
-                                                "Preset: Firewall"
+                                                "Firewall port allowed"
+                                            }
+                                            button {
+                                                class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                                onclick: move |_| {
+                                                    basic_custom_builder.set(BasicCustomBuilder::CustomExpression);
+                                                    save_error.set(String::new());
+                                                },
+                                                "Custom expression"
                                             }
                                         }
-                                        label { class: "text-xs text-violet-300/70 font-medium", "Rule description" }
+
+                                        if *basic_custom_builder.read() == BasicCustomBuilder::CustomExpression {
+                                            label { class: "text-xs text-violet-300/70 font-medium", "Expression" }
+                                            input {
+                                                class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
+                                                placeholder: "config.networking.firewall.enable",
+                                                value: "{basic_expression}",
+                                                oninput: move |event| {
+                                                    basic_expression.set(event.value());
+                                                    save_error.set(String::new());
+                                                },
+                                            }
+                                        }
+
+                                        if *basic_custom_builder.read() == BasicCustomBuilder::ServiceEnabled {
+                                            label { class: "text-xs text-violet-300/70 font-medium", "Service name" }
+                                            input {
+                                                class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
+                                                placeholder: "openssh",
+                                                value: "{basic_service_name}",
+                                                oninput: move |event| {
+                                                    basic_service_name.set(event.value());
+                                                    save_error.set(String::new());
+                                                },
+                                            }
+                                        }
+
+                                        if *basic_custom_builder.read() == BasicCustomBuilder::FirewallPortAllowed {
+                                            div { class: "grid grid-cols-[1fr_auto] gap-2",
+                                                input {
+                                                    class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
+                                                    placeholder: "22",
+                                                    value: "{basic_firewall_port}",
+                                                    oninput: move |event| {
+                                                        basic_firewall_port.set(event.value());
+                                                        save_error.set(String::new());
+                                                    },
+                                                }
+                                                div { class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
+                                                    button {
+                                                        class: "px-2 py-1 rounded text-[11px] transition-colors",
+                                                        class: if *basic_firewall_protocol.read() == "tcp" {
+                                                            "bg-violet-500/20 text-violet-300"
+                                                        } else {
+                                                            "text-gray-400 hover:text-gray-200"
+                                                        },
+                                                        onclick: move |_| basic_firewall_protocol.set("tcp".to_string()),
+                                                        "TCP"
+                                                    }
+                                                    button {
+                                                        class: "px-2 py-1 rounded text-[11px] transition-colors",
+                                                        class: if *basic_firewall_protocol.read() == "udp" {
+                                                            "bg-violet-500/20 text-violet-300"
+                                                        } else {
+                                                            "text-gray-400 hover:text-gray-200"
+                                                        },
+                                                        onclick: move |_| basic_firewall_protocol.set("udp".to_string()),
+                                                        "UDP"
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        label { class: "text-xs text-violet-300/70 font-medium", "Result message" }
                                         input {
                                             class: "w-full rounded-lg border px-3 py-2 text-xs cf-policy-modal-field focus:outline-none",
                                             value: "{basic_rule_description}",
-                                            placeholder: "Firewall must be enabled",
+                                            placeholder: "Policy check failed",
                                             oninput: move |event| {
                                                 basic_rule_description.set(event.value());
                                                 save_error.set(String::new());
@@ -642,7 +718,11 @@ pub fn PolicyEditorModal(
                             let format = *edit_format.read();
                             let in_basic_mode = !*advanced_mode.read();
                             let kind = *basic_kind.read();
+                            let custom_builder = *basic_custom_builder.read();
                             let expression = basic_expression.read().clone();
+                            let service_name = basic_service_name.read().clone();
+                            let firewall_port = basic_firewall_port.read().clone();
+                            let firewall_protocol = basic_firewall_protocol.read().clone();
                             let rule_description = basic_rule_description.read().clone();
                             let packages_raw = basic_packages.read().clone();
                             let strict = *basic_strict.read();
@@ -663,9 +743,44 @@ pub fn PolicyEditorModal(
                                 let (policy_type, config) = if in_basic_mode {
                                     match kind {
                                         BasicPolicyKind::CustomCheck => {
+                                            let (resolved_expression, default_message) = match custom_builder {
+                                                BasicCustomBuilder::CustomExpression => (
+                                                    expression.trim().to_string(),
+                                                    "Custom rule failed".to_string(),
+                                                ),
+                                                BasicCustomBuilder::ServiceEnabled => {
+                                                    let service = service_name.trim().to_string();
+                                                    (
+                                                        format!("config.services.{service}.enable"),
+                                                        format!("Service must be enabled: {service}"),
+                                                    )
+                                                }
+                                                BasicCustomBuilder::FirewallPortAllowed => {
+                                                    let port: u16 = firewall_port.trim().parse().unwrap_or(0);
+                                                    let protocol = firewall_protocol.trim().to_lowercase();
+                                                    let list_attr = if protocol == "udp" {
+                                                        "allowedUDPPorts"
+                                                    } else {
+                                                        "allowedTCPPorts"
+                                                    };
+                                                    (
+                                                        format!(
+                                                            "builtins.elem {port} (config.networking.firewall.{list_attr} or [])"
+                                                        ),
+                                                        format!("Firewall must allow {protocol}/{port}"),
+                                                    )
+                                                }
+                                            };
+
+                                            let resolved_description = if rule_description.trim().is_empty() {
+                                                default_message
+                                            } else {
+                                                rule_description.trim().to_string()
+                                            };
+
                                             let cfg = serde_json::json!({
-                                                "expression": expression,
-                                                "description": rule_description,
+                                                "expression": resolved_expression,
+                                                "description": resolved_description,
                                                 "strict": strict,
                                             });
                                             ("custom_check".to_string(), cfg)
