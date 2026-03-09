@@ -1,9 +1,10 @@
 ---
 id: TASK-123.1
 title: Fix list_deployment_policies to return all policies for CRUD management
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-09 20:59'
+updated_date: '2026-03-09 20:59'
 labels:
   - backend
   - api
@@ -44,3 +45,9 @@ Remove the `WHERE enabled = true` filter from the main `list_deployment_policies
 - [ ] #4 Backend tests verify all policies are returned regardless of enabled status
 - [ ] #5 cargo test passes for deployment_policies module
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-crud
+<!-- SECTION:NOTES:END -->
