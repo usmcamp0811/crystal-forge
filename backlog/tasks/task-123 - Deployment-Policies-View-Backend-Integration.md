@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-08 03:07'
+updated_date: '2026-03-09 21:04'
 labels:
   - backend
   - api
@@ -361,6 +361,26 @@ LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-
 **Resolution Path:**
 - Once we see the console error, we can fix the specific issue
 - May need to address pre-existing compilation errors first in separate task
+
+## MR Review Findings Fixed (2026-03-09)
+
+Two critical bugs identified during MR review and immediately fixed:
+
+1. **TASK-123.1**: List endpoint was filtering `WHERE enabled = true`, hiding disabled policies from CRUD UI
+
+- Fixed: Removed filter so admins can manage all policies
+
+- Kept separate `list_enabled_deployment_policies()` for evaluator use
+
+2. **TASK-123.2**: Pagination total was calculated after LIMIT/OFFSET, showing page size instead of true total
+
+- Fixed: Added `count_deployment_policies()` query called before pagination
+
+- Now returns accurate total for pagination metadata
+
+Both fixes committed: 8976cbe8
+
+Tests added for both scenarios
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
