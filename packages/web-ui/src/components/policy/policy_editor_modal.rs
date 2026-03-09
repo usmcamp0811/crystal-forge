@@ -780,63 +780,87 @@ pub fn PolicyEditorModal(
                                     }
                                 }
                             } else {
-                                label { class: "text-xs text-violet-300/70 font-medium", "Policy Type" }
-                                div {
-                                    class: "flex flex-wrap gap-2",
-                                    button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                        class: if *basic_kind.read() == BasicPolicyKind::CustomCheck {
-                                            "bg-violet-500/20 border-violet-500 text-violet-300"
-                                        } else {
-                                            "border-gray-700 text-gray-300 hover:bg-gray-800"
-                                        },
-                                        onclick: move |_| {
-                                            basic_kind.set(BasicPolicyKind::CustomCheck);
-                                            save_error.set(String::new());
-                                        },
-                                        "Custom rule"
+                                if !is_editing {
+                                    label { class: "text-xs text-violet-300/70 font-medium", "Policy Type" }
+                                    div {
+                                        class: "flex flex-wrap gap-2",
+                                        button {
+                                            class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
+                                            class: if *basic_kind.read() == BasicPolicyKind::CustomCheck {
+                                                "bg-violet-500/20 border-violet-500 text-violet-300"
+                                            } else {
+                                                "border-gray-700 text-gray-300 hover:bg-gray-800"
+                                            },
+                                            onclick: move |_| {
+                                                basic_kind.set(BasicPolicyKind::CustomCheck);
+                                                save_error.set(String::new());
+                                            },
+                                            "Custom rule"
+                                        }
+                                        button {
+                                            class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
+                                            class: if *basic_kind.read() == BasicPolicyKind::RequirePackages {
+                                                "bg-violet-500/20 border-violet-500 text-violet-300"
+                                            } else {
+                                                "border-gray-700 text-gray-300 hover:bg-gray-800"
+                                            },
+                                            onclick: move |_| {
+                                                basic_kind.set(BasicPolicyKind::RequirePackages);
+                                                save_error.set(String::new());
+                                            },
+                                            "Require packages"
+                                        }
                                     }
-                                    button {
-                                        class: "px-3 py-1.5 rounded-md text-xs border transition-colors",
-                                        class: if *basic_kind.read() == BasicPolicyKind::RequirePackages {
-                                            "bg-violet-500/20 border-violet-500 text-violet-300"
+                                } else {
+                                    p {
+                                        class: "text-xs {theme::text::MUTED}",
+                                        if *basic_kind.read() == BasicPolicyKind::CustomCheck {
+                                            "Editing type: Custom rule"
                                         } else {
-                                            "border-gray-700 text-gray-300 hover:bg-gray-800"
-                                        },
-                                        onclick: move |_| {
-                                            basic_kind.set(BasicPolicyKind::RequirePackages);
-                                            save_error.set(String::new());
-                                        },
-                                        "Require packages"
+                                            "Editing type: Require packages"
+                                        }
                                     }
                                 }
 
                                 if *basic_kind.read() == BasicPolicyKind::CustomCheck {
                                     div { class: "space-y-2",
-                                        div { class: "flex flex-wrap gap-2",
-                                            button {
-                                                class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                                onclick: move |_| {
-                                                    basic_custom_builder.set(BasicCustomBuilder::ServiceEnabled);
-                                                    save_error.set(String::new());
-                                                },
-                                                "Service state"
+                                        if !is_editing {
+                                            div { class: "flex flex-wrap gap-2",
+                                                button {
+                                                    class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                                    onclick: move |_| {
+                                                        basic_custom_builder.set(BasicCustomBuilder::ServiceEnabled);
+                                                        save_error.set(String::new());
+                                                    },
+                                                    "Service state"
+                                                }
+                                                button {
+                                                    class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                                    onclick: move |_| {
+                                                        basic_custom_builder.set(BasicCustomBuilder::FirewallPortAllowed);
+                                                        save_error.set(String::new());
+                                                    },
+                                                    "Firewall port state"
+                                                }
+                                                button {
+                                                    class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                                    onclick: move |_| {
+                                                        basic_custom_builder.set(BasicCustomBuilder::CustomExpression);
+                                                        save_error.set(String::new());
+                                                    },
+                                                    "Custom expression"
+                                                }
                                             }
-                                            button {
-                                                class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                                onclick: move |_| {
-                                                    basic_custom_builder.set(BasicCustomBuilder::FirewallPortAllowed);
-                                                    save_error.set(String::new());
-                                                },
-                                                "Firewall port state"
-                                            }
-                                            button {
-                                                class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
-                                                onclick: move |_| {
-                                                    basic_custom_builder.set(BasicCustomBuilder::CustomExpression);
-                                                    save_error.set(String::new());
-                                                },
-                                                "Custom expression"
+                                        } else {
+                                            p {
+                                                class: "text-xs {theme::text::MUTED}",
+                                                if *basic_custom_builder.read() == BasicCustomBuilder::ServiceEnabled {
+                                                    "Editing builder: Service state"
+                                                } else if *basic_custom_builder.read() == BasicCustomBuilder::FirewallPortAllowed {
+                                                    "Editing builder: Firewall port state"
+                                                } else {
+                                                    "Editing builder: Custom expression"
+                                                }
                                             }
                                         }
 
