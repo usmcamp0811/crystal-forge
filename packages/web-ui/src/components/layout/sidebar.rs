@@ -154,6 +154,20 @@ pub fn SidebarNav() -> Element {
                     )
                 }
                 NavLink {
+                    to: Route::CachesView {},
+                    label: "Caches",
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4" }
+                        }
+                    )
+                }
+                NavLink {
                     to: Route::CvesView {},
                     label: "CVEs",
                     icon: rsx!(
