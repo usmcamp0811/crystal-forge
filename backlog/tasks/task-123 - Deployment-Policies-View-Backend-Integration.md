@@ -1,10 +1,10 @@
 ---
 id: TASK-123
 title: Deployment Policies View - Backend Integration
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-09 22:51'
+updated_date: '2026-03-09 12:53'
 labels:
   - backend
   - api
@@ -362,49 +362,13 @@ LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-
 - Once we see the console error, we can fix the specific issue
 - May need to address pre-existing compilation errors first in separate task
 
-## MR Review Findings Fixed (2026-03-09)
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/154
 
-Two critical bugs identified during MR review and immediately fixed:
-
-1. **TASK-123.1**: List endpoint was filtering `WHERE enabled = true`, hiding disabled policies from CRUD UI
-
-- Fixed: Removed filter so admins can manage all policies
-
-- Kept separate `list_enabled_deployment_policies()` for evaluator use
-
-2. **TASK-123.2**: Pagination total was calculated after LIMIT/OFFSET, showing page size instead of true total
-
-- Fixed: Added `count_deployment_policies()` query called before pagination
-
-- Now returns accurate total for pagination metadata
-
-Both fixes committed: 8976cbe8
-
-Tests added for both scenarios
-
-## Additional MR Review Findings Fixed (2026-03-09 - Part 2)
-
-Two more critical bugs identified and fixed:
-
-3. **TASK-123.3**: PolicyCard protection logic didn't recognize JSON-formatted core policies
-
-- Issue: UI adapter converts policies to JSON, but PolicyCard only checked for TOML patterns
-
-- Fixed: Added policy_type field to PolicyDefinition, updated detection logic
-
-- Now works for both TOML mock policies and JSON API policies
-
-4. **TASK-123.4**: Evaluator fallback used non-strict mode
-
-- Issue: Fallback used RequireCrystalForgeAgent { strict: false }, weakening security
-
-- Fixed: Changed to strict: true in both fallback paths
-
-- Added comments explaining why strict mode is required even in fallback
-
-Both fixes committed: ed199e24, 9a407c5f
-
-All four critical issues from MR review now addressed and ready for re-review
+Review status update:
+- Branch: TASK-123-deployment-policies-crud
+- Web UI check now asserts deployment policies route and captures modal screenshots
+- Screenshots attached in MR (policies route, new modal basic, new modal advanced)
+- Follow-up task created for multi-rule policy support: TASK-176
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
