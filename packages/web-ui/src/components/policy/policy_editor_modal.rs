@@ -942,7 +942,7 @@ pub fn PolicyEditorModal(
 
                     if let Some(message) = current_validation_error.clone() {
                         div {
-                            class: "text-xs text-amber-300 bg-amber-950/40 border border-amber-700/40 rounded px-3 py-2",
+                            class: "text-xs text-red-300 bg-red-950/40 border border-red-700/40 rounded px-3 py-2",
                             "{message}"
                         }
                     }
