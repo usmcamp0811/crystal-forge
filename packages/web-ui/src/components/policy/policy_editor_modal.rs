@@ -223,6 +223,7 @@ pub fn PolicyEditorModal(
     let mut basic_service_name = use_signal(String::new);
     let mut basic_firewall_port = use_signal(String::new);
     let mut basic_firewall_protocol = use_signal(|| "tcp".to_string());
+    let mut basic_firewall_expectation = use_signal(|| "allowed".to_string());
     let mut basic_strict = use_signal(|| true);
     let mut show_strict_info = use_signal(|| false);
     let current_validation_error = {
@@ -374,6 +375,13 @@ pub fn PolicyEditorModal(
                                                     basic_custom_builder.set(
                                                         BasicCustomBuilder::FirewallPortAllowed,
                                                     );
+                                                    if expression.contains("!builtins.elem") {
+                                                        basic_firewall_expectation
+                                                            .set("denied".to_string());
+                                                    } else {
+                                                        basic_firewall_expectation
+                                                            .set("allowed".to_string());
+                                                    }
                                                     let maybe_port = expression
                                                         .split_whitespace()
                                                         .nth(1)
@@ -761,6 +769,28 @@ pub fn PolicyEditorModal(
                                                     }
                                                 }
                                             }
+                                            div { class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
+                                                button {
+                                                    class: "px-2 py-1 rounded text-[11px] transition-colors",
+                                                    class: if *basic_firewall_expectation.read() == "allowed" {
+                                                        "bg-violet-500/20 text-violet-300"
+                                                    } else {
+                                                        "text-gray-400 hover:text-gray-200"
+                                                    },
+                                                    onclick: move |_| basic_firewall_expectation.set("allowed".to_string()),
+                                                    "Allowed"
+                                                }
+                                                button {
+                                                    class: "px-2 py-1 rounded text-[11px] transition-colors",
+                                                    class: if *basic_firewall_expectation.read() == "denied" {
+                                                        "bg-violet-500/20 text-violet-300"
+                                                    } else {
+                                                        "text-gray-400 hover:text-gray-200"
+                                                    },
+                                                    onclick: move |_| basic_firewall_expectation.set("denied".to_string()),
+                                                    "Denied"
+                                                }
+                                            }
                                         }
 
                                         label { class: "text-xs text-violet-300/70 font-medium", "Result message" }
@@ -900,6 +930,7 @@ pub fn PolicyEditorModal(
                             let service_name = basic_service_name.read().clone();
                             let firewall_port = basic_firewall_port.read().clone();
                             let firewall_protocol = basic_firewall_protocol.read().clone();
+                            let firewall_expectation = basic_firewall_expectation.read().clone();
                             let rule_description = basic_rule_description.read().clone();
                             let packages_raw = basic_packages.read().clone();
                             let strict = *basic_strict.read();
@@ -935,16 +966,28 @@ pub fn PolicyEditorModal(
                                                 BasicCustomBuilder::FirewallPortAllowed => {
                                                     let port: u16 = firewall_port.trim().parse().unwrap_or(0);
                                                     let protocol = firewall_protocol.trim().to_lowercase();
+                                                    let expectation = firewall_expectation.trim().to_lowercase();
                                                     let list_attr = if protocol == "udp" {
                                                         "allowedUDPPorts"
                                                     } else {
                                                         "allowedTCPPorts"
                                                     };
+                                                    let base_expr = format!(
+                                                        "builtins.elem {port} (config.networking.firewall.{list_attr} or [])"
+                                                    );
+                                                    let expr = if expectation == "denied" {
+                                                        format!("!{base_expr}")
+                                                    } else {
+                                                        base_expr
+                                                    };
+                                                    let message = if expectation == "denied" {
+                                                        format!("Firewall must deny {protocol}/{port}")
+                                                    } else {
+                                                        format!("Firewall must allow {protocol}/{port}")
+                                                    };
                                                     (
-                                                        format!(
-                                                            "builtins.elem {port} (config.networking.firewall.{list_attr} or [])"
-                                                        ),
-                                                        format!("Firewall must allow {protocol}/{port}"),
+                                                        expr,
+                                                        message,
                                                     )
                                                 }
                                             };
