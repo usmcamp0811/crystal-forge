@@ -682,6 +682,11 @@ html, body {
   border: 1px solid rgba(248, 113, 113, 0.55) !important;
 }
 
+.cf-policy-modal-field-error {
+  border-color: rgba(248, 113, 113, 0.75) !important;
+  box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.22) !important;
+}
+
 :root[data-theme="light"] .cf-policy-modal-field {
   background-color: var(--cf-subtle-bg) !important;
   border-color: var(--cf-card-border) !important;

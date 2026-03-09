@@ -273,6 +273,14 @@ pub fn PolicyEditorModal(
             parse_policy_payload(&body, format).err()
         }
     };
+    let name_missing_error = current_validation_error
+        .as_ref()
+        .map(|s| s == "Policy name is required")
+        .unwrap_or(false);
+    let non_name_validation_error = current_validation_error
+        .as_ref()
+        .filter(|s| s.as_str() != "Policy name is required")
+        .cloned();
     let can_save = current_validation_error.is_none() && !*is_saving.read();
 
     rsx! {
@@ -577,13 +585,23 @@ pub fn PolicyEditorModal(
                             class: "space-y-2",
                             label { class: "text-xs text-violet-300/70 font-medium", "Policy Name" }
                             input {
-                                class: "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field focus:outline-none",
+                                class: if name_missing_error {
+                                    "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field cf-policy-modal-field-error focus:outline-none"
+                                } else {
+                                    "w-full rounded-lg border px-3 py-2 text-sm cf-policy-modal-field focus:outline-none"
+                                },
                                 placeholder: "e.g., Require SSH Enabled",
                                 value: "{edit_name}",
                                 oninput: move |event| {
                                     edit_name.set(event.value());
                                     save_error.set(String::new());
                                 },
+                            }
+                            if name_missing_error {
+                                p {
+                                    class: "text-[11px] text-red-300",
+                                    "Policy name is required"
+                                }
                             }
                         }
                         div {
@@ -940,7 +958,7 @@ pub fn PolicyEditorModal(
                         }
                     }
 
-                    if let Some(message) = current_validation_error.clone() {
+                    if let Some(message) = non_name_validation_error.clone() {
                         div {
                             class: "text-xs rounded px-3 py-2 cf-policy-modal-error",
                             "{message}"
