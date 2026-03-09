@@ -93,6 +93,17 @@ pub async fn list_deployment_policies(
     // Validate pagination parameters
     params.validate()?;
 
+    // Get total count for pagination metadata
+    let total = deployment_policies::count_deployment_policies(&state.pool)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to count deployment policies: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to count deployment policies".to_string(),
+            )
+        })?;
+
     // Fetch policies from database
     let policies = deployment_policies::list_deployment_policies(
         &state.pool,
@@ -108,11 +119,9 @@ pub async fn list_deployment_policies(
         )
     })?;
 
-    let total = policies.len();
-
     Ok(Json(DeploymentPoliciesListResponse {
         policies,
-        total,
+        total: total as usize,
         limit: params.limit,
         offset: params.offset,
     }))
@@ -545,6 +554,48 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live postgres"]
+    async fn test_list_includes_disabled_policies() {
+        let pool = test_pool().await;
+        
+        // Create an enabled policy
+        let enabled_request = CreateDeploymentPolicyRequest {
+            name: "Enabled Test Policy".to_string(),
+            description: Some("This policy is enabled".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({"expression": "true"}),
+            enabled: Some(true),
+        };
+        deployment_policies::create_deployment_policy(&pool, &enabled_request)
+            .await
+            .unwrap();
+        
+        // Create a disabled policy
+        let disabled_request = CreateDeploymentPolicyRequest {
+            name: "Disabled Test Policy".to_string(),
+            description: Some("This policy is disabled".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: serde_json::json!({"expression": "false"}),
+            enabled: Some(false),
+        };
+        deployment_policies::create_deployment_policy(&pool, &disabled_request)
+            .await
+            .unwrap();
+        
+        // List all policies
+        let policies = deployment_policies::list_deployment_policies(&pool, 100, 0)
+            .await
+            .unwrap();
+        
+        // Verify both policies are in the list
+        let enabled_found = policies.iter().any(|p| p.name == "Enabled Test Policy" && p.enabled);
+        let disabled_found = policies.iter().any(|p| p.name == "Disabled Test Policy" && !p.enabled);
+        
+        assert!(enabled_found, "Enabled policy should be in the list");
+        assert!(disabled_found, "Disabled policy should be in the list");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
     async fn test_create_deployment_policy() {
         let pool = test_pool().await;
         let request = CreateDeploymentPolicyRequest {
@@ -655,5 +706,53 @@ mod tests {
 
         // Policy not assigned to any environment/system yet
         assert!(!in_use);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn test_count_deployment_policies() {
+        let pool = test_pool().await;
+        
+        // Get initial count
+        let initial_count = deployment_policies::count_deployment_policies(&pool)
+            .await
+            .unwrap();
+        
+        // Create 3 test policies
+        create_test_policy(&pool, "Count Test 1").await;
+        create_test_policy(&pool, "Count Test 2").await;
+        create_test_policy(&pool, "Count Test 3").await;
+        
+        // Verify count increased by 3
+        let new_count = deployment_policies::count_deployment_policies(&pool)
+            .await
+            .unwrap();
+        
+        assert_eq!(new_count, initial_count + 3);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live postgres"]
+    async fn test_pagination_total_is_accurate() {
+        let pool = test_pool().await;
+        
+        // Create multiple policies (more than one page)
+        for i in 1..=5 {
+            create_test_policy(&pool, &format!("Pagination Test {}", i)).await;
+        }
+        
+        // Get total count
+        let total = deployment_policies::count_deployment_policies(&pool)
+            .await
+            .unwrap();
+        
+        // Fetch with limit smaller than total
+        let policies = deployment_policies::list_deployment_policies(&pool, 2, 0)
+            .await
+            .unwrap();
+        
+        // Verify we got a limited page but total represents all policies
+        assert_eq!(policies.len(), 2, "Should return 2 policies per page");
+        assert!(total >= 5, "Total should include all policies, not just the page size");
     }
 }

@@ -18,7 +18,6 @@ pub async fn list_deployment_policies(
         r#"
         SELECT id, name, description, policy_type, config, enabled, created_at, updated_at
         FROM deployment_policies
-        WHERE enabled = true
         ORDER BY name ASC
         LIMIT $1 OFFSET $2
         "#,
@@ -47,6 +46,16 @@ pub async fn list_enabled_deployment_policies(pool: &PgPool) -> Result<Vec<Deplo
     .context("Failed to list enabled deployment policies")?;
 
     Ok(policies)
+}
+
+/// Count total deployment policies (for pagination metadata)
+pub async fn count_deployment_policies(pool: &PgPool) -> Result<i64> {
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
+        .fetch_one(pool)
+        .await
+        .context("Failed to count deployment policies")?;
+
+    Ok(count)
 }
 
 /// Get a deployment policy by ID
