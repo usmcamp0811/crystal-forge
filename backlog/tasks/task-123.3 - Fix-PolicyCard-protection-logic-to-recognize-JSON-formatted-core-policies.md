@@ -1,9 +1,10 @@
 ---
 id: TASK-123.3
 title: Fix PolicyCard protection logic to recognize JSON-formatted core policies
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-09 22:47'
+updated_date: '2026-03-09 22:48'
 labels:
   - frontend
   - web-ui
@@ -47,3 +48,9 @@ Fix the PolicyCard protection detection to correctly identify core policies rega
 - [ ] #5 Mock core policy continues to show same protection behavior
 - [ ] #6 Manual test: Load core policy from DB, verify badge appears and Edit/Delete hidden for non-Admin
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-crud
+<!-- SECTION:NOTES:END -->
