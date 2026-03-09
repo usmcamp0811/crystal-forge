@@ -20,7 +20,7 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, commits, dashboard, environments, flakes, systems,
+            builders, commits, dashboard, deployment_policies, environments, flakes, systems,
         },
         status,
         webhook::webhook_handler,
@@ -195,6 +195,18 @@ async fn main() -> anyhow::Result<()> {
                 .patch(environments::update_environment_policies_handler),
         )
         .route("/api/v1/policies", get(environments::list_policies_handler))
+        // Deployment policies CRUD endpoints
+        .route(
+            "/api/v1/deployment-policies",
+            get(deployment_policies::list_deployment_policies)
+                .post(deployment_policies::create_deployment_policy),
+        )
+        .route(
+            "/api/v1/deployment-policies/:id",
+            get(deployment_policies::get_deployment_policy)
+                .put(deployment_policies::update_deployment_policy)
+                .delete(deployment_policies::delete_deployment_policy),
+        )
         .route("/api/v1/flakes", get(flakes::list_flakes))
         .route("/api/v1/flakes", post(flakes::create_flake))
         .route("/api/v1/flakes/sync", post(flakes::sync_all_flakes_handler))

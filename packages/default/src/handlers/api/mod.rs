@@ -8,6 +8,7 @@ pub mod auth_whoami;
 pub mod builders;
 pub mod commits;
 pub mod dashboard;
+pub mod deployment_policies;
 pub mod environments;
 pub mod flakes;
 pub mod rbac;

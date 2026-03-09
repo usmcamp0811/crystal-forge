@@ -216,6 +216,59 @@ pub async fn fetch_policies() -> Result<Vec<DeploymentPolicySummary>, ApiClientE
     fetch_json(&url).await
 }
 
+// =============================================================================
+// Deployment Policies CRUD API
+// =============================================================================
+
+/// Fetch deployment policies with pagination.
+pub async fn fetch_deployment_policies(
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<DeploymentPoliciesListResponse, ApiClientError> {
+    let mut url = format!("{}/deployment-policies", base_url());
+    let mut query_parts = Vec::new();
+    if let Some(l) = limit {
+        query_parts.push(format!("limit={}", l));
+    }
+    if let Some(o) = offset {
+        query_parts.push(format!("offset={}", o));
+    }
+    if !query_parts.is_empty() {
+        url.push('?');
+        url.push_str(&query_parts.join("&"));
+    }
+    fetch_json(&url).await
+}
+
+/// Fetch a single deployment policy by ID.
+pub async fn fetch_deployment_policy(id: &Uuid) -> Result<DeploymentPolicyRecord, ApiClientError> {
+    let url = format!("{}/deployment-policies/{}", base_url(), id);
+    fetch_json(&url).await
+}
+
+/// Create a new deployment policy (Admin/Operator only).
+pub async fn create_deployment_policy(
+    request: &CreateDeploymentPolicyRequest,
+) -> Result<DeploymentPolicyRecord, ApiClientError> {
+    let url = format!("{}/deployment-policies", base_url());
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Update an existing deployment policy (Admin/Operator only).
+pub async fn update_deployment_policy(
+    id: &Uuid,
+    request: &UpdateDeploymentPolicyRequest,
+) -> Result<DeploymentPolicyRecord, ApiClientError> {
+    let url = format!("{}/deployment-policies/{}", base_url(), id);
+    send_json_with_csrf("PUT", &url, Some(request)).await
+}
+
+/// Delete a deployment policy (Admin only).
+pub async fn delete_deployment_policy(id: &Uuid) -> Result<(), ApiClientError> {
+    let url = format!("{}/deployment-policies/{}", base_url(), id);
+    send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());

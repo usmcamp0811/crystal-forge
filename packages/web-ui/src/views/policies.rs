@@ -6,11 +6,13 @@
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+use crate::api::client::delete_deployment_policy;
 use crate::components::layout::Card;
 use crate::components::policy::{
-    POLICY_TOML_SAMPLE, PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat,
+    PolicyCard, PolicyDefinition, PolicyEditorModal, PolicyFormat,
 };
 use crate::theme;
+use crate::views::policies_api;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -37,6 +39,15 @@ struct PolicyPresetMeta {
     body: String,
 }
 
+const POLICY_JSON_TEMPLATE: &str = r#"{
+  "policy_type": "custom_check",
+  "config": {
+    "expression": "config.networking.firewall.enable",
+    "description": "Firewall must be enabled",
+    "strict": true
+  }
+}"#;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Main View
 // ─────────────────────────────────────────────────────────────────────────────
@@ -44,8 +55,16 @@ struct PolicyPresetMeta {
 /// The policies page for global policy management.
 #[component]
 pub fn PoliciesView() -> Element {
-    let mut policy_library = use_signal(initial_policy_definitions);
+    let mut policy_library: Signal<Vec<PolicyDefinition>> = use_signal(Vec::new);
     let mut show_editor = use_signal(|| false);
+    
+    // Load policies from API on mount
+    use_effect(move || {
+        spawn(async move {
+            let policies = policies_api::load_policies_with_fallback().await;
+            policy_library.set(policies);
+        });
+    });
     let mut editing_policy_id: Signal<Option<Uuid>> = use_signal(|| None);
     let mut edit_name = use_signal(String::new);
     let mut edit_description = use_signal(String::new);
@@ -53,6 +72,7 @@ pub fn PoliciesView() -> Element {
     let mut edit_format = use_signal(|| PolicyFormat::Toml);
     let mut search_query = use_signal(String::new);
     let mut delete_confirm: Signal<Option<Uuid>> = use_signal(|| None);
+    let mut help_collapsed = use_signal(|| true);
 
     let query = search_query.read().to_lowercase();
     let filtered_policies: Vec<PolicyDefinition> = policy_library
@@ -90,8 +110,8 @@ pub fn PoliciesView() -> Element {
                         editing_policy_id.set(None);
                         edit_name.set(String::new());
                         edit_description.set(String::new());
-                        edit_body.set(POLICY_TOML_SAMPLE.to_string());
-                        edit_format.set(PolicyFormat::Toml);
+                        edit_body.set(POLICY_JSON_TEMPLATE.to_string());
+                        edit_format.set(PolicyFormat::Json);
                         show_editor.set(true);
                     },
                     svg {
@@ -107,6 +127,43 @@ pub fn PoliciesView() -> Element {
                         }
                     }
                     "New Policy"
+                }
+            }
+
+            // Lightweight authoring help (visible but unobtrusive)
+            Card {
+                children: rsx! {
+                    div {
+                        class: "space-y-3",
+                        div {
+                            class: "flex items-center justify-between gap-3",
+                            div {
+                                class: "text-sm font-medium text-violet-200",
+                                "Policy authoring quick guide"
+                            }
+                            button {
+                                class: "text-xs px-2 py-1 rounded border border-gray-700 text-gray-300 hover:bg-gray-800",
+                                onclick: move |_| {
+                                    let next = !*help_collapsed.read();
+                                    help_collapsed.set(next);
+                                },
+                                if *help_collapsed.read() { "Show" } else { "Hide" }
+                            }
+                        }
+
+                        if !*help_collapsed.read() {
+                            div {
+                                class: "text-xs {theme::text::SECONDARY} leading-6 space-y-1",
+                                p { "- Use JSON format for best reliability in editor save." }
+                                p { "- Required fields: policy_type + config." }
+                                p { "- custom_check config expects: expression, description, strict." }
+                                p { "- require_packages config expects: packages (array), strict." }
+                                p { "- require_cf_agent is core and always on (protected)." }
+                                p { "- Duplicate name or duplicate policy_type+config is rejected." }
+                                p { class: "mt-2 text-[11px] text-gray-400", "Use the modal template buttons for copy-ready JSON examples." }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -234,10 +291,22 @@ pub fn PoliciesView() -> Element {
                     policy_id: id,
                     policy_name: policy_library.read().iter().find(|p| p.id == id).map(|p| p.name.clone()).unwrap_or_default(),
                     on_confirm: move |_| {
-                        let mut lib = policy_library.read().clone();
-                        lib.retain(|p| p.id != id);
-                        policy_library.set(lib);
-                        delete_confirm.set(None);
+                        let mut policy_library = policy_library;
+                        let mut delete_confirm = delete_confirm;
+                        spawn(async move {
+                            match delete_deployment_policy(&id).await {
+                                Ok(()) => {
+                                    let latest = policies_api::load_policies_with_fallback().await;
+                                    policy_library.set(latest);
+                                }
+                                Err(error) => {
+                                    web_sys::console::error_1(
+                                        &format!("Failed to delete policy: {error}").into(),
+                                    );
+                                }
+                            }
+                            delete_confirm.set(None);
+                        });
                     },
                     on_cancel: move |_| {
                         delete_confirm.set(None);
@@ -393,12 +462,28 @@ strict = false
 fn initial_policy_definitions() -> Vec<PolicyDefinition> {
     policy_presets()
         .into_iter()
-        .map(|preset| PolicyDefinition {
-            id: preset.id,
-            name: preset.title.to_string(),
-            description: preset.description.to_string(),
-            format: preset.format,
-            body: preset.body,
+        .map(|preset| {
+            // Extract policy_type from TOML body for core policy detection
+            let policy_type = if preset.body.contains("type = \"require_crystal_forge_agent\"") {
+                Some("require_crystal_forge_agent".to_string())
+            } else if preset.body.contains("type = \"require_cf_agent\"") {
+                Some("require_cf_agent".to_string())
+            } else if preset.body.contains("type = \"require_packages\"") {
+                Some("require_packages".to_string())
+            } else if preset.body.contains("type = \"custom_check\"") {
+                Some("custom_check".to_string())
+            } else {
+                None
+            };
+            
+            PolicyDefinition {
+                id: preset.id,
+                name: preset.title.to_string(),
+                description: preset.description.to_string(),
+                format: preset.format,
+                body: preset.body,
+                policy_type,
+            }
         })
         .collect()
 }

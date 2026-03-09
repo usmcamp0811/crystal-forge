@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
+use sqlx::types::chrono::{DateTime, Utc};
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// A deployment policy that systems must satisfy
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -263,4 +265,43 @@ mod tests {
         assert!(expr.contains("hasRequiredPackages"));
         assert!(expr.contains("services.crystal-forge"));
     }
+}
+
+// ============================================================================
+// Database Models for CRUD API
+// ============================================================================
+
+/// Database record for a deployment policy
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct DeploymentPolicyRecord {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    /// Policy type: 'require_cf_agent', 'require_packages', 'custom_check'
+    pub policy_type: String,
+    /// JSON configuration specific to the policy type
+    pub config: serde_json::Value,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Request to create a new deployment policy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateDeploymentPolicyRequest {
+    pub name: String,
+    pub description: Option<String>,
+    pub policy_type: String,
+    pub config: serde_json::Value,
+    pub enabled: Option<bool>,
+}
+
+/// Request to update an existing deployment policy
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateDeploymentPolicyRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub policy_type: Option<String>,
+    pub config: Option<serde_json::Value>,
+    pub enabled: Option<bool>,
 }
