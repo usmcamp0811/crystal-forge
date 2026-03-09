@@ -1,10 +1,10 @@
 ---
 id: TASK-123.3
 title: Fix PolicyCard protection logic to recognize JSON-formatted core policies
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-09 22:47'
-updated_date: '2026-03-09 22:48'
+updated_date: '2026-03-09 22:51'
 labels:
   - frontend
   - web-ui
@@ -41,8 +41,8 @@ Fix the PolicyCard protection detection to correctly identify core policies rega
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 PolicyCard protection logic checks policy_type field, not string pattern matching in body
-- [ ] #2 Core policy detection works for both PolicyFormat::Json and PolicyFormat::Toml
+- [x] #1 PolicyCard protection logic checks policy_type field, not string pattern matching in body
+- [x] #2 Core policy detection works for both PolicyFormat::Json and PolicyFormat::Toml
 - [ ] #3 DB-loaded core policy shows 'Core / Always On' badge in UI
 - [ ] #4 Edit/Delete buttons are hidden for DB-loaded core policy when user is not Admin
 - [ ] #5 Mock core policy continues to show same protection behavior
@@ -53,4 +53,16 @@ Fix the PolicyCard protection detection to correctly identify core policies rega
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-agent on gray in ~/code/crystal-forge/TASK-123-deployment-policies-crud
+
+Fixed: Added policy_type field to PolicyDefinition
+
+PolicyCard now checks policy_type instead of string matching in body
+
+Core policy detection works for both TOML and JSON formats
+
+Updated all PolicyDefinition constructors to populate policy_type
+
+Added helper function to extract policy_type from TOML/JSON bodies
+
+Changes committed: 9a407c5f
 <!-- SECTION:NOTES:END -->
