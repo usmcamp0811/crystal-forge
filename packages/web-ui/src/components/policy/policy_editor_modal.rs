@@ -715,7 +715,7 @@ pub fn PolicyEditorModal(
                                                     basic_custom_builder.set(BasicCustomBuilder::ServiceEnabled);
                                                     save_error.set(String::new());
                                                 },
-                                                "Service enabled"
+                                                "Service state"
                                             }
                                             button {
                                                 class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
@@ -723,7 +723,7 @@ pub fn PolicyEditorModal(
                                                     basic_custom_builder.set(BasicCustomBuilder::FirewallPortAllowed);
                                                     save_error.set(String::new());
                                                 },
-                                                "Firewall port allowed"
+                                                "Firewall port state"
                                             }
                                             button {
                                                 class: "px-2 py-1 rounded text-[11px] border border-gray-700 text-gray-300 hover:bg-gray-800",
