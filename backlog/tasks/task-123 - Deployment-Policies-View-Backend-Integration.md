@@ -4,7 +4,7 @@ title: Deployment Policies View - Backend Integration
 status: In Progress
 assignee: []
 created_date: '2026-02-23'
-updated_date: '2026-03-09 21:04'
+updated_date: '2026-03-09 22:51'
 labels:
   - backend
   - api
@@ -381,6 +381,30 @@ Two critical bugs identified during MR review and immediately fixed:
 Both fixes committed: 8976cbe8
 
 Tests added for both scenarios
+
+## Additional MR Review Findings Fixed (2026-03-09 - Part 2)
+
+Two more critical bugs identified and fixed:
+
+3. **TASK-123.3**: PolicyCard protection logic didn't recognize JSON-formatted core policies
+
+- Issue: UI adapter converts policies to JSON, but PolicyCard only checked for TOML patterns
+
+- Fixed: Added policy_type field to PolicyDefinition, updated detection logic
+
+- Now works for both TOML mock policies and JSON API policies
+
+4. **TASK-123.4**: Evaluator fallback used non-strict mode
+
+- Issue: Fallback used RequireCrystalForgeAgent { strict: false }, weakening security
+
+- Fixed: Changed to strict: true in both fallback paths
+
+- Added comments explaining why strict mode is required even in fallback
+
+Both fixes committed: ed199e24, 9a407c5f
+
+All four critical issues from MR review now addressed and ready for re-review
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
