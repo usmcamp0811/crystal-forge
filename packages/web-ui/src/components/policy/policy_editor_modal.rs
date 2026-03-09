@@ -221,6 +221,7 @@ pub fn PolicyEditorModal(
     let mut basic_rule_description = use_signal(String::new);
     let mut basic_packages = use_signal(String::new);
     let mut basic_service_name = use_signal(String::new);
+    let mut basic_service_expectation = use_signal(|| "enabled".to_string());
     let mut basic_firewall_port = use_signal(String::new);
     let mut basic_firewall_protocol = use_signal(|| "tcp".to_string());
     let mut basic_firewall_expectation = use_signal(|| "allowed".to_string());
@@ -359,12 +360,21 @@ pub fn PolicyEditorModal(
                                                 basic_expression.set(expression.clone());
                                                 basic_rule_description.set(result_message);
 
-                                                if expression.starts_with("config.services.")
+                                                if (expression.starts_with("config.services.")
+                                                    || expression.starts_with("!config.services."))
                                                     && expression.ends_with(".enable")
                                                 {
                                                     basic_custom_builder
                                                         .set(BasicCustomBuilder::ServiceEnabled);
+                                                    if expression.starts_with('!') {
+                                                        basic_service_expectation
+                                                            .set("disabled".to_string());
+                                                    } else {
+                                                        basic_service_expectation
+                                                            .set("enabled".to_string());
+                                                    }
                                                     let service_name = expression
+                                                        .trim_start_matches('!')
                                                         .trim_start_matches("config.services.")
                                                         .trim_end_matches(".enable")
                                                         .to_string();
@@ -448,13 +458,29 @@ pub fn PolicyEditorModal(
                                                                 .read()
                                                                 .trim()
                                                                 .to_string();
+                                                            let expectation =
+                                                                basic_service_expectation
+                                                                    .read()
+                                                                    .trim()
+                                                                    .to_lowercase();
+                                                            let base_expr = format!(
+                                                                "config.services.{svc}.enable"
+                                                            );
                                                             (
-                                                                format!(
-                                                                    "config.services.{svc}.enable"
-                                                                ),
-                                                                format!(
-                                                                    "Service must be enabled: {svc}"
-                                                                ),
+                                                                if expectation == "disabled" {
+                                                                    format!("!{base_expr}")
+                                                                } else {
+                                                                    base_expr
+                                                                },
+                                                                if expectation == "disabled" {
+                                                                    format!(
+                                                                        "Service must be disabled: {svc}"
+                                                                    )
+                                                                } else {
+                                                                    format!(
+                                                                        "Service must be enabled: {svc}"
+                                                                    )
+                                                                },
                                                             )
                                                         }
                                                         BasicCustomBuilder::FirewallPortAllowed => {
@@ -733,6 +759,28 @@ pub fn PolicyEditorModal(
                                                     save_error.set(String::new());
                                                 },
                                             }
+                                            div { class: "inline-flex rounded-md border border-gray-700 bg-gray-950/50 p-1",
+                                                button {
+                                                    class: "px-2 py-1 rounded text-[11px] transition-colors",
+                                                    class: if *basic_service_expectation.read() == "enabled" {
+                                                        "bg-violet-500/20 text-violet-300"
+                                                    } else {
+                                                        "text-gray-400 hover:text-gray-200"
+                                                    },
+                                                    onclick: move |_| basic_service_expectation.set("enabled".to_string()),
+                                                    "Enabled"
+                                                }
+                                                button {
+                                                    class: "px-2 py-1 rounded text-[11px] transition-colors",
+                                                    class: if *basic_service_expectation.read() == "disabled" {
+                                                        "bg-violet-500/20 text-violet-300"
+                                                    } else {
+                                                        "text-gray-400 hover:text-gray-200"
+                                                    },
+                                                    onclick: move |_| basic_service_expectation.set("disabled".to_string()),
+                                                    "Disabled"
+                                                }
+                                            }
                                         }
 
                                         if *basic_custom_builder.read() == BasicCustomBuilder::FirewallPortAllowed {
@@ -928,6 +976,7 @@ pub fn PolicyEditorModal(
                             let custom_builder = *basic_custom_builder.read();
                             let expression = basic_expression.read().clone();
                             let service_name = basic_service_name.read().clone();
+                            let service_expectation = basic_service_expectation.read().clone();
                             let firewall_port = basic_firewall_port.read().clone();
                             let firewall_protocol = basic_firewall_protocol.read().clone();
                             let firewall_expectation = basic_firewall_expectation.read().clone();
@@ -958,9 +1007,21 @@ pub fn PolicyEditorModal(
                                                 ),
                                                 BasicCustomBuilder::ServiceEnabled => {
                                                     let service = service_name.trim().to_string();
+                                                    let expectation =
+                                                        service_expectation.trim().to_lowercase();
+                                                    let base_expr =
+                                                        format!("config.services.{service}.enable");
                                                     (
-                                                        format!("config.services.{service}.enable"),
-                                                        format!("Service must be enabled: {service}"),
+                                                        if expectation == "disabled" {
+                                                            format!("!{base_expr}")
+                                                        } else {
+                                                            base_expr
+                                                        },
+                                                        if expectation == "disabled" {
+                                                            format!("Service must be disabled: {service}")
+                                                        } else {
+                                                            format!("Service must be enabled: {service}")
+                                                        },
                                                     )
                                                 }
                                                 BasicCustomBuilder::FirewallPortAllowed => {
