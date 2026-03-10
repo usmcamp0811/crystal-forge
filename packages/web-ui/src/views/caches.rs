@@ -173,22 +173,21 @@ fn CacheDestinationsList() -> Element {
                                 label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
                                 input {
                                     class: if add_field_errors().contains_key("name") {
-                                        "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
                                     } else {
-                                        "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
                                     },
                                     placeholder: "main-cache",
                                     value: add_name(),
                                     oninput: move |evt| {
                                         add_name.set(evt.value());
-                                        // Clear error on input
                                         let mut errors = add_field_errors();
                                         errors.remove("name");
                                         add_field_errors.set(errors);
                                     },
                                 }
                                 if let Some(err) = add_field_errors().get("name") {
-                                    p { class: "text-xs text-red-400 mt-1", "{err}" }
+                                    p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                 }
                             }
 
@@ -208,14 +207,20 @@ fn CacheDestinationsList() -> Element {
                             // Type-specific required fields
                             if add_type() == "Attic" {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name *" }
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Cache Name (on Attic server) *" }
+                                        if !add_field_errors().contains_key("attic_cache_name") {
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Name of cache configured in your Attic server" }
+                                        }
+                                    }
                                     input {
                                         class: if add_field_errors().contains_key("attic_cache_name") {
-                                            "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
                                         } else {
-                                            "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
                                         },
-                                        placeholder: "my-attic-cache",
+                                        placeholder: "my-binary-cache",
                                         value: add_attic_cache_name(),
                                         oninput: move |evt| {
                                             add_attic_cache_name.set(evt.value());
@@ -225,28 +230,37 @@ fn CacheDestinationsList() -> Element {
                                         },
                                     }
                                     if let Some(err) = add_field_errors().get("attic_cache_name") {
-                                        p { class: "text-xs text-red-400 mt-1", "{err}" }
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                     }
                                 }
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
+                                        span { class: "text-[11px] {theme::text::MUTED}", "Authentication token for Attic cache server" }
+                                    }
                                     input {
                                         r#type: "password",
-                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none",
                                         placeholder: "attic-token-xyz...",
                                         value: add_attic_token(),
                                         oninput: move |evt| add_attic_token.set(evt.value()),
                                     }
-                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Authentication token for Attic cache server" }
                                 }
                             } else {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
+                                        if !add_field_errors().contains_key("push_to") {
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Full URL to the cache destination" }
+                                        }
+                                    }
                                     input {
                                         class: if add_field_errors().contains_key("push_to") {
-                                            "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
                                         } else {
-                                            "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
                                         },
                                         placeholder: "https://cache.example.com or s3://bucket",
                                         value: add_push_to(),
@@ -258,9 +272,7 @@ fn CacheDestinationsList() -> Element {
                                         },
                                     }
                                     if let Some(err) = add_field_errors().get("push_to") {
-                                        p { class: "text-xs text-red-400 mt-1", "{err}" }
-                                    } else {
-                                        p { class: "text-xs {theme::text::MUTED} mt-1", "Full URL to the cache destination" }
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                     }
                                 }
                             }
@@ -293,14 +305,17 @@ fn CacheDestinationsList() -> Element {
                             // Signing key (only for Nix binary cache types, not Attic)
                             if add_type() != "Attic" {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
+                                        span { class: "text-[11px] {theme::text::MUTED}", "Path to Nix cache signing key for signature verification" }
+                                    }
                                     input {
-                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none",
                                         placeholder: "/path/to/cache-priv-key.pem",
                                         value: add_signing_key_path(),
                                         oninput: move |evt| add_signing_key_path.set(evt.value()),
                                     }
-                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Path to Nix cache signing key for signature verification" }
                                 }
                             }
 
@@ -550,9 +565,9 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
                                 input {
                                     class: if edit_field_errors().contains_key("name") {
-                                        "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
                                     } else {
-                                        "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                        "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
                                     },
                                     value: edit_name(),
                                     oninput: move |evt| {
@@ -563,7 +578,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     },
                                 }
                                 if let Some(err) = edit_field_errors().get("name") {
-                                    p { class: "text-xs text-red-400 mt-1", "{err}" }
+                                    p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                 }
                             }
 
@@ -583,14 +598,20 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                             // Type-specific required fields
                             if edit_type() == "Attic" {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name *" }
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Cache Name (on Attic server) *" }
+                                        if !edit_field_errors().contains_key("attic_cache_name") {
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Name of cache configured in your Attic server" }
+                                        }
+                                    }
                                     input {
                                         class: if edit_field_errors().contains_key("attic_cache_name") {
-                                            "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
                                         } else {
-                                            "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
                                         },
-                                        placeholder: "my-attic-cache",
+                                        placeholder: "my-binary-cache",
                                         value: edit_attic_cache_name(),
                                         oninput: move |evt| {
                                             edit_attic_cache_name.set(evt.value());
@@ -600,28 +621,37 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         },
                                     }
                                     if let Some(err) = edit_field_errors().get("attic_cache_name") {
-                                        p { class: "text-xs text-red-400 mt-1", "{err}" }
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                     }
                                 }
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
+                                        span { class: "text-[11px] {theme::text::MUTED}", "Leave empty to keep existing or enter new token" }
+                                    }
                                     input {
                                         r#type: "password",
-                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                        placeholder: "Leave empty to keep existing or enter new token",
+                                        class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none",
+                                        placeholder: "••••••••",
                                         value: edit_attic_token(),
                                         oninput: move |evt| edit_attic_token.set(evt.value()),
                                     }
-                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Authentication token for Attic cache server" }
                                 }
                             } else {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
+                                        if !edit_field_errors().contains_key("push_to") {
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Full URL to the cache destination" }
+                                        }
+                                    }
                                     input {
                                         class: if edit_field_errors().contains_key("push_to") {
-                                            "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
                                         } else {
-                                            "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
                                         },
                                         placeholder: "https://cache.example.com or s3://bucket",
                                         value: edit_push_to(),
@@ -633,9 +663,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         },
                                     }
                                     if let Some(err) = edit_field_errors().get("push_to") {
-                                        p { class: "text-xs text-red-400 mt-1", "{err}" }
-                                    } else {
-                                        p { class: "text-xs {theme::text::MUTED} mt-1", "Full URL to the cache destination" }
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                     }
                                 }
                             }
@@ -668,14 +696,17 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                             // Signing key (only for Nix binary cache types, not Attic)
                             if edit_type() != "Attic" {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
+                                        span { class: "text-[11px] {theme::text::MUTED}", "Path to Nix cache signing key for signature verification" }
+                                    }
                                     input {
-                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none",
                                         placeholder: "/path/to/cache-priv-key.pem",
                                         value: edit_signing_key_path(),
                                         oninput: move |evt| edit_signing_key_path.set(evt.value()),
                                     }
-                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Path to Nix cache signing key for signature verification" }
                                 }
                             }
 
