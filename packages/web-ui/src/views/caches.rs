@@ -84,6 +84,11 @@ fn CacheDestinationsList() -> Element {
     let mut add_type = use_signal(|| "Nix".to_string());
     let mut add_push_to = use_signal(String::new);
     let mut add_attic_cache_name = use_signal(String::new);
+    let mut add_attic_token = use_signal(String::new);
+    let mut add_signing_key_path = use_signal(String::new);
+    let mut add_compression = use_signal(String::new);
+    let mut add_s3_region = use_signal(String::new);
+    let mut add_s3_profile = use_signal(String::new);
     let mut add_error = use_signal(|| None::<String>);
     let mut add_submitting = use_signal(|| false);
 
@@ -186,9 +191,10 @@ fn CacheDestinationsList() -> Element {
                                 }
                             }
 
+                            // Type-specific required fields
                             if add_type() == "Attic" {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name" }
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name *" }
                                     input {
                                         class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                         placeholder: "my-attic-cache",
@@ -196,15 +202,77 @@ fn CacheDestinationsList() -> Element {
                                         oninput: move |evt| add_attic_cache_name.set(evt.value()),
                                     }
                                 }
+                                div {
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
+                                    input {
+                                        r#type: "password",
+                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        placeholder: "attic-token-xyz...",
+                                        value: add_attic_token(),
+                                        oninput: move |evt| add_attic_token.set(evt.value()),
+                                    }
+                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Authentication token for Attic cache server" }
+                                }
                             } else {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL" }
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
                                     input {
                                         class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                                         placeholder: "https://cache.example.com or s3://bucket",
                                         value: add_push_to(),
                                         oninput: move |evt| add_push_to.set(evt.value()),
                                     }
+                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Full URL to the cache destination" }
+                                }
+                            }
+
+                            // S3-specific fields
+                            if add_type() == "S3" {
+                                div {
+                                    class: "grid grid-cols-2 gap-4",
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region (optional)" }
+                                        input {
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "us-east-1",
+                                            value: add_s3_region(),
+                                            oninput: move |evt| add_s3_region.set(evt.value()),
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Profile (optional)" }
+                                        input {
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "default",
+                                            value: add_s3_profile(),
+                                            oninput: move |evt| add_s3_profile.set(evt.value()),
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Common optional fields
+                            div {
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
+                                input {
+                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    placeholder: "/path/to/cache-priv-key.pem",
+                                    value: add_signing_key_path(),
+                                    oninput: move |evt| add_signing_key_path.set(evt.value()),
+                                }
+                                p { class: "text-xs {theme::text::MUTED} mt-1", "Path to Nix cache signing key for verification" }
+                            }
+
+                            div {
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Compression (optional)" }
+                                select {
+                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    value: add_compression(),
+                                    onchange: move |evt| add_compression.set(evt.value()),
+                                    option { class: "text-slate-900 bg-white", value: "", selected: add_compression().is_empty(), "(default)" }
+                                    option { class: "text-slate-900 bg-white", value: "none", selected: add_compression() == "none", "None" }
+                                    option { class: "text-slate-900 bg-white", value: "xz", selected: add_compression() == "xz", "XZ" }
+                                    option { class: "text-slate-900 bg-white", value: "zstd", selected: add_compression() == "zstd", "Zstandard" }
                                 }
                             }
 
@@ -250,17 +318,23 @@ fn CacheDestinationsList() -> Element {
                                     add_submitting.set(true);
                                     add_error.set(None);
 
+                                    let attic_token_val = add_attic_token();
+                                    let signing_key_path_val = add_signing_key_path();
+                                    let compression_val = add_compression();
+                                    let s3_region_val = add_s3_region();
+                                    let s3_profile_val = add_s3_profile();
+
                                     spawn(async move {
                                         let req = CreateCacheDestination {
                                             name,
                                             cache_type: cache_type.clone(),
                                             push_to: if cache_type == "Attic" { None } else { Some(push_to) },
                                             enabled: Some(true),
-                                            signing_key_path: None,
-                                            compression: None,
-                                            s3_region: None,
-                                            s3_profile: None,
-                                            attic_token: None,
+                                            signing_key_path: if signing_key_path_val.trim().is_empty() { None } else { Some(signing_key_path_val.trim().to_string()) },
+                                            compression: if compression_val.trim().is_empty() { None } else { Some(compression_val.trim().to_string()) },
+                                            s3_region: if s3_region_val.trim().is_empty() { None } else { Some(s3_region_val.trim().to_string()) },
+                                            s3_profile: if s3_profile_val.trim().is_empty() { None } else { Some(s3_profile_val.trim().to_string()) },
+                                            attic_token: if attic_token_val.trim().is_empty() { None } else { Some(attic_token_val.trim().to_string()) },
                                             attic_cache_name: if cache_type == "Attic" { Some(attic_cache_name) } else { None },
                                             attic_ignore_upstream_cache_filter: Some(true),
                                             attic_jobs: Some(5),
@@ -278,6 +352,11 @@ fn CacheDestinationsList() -> Element {
                                                 add_name.set(String::new());
                                                 add_push_to.set(String::new());
                                                 add_attic_cache_name.set(String::new());
+                                                add_attic_token.set(String::new());
+                                                add_signing_key_path.set(String::new());
+                                                add_compression.set(String::new());
+                                                add_s3_region.set(String::new());
+                                                add_s3_profile.set(String::new());
                                                 refresh_nonce.set(refresh_nonce() + 1);
                                             }
                                             Err(e) => {
@@ -318,6 +397,16 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let mut edit_push_to = use_signal(|| destination.push_to.clone().unwrap_or_default());
     let mut edit_attic_cache_name =
         use_signal(|| destination.attic_cache_name.clone().unwrap_or_default());
+    let mut edit_attic_token =
+        use_signal(|| destination.attic_token.clone().unwrap_or_default());
+    let mut edit_signing_key_path =
+        use_signal(|| destination.signing_key_path.clone().unwrap_or_default());
+    let mut edit_compression =
+        use_signal(|| destination.compression.clone().unwrap_or_default());
+    let mut edit_s3_region =
+        use_signal(|| destination.s3_region.clone().unwrap_or_default());
+    let mut edit_s3_profile =
+        use_signal(|| destination.s3_profile.clone().unwrap_or_default());
     let mut edit_error = use_signal(|| None::<String>);
     let mut edit_submitting = use_signal(|| false);
 
@@ -425,23 +514,88 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 }
                             }
 
+                            // Type-specific required fields
                             if edit_type() == "Attic" {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name" }
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name *" }
                                     input {
                                         class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        placeholder: "my-attic-cache",
                                         value: edit_attic_cache_name(),
                                         oninput: move |evt| edit_attic_cache_name.set(evt.value()),
                                     }
                                 }
+                                div {
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
+                                    input {
+                                        r#type: "password",
+                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        placeholder: "Leave empty to keep existing or enter new token",
+                                        value: edit_attic_token(),
+                                        oninput: move |evt| edit_attic_token.set(evt.value()),
+                                    }
+                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Authentication token for Attic cache server" }
+                                }
                             } else {
                                 div {
-                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL" }
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
                                     input {
                                         class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        placeholder: "https://cache.example.com or s3://bucket",
                                         value: edit_push_to(),
                                         oninput: move |evt| edit_push_to.set(evt.value()),
                                     }
+                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Full URL to the cache destination" }
+                                }
+                            }
+
+                            // S3-specific fields
+                            if edit_type() == "S3" {
+                                div {
+                                    class: "grid grid-cols-2 gap-4",
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region (optional)" }
+                                        input {
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "us-east-1",
+                                            value: edit_s3_region(),
+                                            oninput: move |evt| edit_s3_region.set(evt.value()),
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Profile (optional)" }
+                                        input {
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "default",
+                                            value: edit_s3_profile(),
+                                            oninput: move |evt| edit_s3_profile.set(evt.value()),
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Common optional fields
+                            div {
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
+                                input {
+                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    placeholder: "/path/to/cache-priv-key.pem",
+                                    value: edit_signing_key_path(),
+                                    oninput: move |evt| edit_signing_key_path.set(evt.value()),
+                                }
+                                p { class: "text-xs {theme::text::MUTED} mt-1", "Path to Nix cache signing key for verification" }
+                            }
+
+                            div {
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Compression (optional)" }
+                                select {
+                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    value: edit_compression(),
+                                    onchange: move |evt| edit_compression.set(evt.value()),
+                                    option { class: "text-slate-900 bg-white", value: "", selected: edit_compression().is_empty(), "(default)" }
+                                    option { class: "text-slate-900 bg-white", value: "none", selected: edit_compression() == "none", "None" }
+                                    option { class: "text-slate-900 bg-white", value: "xz", selected: edit_compression() == "xz", "XZ" }
+                                    option { class: "text-slate-900 bg-white", value: "zstd", selected: edit_compression() == "zstd", "Zstandard" }
                                 }
                             }
 
@@ -485,6 +639,12 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     edit_submitting.set(true);
                                     edit_error.set(None);
                                     let on_change = on_change.clone();
+                                    
+                                    let attic_token_val = edit_attic_token();
+                                    let signing_key_path_val = edit_signing_key_path();
+                                    let compression_val = edit_compression();
+                                    let s3_region_val = edit_s3_region();
+                                    let s3_profile_val = edit_s3_profile();
 
                                     spawn(async move {
                                         let req = UpdateCacheDestination {
@@ -492,11 +652,11 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             cache_type: Some(cache_type.clone()),
                                             push_to: if cache_type == "Attic" { None } else { Some(push_to) },
                                             enabled: None,
-                                            signing_key_path: None,
-                                            compression: None,
-                                            s3_region: None,
-                                            s3_profile: None,
-                                            attic_token: None,
+                                            signing_key_path: if signing_key_path_val.trim().is_empty() { None } else { Some(signing_key_path_val.trim().to_string()) },
+                                            compression: if compression_val.trim().is_empty() { None } else { Some(compression_val.trim().to_string()) },
+                                            s3_region: if s3_region_val.trim().is_empty() { None } else { Some(s3_region_val.trim().to_string()) },
+                                            s3_profile: if s3_profile_val.trim().is_empty() { None } else { Some(s3_profile_val.trim().to_string()) },
+                                            attic_token: if attic_token_val.trim().is_empty() { None } else { Some(attic_token_val.trim().to_string()) },
                                             attic_cache_name: if cache_type == "Attic" {
                                                 Some(attic_cache_name)
                                             } else {
