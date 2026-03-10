@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-10 06:04'
+updated_date: '2026-03-10 12:41'
 labels:
   - ui
   - web-ui
@@ -489,6 +489,24 @@ Next Steps:
 2. Display environment badges on cache destination cards
 3. Update cache worker to filter by build environment
 4. Full-stack manual testing
+
+Build Error Fix (2026-03-10)
+
+Problem: Build was failing with compilation errors in environment assignment API handlers
+
+Issues Fixed:
+- ApiError is a struct, not an enum - cannot use ApiError::InternalServerError() or ApiError::Forbidden()
+- authenticated_user_roles returns Option<(Uuid, Vec<AuthRole>)>, not Result
+- Missing import for authenticated_user_roles from rbac module
+
+Solution:
+- Replaced enum-style error handling with tuple responses: (StatusCode, Json(ApiError {...})).into_response()
+- Changed to Option pattern matching: let Some((user_id, roles)) = authenticated_user_roles(...) else { ... }
+- Added authenticated_user_roles to rbac imports
+- Followed existing codebase patterns from environments.rs and systems.rs handlers
+
+Commit: 99bad004
+Build Status: Fixed - handlers now follow correct error response patterns
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
