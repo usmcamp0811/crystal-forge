@@ -90,6 +90,7 @@ fn CacheDestinationsList() -> Element {
     let mut add_s3_region = use_signal(String::new);
     let mut add_s3_profile = use_signal(String::new);
     let mut add_error = use_signal(|| None::<String>);
+    let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut add_submitting = use_signal(|| false);
 
     rsx! {
@@ -169,12 +170,25 @@ fn CacheDestinationsList() -> Element {
                         div {
                             class: "space-y-4",
                             div {
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name" }
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
                                 input {
-                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    class: if add_field_errors().contains_key("name") {
+                                        "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                    } else {
+                                        "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                    },
                                     placeholder: "main-cache",
                                     value: add_name(),
-                                    oninput: move |evt| add_name.set(evt.value()),
+                                    oninput: move |evt| {
+                                        add_name.set(evt.value());
+                                        // Clear error on input
+                                        let mut errors = add_field_errors();
+                                        errors.remove("name");
+                                        add_field_errors.set(errors);
+                                    },
+                                }
+                                if let Some(err) = add_field_errors().get("name") {
+                                    p { class: "text-xs text-red-400 mt-1", "{err}" }
                                 }
                             }
 
@@ -196,10 +210,22 @@ fn CacheDestinationsList() -> Element {
                                 div {
                                     label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name *" }
                                     input {
-                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: if add_field_errors().contains_key("attic_cache_name") {
+                                            "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                        } else {
+                                            "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                        },
                                         placeholder: "my-attic-cache",
                                         value: add_attic_cache_name(),
-                                        oninput: move |evt| add_attic_cache_name.set(evt.value()),
+                                        oninput: move |evt| {
+                                            add_attic_cache_name.set(evt.value());
+                                            let mut errors = add_field_errors();
+                                            errors.remove("attic_cache_name");
+                                            add_field_errors.set(errors);
+                                        },
+                                    }
+                                    if let Some(err) = add_field_errors().get("attic_cache_name") {
+                                        p { class: "text-xs text-red-400 mt-1", "{err}" }
                                     }
                                 }
                                 div {
@@ -217,12 +243,25 @@ fn CacheDestinationsList() -> Element {
                                 div {
                                     label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
                                     input {
-                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: if add_field_errors().contains_key("push_to") {
+                                            "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                        } else {
+                                            "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                        },
                                         placeholder: "https://cache.example.com or s3://bucket",
                                         value: add_push_to(),
-                                        oninput: move |evt| add_push_to.set(evt.value()),
+                                        oninput: move |evt| {
+                                            add_push_to.set(evt.value());
+                                            let mut errors = add_field_errors();
+                                            errors.remove("push_to");
+                                            add_field_errors.set(errors);
+                                        },
                                     }
-                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Full URL to the cache destination" }
+                                    if let Some(err) = add_field_errors().get("push_to") {
+                                        p { class: "text-xs text-red-400 mt-1", "{err}" }
+                                    } else {
+                                        p { class: "text-xs {theme::text::MUTED} mt-1", "Full URL to the cache destination" }
+                                    }
                                 }
                             }
 
@@ -290,6 +329,7 @@ fn CacheDestinationsList() -> Element {
                                 onclick: move |_| {
                                     show_add_modal.set(false);
                                     add_error.set(None);
+                                    add_field_errors.set(std::collections::HashMap::new());
                                 },
                                 "Cancel"
                             }
@@ -302,20 +342,31 @@ fn CacheDestinationsList() -> Element {
                                     let push_to = add_push_to().trim().to_string();
                                     let attic_cache_name = add_attic_cache_name().trim().to_string();
 
+                                    // Validate and collect field errors
+                                    let mut errors = std::collections::HashMap::new();
+                                    
                                     if name.is_empty() {
-                                        add_error.set(Some("Name is required".to_string()));
-                                        return;
+                                        errors.insert("name".to_string(), "Cache name is required".to_string());
                                     }
 
                                     if cache_type == "Attic" && attic_cache_name.is_empty() {
-                                        add_error.set(Some("Attic cache name is required".to_string()));
-                                        return;
+                                        errors.insert("attic_cache_name".to_string(), "Attic cache name is required".to_string());
                                     }
 
                                     if cache_type != "Attic" && push_to.is_empty() {
-                                        add_error.set(Some("Destination URL is required".to_string()));
+                                        errors.insert("push_to".to_string(), "Destination URL is required".to_string());
+                                    }
+
+                                    // If there are validation errors, display them and stop
+                                    if !errors.is_empty() {
+                                        add_field_errors.set(errors);
+                                        add_error.set(Some("Please fix the errors above".to_string()));
                                         return;
                                     }
+                                    
+                                    // Clear any previous errors
+                                    add_field_errors.set(std::collections::HashMap::new());
+                                    add_error.set(None);
 
                                     add_submitting.set(true);
                                     add_error.set(None);
@@ -410,6 +461,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let mut edit_s3_profile =
         use_signal(|| destination.s3_profile.clone().unwrap_or_default());
     let mut edit_error = use_signal(|| None::<String>);
+    let mut edit_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut edit_submitting = use_signal(|| false);
 
     rsx! {
@@ -495,11 +547,23 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                         div {
                             class: "space-y-4",
                             div {
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name" }
+                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
                                 input {
-                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                    class: if edit_field_errors().contains_key("name") {
+                                        "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                    } else {
+                                        "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                    },
                                     value: edit_name(),
-                                    oninput: move |evt| edit_name.set(evt.value()),
+                                    oninput: move |evt| {
+                                        edit_name.set(evt.value());
+                                        let mut errors = edit_field_errors();
+                                        errors.remove("name");
+                                        edit_field_errors.set(errors);
+                                    },
+                                }
+                                if let Some(err) = edit_field_errors().get("name") {
+                                    p { class: "text-xs text-red-400 mt-1", "{err}" }
                                 }
                             }
 
@@ -521,10 +585,22 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 div {
                                     label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Cache Name *" }
                                     input {
-                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: if edit_field_errors().contains_key("attic_cache_name") {
+                                            "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                        } else {
+                                            "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                        },
                                         placeholder: "my-attic-cache",
                                         value: edit_attic_cache_name(),
-                                        oninput: move |evt| edit_attic_cache_name.set(evt.value()),
+                                        oninput: move |evt| {
+                                            edit_attic_cache_name.set(evt.value());
+                                            let mut errors = edit_field_errors();
+                                            errors.remove("attic_cache_name");
+                                            edit_field_errors.set(errors);
+                                        },
+                                    }
+                                    if let Some(err) = edit_field_errors().get("attic_cache_name") {
+                                        p { class: "text-xs text-red-400 mt-1", "{err}" }
                                     }
                                 }
                                 div {
@@ -542,12 +618,25 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 div {
                                     label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Destination URL *" }
                                     input {
-                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        class: if edit_field_errors().contains_key("push_to") {
+                                            "w-full px-3 py-2 rounded-lg text-sm border-2 border-red-500 bg-red-500/5 text-white"
+                                        } else {
+                                            "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                        },
                                         placeholder: "https://cache.example.com or s3://bucket",
                                         value: edit_push_to(),
-                                        oninput: move |evt| edit_push_to.set(evt.value()),
+                                        oninput: move |evt| {
+                                            edit_push_to.set(evt.value());
+                                            let mut errors = edit_field_errors();
+                                            errors.remove("push_to");
+                                            edit_field_errors.set(errors);
+                                        },
                                     }
-                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Full URL to the cache destination" }
+                                    if let Some(err) = edit_field_errors().get("push_to") {
+                                        p { class: "text-xs text-red-400 mt-1", "{err}" }
+                                    } else {
+                                        p { class: "text-xs {theme::text::MUTED} mt-1", "Full URL to the cache destination" }
+                                    }
                                 }
                             }
 
@@ -615,6 +704,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 onclick: move |_| {
                                     show_edit_modal.set(false);
                                     edit_error.set(None);
+                                    edit_field_errors.set(std::collections::HashMap::new());
                                 },
                                 "Cancel"
                             }
@@ -627,19 +717,30 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     let push_to = edit_push_to().trim().to_string();
                                     let attic_cache_name = edit_attic_cache_name().trim().to_string();
 
+                                    // Validate and collect field errors
+                                    let mut errors = std::collections::HashMap::new();
+                                    
                                     if name.is_empty() {
-                                        edit_error.set(Some("Name is required".to_string()));
-                                        return;
+                                        errors.insert("name".to_string(), "Cache name is required".to_string());
                                     }
+
                                     if cache_type == "Attic" && attic_cache_name.is_empty() {
-                                        edit_error.set(Some("Attic cache name is required".to_string()));
-                                        return;
+                                        errors.insert("attic_cache_name".to_string(), "Attic cache name is required".to_string());
                                     }
+
                                     if cache_type != "Attic" && push_to.is_empty() {
-                                        edit_error.set(Some("Destination URL is required".to_string()));
+                                        errors.insert("push_to".to_string(), "Destination URL is required".to_string());
+                                    }
+
+                                    // If there are validation errors, display them and stop
+                                    if !errors.is_empty() {
+                                        edit_field_errors.set(errors);
+                                        edit_error.set(Some("Please fix the errors above".to_string()));
                                         return;
                                     }
 
+                                    // Clear any previous errors
+                                    edit_field_errors.set(std::collections::HashMap::new());
                                     edit_submitting.set(true);
                                     edit_error.set(None);
                                     let on_change = on_change.clone();
