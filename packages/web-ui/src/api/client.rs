@@ -586,6 +586,28 @@ pub async fn bulk_cancel_cache_push_jobs(job_ids: Vec<i32>) -> Result<(), ApiCli
     send_empty_with_csrf("POST", &url, Some(&data)).await
 }
 
+// Cache environment assignment
+#[derive(Debug, serde::Serialize)]
+struct AssignEnvironmentsRequest {
+    environment_ids: Vec<i32>,
+}
+
+pub async fn get_cache_environments(cache_id: i32) -> Result<Vec<i32>, ApiClientError> {
+    let url = format!("{}/caches/{}/environments", base_url(), cache_id);
+    send_json_with_csrf("GET", &url, None::<&()>).await
+}
+
+pub async fn assign_cache_environments(cache_id: i32, environment_ids: Vec<i32>) -> Result<(), ApiClientError> {
+    let url = format!("{}/caches/{}/environments", base_url(), cache_id);
+    let data = AssignEnvironmentsRequest { environment_ids };
+    send_empty_with_csrf("PUT", &url, Some(&data)).await
+}
+
+pub async fn get_environment_caches(environment_id: i32) -> Result<Vec<CacheDestination>, ApiClientError> {
+    let url = format!("{}/environments/{}/caches", base_url(), environment_id);
+    send_json_with_csrf("GET", &url, None::<&()>).await
+}
+
 /// Send JSON request with CSRF token from cookie.
 async fn send_json_with_csrf<T: serde::de::DeserializeOwned, B: serde::Serialize>(
     method: &str,

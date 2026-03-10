@@ -412,6 +412,7 @@ fn CacheDestinationsList() -> Element {
                                             push_timeout_seconds: Some(3600),
                                             force_repush: Some(false),
                                             require_sigs: Some(true),
+                                            environment_ids: None, // TODO: Add environment selector UI
                                         };
 
                                         match client::create_cache_destination(&req).await {
@@ -806,6 +807,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             push_timeout_seconds: None,
                                             force_repush: None,
                                             require_sigs: None,
+                                            environment_ids: None, // TODO: Add environment selector UI
                                         };
 
                                         match client::update_cache_destination(destination.id, &req).await {
