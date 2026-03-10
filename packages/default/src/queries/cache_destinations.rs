@@ -57,6 +57,9 @@ pub async fn create_cache_destination(
     // Validate before inserting
     create.validate().map_err(|e| anyhow::anyhow!(e))?;
 
+    // Start transaction
+    let mut tx = pool.begin().await?;
+
     let destination = sqlx::query_as::<_, CacheDestination>(
         r#"
         INSERT INTO cache_destinations (
@@ -89,10 +92,28 @@ pub async fn create_cache_destination(
     .bind(create.push_timeout_seconds)
     .bind(create.force_repush)
     .bind(create.require_sigs)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
-    debug!("Created cache destination: {}", destination.name);
+    // Assign environments if provided
+    if let Some(ref env_ids) = create.environment_ids {
+        for env_id in env_ids {
+            sqlx::query(
+                "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
+                 VALUES ($1, $2)"
+            )
+            .bind(destination.id)
+            .bind(env_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+
+    debug!("Created cache destination: {} with {} environment assignments", 
+           destination.name,
+           create.environment_ids.as_ref().map(|e| e.len()).unwrap_or(0));
     Ok(destination)
 }
 
@@ -186,15 +207,19 @@ pub async fn update_cache_destination(
         bind_count += 1;
     }
 
-    if updates.is_empty() {
+    if updates.is_empty() && update.environment_ids.is_none() {
         // No fields to update, just return the existing record
         return get_cache_destination(pool, id).await;
     }
 
-    query.push_str(&updates.join(", "));
-    query.push_str(&format!(" WHERE id = ${} RETURNING *", bind_count));
+    // Start transaction for update + environment assignment
+    let mut tx = pool.begin().await?;
 
-    let mut q = sqlx::query_as::<_, CacheDestination>(&query);
+    let destination = if !updates.is_empty() {
+        query.push_str(&updates.join(", "));
+        query.push_str(&format!(" WHERE id = ${} RETURNING *", bind_count));
+
+        let mut q = sqlx::query_as::<_, CacheDestination>(&query);
 
     // Bind values in the same order as the updates
     if let Some(ref name) = update.name {
@@ -252,10 +277,37 @@ pub async fn update_cache_destination(
         q = q.bind(require_sigs);
     }
 
-    // Bind the ID for WHERE clause
-    q = q.bind(id);
+        // Bind the ID for WHERE clause
+        q = q.bind(id);
 
-    let destination = q.fetch_optional(pool).await?;
+        q.fetch_optional(&mut *tx).await?
+    } else {
+        // No fields to update, get existing
+        get_cache_destination(pool, id).await?
+    };
+
+    // Update environment assignments if provided
+    if let Some(ref env_ids) = update.environment_ids {
+        // Delete existing assignments
+        sqlx::query("DELETE FROM cache_destination_environments WHERE cache_destination_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+
+        // Insert new assignments
+        for env_id in env_ids {
+            sqlx::query(
+                "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
+                 VALUES ($1, $2)"
+            )
+            .bind(id)
+            .bind(env_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
 
     if let Some(ref dest) = destination {
         debug!("Updated cache destination: {}", dest.name);
@@ -290,4 +342,126 @@ pub async fn update_cache_destination_last_used(pool: &PgPool, name: &str) -> Re
 
     debug!("Updated last_used_at for cache destination: {}", name);
     Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment Assignment Queries
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Assign environments to a cache destination (replaces existing assignments)
+pub async fn assign_environments_to_cache(
+    pool: &PgPool,
+    cache_id: i32,
+    environment_ids: &[i32],
+) -> Result<()> {
+    // Start transaction
+    let mut tx = pool.begin().await?;
+
+    // Delete existing assignments
+    sqlx::query("DELETE FROM cache_destination_environments WHERE cache_destination_id = $1")
+        .bind(cache_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Insert new assignments
+    for env_id in environment_ids {
+        sqlx::query(
+            "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
+             VALUES ($1, $2)"
+        )
+        .bind(cache_id)
+        .bind(env_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    debug!(
+        "Assigned {} environments to cache destination {}",
+        environment_ids.len(),
+        cache_id
+    );
+    Ok(())
+}
+
+/// Get environment IDs assigned to a cache destination
+pub async fn get_cache_environments(pool: &PgPool, cache_id: i32) -> Result<Vec<i32>> {
+    let environment_ids = sqlx::query_scalar::<_, i32>(
+        "SELECT environment_id FROM cache_destination_environments 
+         WHERE cache_destination_id = $1 
+         ORDER BY environment_id"
+    )
+    .bind(cache_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(environment_ids)
+}
+
+/// Get cache destinations assigned to a specific environment (includes global caches)
+pub async fn get_caches_for_environment(
+    pool: &PgPool,
+    environment_id: i32,
+) -> Result<Vec<CacheDestination>> {
+    let caches = sqlx::query_as::<_, CacheDestination>(
+        "SELECT DISTINCT cd.* FROM cache_destinations cd
+         LEFT JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
+         WHERE cd.enabled = true
+           AND (cde.environment_id = $1 OR cde.environment_id IS NULL)
+         ORDER BY cd.name"
+    )
+    .bind(environment_id)
+    .fetch_all(pool)
+    .await?;
+
+    debug!(
+        "Found {} caches for environment {} (including global)",
+        caches.len(),
+        environment_id
+    );
+    Ok(caches)
+}
+
+/// Filter cache destinations by environment (excludes global if filter is applied)
+pub async fn filter_caches_by_environment(
+    pool: &PgPool,
+    environment_id: Option<i32>,
+) -> Result<Vec<CacheDestination>> {
+    let caches = match environment_id {
+        Some(env_id) => {
+            // Get caches specifically assigned to this environment
+            sqlx::query_as::<_, CacheDestination>(
+                "SELECT DISTINCT cd.* FROM cache_destinations cd
+                 INNER JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
+                 WHERE cde.environment_id = $1
+                 ORDER BY cd.name"
+            )
+            .bind(env_id)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            // Get all caches (no filter)
+            list_cache_destinations(pool, false).await?
+        }
+    };
+
+    Ok(caches)
+}
+
+/// Get global cache destinations (not assigned to any environment)
+pub async fn get_global_caches(pool: &PgPool) -> Result<Vec<CacheDestination>> {
+    let caches = sqlx::query_as::<_, CacheDestination>(
+        "SELECT cd.* FROM cache_destinations cd
+         LEFT JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
+         WHERE cd.enabled = true
+           AND cde.cache_destination_id IS NULL
+         ORDER BY cd.name"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    debug!("Found {} global cache destinations", caches.len());
+    Ok(caches)
 }
