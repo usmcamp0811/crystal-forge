@@ -2,6 +2,14 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 
+/// Cache destination to environment assignment
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CacheDestinationEnvironment {
+    pub cache_destination_id: i32,
+    pub environment_id: i32,
+    pub created_at: DateTime<Utc>,
+}
+
 /// Cache destination configuration stored in database
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct CacheDestination {
@@ -62,6 +70,8 @@ pub struct CreateCacheDestination {
     pub push_timeout_seconds: Option<i64>,
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
+    // Environment assignments (empty = global cache)
+    pub environment_ids: Option<Vec<i32>>,
 }
 
 /// DTO for updating an existing cache destination
@@ -85,6 +95,8 @@ pub struct UpdateCacheDestination {
     pub push_timeout_seconds: Option<i64>,
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
+    // Environment assignments (None = don't change, Some(vec) = update assignments)
+    pub environment_ids: Option<Vec<i32>>,
 }
 
 impl CreateCacheDestination {
@@ -165,6 +177,8 @@ mod tests {
             push_timeout_seconds: None,
             force_repush: None,
             require_sigs: None,
+            environment_ids: None,
+            environment_ids: None,
         };
 
         let result = create.validate();
@@ -193,6 +207,8 @@ mod tests {
             push_timeout_seconds: None,
             force_repush: None,
             require_sigs: None,
+            environment_ids: None,
+            environment_ids: None,
         };
 
         let result = create.validate();
@@ -221,6 +237,7 @@ mod tests {
             push_timeout_seconds: None,
             force_repush: None,
             require_sigs: None,
+            environment_ids: None,
         };
 
         let result = create.validate();
@@ -248,6 +265,7 @@ mod tests {
             push_timeout_seconds: None,
             force_repush: None,
             require_sigs: None,
+            environment_ids: None,
         };
 
         let result = create.validate();
@@ -276,6 +294,7 @@ mod tests {
             push_timeout_seconds: None,
             force_repush: None,
             require_sigs: None,
+            environment_ids: None,
         };
 
         let result = create.validate();
