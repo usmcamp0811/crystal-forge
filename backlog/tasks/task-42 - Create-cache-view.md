@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-10 03:27'
+updated_date: '2026-03-10 06:04'
 labels:
   - ui
   - web-ui
@@ -460,6 +460,35 @@ These should be done during full-stack manual testing before merge.
 - ✅ Changes committed
 
 **Next:** The cache destination forms are now fully functional with all necessary credentials.
+
+Phase 7 UI Complete (2026-03-10)
+
+Completed:
+- Add modal: Environment multi-select UI implemented and wired to CreateCacheDestination
+- Edit modal: Environment multi-select UI implemented and wired to UpdateCacheDestination
+- Edit modal: Fetches current environment assignments via GET /api/v1/caches/:id/environments
+- Edit modal: Initializes selection with existing assignments using use_effect
+- Both modals: Toggle button UI for environment selection
+- Form cleanup: Clear environment selection on successful submission
+- Backend integration: environment_ids properly sent in both create and update requests
+- Global cache behavior: Empty selection = None (cache available to all environments)
+
+Remaining Phase 7 Tasks:
+- Cache list: Add environment filter dropdown in header
+- Cache cards: Show environment badges on destination cards
+- Cache worker: Filter destinations by build's environment ID
+- Environment view: Show assigned caches section (stretch goal)
+
+Build Status:
+- Web-UI compiles successfully (cargo check passes with warnings)
+- Environment assignment UI functional in both modals
+- Changes committed (3d65dcd7)
+
+Next Steps:
+1. Add environment filter to cache list header
+2. Display environment badges on cache destination cards
+3. Update cache worker to filter by build environment
+4. Full-stack manual testing
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
