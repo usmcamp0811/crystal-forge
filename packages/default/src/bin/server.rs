@@ -351,6 +351,16 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/cache-push-jobs/bulk-cancel",
             post(caches::bulk_cancel_cache_push_jobs),
         )
+        // Cache environment assignment routes
+        .route(
+            "/api/v1/caches/:id/environments",
+            get(caches::get_cache_environments_handler)
+                .put(caches::assign_cache_environments_handler),
+        )
+        .route(
+            "/api/v1/environments/:id/caches",
+            get(caches::get_environment_caches_handler),
+        )
         // Auth context endpoint (publicly accessible)
         .route("/api/auth/whoami", get(auth_whoami::whoami))
         // Setup status endpoint (publicly accessible)

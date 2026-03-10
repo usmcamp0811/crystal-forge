@@ -515,3 +515,76 @@ pub async fn bulk_cancel_cache_push_jobs(
         }
     }
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment Assignment Handlers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Request to assign environments to a cache destination
+#[derive(Debug, Deserialize)]
+pub struct AssignEnvironmentsRequest {
+    pub environment_ids: Vec<i32>,
+}
+
+/// GET /api/caches/:id/environments - Get environments assigned to a cache
+pub async fn get_cache_environments_handler(
+    State(pool): State<PgPool>,
+    _user: User,
+    Path(cache_id): Path<i32>,
+) -> ApiResult<Json<Vec<i32>>> {
+    let environment_ids = crate::queries::cache_destinations::get_cache_environments(&pool, cache_id)
+        .await
+        .map_err(|e| {
+            ApiError::InternalServerError(format!("Failed to get cache environments: {e}"))
+        })?;
+
+    Ok(Json(environment_ids))
+}
+
+/// PUT /api/caches/:id/environments - Assign environments to a cache destination
+pub async fn assign_cache_environments_handler(
+    State(pool): State<PgPool>,
+    user: User,
+    Path(cache_id): Path<i32>,
+    Json(req): Json<AssignEnvironmentsRequest>,
+) -> ApiResult<Json<serde_json::Value>> {
+    // Require admin role
+    if user.role != "admin" {
+        return Err(ApiError::Forbidden(
+            "Only admins can assign cache environments".to_string(),
+        ));
+    }
+
+    crate::queries::cache_destinations::assign_environments_to_cache(
+        &pool,
+        cache_id,
+        &req.environment_ids,
+    )
+    .await
+    .map_err(|e| {
+        ApiError::InternalServerError(format!("Failed to assign environments: {e}"))
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "message": "Environments assigned successfully",
+        "cache_id": cache_id,
+        "environment_count": req.environment_ids.len()
+    })))
+}
+
+/// GET /api/environments/:id/caches - Get caches assigned to an environment
+pub async fn get_environment_caches_handler(
+    State(pool): State<PgPool>,
+    _user: User,
+    Path(environment_id): Path<i32>,
+) -> ApiResult<Json<Vec<CacheDestination>>> {
+    let caches = crate::queries::cache_destinations::get_caches_for_environment(&pool, environment_id)
+        .await
+        .map_err(|e| {
+            ApiError::InternalServerError(format!("Failed to get environment caches: {e}"))
+        })?;
+
+    Ok(Json(caches))
+}
+
