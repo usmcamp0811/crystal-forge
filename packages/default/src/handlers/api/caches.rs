@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
 use crate::api::models::ApiError;
-use crate::handlers::api::rbac::require_admin as require_admin_user;
+use crate::handlers::api::rbac::{authenticated_user_roles, require_admin as require_admin_user};
 use crate::models::cache_destination::{CacheDestination, CreateCacheDestination, UpdateCacheDestination};
 use crate::queries::{cache_destinations, cache_push};
 
@@ -530,61 +530,106 @@ pub struct AssignEnvironmentsRequest {
 /// GET /api/caches/:id/environments - Get environments assigned to a cache
 pub async fn get_cache_environments_handler(
     State(pool): State<PgPool>,
-    _user: User,
+    headers: HeaderMap,
     Path(cache_id): Path<i32>,
-) -> ApiResult<Json<Vec<i32>>> {
-    let environment_ids = crate::queries::cache_destinations::get_cache_environments(&pool, cache_id)
-        .await
-        .map_err(|e| {
-            ApiError::InternalServerError(format!("Failed to get cache environments: {e}"))
-        })?;
+) -> impl IntoResponse {
+    // Require authentication
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "unauthorized".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
 
-    Ok(Json(environment_ids))
+    match crate::queries::cache_destinations::get_cache_environments(&pool, cache_id).await {
+        Ok(environment_ids) => (StatusCode::OK, Json(environment_ids)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "internal_server_error".to_string(),
+                message: format!("Failed to get cache environments: {e}"),
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
 }
 
 /// PUT /api/caches/:id/environments - Assign environments to a cache destination
 pub async fn assign_cache_environments_handler(
     State(pool): State<PgPool>,
-    user: User,
+    headers: HeaderMap,
     Path(cache_id): Path<i32>,
     Json(req): Json<AssignEnvironmentsRequest>,
-) -> ApiResult<Json<serde_json::Value>> {
+) -> impl IntoResponse {
     // Require admin role
-    if user.role != "admin" {
-        return Err(ApiError::Forbidden(
-            "Only admins can assign cache environments".to_string(),
-        ));
+    if let Err(err_resp) = require_admin_user(&pool, &headers).await {
+        return err_resp;
     }
 
-    crate::queries::cache_destinations::assign_environments_to_cache(
+    match crate::queries::cache_destinations::assign_environments_to_cache(
         &pool,
         cache_id,
         &req.environment_ids,
     )
     .await
-    .map_err(|e| {
-        ApiError::InternalServerError(format!("Failed to assign environments: {e}"))
-    })?;
-
-    Ok(Json(serde_json::json!({
-        "message": "Environments assigned successfully",
-        "cache_id": cache_id,
-        "environment_count": req.environment_ids.len()
-    })))
+    {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "message": "Environments assigned successfully",
+                "cache_id": cache_id,
+                "environment_count": req.environment_ids.len()
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "internal_server_error".to_string(),
+                message: format!("Failed to assign environments: {e}"),
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
 }
 
 /// GET /api/environments/:id/caches - Get caches assigned to an environment
 pub async fn get_environment_caches_handler(
     State(pool): State<PgPool>,
-    _user: User,
+    headers: HeaderMap,
     Path(environment_id): Path<i32>,
-) -> ApiResult<Json<Vec<CacheDestination>>> {
-    let caches = crate::queries::cache_destinations::get_caches_for_environment(&pool, environment_id)
-        .await
-        .map_err(|e| {
-            ApiError::InternalServerError(format!("Failed to get environment caches: {e}"))
-        })?;
+) -> impl IntoResponse {
+    // Require authentication
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "unauthorized".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
 
-    Ok(Json(caches))
+    match crate::queries::cache_destinations::get_caches_for_environment(&pool, environment_id).await {
+        Ok(caches) => (StatusCode::OK, Json(caches)).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiError {
+                error: "internal_server_error".to_string(),
+                message: format!("Failed to get environment caches: {e}"),
+                details: None,
+            }),
+        )
+            .into_response(),
+    }
 }
 
