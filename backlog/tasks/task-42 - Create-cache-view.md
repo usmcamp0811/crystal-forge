@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-10 01:27'
+updated_date: '2026-03-10 03:27'
 labels:
   - ui
   - web-ui
@@ -55,6 +55,12 @@ This view consolidates cache operations that are currently scattered across CLI-
 - [ ] #14 Cache worker uses database-backed cache destinations instead of server.toml (or hybrid fallback)
 - [ ] #15 All cache operations require admin role authorization
 - [ ] #16 UI follows existing Crystal Forge design patterns and component structure
+- [ ] #17 Cache destinations can be assigned to one or more environments
+- [ ] #18 Cache list can be filtered by environment
+- [ ] #19 Environment badges shown on cache destination cards
+- [ ] #20 Cache worker filters destinations based on build environment
+- [ ] #21 Unassigned caches work as global defaults (all environments)
+- [ ] #22 Environment view shows assigned cache destinations
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -125,6 +131,55 @@ This view consolidates cache operations that are currently scattered across CLI-
 2. Write integration tests for cache push job endpoints
 3. Manual UI testing for all CRUD operations
 4. Test cache worker reads from database correctly
+
+## Phase 7: Environment Assignment Feature
+
+### Database Schema
+Create many-to-many relationship between cache destinations and environments:
+```sql
+CREATE TABLE cache_destination_environments (
+    cache_destination_id INTEGER REFERENCES cache_destinations(id) ON DELETE CASCADE,
+    environment_id INTEGER REFERENCES environments(id) ON DELETE CASCADE,
+    PRIMARY KEY (cache_destination_id, environment_id)
+);
+```
+
+### Backend Changes
+1. Add migration for cache_destination_environments join table
+2. Update CacheDestination model to include environment relationships
+3. Add queries:
+   - assign_environments_to_cache(cache_id, environment_ids)
+   - get_cache_environments(cache_id)
+   - get_caches_for_environment(environment_id)
+   - filter_caches_by_environment(environment_id)
+4. Update cache worker to filter destinations by build's environment
+5. API endpoints:
+   - PUT /api/caches/:id/environments (assign environments)
+   - GET /api/caches/:id/environments (list assigned environments)
+   - GET /api/environments/:id/caches (list caches for environment)
+
+### UI Changes
+1. **Cache View**:
+   - Add environment multi-select in Add/Edit modals
+   - Add environment filter dropdown in cache list header
+   - Show environment badges on cache destination cards
+   - Display "Global" badge for unassigned caches
+
+2. **Environment View**:
+   - Add "Assigned Caches" section
+   - Show list of caches assigned to this environment
+   - Allow assigning/unassigning caches from environment view
+
+### Cache Worker Logic
+When processing a cache push job:
+1. Determine the build's environment (from job metadata)
+2. Query cache destinations assigned to that environment
+3. Include global (unassigned) caches in the list
+4. Push to filtered destination list
+
+### Backward Compatibility
+- Caches with no environment assignments work as global defaults
+- Existing caches continue working after migration (unassigned = global)
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
