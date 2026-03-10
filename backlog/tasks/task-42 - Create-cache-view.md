@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-08 16:27'
+updated_date: '2026-03-10 00:03'
 labels:
   - ui
   - web-ui
@@ -337,6 +337,43 @@ Database-dependent integration tests would require:
 These should be done during full-stack manual testing before merge.
 
 **Status:** Core implementation complete and verified. Ready for manual testing and PR creation.
+
+## Rebase Completed on Dev Branch
+
+**Date:** 2026-03-09
+
+**Actions Taken:**
+1. Committed UI polish changes (theme integration, CRUD modals, enhanced styling)
+2. Fetched latest dev branch changes (includes TASK-123 deployment policies merge)
+3. Successfully rebased TASK-42-cache-view on dev
+4. Resolved merge conflict in packages/default/src/bin/server.rs (both caches and deployment_policies imports needed)
+5. All 6 commits rebased successfully
+
+**Build Verification After Rebase:**
+- ✅ nix build succeeds - binary produced at result/bin/server
+- ✅ SQLX_OFFLINE=true cargo check passes for packages/default
+- ✅ cargo check passes for packages/web-ui
+- ⚠️ Minor unused variable warnings (non-blocking)
+
+**Commits After Rebase:**
+1. WIP: Add cache management backend (migrations, models, queries, handlers)
+2. Fix ApiError formatting in caches.rs + add Serialize to CachePushJob
+3. Add cache management UI (Phase 4)
+4. feat(cache): Implement Phase 5 - Cache worker database integration
+5. test(cache): Add unit tests for CacheDestination validation
+6. feat(cache): Polish cache UI with theme integration and CRUD modals
+
+**Branch Status:**
+- Current branch: TASK-42-cache-view
+- Rebased on: dev (e6c1b438)
+- Remote status: diverged (will need force push)
+- Working tree: clean
+
+**Next Steps:**
+- Manual UI testing with full-stack up
+- Screenshot capture for MR
+- Create Merge Request with proper template
+- Update task to Review status
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
