@@ -55,7 +55,7 @@ This view consolidates cache operations that are currently scattered across CLI-
 - [ ] #14 Cache worker uses database-backed cache destinations instead of server.toml (or hybrid fallback)
 - [ ] #15 All cache operations require admin role authorization
 - [ ] #16 UI follows existing Crystal Forge design patterns and component structure
-- [ ] #17 Cache destinations can be assigned to one or more environments
+- [x] #17 Cache destinations can be assigned to one or more environments
 - [ ] #18 Cache list can be filtered by environment
 - [ ] #19 Environment badges shown on cache destination cards
 - [ ] #20 Cache worker filters destinations based on build environment
