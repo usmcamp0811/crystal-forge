@@ -251,16 +251,18 @@ fn CacheDestinationsList() -> Element {
                                 }
                             }
 
-                            // Common optional fields
-                            div {
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
-                                input {
-                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    placeholder: "/path/to/cache-priv-key.pem",
-                                    value: add_signing_key_path(),
-                                    oninput: move |evt| add_signing_key_path.set(evt.value()),
+                            // Signing key (only for Nix binary cache types, not Attic)
+                            if add_type() != "Attic" {
+                                div {
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
+                                    input {
+                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        placeholder: "/path/to/cache-priv-key.pem",
+                                        value: add_signing_key_path(),
+                                        oninput: move |evt| add_signing_key_path.set(evt.value()),
+                                    }
+                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Path to Nix cache signing key for signature verification" }
                                 }
-                                p { class: "text-xs {theme::text::MUTED} mt-1", "Path to Nix cache signing key for verification" }
                             }
 
                             div {
@@ -574,16 +576,18 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 }
                             }
 
-                            // Common optional fields
-                            div {
-                                label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
-                                input {
-                                    class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
-                                    placeholder: "/path/to/cache-priv-key.pem",
-                                    value: edit_signing_key_path(),
-                                    oninput: move |evt| edit_signing_key_path.set(evt.value()),
+                            // Signing key (only for Nix binary cache types, not Attic)
+                            if edit_type() != "Attic" {
+                                div {
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Signing Key Path (optional)" }
+                                    input {
+                                        class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                        placeholder: "/path/to/cache-priv-key.pem",
+                                        value: edit_signing_key_path(),
+                                        oninput: move |evt| edit_signing_key_path.set(evt.value()),
+                                    }
+                                    p { class: "text-xs {theme::text::MUTED} mt-1", "Path to Nix cache signing key for signature verification" }
                                 }
-                                p { class: "text-xs {theme::text::MUTED} mt-1", "Path to Nix cache signing key for verification" }
                             }
 
                             div {
