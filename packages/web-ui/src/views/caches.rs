@@ -89,9 +89,15 @@ fn CacheDestinationsList() -> Element {
     let mut add_compression = use_signal(String::new);
     let mut add_s3_region = use_signal(String::new);
     let mut add_s3_profile = use_signal(String::new);
+    let mut add_environment_ids = use_signal(|| Vec::<i32>::new());
     let mut add_error = use_signal(|| None::<String>);
     let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut add_submitting = use_signal(|| false);
+    
+    // Fetch available environments for assignment
+    let environments = use_resource(|| async move {
+        client::fetch_environments().await
+    });
 
     rsx! {
         div {
@@ -332,6 +338,52 @@ fn CacheDestinationsList() -> Element {
                                 }
                             }
 
+                            // Environment assignment
+                            div {
+                                div {
+                                    class: "flex items-baseline justify-between gap-2",
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Environments (optional)" }
+                                    span { class: "text-[11px] {theme::text::MUTED}", "Leave empty for global cache (all environments)" }
+                                }
+                                if let Some(Ok(envs)) = environments.read().as_ref() {
+                                    div {
+                                        class: "flex flex-wrap gap-2 p-2 rounded-lg border {theme::interactive::INPUT}",
+                                        if envs.is_empty() {
+                                            p { class: "text-xs {theme::text::MUTED}", "No environments available" }
+                                        } else {
+                                            for env in envs {
+                                                {
+                                                    let env_id = env.id.as_simple().to_string().parse::<i32>().unwrap_or(0);
+                                                    let is_selected = add_environment_ids().contains(&env_id);
+                                                    rsx! {
+                                                        button {
+                                                            r#type: "button",
+                                                            class: if is_selected {
+                                                                "px-2 py-1 text-xs rounded border border-blue-500 bg-blue-500/20 text-blue-300"
+                                                            } else {
+                                                                "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
+                                                            },
+                                                            onclick: move |_| {
+                                                                let mut selected = add_environment_ids();
+                                                                if is_selected {
+                                                                    selected.retain(|&id| id != env_id);
+                                                                } else {
+                                                                    selected.push(env_id);
+                                                                }
+                                                                add_environment_ids.set(selected);
+                                                            },
+                                                            "{env.name}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    p { class: "text-xs {theme::text::MUTED}", "Loading environments..." }
+                                }
+                            }
+
                             if let Some(err) = add_error() {
                                 p { class: "text-sm text-red-400", "{err}" }
                             }
@@ -412,7 +464,11 @@ fn CacheDestinationsList() -> Element {
                                             push_timeout_seconds: Some(3600),
                                             force_repush: Some(false),
                                             require_sigs: Some(true),
-                                            environment_ids: None, // TODO: Add environment selector UI
+                                            environment_ids: if add_environment_ids().is_empty() { 
+                                                None 
+                                            } else { 
+                                                Some(add_environment_ids()) 
+                                            },
                                         };
 
                                         match client::create_cache_destination(&req).await {
@@ -426,6 +482,7 @@ fn CacheDestinationsList() -> Element {
                                                 add_compression.set(String::new());
                                                 add_s3_region.set(String::new());
                                                 add_s3_profile.set(String::new());
+                                                add_environment_ids.set(Vec::new());
                                                 refresh_nonce.set(refresh_nonce() + 1);
                                             }
                                             Err(e) => {
@@ -479,6 +536,25 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let mut edit_error = use_signal(|| None::<String>);
     let mut edit_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut edit_submitting = use_signal(|| false);
+    
+    // Fetch current environment assignments and available environments
+    let cache_id = destination.id;
+    let edit_environment_ids = use_resource(move || async move {
+        client::get_cache_environments(cache_id).await.unwrap_or_default()
+    });
+    let mut edit_selected_environments = use_signal(Vec::<i32>::new);
+    let edit_environments = use_resource(|| async move {
+        client::fetch_environments().await
+    });
+    
+    // Initialize selected environments when loaded
+    use_effect(move || {
+        if let Some(loaded_env_ids) = edit_environment_ids.read().as_ref() {
+            if edit_selected_environments().is_empty() && !loaded_env_ids.is_empty() {
+                edit_selected_environments.set(loaded_env_ids.clone());
+            }
+        }
+    });
 
     rsx! {
         div {
@@ -724,6 +800,52 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 }
                             }
 
+                            // Environment assignment
+                            div {
+                                div {
+                                    class: "flex items-baseline justify-between gap-2",
+                                    label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Environments (optional)" }
+                                    span { class: "text-[11px] {theme::text::MUTED}", "Leave empty for global cache (all environments)" }
+                                }
+                                if let Some(Ok(envs)) = edit_environments.read().as_ref() {
+                                    div {
+                                        class: "flex flex-wrap gap-2 p-2 rounded-lg border {theme::interactive::INPUT}",
+                                        if envs.is_empty() {
+                                            p { class: "text-xs {theme::text::MUTED}", "No environments available" }
+                                        } else {
+                                            for env in envs {
+                                                {
+                                                    let env_id = env.id.as_simple().to_string().parse::<i32>().unwrap_or(0);
+                                                    let is_selected = edit_selected_environments().contains(&env_id);
+                                                    rsx! {
+                                                        button {
+                                                            r#type: "button",
+                                                            class: if is_selected {
+                                                                "px-2 py-1 text-xs rounded border border-blue-500 bg-blue-500/20 text-blue-300"
+                                                            } else {
+                                                                "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
+                                                            },
+                                                            onclick: move |_| {
+                                                                let mut selected = edit_selected_environments();
+                                                                if is_selected {
+                                                                    selected.retain(|&id| id != env_id);
+                                                                } else {
+                                                                    selected.push(env_id);
+                                                                }
+                                                                edit_selected_environments.set(selected);
+                                                            },
+                                                            "{env.name}"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    p { class: "text-xs {theme::text::MUTED}", "Loading environments..." }
+                                }
+                            }
+
                             if let Some(err) = edit_error() {
                                 p { class: "text-sm text-red-400", "{err}" }
                             }
@@ -807,7 +929,11 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             push_timeout_seconds: None,
                                             force_repush: None,
                                             require_sigs: None,
-                                            environment_ids: None, // TODO: Add environment selector UI
+                                            environment_ids: if edit_selected_environments().is_empty() { 
+                                                None 
+                                            } else { 
+                                                Some(edit_selected_environments()) 
+                                            },
                                         };
 
                                         match client::update_cache_destination(destination.id, &req).await {
