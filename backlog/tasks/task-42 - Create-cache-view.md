@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-10 00:03'
+updated_date: '2026-03-10 01:27'
 labels:
   - ui
   - web-ui
@@ -374,6 +374,37 @@ These should be done during full-stack manual testing before merge.
 - Screenshot capture for MR
 - Create Merge Request with proper template
 - Update task to Review status
+
+## Credential Fields Added (2026-03-09)
+
+**Issue:** Cache destination forms were missing critical credential and configuration fields needed to actually authenticate and configure cache destinations.
+
+**Solution:** Enhanced Add/Edit modal forms with comprehensive credential inputs:
+
+**Attic-specific fields:**
+- Attic token (password field) for authentication
+
+**S3-specific fields:**
+- S3 region (e.g., us-east-1)
+- S3 profile (for AWS credential profiles)
+
+**Common fields (all cache types):**
+- Signing key path (for Nix cache signature verification)
+- Compression selector (none/xz/zstd)
+
+**UX Improvements:**
+- Required fields marked with asterisks (*)
+- Helpful placeholder text and descriptions
+- Password input type for sensitive Attic token
+- Two-column grid layout for S3 region/profile
+- Proper field clearing on successful submission
+
+**Build Status:**
+- ✅ Web-UI compiles successfully
+- ✅ All form validations working
+- ✅ Changes committed
+
+**Next:** The cache destination forms are now fully functional with all necessary credentials.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
