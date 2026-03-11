@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-11 02:15'
+updated_date: '2026-03-11 02:31'
 labels:
   - ui
   - web-ui
@@ -570,6 +570,24 @@ All Rust code was also incorrectly using `Vec<i32>` for environment_ids instead 
 **Commit:** d3512ed4 - fix: use UUID for environment_id in cache assignments
 
 LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-42-cache-view (takeover from prior session)
+
+Implemented Attic public key + server-managed runtime cache delivery for agents (2026-03-11)
+
+Changes:
+- Added migration 0094_add_attic_public_key_to_cache_destinations.sql
+- Added attic_public_key to cache destination model + create/update DTOs + query insert/update paths
+- Strengthened Attic validation: now requires push_to URL, attic_cache_name, and attic_public_key
+- Added Attic Public Key field to cache Add/Edit modals with field-level validation styling
+- Extended /agent/heartbeat response with runtime_caches payload filtered by system environment (includes global fallback via existing query behavior)
+- Updated agent deployment manager to prefer server-provided runtime cache config over static local cache config
+- Agent now passes trusted-public-keys via nix copy --option when runtime cache public key is provided
+
+Verification run:
+- nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo check" (pass)
+- nix develop -c bash -c "cd packages/web-ui && cargo check" (pass)
+- Started db-only with process-compose and ran cargo sqlx prepare from packages/default (prepare succeeded)
+
+Commit: c78b1e2f
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
