@@ -1,6 +1,7 @@
 //! Cache management view - configure cache destinations and monitor push jobs.
 
 use dioxus::prelude::*;
+use uuid::Uuid;
 
 use crate::api::client;
 use crate::api::models::{
@@ -89,7 +90,7 @@ fn CacheDestinationsList() -> Element {
     let mut add_compression = use_signal(String::new);
     let mut add_s3_region = use_signal(String::new);
     let mut add_s3_profile = use_signal(String::new);
-    let mut add_environment_ids = use_signal(|| Vec::<i32>::new());
+    let mut add_environment_ids = use_signal(|| Vec::<Uuid>::new());
     let mut add_error = use_signal(|| None::<String>);
     let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut add_submitting = use_signal(|| false);
@@ -399,13 +400,13 @@ fn CacheDestinationsList() -> Element {
                                         } else {
                                             for env in envs {
                                                 {
-                                                    let env_id = env.id.as_simple().to_string().parse::<i32>().unwrap_or(0);
+                                                    let env_id = env.id;
                                                     let is_selected = add_environment_ids().contains(&env_id);
                                                     rsx! {
                                                         button {
                                                             r#type: "button",
                                                             class: if is_selected {
-                                                                "px-2 py-1 text-xs rounded border border-blue-500 bg-blue-500/20 text-blue-300"
+                                                                "px-2 py-1 text-xs rounded border cf-chip-blue {theme::text::PRIMARY}"
                                                             } else {
                                                                 "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
                                                             },
@@ -600,7 +601,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let edit_environment_ids = use_resource(move || async move {
         client::get_cache_environments(cache_id).await.unwrap_or_default()
     });
-    let mut edit_selected_environments = use_signal(Vec::<i32>::new);
+    let mut edit_selected_environments = use_signal(Vec::<Uuid>::new);
     let edit_environments = use_resource(|| async move {
         client::fetch_environments().await
     });
@@ -919,13 +920,13 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         } else {
                                             for env in envs {
                                                 {
-                                                    let env_id = env.id.as_simple().to_string().parse::<i32>().unwrap_or(0);
+                                                    let env_id = env.id;
                                                     let is_selected = edit_selected_environments().contains(&env_id);
                                                     rsx! {
                                                         button {
                                                             r#type: "button",
                                                             class: if is_selected {
-                                                                "px-2 py-1 text-xs rounded border border-blue-500 bg-blue-500/20 text-blue-300"
+                                                                "px-2 py-1 text-xs rounded border cf-chip-blue {theme::text::PRIMARY}"
                                                             } else {
                                                                 "px-2 py-1 text-xs rounded border {theme::surface::CARD_BORDER} {theme::text::MUTED} hover:{theme::text::SECONDARY}"
                                                             },

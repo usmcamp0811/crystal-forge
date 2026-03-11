@@ -1221,7 +1221,7 @@ pub struct CreateCacheDestination {
     pub push_timeout_seconds: Option<i64>,
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
-    pub environment_ids: Option<Vec<i32>>,
+    pub environment_ids: Option<Vec<Uuid>>,
 }
 
 /// Update cache destination request
@@ -1245,7 +1245,7 @@ pub struct UpdateCacheDestination {
     pub push_timeout_seconds: Option<i64>,
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
-    pub environment_ids: Option<Vec<i32>>,
+    pub environment_ids: Option<Vec<Uuid>>,
 }
 
 /// Cache push job status and details
