@@ -1,7 +1,7 @@
 ---
 id: TASK-182
 title: Encrypt cache credentials at rest and require strict cache auth fields
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-11 12:47'
 updated_date: '2026-03-11 12:47'
@@ -61,4 +61,6 @@ Risk Level: high (security-sensitive storage and migration behavior)
 
 <!-- SECTION:NOTES:BEGIN -->
 Moved to To Do per explicit maintainer request for immediate execution.
+
+LOCK: OpenCode on gray in /home/mcamp/code/crystal-forge/TASK-182-encrypt-cache-credentials
 <!-- SECTION:NOTES:END -->
