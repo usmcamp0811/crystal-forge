@@ -158,18 +158,34 @@ fn CacheDestinationsList() -> Element {
             if show_add_modal() {
                 div {
                     class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+                    tabindex: "0",
                     onclick: move |_| show_add_modal.set(false),
+                    onkeydown: move |evt| {
+                        if evt.key() == Key::Escape {
+                            show_add_modal.set(false);
+                        }
+                    },
                     div {
                         class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 w-full cf-modal-panel-44 flex flex-col",
                         style: "max-height: calc(100dvh - 2rem);",
+                        role: "dialog",
+                        aria_modal: "true",
+                        aria_labelledby: "add-cache-destination-modal-title",
                         onclick: move |e| e.stop_propagation(),
                         
                         // Header
                         div {
                             class: "flex justify-between items-center mb-6 shrink-0",
-                            h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}", "Add Cache Destination" }
+                            h3 {
+                                id: "add-cache-destination-modal-title",
+                                class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
+                                "Add Cache Destination"
+                            }
                             button {
+                                r#type: "button",
                                 class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
+                                title: "Close add cache destination modal",
+                                aria_label: "Close add cache destination modal",
                                 onclick: move |_| show_add_modal.set(false),
                                 "✕"
                             }
@@ -540,6 +556,8 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let mut edit_error = use_signal(|| None::<String>);
     let mut edit_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut edit_submitting = use_signal(|| false);
+    let edit_modal_title_id = format!("edit-cache-destination-modal-title-{}", destination.id);
+    let delete_modal_title_id = format!("delete-cache-destination-modal-title-{}", destination.id);
     
     // Fetch current environment assignments and available environments
     let cache_id = destination.id;
@@ -625,18 +643,34 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
             if show_edit_modal() {
                 div {
                     class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+                    tabindex: "0",
                     onclick: move |_| show_edit_modal.set(false),
+                    onkeydown: move |evt| {
+                        if evt.key() == Key::Escape {
+                            show_edit_modal.set(false);
+                        }
+                    },
                     div {
                         class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 w-full cf-modal-panel-44 flex flex-col",
                         style: "max-height: calc(100dvh - 2rem);",
+                        role: "dialog",
+                        aria_modal: "true",
+                        aria_labelledby: "{edit_modal_title_id}",
                         onclick: move |e| e.stop_propagation(),
 
                         // Header
                         div {
                             class: "flex justify-between items-center mb-6 shrink-0",
-                            h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}", "Edit Cache Destination" }
+                            h3 {
+                                id: "{edit_modal_title_id}",
+                                class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
+                                "Edit Cache Destination"
+                            }
                             button {
+                                r#type: "button",
                                 class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
+                                title: "Close edit cache destination modal",
+                                aria_label: "Close edit cache destination modal",
                                 onclick: move |_| show_edit_modal.set(false),
                                 "✕"
                             }
@@ -967,12 +1001,25 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
             if show_delete_confirm() {
                 div {
                     class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
+                    tabindex: "0",
                     onclick: move |_| show_delete_confirm.set(false),
+                    onkeydown: move |evt| {
+                        if evt.key() == Key::Escape {
+                            show_delete_confirm.set(false);
+                        }
+                    },
                     div {
                         class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 cf-modal-panel-30",
+                        role: "dialog",
+                        aria_modal: "true",
+                        aria_labelledby: "{delete_modal_title_id}",
                         onclick: move |e| e.stop_propagation(),
                         
-                        h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY} mb-4", "Delete Cache Destination?" }
+                        h3 {
+                            id: "{delete_modal_title_id}",
+                            class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY} mb-4",
+                            "Delete Cache Destination?"
+                        }
                         p { class: "{theme::text::SECONDARY} mb-6", "Are you sure you want to delete \"{destination.name}\"? This action cannot be undone." }
                         
                         div {
