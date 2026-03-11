@@ -200,6 +200,14 @@ const steps = [
       await page.getByText("Policy Definition").first().waitFor({ timeout: 5000 });
     },
   },
+  {
+    name: "17-caches",
+    description: "Cache management view",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+    },
+  },
 ];
 
 (async () => {
