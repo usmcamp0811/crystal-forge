@@ -1,9 +1,10 @@
 ---
 id: TASK-182
 title: Encrypt cache credentials at rest and require strict cache auth fields
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-03-11 12:47'
+updated_date: '2026-03-11 12:47'
 labels:
   - security
   - cache
@@ -55,3 +56,9 @@ Risk Level: high (security-sensitive storage and migration behavior)
 - [ ] #4 Existing rows remain compatible through migration strategy (no runtime breakage).
 - [ ] #5 Automated tests cover encryption/decryption behavior and required-field validation paths.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moved to To Do per explicit maintainer request for immediate execution.
+<!-- SECTION:NOTES:END -->
