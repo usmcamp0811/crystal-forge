@@ -178,7 +178,6 @@ mod tests {
             force_repush: None,
             require_sigs: None,
             environment_ids: None,
-            environment_ids: None,
         };
 
         let result = create.validate();
@@ -207,7 +206,6 @@ mod tests {
             push_timeout_seconds: None,
             force_repush: None,
             require_sigs: None,
-            environment_ids: None,
             environment_ids: None,
         };
 

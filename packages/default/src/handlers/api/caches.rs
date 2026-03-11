@@ -568,8 +568,16 @@ pub async fn assign_cache_environments_handler(
     Json(req): Json<AssignEnvironmentsRequest>,
 ) -> impl IntoResponse {
     // Require admin role
-    if let Err(err_resp) = require_admin_user(&pool, &headers).await {
-        return err_resp;
+    if require_admin_user(&pool, &headers).await.is_none() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiError {
+                error: "forbidden".to_string(),
+                message: "Admin role required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
     }
 
     match crate::queries::cache_destinations::assign_environments_to_cache(
