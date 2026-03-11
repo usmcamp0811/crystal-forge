@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-10 12:41'
+updated_date: '2026-03-11 00:27'
 labels:
   - ui
   - web-ui
@@ -507,6 +507,39 @@ Solution:
 
 Commit: 99bad004
 Build Status: Fixed - handlers now follow correct error response patterns
+
+## Build Error Fixed (2026-03-10)
+
+**Problem:** Task worktree was failing to build with type mismatch error.
+
+**Error:**
+```
+error[E0308]: mismatched types
+   --> src/handlers/api/caches.rs:571:12
+    |
+571 |     if let Err(err_resp) = require_admin_user(&pool, &headers).await {
+    |            ^^^^^^^^^^^^^   ----------------------------------------- this expression has type `std::option::Option<Uuid>`
+    |            |
+    |            expected `Option<Uuid>`, found `Result<_, _>`
+```
+
+**Root Cause:**
+1. Line 571 in `assign_cache_environments_handler` was using wrong pattern for `require_admin_user`
+2. Function returns `Option<Uuid>`, not `Result<_, _>`
+3. Multiple test structs had duplicate `environment_ids: None,` fields
+
+**Fix:**
+- Changed from `if let Err(err_resp) = require_admin_user(...).await` to `if require_admin_user(...).await.is_none()`
+- This matches the pattern used consistently throughout the rest of the file (lines 85, 140, 185, etc.)
+- Removed duplicate `environment_ids` fields from test struct initializers
+
+**Verification:**
+- ✅ `nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo check"` - Finished successfully
+- ✅ `nix develop -c bash -c "cd packages/web-ui && cargo check"` - Finished successfully
+- ✅ `nix build` - Completed, binaries created in result/bin/
+- ✅ `nix develop` - Shell environment working
+
+**Commit:** 3aaf5fdb - fix: correct require_admin_user pattern and remove duplicate fields
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
