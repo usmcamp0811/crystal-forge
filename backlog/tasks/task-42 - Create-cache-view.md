@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-11 00:27'
+updated_date: '2026-03-11 00:37'
 labels:
   - ui
   - web-ui
@@ -540,6 +540,33 @@ error[E0308]: mismatched types
 - ✅ `nix develop` - Shell environment working
 
 **Commit:** 3aaf5fdb - fix: correct require_admin_user pattern and remove duplicate fields
+
+## Migration UUID Type Mismatch Fixed (2026-03-11)
+
+**Problem:** Database migration was failing during `sqlx-refresh`.
+
+**Error:**
+```
+Error: while executing migration 93: error returned from database: foreign key constraint "cache_destination_environments_environment_id_fkey" cannot be implemented
+```
+
+**Root Cause:**
+Migration 0093 was trying to create a foreign key with `environment_id INTEGER` to reference `environments(id)`, but the environments table uses `id UUID` (defined in migration 0006, line 121).
+
+All Rust code was also incorrectly using `Vec<i32>` for environment_ids instead of `Vec<uuid::Uuid>`.
+
+**Fix:**
+1. **Migration 0093:** Changed `environment_id INTEGER` to `environment_id UUID`
+2. **Rust Models:** Updated `CreateCacheDestination`, `UpdateCacheDestination`, `CacheDestinationEnvironment` to use `uuid::Uuid`
+3. **Queries:** Updated `assign_environments_to_cache`, `get_cache_environments`, `get_caches_for_environment`, `filter_caches_by_environment` to use `uuid::Uuid`
+4. **Handlers:** Updated `AssignEnvironmentsRequest` and `get_environment_caches_handler` to use `uuid::Uuid`
+
+**Verification:**
+- ✅ `nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo check"` - Finished successfully
+- ✅ `nix develop` - Shell environment working
+- ✅ All type signatures now match database schema
+
+**Commit:** d3512ed4 - fix: use UUID for environment_id in cache assignments
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
