@@ -60,8 +60,13 @@ fn parse_deployment_policy_record(
     let cfg = &record.config;
     match record.policy_type.as_str() {
         "require_cf_agent" => {
-            let strict = cfg.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
-            Some(DeploymentPolicy::RequireCrystalForgeAgent { strict })
+            if cfg.get("strict").and_then(|v| v.as_bool()) == Some(false) {
+                warn!(
+                    "Ignoring strict=false for require_cf_agent policy '{}' ({}); enforcing strict=true",
+                    record.name, record.id
+                );
+            }
+            Some(DeploymentPolicy::RequireCrystalForgeAgent { strict: true })
         }
         "require_packages" => {
             let strict = cfg.get("strict").and_then(|v| v.as_bool()).unwrap_or(true);
@@ -592,7 +597,11 @@ fn select_next_pending_commit_id_for_cycle(
 
 #[cfg(test)]
 mod tests {
-    use super::select_next_pending_commit_id_for_cycle;
+    use super::{parse_deployment_policy_record, select_next_pending_commit_id_for_cycle};
+    use crate::models::deployment_policies::{DeploymentPolicy, DeploymentPolicyRecord};
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
 
     #[test]
     fn select_next_pending_commit_id_honors_latest_reordered_snapshot() {
@@ -618,6 +627,26 @@ mod tests {
             select_next_pending_commit_id_for_cycle(next_cycle.into_iter()),
             Some(22)
         );
+    }
+
+    #[test]
+    fn parse_require_cf_agent_enforces_strict_true() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "core".to_string(),
+            description: Some("core policy".to_string()),
+            policy_type: "require_cf_agent".to_string(),
+            config: json!({"strict": false}),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let parsed = parse_deployment_policy_record(&record).expect("policy should parse");
+        match parsed {
+            DeploymentPolicy::RequireCrystalForgeAgent { strict } => assert!(strict),
+            _ => panic!("expected RequireCrystalForgeAgent variant"),
+        }
     }
 }
 
