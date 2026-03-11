@@ -175,12 +175,25 @@ pub async fn update_cache_destination(
             .into_response(),
         Err(e) => {
             tracing::error!("Failed to update cache destination {}: {:#}", id, e);
+            let message = e.to_string();
+            let status = if message.contains("required for")
+                || message.contains("Invalid cache_type")
+                || message.contains("cannot be empty")
+            {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
             (
-                StatusCode::INTERNAL_SERVER_ERROR,
+                status,
                 Json(ApiError {
-                    error: "internal_error".to_string(),
-                message: e.to_string(),
-                details: None,
+                    error: if status == StatusCode::BAD_REQUEST {
+                        "validation_error".to_string()
+                    } else {
+                        "internal_error".to_string()
+                    },
+                    message,
+                    details: None,
                 }),
             )
                 .into_response()
@@ -363,7 +376,7 @@ pub async fn retry_cache_push_job(
     }
 }
 
-/// POST /api/cache-push-jobs/:id/cancel - Cancel a pending cache push job (admin only)
+/// POST /api/cache-push-jobs/:id/cancel - Cancel a pending or failed cache push job (admin only)
 pub async fn cancel_cache_push_job(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -591,6 +604,32 @@ pub async fn assign_cache_environments_handler(
             }),
         )
             .into_response();
+    }
+
+    match crate::queries::cache_destinations::cache_destination_exists(&pool, cache_id).await {
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ApiError {
+                    error: "not_found".to_string(),
+                    message: format!("Cache destination with id {} not found", cache_id),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Ok(true) => {}
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiError {
+                    error: "internal_server_error".to_string(),
+                    message: format!("Failed to validate cache destination: {e}"),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
     }
 
     match crate::queries::cache_destinations::assign_environments_to_cache(

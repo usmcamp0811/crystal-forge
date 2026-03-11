@@ -129,6 +129,12 @@ pub async fn update_cache_destination(
     id: i32,
     update: &UpdateCacheDestination,
 ) -> Result<Option<CacheDestination>> {
+    let Some(current) = get_cache_destination(pool, id).await? else {
+        return Ok(None);
+    };
+
+    validate_update_shape(&current, update)?;
+
     // Build dynamic update query based on which fields are provided
     let mut query = String::from("UPDATE cache_destinations SET ");
     let mut updates = Vec::new();
@@ -235,7 +241,7 @@ pub async fn update_cache_destination(
 
     if updates.is_empty() && update.environment_ids.is_none() {
         // No fields to update, just return the existing record
-        return get_cache_destination(pool, id).await;
+        return Ok(Some(current));
     }
 
     // Start transaction for update + environment assignment
@@ -324,7 +330,7 @@ pub async fn update_cache_destination(
         q.fetch_optional(&mut *tx).await?
     } else {
         // No fields to update, get existing
-        get_cache_destination(pool, id).await?
+        Some(current.clone())
     };
 
     // Update environment assignments if provided
@@ -355,6 +361,69 @@ pub async fn update_cache_destination(
     }
 
     Ok(destination)
+}
+
+fn validate_update_shape(current: &CacheDestination, update: &UpdateCacheDestination) -> Result<()> {
+    let merged = CreateCacheDestination {
+        name: update.name.clone().unwrap_or_else(|| current.name.clone()),
+        cache_type: update
+            .cache_type
+            .clone()
+            .unwrap_or_else(|| current.cache_type.clone()),
+        push_to: update.push_to.clone().or_else(|| current.push_to.clone()),
+        enabled: Some(update.enabled.unwrap_or(current.enabled)),
+        signing_key_path: update
+            .signing_key_path
+            .clone()
+            .or_else(|| current.signing_key_path.clone()),
+        compression: update
+            .compression
+            .clone()
+            .or_else(|| current.compression.clone()),
+        s3_region: update.s3_region.clone().or_else(|| current.s3_region.clone()),
+        s3_profile: update.s3_profile.clone().or_else(|| current.s3_profile.clone()),
+        s3_access_key_id: update
+            .s3_access_key_id
+            .clone()
+            .or_else(|| current.s3_access_key_id.clone()),
+        s3_secret_access_key: update
+            .s3_secret_access_key
+            .clone()
+            .or_else(|| current.s3_secret_access_key.clone()),
+        s3_session_token: update
+            .s3_session_token
+            .clone()
+            .or_else(|| current.s3_session_token.clone()),
+        s3_endpoint_url: update
+            .s3_endpoint_url
+            .clone()
+            .or_else(|| current.s3_endpoint_url.clone()),
+        attic_token: update
+            .attic_token
+            .clone()
+            .or_else(|| current.attic_token.clone()),
+        attic_cache_name: update
+            .attic_cache_name
+            .clone()
+            .or_else(|| current.attic_cache_name.clone()),
+        attic_public_key: update
+            .attic_public_key
+            .clone()
+            .or_else(|| current.attic_public_key.clone()),
+        attic_ignore_upstream_cache_filter: update
+            .attic_ignore_upstream_cache_filter
+            .or(current.attic_ignore_upstream_cache_filter),
+        attic_jobs: update.attic_jobs.or(current.attic_jobs),
+        parallel_uploads: update.parallel_uploads.or(current.parallel_uploads),
+        max_retries: update.max_retries.or(current.max_retries),
+        retry_delay_seconds: update.retry_delay_seconds.or(current.retry_delay_seconds),
+        push_timeout_seconds: update.push_timeout_seconds.or(current.push_timeout_seconds),
+        force_repush: update.force_repush.or(current.force_repush),
+        require_sigs: update.require_sigs.or(current.require_sigs),
+        environment_ids: None,
+    };
+
+    merged.validate().map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Delete a cache destination
@@ -424,6 +493,14 @@ pub async fn assign_environments_to_cache(
         cache_id
     );
     Ok(())
+}
+
+pub async fn cache_destination_exists(pool: &PgPool, cache_id: i32) -> Result<bool> {
+    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM cache_destinations WHERE id = $1)")
+        .bind(cache_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(exists)
 }
 
 /// Get environment IDs assigned to a cache destination

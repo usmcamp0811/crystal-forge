@@ -321,15 +321,27 @@ fn CacheDestinationsList() -> Element {
                                 div {
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
-                                        span { class: "text-[11px] {theme::text::MUTED}", "Authentication token for Attic cache server" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token *" }
+                                        span { class: "text-[11px] {theme::text::MUTED}", "Authentication token required for Attic cache server" }
                                     }
                                     input {
                                         r#type: "password",
-                                        class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none",
+                                        class: if add_field_errors().contains_key("attic_token") {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
+                                        } else {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
+                                        },
                                         placeholder: "attic-token-xyz...",
                                         value: add_attic_token(),
-                                        oninput: move |evt| add_attic_token.set(evt.value()),
+                                        oninput: move |evt| {
+                                            add_attic_token.set(evt.value());
+                                            let mut errors = add_field_errors();
+                                            errors.remove("attic_token");
+                                            add_field_errors.set(errors);
+                                        },
+                                    }
+                                    if let Some(err) = add_field_errors().get("attic_token") {
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                     }
                                 }
                             } else {
@@ -367,12 +379,24 @@ fn CacheDestinationsList() -> Element {
                                 div {
                                     class: "grid grid-cols-2 gap-4",
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region (optional)" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region *" }
                                         input {
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            class: if add_field_errors().contains_key("s3_region") {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
+                                            } else {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            },
                                             placeholder: "us-east-1",
                                             value: add_s3_region(),
-                                            oninput: move |evt| add_s3_region.set(evt.value()),
+                                            oninput: move |evt| {
+                                                add_s3_region.set(evt.value());
+                                                let mut errors = add_field_errors();
+                                                errors.remove("s3_region");
+                                                add_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = add_field_errors().get("s3_region") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                         }
                                     }
                                     div {
@@ -388,22 +412,46 @@ fn CacheDestinationsList() -> Element {
                                 div {
                                     class: "grid grid-cols-2 gap-4",
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Access Key ID (optional)" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Access Key ID *" }
                                         input {
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            class: if add_field_errors().contains_key("s3_access_key_id") {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
+                                            } else {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            },
                                             placeholder: "AKIA...",
                                             value: add_s3_access_key_id(),
-                                            oninput: move |evt| add_s3_access_key_id.set(evt.value()),
+                                            oninput: move |evt| {
+                                                add_s3_access_key_id.set(evt.value());
+                                                let mut errors = add_field_errors();
+                                                errors.remove("s3_access_key_id");
+                                                add_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = add_field_errors().get("s3_access_key_id") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                         }
                                     }
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key (optional)" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key *" }
                                         input {
                                             r#type: "password",
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            class: if add_field_errors().contains_key("s3_secret_access_key") {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
+                                            } else {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            },
                                             placeholder: "••••••••",
                                             value: add_s3_secret_access_key(),
-                                            oninput: move |evt| add_s3_secret_access_key.set(evt.value()),
+                                            oninput: move |evt| {
+                                                add_s3_secret_access_key.set(evt.value());
+                                                let mut errors = add_field_errors();
+                                                errors.remove("s3_secret_access_key");
+                                                add_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = add_field_errors().get("s3_secret_access_key") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                         }
                                     }
                                 }
@@ -420,12 +468,24 @@ fn CacheDestinationsList() -> Element {
                                         }
                                     }
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL (optional)" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL *" }
                                         input {
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            class: if add_field_errors().contains_key("s3_endpoint_url") {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
+                                            } else {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            },
                                             placeholder: "https://s3.us-east-1.amazonaws.com",
                                             value: add_s3_endpoint_url(),
-                                            oninput: move |evt| add_s3_endpoint_url.set(evt.value()),
+                                            oninput: move |evt| {
+                                                add_s3_endpoint_url.set(evt.value());
+                                                let mut errors = add_field_errors();
+                                                errors.remove("s3_endpoint_url");
+                                                add_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = add_field_errors().get("s3_endpoint_url") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                         }
                                     }
                                 }
@@ -547,6 +607,26 @@ fn CacheDestinationsList() -> Element {
 
                                     if cache_type == "Attic" && attic_public_key.is_empty() {
                                         errors.insert("attic_public_key".to_string(), "Attic public key is required".to_string());
+                                    }
+
+                                    if cache_type == "Attic" && add_attic_token().trim().is_empty() {
+                                        errors.insert("attic_token".to_string(), "Attic token is required".to_string());
+                                    }
+
+                                    if cache_type == "S3" && add_s3_region().trim().is_empty() {
+                                        errors.insert("s3_region".to_string(), "S3 region is required".to_string());
+                                    }
+
+                                    if cache_type == "S3" && add_s3_access_key_id().trim().is_empty() {
+                                        errors.insert("s3_access_key_id".to_string(), "AWS access key ID is required".to_string());
+                                    }
+
+                                    if cache_type == "S3" && add_s3_secret_access_key().trim().is_empty() {
+                                        errors.insert("s3_secret_access_key".to_string(), "AWS secret access key is required".to_string());
+                                    }
+
+                                    if cache_type == "S3" && add_s3_endpoint_url().trim().is_empty() {
+                                        errors.insert("s3_endpoint_url".to_string(), "S3 endpoint URL is required".to_string());
                                     }
 
                                     if push_to.is_empty() {
@@ -945,15 +1025,27 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 div {
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
-                                        span { class: "text-[11px] {theme::text::MUTED}", "Leave empty to keep existing or enter new token" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token *" }
+                                        span { class: "text-[11px] {theme::text::MUTED}", "Token is required for Attic cache destinations" }
                                     }
                                     input {
                                         r#type: "password",
-                                        class: "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none",
+                                        class: if edit_field_errors().contains_key("attic_token") {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
+                                        } else {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
+                                        },
                                         placeholder: "••••••••",
                                         value: edit_attic_token(),
-                                        oninput: move |evt| edit_attic_token.set(evt.value()),
+                                        oninput: move |evt| {
+                                            edit_attic_token.set(evt.value());
+                                            let mut errors = edit_field_errors();
+                                            errors.remove("attic_token");
+                                            edit_field_errors.set(errors);
+                                        },
+                                    }
+                                    if let Some(err) = edit_field_errors().get("attic_token") {
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                     }
                                 }
                             } else {
@@ -991,12 +1083,24 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 div {
                                     class: "grid grid-cols-2 gap-4",
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region (optional)" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Region *" }
                                         input {
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            class: if edit_field_errors().contains_key("s3_region") {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
+                                            } else {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            },
                                             placeholder: "us-east-1",
                                             value: edit_s3_region(),
-                                            oninput: move |evt| edit_s3_region.set(evt.value()),
+                                            oninput: move |evt| {
+                                                edit_s3_region.set(evt.value());
+                                                let mut errors = edit_field_errors();
+                                                errors.remove("s3_region");
+                                                edit_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = edit_field_errors().get("s3_region") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                         }
                                     }
                                     div {
@@ -1012,22 +1116,46 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 div {
                                     class: "grid grid-cols-2 gap-4",
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Access Key ID (optional)" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Access Key ID *" }
                                         input {
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            class: if edit_field_errors().contains_key("s3_access_key_id") {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
+                                            } else {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            },
                                             placeholder: "AKIA...",
                                             value: edit_s3_access_key_id(),
-                                            oninput: move |evt| edit_s3_access_key_id.set(evt.value()),
+                                            oninput: move |evt| {
+                                                edit_s3_access_key_id.set(evt.value());
+                                                let mut errors = edit_field_errors();
+                                                errors.remove("s3_access_key_id");
+                                                edit_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = edit_field_errors().get("s3_access_key_id") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                         }
                                     }
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key (optional)" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key *" }
                                         input {
                                             r#type: "password",
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            class: if edit_field_errors().contains_key("s3_secret_access_key") {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
+                                            } else {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            },
                                             placeholder: "••••••••",
                                             value: edit_s3_secret_access_key(),
-                                            oninput: move |evt| edit_s3_secret_access_key.set(evt.value()),
+                                            oninput: move |evt| {
+                                                edit_s3_secret_access_key.set(evt.value());
+                                                let mut errors = edit_field_errors();
+                                                errors.remove("s3_secret_access_key");
+                                                edit_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = edit_field_errors().get("s3_secret_access_key") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                         }
                                     }
                                 }
@@ -1044,12 +1172,24 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         }
                                     }
                                     div {
-                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL (optional)" }
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL *" }
                                         input {
-                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            class: if edit_field_errors().contains_key("s3_endpoint_url") {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::text::PRIMARY} cf-policy-modal-field-error"
+                                            } else {
+                                                "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}"
+                                            },
                                             placeholder: "https://s3.us-east-1.amazonaws.com",
                                             value: edit_s3_endpoint_url(),
-                                            oninput: move |evt| edit_s3_endpoint_url.set(evt.value()),
+                                            oninput: move |evt| {
+                                                edit_s3_endpoint_url.set(evt.value());
+                                                let mut errors = edit_field_errors();
+                                                errors.remove("s3_endpoint_url");
+                                                edit_field_errors.set(errors);
+                                            },
+                                        }
+                                        if let Some(err) = edit_field_errors().get("s3_endpoint_url") {
+                                            p { class: "text-[11px] text-red-300 mt-1", "{err}" }
                                         }
                                     }
                                 }
@@ -1171,6 +1311,26 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
 
                                     if cache_type == "Attic" && attic_public_key.is_empty() {
                                         errors.insert("attic_public_key".to_string(), "Attic public key is required".to_string());
+                                    }
+
+                                    if cache_type == "Attic" && edit_attic_token().trim().is_empty() {
+                                        errors.insert("attic_token".to_string(), "Attic token is required".to_string());
+                                    }
+
+                                    if cache_type == "S3" && edit_s3_region().trim().is_empty() {
+                                        errors.insert("s3_region".to_string(), "S3 region is required".to_string());
+                                    }
+
+                                    if cache_type == "S3" && edit_s3_access_key_id().trim().is_empty() {
+                                        errors.insert("s3_access_key_id".to_string(), "AWS access key ID is required".to_string());
+                                    }
+
+                                    if cache_type == "S3" && edit_s3_secret_access_key().trim().is_empty() {
+                                        errors.insert("s3_secret_access_key".to_string(), "AWS secret access key is required".to_string());
+                                    }
+
+                                    if cache_type == "S3" && edit_s3_endpoint_url().trim().is_empty() {
+                                        errors.insert("s3_endpoint_url".to_string(), "S3 endpoint URL is required".to_string());
                                     }
 
                                     if push_to.is_empty() {

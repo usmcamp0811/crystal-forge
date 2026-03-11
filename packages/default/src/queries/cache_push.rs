@@ -452,7 +452,7 @@ pub async fn retry_cache_push_job(pool: &PgPool, job_id: i32) -> Result<bool> {
     Ok(retried)
 }
 
-/// Cancel a pending or in-progress cache push job (admin action)
+/// Cancel a pending or failed cache push job (admin action)
 pub async fn cancel_cache_push_job(pool: &PgPool, job_id: i32) -> Result<bool> {
     let result = sqlx::query(
         r#"
