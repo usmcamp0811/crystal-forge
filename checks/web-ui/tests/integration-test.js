@@ -208,6 +208,74 @@ const steps = [
       await page.waitForTimeout(2500);
     },
   },
+  {
+    name: "18-caches-modal-nix",
+    description: "Add cache modal with Nix type selected",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+
+      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      await addBtn.waitFor({ timeout: 5000 });
+      await addBtn.click();
+      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+
+      const dialog = page.locator("[role='dialog']").first();
+      await dialog.locator("select").first().selectOption("Nix");
+      await page.waitForTimeout(1200);
+    },
+  },
+  {
+    name: "19-caches-modal-http",
+    description: "Add cache modal with Http type selected",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+
+      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      await addBtn.waitFor({ timeout: 5000 });
+      await addBtn.click();
+      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+
+      const dialog = page.locator("[role='dialog']").first();
+      await dialog.locator("select").first().selectOption("Http");
+      await page.waitForTimeout(1200);
+    },
+  },
+  {
+    name: "20-caches-modal-s3",
+    description: "Add cache modal with S3 type selected",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+
+      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      await addBtn.waitFor({ timeout: 5000 });
+      await addBtn.click();
+      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+
+      const dialog = page.locator("[role='dialog']").first();
+      await dialog.locator("select").first().selectOption("S3");
+      await page.waitForTimeout(1200);
+    },
+  },
+  {
+    name: "21-caches-modal-attic",
+    description: "Add cache modal with Attic type selected",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2500);
+
+      const addBtn = page.locator("button:has-text('Add Destination')").first();
+      await addBtn.waitFor({ timeout: 5000 });
+      await addBtn.click();
+      await page.getByRole("heading", { name: "Add Cache Destination" }).waitFor({ timeout: 5000 });
+
+      const dialog = page.locator("[role='dialog']").first();
+      await dialog.locator("select").first().selectOption("Attic");
+      await page.waitForTimeout(1200);
+    },
+  },
 ];
 
 (async () => {
