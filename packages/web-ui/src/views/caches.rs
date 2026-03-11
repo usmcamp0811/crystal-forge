@@ -154,27 +154,30 @@ fn CacheDestinationsList() -> Element {
                 },
             }
             
-            // Add modal placeholder
+            // Add modal
             if show_add_modal() {
                 div {
-                    class: "fixed inset-0 bg-black/50 flex items-center justify-center z-50",
+                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
                     onclick: move |_| show_add_modal.set(false),
                     div {
-                        class: "{theme::presets::CARD} max-w-2xl w-full mx-4",
+                        class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 w-full cf-modal-panel-44 flex flex-col",
+                        style: "max-height: calc(100dvh - 2rem);",
                         onclick: move |e| e.stop_propagation(),
                         
+                        // Header
                         div {
-                            class: "flex justify-between items-center mb-6",
+                            class: "flex justify-between items-center mb-6 shrink-0",
                             h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}", "Add Cache Destination" }
                             button {
-                                class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY}",
+                                class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
                                 onclick: move |_| show_add_modal.set(false),
                                 "✕"
                             }
                         }
                         
+                        // Scrollable body
                         div {
-                            class: "space-y-4",
+                            class: "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1",
                             div {
                                 label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
                                 input {
@@ -389,8 +392,9 @@ fn CacheDestinationsList() -> Element {
                             }
                         }
 
+                        // Footer
                         div {
-                            class: "mt-6 flex justify-end gap-3",
+                            class: "mt-6 flex justify-end gap-3 shrink-0 pt-4 border-t {theme::surface::DIVIDER}",
                             button {
                                 class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::GHOST_BTN} {theme::text::SECONDARY}",
                                 onclick: move |_| {
@@ -620,24 +624,27 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
 
             if show_edit_modal() {
                 div {
-                    class: "fixed inset-0 bg-black/50 flex items-center justify-center z-50",
+                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
                     onclick: move |_| show_edit_modal.set(false),
                     div {
-                        class: "{theme::presets::CARD} max-w-2xl w-full mx-4",
+                        class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 w-full cf-modal-panel-44 flex flex-col",
+                        style: "max-height: calc(100dvh - 2rem);",
                         onclick: move |e| e.stop_propagation(),
 
+                        // Header
                         div {
-                            class: "flex justify-between items-center mb-6",
+                            class: "flex justify-between items-center mb-6 shrink-0",
                             h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}", "Edit Cache Destination" }
                             button {
-                                class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY}",
+                                class: "{theme::text::SECONDARY} hover:{theme::text::PRIMARY} text-lg",
                                 onclick: move |_| show_edit_modal.set(false),
                                 "✕"
                             }
                         }
 
+                        // Scrollable body
                         div {
-                            class: "space-y-4",
+                            class: "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1",
                             div {
                                 label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Name *" }
                                 input {
@@ -851,8 +858,9 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                             }
                         }
 
+                        // Footer
                         div {
-                            class: "mt-6 flex justify-end gap-3",
+                            class: "mt-6 flex justify-end gap-3 shrink-0 pt-4 border-t {theme::surface::DIVIDER}",
                             button {
                                 class: "px-4 py-2 rounded-lg text-sm font-medium {theme::interactive::GHOST_BTN} {theme::text::SECONDARY}",
                                 onclick: move |_| {
@@ -958,10 +966,10 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
             // Delete confirmation modal
             if show_delete_confirm() {
                 div {
-                    class: "fixed inset-0 bg-black/50 flex items-center justify-center z-50",
+                    class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
                     onclick: move |_| show_delete_confirm.set(false),
                     div {
-                        class: "{theme::presets::CARD} max-w-md w-full mx-4",
+                        class: "relative {theme::surface::CARD_BG} border {theme::surface::CARD_BORDER} rounded-xl shadow-2xl p-6 cf-modal-panel-30",
                         onclick: move |e| e.stop_propagation(),
                         
                         h3 { class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY} mb-4", "Delete Cache Destination?" }
