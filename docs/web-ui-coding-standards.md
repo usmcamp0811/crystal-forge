@@ -1,5 +1,7 @@
 # Web UI Coding Standards
 
+> **See Also:** For comprehensive UI/UX guidance including design philosophy, component patterns, accessibility, and anti-patterns, see **[UI/UX Design System](./ui-ux-design-system.md)**.
+
 ## Scope
 
 This document defines styling standards for `packages/web-ui` (Dioxus frontend).
