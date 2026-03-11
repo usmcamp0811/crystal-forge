@@ -1,4 +1,5 @@
 use crate::models::cache_destination::{CacheDestination, CreateCacheDestination, UpdateCacheDestination};
+use crate::security::cache_secrets;
 use anyhow::Result;
 use sqlx::PgPool;
 use tracing::debug;
@@ -18,6 +19,11 @@ pub async fn list_cache_destinations(
         .fetch_all(pool)
         .await?;
 
+    let destinations = destinations
+        .into_iter()
+        .map(decrypt_destination_secrets)
+        .collect::<Result<Vec<_>>>()?;
+
     debug!("Listed {} cache destinations", destinations.len());
     Ok(destinations)
 }
@@ -31,7 +37,7 @@ pub async fn get_cache_destination(pool: &PgPool, id: i32) -> Result<Option<Cach
     .fetch_optional(pool)
     .await?;
 
-    Ok(destination)
+    destination.map(decrypt_destination_secrets).transpose()
 }
 
 /// Get a single cache destination by name
@@ -46,7 +52,66 @@ pub async fn get_cache_destination_by_name(
     .fetch_optional(pool)
     .await?;
 
+    destination.map(decrypt_destination_secrets).transpose()
+}
+
+fn decrypt_destination_secrets(mut destination: CacheDestination) -> Result<CacheDestination> {
+    destination.attic_token = cache_secrets::decrypt_optional(destination.attic_token.as_deref())?;
+    destination.s3_access_key_id =
+        cache_secrets::decrypt_optional(destination.s3_access_key_id.as_deref())?;
+    destination.s3_secret_access_key =
+        cache_secrets::decrypt_optional(destination.s3_secret_access_key.as_deref())?;
+    destination.s3_session_token =
+        cache_secrets::decrypt_optional(destination.s3_session_token.as_deref())?;
     Ok(destination)
+}
+
+pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
+    let destinations = sqlx::query_as::<_, CacheDestination>("SELECT * FROM cache_destinations")
+        .fetch_all(pool)
+        .await?;
+
+    let mut updated: u64 = 0;
+    for destination in destinations {
+        let attic = destination.attic_token.as_deref();
+        let s3_access = destination.s3_access_key_id.as_deref();
+        let s3_secret = destination.s3_secret_access_key.as_deref();
+        let s3_session = destination.s3_session_token.as_deref();
+
+        let needs_update = attic.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || s3_access.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || s3_secret.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || s3_session.is_some_and(|v| !cache_secrets::is_encrypted(v));
+
+        if !needs_update {
+            continue;
+        }
+
+        let encrypted_attic = cache_secrets::encrypt_optional(attic)?;
+        let encrypted_s3_access = cache_secrets::encrypt_optional(s3_access)?;
+        let encrypted_s3_secret = cache_secrets::encrypt_optional(s3_secret)?;
+        let encrypted_s3_session = cache_secrets::encrypt_optional(s3_session)?;
+
+        sqlx::query(
+            "UPDATE cache_destinations
+             SET attic_token = $2,
+                 s3_access_key_id = $3,
+                 s3_secret_access_key = $4,
+                 s3_session_token = $5
+             WHERE id = $1",
+        )
+        .bind(destination.id)
+        .bind(encrypted_attic)
+        .bind(encrypted_s3_access)
+        .bind(encrypted_s3_secret)
+        .bind(encrypted_s3_session)
+        .execute(pool)
+        .await?;
+
+        updated += 1;
+    }
+
+    Ok(updated)
 }
 
 /// Create a new cache destination
@@ -59,6 +124,12 @@ pub async fn create_cache_destination(
 
     // Start transaction
     let mut tx = pool.begin().await?;
+
+    let encrypted_s3_access_key_id = cache_secrets::encrypt_optional(create.s3_access_key_id.as_deref())?;
+    let encrypted_s3_secret_access_key =
+        cache_secrets::encrypt_optional(create.s3_secret_access_key.as_deref())?;
+    let encrypted_s3_session_token = cache_secrets::encrypt_optional(create.s3_session_token.as_deref())?;
+    let encrypted_attic_token = cache_secrets::encrypt_optional(create.attic_token.as_deref())?;
 
     let destination = sqlx::query_as::<_, CacheDestination>(
         r#"
@@ -83,11 +154,11 @@ pub async fn create_cache_destination(
     .bind(&create.compression)
     .bind(&create.s3_region)
     .bind(&create.s3_profile)
-    .bind(&create.s3_access_key_id)
-    .bind(&create.s3_secret_access_key)
-    .bind(&create.s3_session_token)
+    .bind(&encrypted_s3_access_key_id)
+    .bind(&encrypted_s3_secret_access_key)
+    .bind(&encrypted_s3_session_token)
     .bind(&create.s3_endpoint_url)
-    .bind(&create.attic_token)
+    .bind(&encrypted_attic_token)
     .bind(&create.attic_cache_name)
     .bind(&create.attic_public_key)
     .bind(create.attic_ignore_upstream_cache_filter)
@@ -116,6 +187,8 @@ pub async fn create_cache_destination(
     }
 
     tx.commit().await?;
+
+    let destination = decrypt_destination_secrets(destination)?;
 
     debug!("Created cache destination: {} with {} environment assignments", 
            destination.name,
@@ -279,19 +352,23 @@ pub async fn update_cache_destination(
         q = q.bind(s3_profile);
     }
     if let Some(ref s3_access_key_id) = update.s3_access_key_id {
-        q = q.bind(s3_access_key_id);
+        let encrypted = cache_secrets::encrypt_secret(s3_access_key_id)?;
+        q = q.bind(encrypted);
     }
     if let Some(ref s3_secret_access_key) = update.s3_secret_access_key {
-        q = q.bind(s3_secret_access_key);
+        let encrypted = cache_secrets::encrypt_secret(s3_secret_access_key)?;
+        q = q.bind(encrypted);
     }
     if let Some(ref s3_session_token) = update.s3_session_token {
-        q = q.bind(s3_session_token);
+        let encrypted = cache_secrets::encrypt_secret(s3_session_token)?;
+        q = q.bind(encrypted);
     }
     if let Some(ref s3_endpoint_url) = update.s3_endpoint_url {
         q = q.bind(s3_endpoint_url);
     }
     if let Some(ref attic_token) = update.attic_token {
-        q = q.bind(attic_token);
+        let encrypted = cache_secrets::encrypt_secret(attic_token)?;
+        q = q.bind(encrypted);
     }
     if let Some(ref attic_cache_name) = update.attic_cache_name {
         q = q.bind(attic_cache_name);
@@ -355,6 +432,10 @@ pub async fn update_cache_destination(
     }
 
     tx.commit().await?;
+
+    let destination = destination
+        .map(decrypt_destination_secrets)
+        .transpose()?;
 
     if let Some(ref dest) = destination {
         debug!("Updated cache destination: {}", dest.name);
@@ -533,6 +614,11 @@ pub async fn get_caches_for_environment(
     .fetch_all(pool)
     .await?;
 
+    let caches = caches
+        .into_iter()
+        .map(decrypt_destination_secrets)
+        .collect::<Result<Vec<_>>>()?;
+
     debug!(
         "Found {} caches for environment {} (including global)",
         caches.len(),
@@ -558,6 +644,9 @@ pub async fn filter_caches_by_environment(
             .bind(env_id)
             .fetch_all(pool)
             .await?
+            .into_iter()
+            .map(decrypt_destination_secrets)
+            .collect::<Result<Vec<_>>>()?
         }
         None => {
             // Get all caches (no filter)
@@ -566,6 +655,100 @@ pub async fn filter_caches_by_environment(
     };
 
     Ok(caches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn empty_update() -> UpdateCacheDestination {
+        UpdateCacheDestination {
+            name: None,
+            cache_type: None,
+            push_to: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: None,
+            attic_cache_name: None,
+            attic_public_key: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        }
+    }
+
+    fn base_destination() -> CacheDestination {
+        CacheDestination {
+            id: 1,
+            name: "cache-a".to_string(),
+            cache_type: "S3".to_string(),
+            push_to: Some("s3://bucket/path".to_string()),
+            enabled: true,
+            signing_key_path: None,
+            compression: None,
+            s3_region: Some("us-east-1".to_string()),
+            s3_profile: None,
+            s3_access_key_id: Some("AKIA...".to_string()),
+            s3_secret_access_key: Some("super-secret".to_string()),
+            s3_session_token: None,
+            s3_endpoint_url: Some("https://s3.amazonaws.com".to_string()),
+            attic_token: None,
+            attic_cache_name: None,
+            attic_public_key: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn validate_update_shape_rejects_invalid_attic_switch() {
+        let current = base_destination();
+        let mut update = empty_update();
+        update.cache_type = Some("Attic".to_string());
+
+        let err = validate_update_shape(&current, &update).expect_err("must reject invalid Attic shape");
+        assert!(
+            err.to_string().contains("attic_cache_name is required")
+                || err.to_string().contains("attic_public_key is required")
+                || err.to_string().contains("attic_token is required")
+        );
+    }
+
+    #[test]
+    fn validate_update_shape_accepts_valid_attic_switch() {
+        let current = base_destination();
+        let mut update = empty_update();
+        update.cache_type = Some("Attic".to_string());
+        update.push_to = Some("https://attic.example.com".to_string());
+        update.attic_cache_name = Some("binary-cache".to_string());
+        update.attic_public_key = Some("attic:pub:key".to_string());
+        update.attic_token = Some("attic-token".to_string());
+
+        validate_update_shape(&current, &update).expect("valid Attic update must pass");
+    }
 }
 
 /// Get global cache destinations (not assigned to any environment)
@@ -579,6 +762,11 @@ pub async fn get_global_caches(pool: &PgPool) -> Result<Vec<CacheDestination>> {
     )
     .fetch_all(pool)
     .await?;
+
+    let caches = caches
+        .into_iter()
+        .map(decrypt_destination_secrets)
+        .collect::<Result<Vec<_>>>()?;
 
     debug!("Found {} global cache destinations", caches.len());
     Ok(caches)

@@ -27,6 +27,7 @@ use crystal_forge::{
         webhook::webhook_handler,
     },
     queries::derivations::reset_non_terminal_derivations,
+    queries::cache_destinations::encrypt_plaintext_cache_secrets,
     queue::QueueNotifier,
     server::memory_monitor_task,
     server::spawn_background_tasks,
@@ -90,6 +91,13 @@ async fn main() -> anyhow::Result<()> {
     let pool = CrystalForgeConfig::db_pool().await?;
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
+    let encrypted_rows = encrypt_plaintext_cache_secrets(&pool).await?;
+    if encrypted_rows > 0 {
+        info!(
+            "Encrypted cache secret fields at rest for {} existing destination(s)",
+            encrypted_rows
+        );
+    }
     cfg.sync_systems_to_db(&pool).await?;
 
     // Initialize dev mode fixtures if AUTH_MODE=dev

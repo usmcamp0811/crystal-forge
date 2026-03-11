@@ -6,6 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use sqlx::PgPool;
+use url::Url;
 
 use crate::api::models::ApiError;
 use crate::handlers::api::rbac::{authenticated_user_roles, require_admin as require_admin_user};
@@ -13,10 +14,29 @@ use crate::models::cache_destination::{CacheDestination, CreateCacheDestination,
 use crate::queries::{cache_destinations, cache_push};
 
 fn redact_cache_secrets(mut destination: CacheDestination) -> CacheDestination {
+    destination.push_to = destination
+        .push_to
+        .as_deref()
+        .map(sanitize_push_to_url_credentials);
     destination.attic_token = None;
+    destination.s3_access_key_id = None;
     destination.s3_secret_access_key = None;
     destination.s3_session_token = None;
     destination
+}
+
+fn sanitize_push_to_url_credentials(push_to: &str) -> String {
+    let Ok(mut parsed) = Url::parse(push_to) else {
+        return push_to.to_string();
+    };
+
+    if parsed.password().is_none() && parsed.username().is_empty() {
+        return push_to.to_string();
+    }
+
+    let _ = parsed.set_username("");
+    let _ = parsed.set_password(None);
+    parsed.to_string()
 }
 
 // ============================================================================
@@ -32,8 +52,21 @@ pub struct ListCacheDestinationsQuery {
 /// GET /api/caches - List all cache destinations
 pub async fn list_cache_destinations(
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Query(query): Query<ListCacheDestinationsQuery>,
 ) -> impl IntoResponse {
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "unauthorized".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
+
     match cache_destinations::list_cache_destinations(&pool, query.enabled_only).await {
         Ok(destinations) => {
             let redacted: Vec<CacheDestination> = destinations
@@ -60,8 +93,21 @@ pub async fn list_cache_destinations(
 /// GET /api/caches/:id - Get a single cache destination
 pub async fn get_cache_destination(
     State(pool): State<PgPool>,
+    headers: HeaderMap,
     Path(id): Path<i32>,
 ) -> impl IntoResponse {
+    let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiError {
+                error: "unauthorized".to_string(),
+                message: "Authentication required".to_string(),
+                details: None,
+            }),
+        )
+            .into_response();
+    };
+
     match cache_destinations::get_cache_destination(&pool, id).await {
         Ok(Some(destination)) => (StatusCode::OK, Json(redact_cache_secrets(destination))).into_response(),
         Ok(None) => (
