@@ -5,7 +5,7 @@ status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-11 03:27'
+updated_date: '2026-03-11 03:41'
 labels:
   - ui
   - web-ui
@@ -598,6 +598,10 @@ Commit pushed: 13c1d199
 MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/155
 
 Moved to Review after implementation and verification commands were executed for backend, web-ui, sqlx prepare, and web-ui integration check screenshots.
+
+Follow-up review fix: added `/caches` route screenshot step to `checks/web-ui/tests/integration-test.js`, reran `nix build .#checks.x86_64-linux.web-ui` (pass), and updated MR !155 description with generated `17-caches.png` upload.
+
+Commit pushed: 45b5671a
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
