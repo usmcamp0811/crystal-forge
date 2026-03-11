@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-11 02:31'
+updated_date: '2026-03-11 03:09'
 labels:
   - ui
   - web-ui
@@ -588,6 +588,12 @@ Verification run:
 - Started db-only with process-compose and ran cargo sqlx prepare from packages/default (prepare succeeded)
 
 Commit: c78b1e2f
+
+Added authenticated S3 cache credential support end-to-end (migration 0095 plus model/query/config/UI wiring) and redacted sensitive cache fields from cache destination API responses.
+
+Verification run: nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo check" (pass), nix develop -c bash -c "cd packages/web-ui && cargo check" (pass), nix develop -c bash -lc "nix run .#devScripts.db-only -- up -D && cd packages/default && cargo sqlx prepare" (prepare succeeded).
+
+Commit pushed: 13c1d199
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
