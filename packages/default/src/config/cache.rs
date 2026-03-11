@@ -18,6 +18,10 @@ pub struct CacheConfig {
     // S3-specific
     pub s3_region: Option<String>,
     pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
     // Attic-specific
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
@@ -187,6 +191,10 @@ impl Default for CacheConfig {
             parallel_uploads: Self::default_parallel_uploads(),
             s3_region: None,
             s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
             attic_token: None,
             attic_cache_name: None,
             attic_ignore_upstream_cache_filter: true, // Fixed typo

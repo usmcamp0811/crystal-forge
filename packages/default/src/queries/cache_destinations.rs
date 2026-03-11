@@ -64,12 +64,13 @@ pub async fn create_cache_destination(
         r#"
         INSERT INTO cache_destinations (
             name, cache_type, push_to, enabled, signing_key_path, compression,
-            s3_region, s3_profile, attic_token, attic_cache_name, attic_public_key,
+            s3_region, s3_profile, s3_access_key_id, s3_secret_access_key, s3_session_token, s3_endpoint_url,
+            attic_token, attic_cache_name, attic_public_key,
             attic_ignore_upstream_cache_filter, attic_jobs,
             parallel_uploads, max_retries, retry_delay_seconds, push_timeout_seconds,
             force_repush, require_sigs
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
         )
         RETURNING *
         "#,
@@ -82,6 +83,10 @@ pub async fn create_cache_destination(
     .bind(&create.compression)
     .bind(&create.s3_region)
     .bind(&create.s3_profile)
+    .bind(&create.s3_access_key_id)
+    .bind(&create.s3_secret_access_key)
+    .bind(&create.s3_session_token)
+    .bind(&create.s3_endpoint_url)
     .bind(&create.attic_token)
     .bind(&create.attic_cache_name)
     .bind(&create.attic_public_key)
@@ -167,6 +172,22 @@ pub async fn update_cache_destination(
         updates.push(format!("s3_profile = ${}", bind_count));
         bind_count += 1;
     }
+    if update.s3_access_key_id.is_some() {
+        updates.push(format!("s3_access_key_id = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_secret_access_key.is_some() {
+        updates.push(format!("s3_secret_access_key = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_session_token.is_some() {
+        updates.push(format!("s3_session_token = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_endpoint_url.is_some() {
+        updates.push(format!("s3_endpoint_url = ${}", bind_count));
+        bind_count += 1;
+    }
     if update.attic_token.is_some() {
         updates.push(format!("attic_token = ${}", bind_count));
         bind_count += 1;
@@ -250,6 +271,18 @@ pub async fn update_cache_destination(
     }
     if let Some(ref s3_profile) = update.s3_profile {
         q = q.bind(s3_profile);
+    }
+    if let Some(ref s3_access_key_id) = update.s3_access_key_id {
+        q = q.bind(s3_access_key_id);
+    }
+    if let Some(ref s3_secret_access_key) = update.s3_secret_access_key {
+        q = q.bind(s3_secret_access_key);
+    }
+    if let Some(ref s3_session_token) = update.s3_session_token {
+        q = q.bind(s3_session_token);
+    }
+    if let Some(ref s3_endpoint_url) = update.s3_endpoint_url {
+        q = q.bind(s3_endpoint_url);
     }
     if let Some(ref attic_token) = update.attic_token {
         q = q.bind(attic_token);

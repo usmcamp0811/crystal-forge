@@ -91,6 +91,10 @@ fn CacheDestinationsList() -> Element {
     let mut add_compression = use_signal(String::new);
     let mut add_s3_region = use_signal(String::new);
     let mut add_s3_profile = use_signal(String::new);
+    let mut add_s3_access_key_id = use_signal(String::new);
+    let mut add_s3_secret_access_key = use_signal(String::new);
+    let mut add_s3_session_token = use_signal(String::new);
+    let mut add_s3_endpoint_url = use_signal(String::new);
     let mut add_environment_ids = use_signal(|| Vec::<Uuid>::new());
     let mut add_error = use_signal(|| None::<String>);
     let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
@@ -381,6 +385,50 @@ fn CacheDestinationsList() -> Element {
                                         }
                                     }
                                 }
+                                div {
+                                    class: "grid grid-cols-2 gap-4",
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Access Key ID (optional)" }
+                                        input {
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "AKIA...",
+                                            value: add_s3_access_key_id(),
+                                            oninput: move |evt| add_s3_access_key_id.set(evt.value()),
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key (optional)" }
+                                        input {
+                                            r#type: "password",
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "••••••••",
+                                            value: add_s3_secret_access_key(),
+                                            oninput: move |evt| add_s3_secret_access_key.set(evt.value()),
+                                        }
+                                    }
+                                }
+                                div {
+                                    class: "grid grid-cols-2 gap-4",
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Session Token (optional)" }
+                                        input {
+                                            r#type: "password",
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "session token",
+                                            value: add_s3_session_token(),
+                                            oninput: move |evt| add_s3_session_token.set(evt.value()),
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL (optional)" }
+                                        input {
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "https://s3.us-east-1.amazonaws.com",
+                                            value: add_s3_endpoint_url(),
+                                            oninput: move |evt| add_s3_endpoint_url.set(evt.value()),
+                                        }
+                                    }
+                                }
                             }
 
                             // Signing key (only for Nix binary cache types, not Attic)
@@ -529,6 +577,10 @@ fn CacheDestinationsList() -> Element {
                                     let compression_val = add_compression();
                                     let s3_region_val = add_s3_region();
                                     let s3_profile_val = add_s3_profile();
+                                    let s3_access_key_id_val = add_s3_access_key_id();
+                                    let s3_secret_access_key_val = add_s3_secret_access_key();
+                                    let s3_session_token_val = add_s3_session_token();
+                                    let s3_endpoint_url_val = add_s3_endpoint_url();
 
                                     spawn(async move {
                                         let req = CreateCacheDestination {
@@ -544,6 +596,10 @@ fn CacheDestinationsList() -> Element {
                                             compression: if compression_val.trim().is_empty() { None } else { Some(compression_val.trim().to_string()) },
                                             s3_region: if s3_region_val.trim().is_empty() { None } else { Some(s3_region_val.trim().to_string()) },
                                             s3_profile: if s3_profile_val.trim().is_empty() { None } else { Some(s3_profile_val.trim().to_string()) },
+                                            s3_access_key_id: if s3_access_key_id_val.trim().is_empty() { None } else { Some(s3_access_key_id_val.trim().to_string()) },
+                                            s3_secret_access_key: if s3_secret_access_key_val.trim().is_empty() { None } else { Some(s3_secret_access_key_val.trim().to_string()) },
+                                            s3_session_token: if s3_session_token_val.trim().is_empty() { None } else { Some(s3_session_token_val.trim().to_string()) },
+                                            s3_endpoint_url: if s3_endpoint_url_val.trim().is_empty() { None } else { Some(s3_endpoint_url_val.trim().to_string()) },
                                             attic_token: if attic_token_val.trim().is_empty() { None } else { Some(attic_token_val.trim().to_string()) },
                                             attic_cache_name: if cache_type == "Attic" { Some(attic_cache_name) } else { None },
                                             attic_public_key: if cache_type == "Attic" {
@@ -578,6 +634,10 @@ fn CacheDestinationsList() -> Element {
                                                 add_compression.set(String::new());
                                                 add_s3_region.set(String::new());
                                                 add_s3_profile.set(String::new());
+                                                add_s3_access_key_id.set(String::new());
+                                                add_s3_secret_access_key.set(String::new());
+                                                add_s3_session_token.set(String::new());
+                                                add_s3_endpoint_url.set(String::new());
                                                 add_environment_ids.set(Vec::new());
                                                 refresh_nonce.set(refresh_nonce() + 1);
                                             }
@@ -631,6 +691,14 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
         use_signal(|| destination.s3_region.clone().unwrap_or_default());
     let mut edit_s3_profile =
         use_signal(|| destination.s3_profile.clone().unwrap_or_default());
+    let mut edit_s3_access_key_id =
+        use_signal(|| destination.s3_access_key_id.clone().unwrap_or_default());
+    let mut edit_s3_secret_access_key =
+        use_signal(|| destination.s3_secret_access_key.clone().unwrap_or_default());
+    let mut edit_s3_session_token =
+        use_signal(|| destination.s3_session_token.clone().unwrap_or_default());
+    let mut edit_s3_endpoint_url =
+        use_signal(|| destination.s3_endpoint_url.clone().unwrap_or_default());
     let mut edit_error = use_signal(|| None::<String>);
     let mut edit_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut edit_submitting = use_signal(|| false);
@@ -941,6 +1009,50 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         }
                                     }
                                 }
+                                div {
+                                    class: "grid grid-cols-2 gap-4",
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Access Key ID (optional)" }
+                                        input {
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "AKIA...",
+                                            value: edit_s3_access_key_id(),
+                                            oninput: move |evt| edit_s3_access_key_id.set(evt.value()),
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Secret Access Key (optional)" }
+                                        input {
+                                            r#type: "password",
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "••••••••",
+                                            value: edit_s3_secret_access_key(),
+                                            oninput: move |evt| edit_s3_secret_access_key.set(evt.value()),
+                                        }
+                                    }
+                                }
+                                div {
+                                    class: "grid grid-cols-2 gap-4",
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "AWS Session Token (optional)" }
+                                        input {
+                                            r#type: "password",
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "session token",
+                                            value: edit_s3_session_token(),
+                                            oninput: move |evt| edit_s3_session_token.set(evt.value()),
+                                        }
+                                    }
+                                    div {
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "S3 Endpoint URL (optional)" }
+                                        input {
+                                            class: "w-full px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
+                                            placeholder: "https://s3.us-east-1.amazonaws.com",
+                                            value: edit_s3_endpoint_url(),
+                                            oninput: move |evt| edit_s3_endpoint_url.set(evt.value()),
+                                        }
+                                    }
+                                }
                             }
 
                             // Signing key (only for Nix binary cache types, not Attic)
@@ -1088,6 +1200,10 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     let compression_val = edit_compression();
                                     let s3_region_val = edit_s3_region();
                                     let s3_profile_val = edit_s3_profile();
+                                    let s3_access_key_id_val = edit_s3_access_key_id();
+                                    let s3_secret_access_key_val = edit_s3_secret_access_key();
+                                    let s3_session_token_val = edit_s3_session_token();
+                                    let s3_endpoint_url_val = edit_s3_endpoint_url();
 
                                     spawn(async move {
                                         let req = UpdateCacheDestination {
@@ -1103,6 +1219,10 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             compression: if compression_val.trim().is_empty() { None } else { Some(compression_val.trim().to_string()) },
                                             s3_region: if s3_region_val.trim().is_empty() { None } else { Some(s3_region_val.trim().to_string()) },
                                             s3_profile: if s3_profile_val.trim().is_empty() { None } else { Some(s3_profile_val.trim().to_string()) },
+                                            s3_access_key_id: if s3_access_key_id_val.trim().is_empty() { None } else { Some(s3_access_key_id_val.trim().to_string()) },
+                                            s3_secret_access_key: if s3_secret_access_key_val.trim().is_empty() { None } else { Some(s3_secret_access_key_val.trim().to_string()) },
+                                            s3_session_token: if s3_session_token_val.trim().is_empty() { None } else { Some(s3_session_token_val.trim().to_string()) },
+                                            s3_endpoint_url: if s3_endpoint_url_val.trim().is_empty() { None } else { Some(s3_endpoint_url_val.trim().to_string()) },
                                             attic_token: if attic_token_val.trim().is_empty() { None } else { Some(attic_token_val.trim().to_string()) },
                                             attic_cache_name: if cache_type == "Attic" {
                                                 Some(attic_cache_name)

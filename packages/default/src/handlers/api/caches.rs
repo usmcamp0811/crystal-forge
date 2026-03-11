@@ -4,13 +4,20 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sqlx::PgPool;
 
 use crate::api::models::ApiError;
 use crate::handlers::api::rbac::{authenticated_user_roles, require_admin as require_admin_user};
 use crate::models::cache_destination::{CacheDestination, CreateCacheDestination, UpdateCacheDestination};
 use crate::queries::{cache_destinations, cache_push};
+
+fn redact_cache_secrets(mut destination: CacheDestination) -> CacheDestination {
+    destination.attic_token = None;
+    destination.s3_secret_access_key = None;
+    destination.s3_session_token = None;
+    destination
+}
 
 // ============================================================================
 // Cache Destinations API
@@ -28,7 +35,13 @@ pub async fn list_cache_destinations(
     Query(query): Query<ListCacheDestinationsQuery>,
 ) -> impl IntoResponse {
     match cache_destinations::list_cache_destinations(&pool, query.enabled_only).await {
-        Ok(destinations) => (StatusCode::OK, Json(destinations)).into_response(),
+        Ok(destinations) => {
+            let redacted: Vec<CacheDestination> = destinations
+                .into_iter()
+                .map(redact_cache_secrets)
+                .collect();
+            (StatusCode::OK, Json(redacted)).into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to list cache destinations: {:#}", e);
             (
@@ -50,7 +63,7 @@ pub async fn get_cache_destination(
     Path(id): Path<i32>,
 ) -> impl IntoResponse {
     match cache_destinations::get_cache_destination(&pool, id).await {
-        Ok(Some(destination)) => (StatusCode::OK, Json(destination)).into_response(),
+        Ok(Some(destination)) => (StatusCode::OK, Json(redact_cache_secrets(destination))).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
@@ -108,7 +121,7 @@ pub async fn create_cache_destination(
     }
 
     match cache_destinations::create_cache_destination(&pool, &create).await {
-        Ok(destination) => (StatusCode::CREATED, Json(destination)).into_response(),
+        Ok(destination) => (StatusCode::CREATED, Json(redact_cache_secrets(destination))).into_response(),
         Err(e) => {
             tracing::error!("Failed to create cache destination: {:#}", e);
             let error_msg = if e.to_string().contains("duplicate key") || e.to_string().contains("unique constraint") {
@@ -150,7 +163,7 @@ pub async fn update_cache_destination(
     }
 
     match cache_destinations::update_cache_destination(&pool, id, &update).await {
-        Ok(Some(destination)) => (StatusCode::OK, Json(destination)).into_response(),
+        Ok(Some(destination)) => (StatusCode::OK, Json(redact_cache_secrets(destination))).into_response(),
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ApiError {
@@ -628,7 +641,13 @@ pub async fn get_environment_caches_handler(
     };
 
     match crate::queries::cache_destinations::get_caches_for_environment(&pool, environment_id).await {
-        Ok(caches) => (StatusCode::OK, Json(caches)).into_response(),
+        Ok(caches) => {
+            let redacted: Vec<CacheDestination> = caches
+                .into_iter()
+                .map(redact_cache_secrets)
+                .collect();
+            (StatusCode::OK, Json(redacted)).into_response()
+        }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiError {
@@ -640,4 +659,3 @@ pub async fn get_environment_caches_handler(
             .into_response(),
     }
 }
-
