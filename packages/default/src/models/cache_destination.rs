@@ -6,7 +6,7 @@ use sqlx::FromRow;
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct CacheDestinationEnvironment {
     pub cache_destination_id: i32,
-    pub environment_id: i32,
+    pub environment_id: uuid::Uuid,
     pub created_at: DateTime<Utc>,
 }
 
@@ -71,7 +71,7 @@ pub struct CreateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     // Environment assignments (empty = global cache)
-    pub environment_ids: Option<Vec<i32>>,
+    pub environment_ids: Option<Vec<uuid::Uuid>>,
 }
 
 /// DTO for updating an existing cache destination
@@ -96,7 +96,7 @@ pub struct UpdateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     // Environment assignments (None = don't change, Some(vec) = update assignments)
-    pub environment_ids: Option<Vec<i32>>,
+    pub environment_ids: Option<Vec<uuid::Uuid>>,
 }
 
 impl CreateCacheDestination {

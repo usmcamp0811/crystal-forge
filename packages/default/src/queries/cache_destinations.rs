@@ -352,7 +352,7 @@ pub async fn update_cache_destination_last_used(pool: &PgPool, name: &str) -> Re
 pub async fn assign_environments_to_cache(
     pool: &PgPool,
     cache_id: i32,
-    environment_ids: &[i32],
+    environment_ids: &[uuid::Uuid],
 ) -> Result<()> {
     // Start transaction
     let mut tx = pool.begin().await?;
@@ -386,8 +386,8 @@ pub async fn assign_environments_to_cache(
 }
 
 /// Get environment IDs assigned to a cache destination
-pub async fn get_cache_environments(pool: &PgPool, cache_id: i32) -> Result<Vec<i32>> {
-    let environment_ids = sqlx::query_scalar::<_, i32>(
+pub async fn get_cache_environments(pool: &PgPool, cache_id: i32) -> Result<Vec<uuid::Uuid>> {
+    let environment_ids = sqlx::query_scalar::<_, uuid::Uuid>(
         "SELECT environment_id FROM cache_destination_environments 
          WHERE cache_destination_id = $1 
          ORDER BY environment_id"
@@ -402,7 +402,7 @@ pub async fn get_cache_environments(pool: &PgPool, cache_id: i32) -> Result<Vec<
 /// Get cache destinations assigned to a specific environment (includes global caches)
 pub async fn get_caches_for_environment(
     pool: &PgPool,
-    environment_id: i32,
+    environment_id: uuid::Uuid,
 ) -> Result<Vec<CacheDestination>> {
     let caches = sqlx::query_as::<_, CacheDestination>(
         "SELECT DISTINCT cd.* FROM cache_destinations cd
@@ -426,7 +426,7 @@ pub async fn get_caches_for_environment(
 /// Filter cache destinations by environment (excludes global if filter is applied)
 pub async fn filter_caches_by_environment(
     pool: &PgPool,
-    environment_id: Option<i32>,
+    environment_id: Option<uuid::Uuid>,
 ) -> Result<Vec<CacheDestination>> {
     let caches = match environment_id {
         Some(env_id) => {

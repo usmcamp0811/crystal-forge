@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS cache_destination_environments (
     cache_destination_id INTEGER NOT NULL REFERENCES cache_destinations(id) ON DELETE CASCADE,
-    environment_id INTEGER NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+    environment_id UUID NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     PRIMARY KEY (cache_destination_id, environment_id)
 );

@@ -524,7 +524,7 @@ pub async fn bulk_cancel_cache_push_jobs(
 /// Request to assign environments to a cache destination
 #[derive(Debug, Deserialize)]
 pub struct AssignEnvironmentsRequest {
-    pub environment_ids: Vec<i32>,
+    pub environment_ids: Vec<uuid::Uuid>,
 }
 
 /// GET /api/caches/:id/environments - Get environments assigned to a cache
@@ -612,7 +612,7 @@ pub async fn assign_cache_environments_handler(
 pub async fn get_environment_caches_handler(
     State(pool): State<PgPool>,
     headers: HeaderMap,
-    Path(environment_id): Path<i32>,
+    Path(environment_id): Path<uuid::Uuid>,
 ) -> impl IntoResponse {
     // Require authentication
     let Some((_user_id, _roles)) = authenticated_user_roles(&pool, &headers).await else {
