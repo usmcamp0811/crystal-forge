@@ -85,6 +85,7 @@ fn CacheDestinationsList() -> Element {
     let mut add_type = use_signal(|| "Nix".to_string());
     let mut add_push_to = use_signal(String::new);
     let mut add_attic_cache_name = use_signal(String::new);
+    let mut add_attic_public_key = use_signal(String::new);
     let mut add_attic_token = use_signal(String::new);
     let mut add_signing_key_path = use_signal(String::new);
     let mut add_compression = use_signal(String::new);
@@ -289,6 +290,33 @@ fn CacheDestinationsList() -> Element {
                                 div {
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Public Key *" }
+                                        if !add_field_errors().contains_key("attic_public_key") {
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Used by agents as trusted-public-key" }
+                                        }
+                                    }
+                                    input {
+                                        class: if add_field_errors().contains_key("attic_public_key") {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
+                                        } else {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
+                                        },
+                                        placeholder: "cache.example.org-1:AbCdEf...",
+                                        value: add_attic_public_key(),
+                                        oninput: move |evt| {
+                                            add_attic_public_key.set(evt.value());
+                                            let mut errors = add_field_errors();
+                                            errors.remove("attic_public_key");
+                                            add_field_errors.set(errors);
+                                        },
+                                    }
+                                    if let Some(err) = add_field_errors().get("attic_public_key") {
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                    }
+                                }
+                                div {
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
                                         span { class: "text-[11px] {theme::text::MUTED}", "Authentication token for Attic cache server" }
                                     }
@@ -456,6 +484,7 @@ fn CacheDestinationsList() -> Element {
                                     let cache_type = add_type();
                                     let push_to = add_push_to().trim().to_string();
                                     let attic_cache_name = add_attic_cache_name().trim().to_string();
+                                    let attic_public_key = add_attic_public_key().trim().to_string();
 
                                     // Validate and collect field errors
                                     let mut errors = std::collections::HashMap::new();
@@ -466,6 +495,10 @@ fn CacheDestinationsList() -> Element {
 
                                     if cache_type == "Attic" && attic_cache_name.is_empty() {
                                         errors.insert("attic_cache_name".to_string(), "Attic cache name is required".to_string());
+                                    }
+
+                                    if cache_type == "Attic" && attic_public_key.is_empty() {
+                                        errors.insert("attic_public_key".to_string(), "Attic public key is required".to_string());
                                     }
 
                                     if push_to.is_empty() {
@@ -513,6 +546,11 @@ fn CacheDestinationsList() -> Element {
                                             s3_profile: if s3_profile_val.trim().is_empty() { None } else { Some(s3_profile_val.trim().to_string()) },
                                             attic_token: if attic_token_val.trim().is_empty() { None } else { Some(attic_token_val.trim().to_string()) },
                                             attic_cache_name: if cache_type == "Attic" { Some(attic_cache_name) } else { None },
+                                            attic_public_key: if cache_type == "Attic" {
+                                                if attic_public_key.trim().is_empty() { None } else { Some(attic_public_key.trim().to_string()) }
+                                            } else {
+                                                None
+                                            },
                                             attic_ignore_upstream_cache_filter: Some(true),
                                             attic_jobs: Some(5),
                                             parallel_uploads: Some(1),
@@ -534,6 +572,7 @@ fn CacheDestinationsList() -> Element {
                                                 add_name.set(String::new());
                                                 add_push_to.set(String::new());
                                                 add_attic_cache_name.set(String::new());
+                                                add_attic_public_key.set(String::new());
                                                 add_attic_token.set(String::new());
                                                 add_signing_key_path.set(String::new());
                                                 add_compression.set(String::new());
@@ -580,6 +619,8 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let mut edit_push_to = use_signal(|| destination.push_to.clone().unwrap_or_default());
     let mut edit_attic_cache_name =
         use_signal(|| destination.attic_cache_name.clone().unwrap_or_default());
+    let mut edit_attic_public_key =
+        use_signal(|| destination.attic_public_key.clone().unwrap_or_default());
     let mut edit_attic_token =
         use_signal(|| destination.attic_token.clone().unwrap_or_default());
     let mut edit_signing_key_path =
@@ -809,6 +850,33 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 div {
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Public Key *" }
+                                        if !edit_field_errors().contains_key("attic_public_key") {
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Used by agents as trusted-public-key" }
+                                        }
+                                    }
+                                    input {
+                                        class: if edit_field_errors().contains_key("attic_public_key") {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
+                                        } else {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
+                                        },
+                                        placeholder: "cache.example.org-1:AbCdEf...",
+                                        value: edit_attic_public_key(),
+                                        oninput: move |evt| {
+                                            edit_attic_public_key.set(evt.value());
+                                            let mut errors = edit_field_errors();
+                                            errors.remove("attic_public_key");
+                                            edit_field_errors.set(errors);
+                                        },
+                                    }
+                                    if let Some(err) = edit_field_errors().get("attic_public_key") {
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                    }
+                                }
+                                div {
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
                                         span { class: "text-[11px] {theme::text::MUTED}", "Leave empty to keep existing or enter new token" }
                                     }
@@ -976,6 +1044,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     let cache_type = edit_type();
                                     let push_to = edit_push_to().trim().to_string();
                                     let attic_cache_name = edit_attic_cache_name().trim().to_string();
+                                    let attic_public_key = edit_attic_public_key().trim().to_string();
 
                                     // Validate and collect field errors
                                     let mut errors = std::collections::HashMap::new();
@@ -986,6 +1055,10 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
 
                                     if cache_type == "Attic" && attic_cache_name.is_empty() {
                                         errors.insert("attic_cache_name".to_string(), "Attic cache name is required".to_string());
+                                    }
+
+                                    if cache_type == "Attic" && attic_public_key.is_empty() {
+                                        errors.insert("attic_public_key".to_string(), "Attic public key is required".to_string());
                                     }
 
                                     if push_to.is_empty() {
@@ -1033,6 +1106,11 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             attic_token: if attic_token_val.trim().is_empty() { None } else { Some(attic_token_val.trim().to_string()) },
                                             attic_cache_name: if cache_type == "Attic" {
                                                 Some(attic_cache_name)
+                                            } else {
+                                                None
+                                            },
+                                            attic_public_key: if cache_type == "Attic" {
+                                                if attic_public_key.trim().is_empty() { None } else { Some(attic_public_key.trim().to_string()) }
                                             } else {
                                                 None
                                             },

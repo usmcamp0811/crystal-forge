@@ -2,6 +2,8 @@ use crate::handlers::agent_request::{
     CFState, authenticate_agent_request, deserialize_system_state_versioned,
 };
 use crate::models::agent_heartbeats::AgentHeartbeat;
+use crate::models::cache_destination::CacheDestination;
+use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::get_desired_target_by_hostname;
 use crate::queries::{agent_heartbeat::insert_agent_heartbeat, system_states::insert_system_state};
 use axum::response::Response;
@@ -17,8 +19,46 @@ use sqlx::PgPool;
 use tracing::{debug, info};
 
 #[derive(Serialize, Deserialize)]
+pub struct RuntimeCacheConfig {
+    pub cache_type: String,
+    pub cache_url: String,
+    pub cache_public_key: Option<String>,
+    pub attic_cache_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct LogResponse {
     pub desired_target: Option<String>,
+    #[serde(default)]
+    pub runtime_caches: Vec<RuntimeCacheConfig>,
+}
+
+fn destination_to_runtime_cache(destination: CacheDestination) -> Option<RuntimeCacheConfig> {
+    let cache_url = destination.push_to?;
+    Some(RuntimeCacheConfig {
+        cache_type: destination.cache_type,
+        cache_url,
+        cache_public_key: destination.attic_public_key,
+        attic_cache_name: destination.attic_cache_name,
+    })
+}
+
+async fn load_runtime_caches_for_agent(pool: &PgPool, environment_id: Option<uuid::Uuid>) -> Vec<RuntimeCacheConfig> {
+    let destinations = match environment_id {
+        Some(env_id) => get_caches_for_environment(pool, env_id).await,
+        None => get_global_caches(pool).await,
+    };
+
+    match destinations {
+        Ok(dests) => dests
+            .into_iter()
+            .filter_map(destination_to_runtime_cache)
+            .collect(),
+        Err(e) => {
+            debug!("❌ Failed to load runtime cache config for agent: {e:?}");
+            Vec::new()
+        }
+    }
 }
 /// Handles the `/current-system` POST route.
 /// Verifies the body signature using headers, parses the payload, and
@@ -80,7 +120,11 @@ pub async fn log(
             }
         };
 
-    let response = LogResponse { desired_target };
+    let runtime_caches = load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
+    let response = LogResponse {
+        desired_target,
+        runtime_caches,
+    };
 
     // Return JSON response with appropriate status
     let status = if version_compatible {

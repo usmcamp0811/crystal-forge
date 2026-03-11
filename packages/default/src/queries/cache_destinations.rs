@@ -64,12 +64,12 @@ pub async fn create_cache_destination(
         r#"
         INSERT INTO cache_destinations (
             name, cache_type, push_to, enabled, signing_key_path, compression,
-            s3_region, s3_profile, attic_token, attic_cache_name, 
+            s3_region, s3_profile, attic_token, attic_cache_name, attic_public_key,
             attic_ignore_upstream_cache_filter, attic_jobs,
             parallel_uploads, max_retries, retry_delay_seconds, push_timeout_seconds,
             force_repush, require_sigs
         ) VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
         )
         RETURNING *
         "#,
@@ -84,6 +84,7 @@ pub async fn create_cache_destination(
     .bind(&create.s3_profile)
     .bind(&create.attic_token)
     .bind(&create.attic_cache_name)
+    .bind(&create.attic_public_key)
     .bind(create.attic_ignore_upstream_cache_filter)
     .bind(create.attic_jobs)
     .bind(create.parallel_uploads)
@@ -174,6 +175,10 @@ pub async fn update_cache_destination(
         updates.push(format!("attic_cache_name = ${}", bind_count));
         bind_count += 1;
     }
+    if update.attic_public_key.is_some() {
+        updates.push(format!("attic_public_key = ${}", bind_count));
+        bind_count += 1;
+    }
     if update.attic_ignore_upstream_cache_filter.is_some() {
         updates.push(format!("attic_ignore_upstream_cache_filter = ${}", bind_count));
         bind_count += 1;
@@ -251,6 +256,9 @@ pub async fn update_cache_destination(
     }
     if let Some(ref attic_cache_name) = update.attic_cache_name {
         q = q.bind(attic_cache_name);
+    }
+    if let Some(ref attic_public_key) = update.attic_public_key {
+        q = q.bind(attic_public_key);
     }
     if let Some(attic_ignore_upstream_cache_filter) = update.attic_ignore_upstream_cache_filter {
         q = q.bind(attic_ignore_upstream_cache_filter);

@@ -30,6 +30,7 @@ pub struct CacheDestination {
     // Attic-specific
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: Option<bool>,
     pub attic_jobs: Option<i32>,
 
@@ -62,6 +63,7 @@ pub struct CreateCacheDestination {
     pub s3_profile: Option<String>,
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: Option<bool>,
     pub attic_jobs: Option<i32>,
     pub parallel_uploads: Option<i32>,
@@ -87,6 +89,7 @@ pub struct UpdateCacheDestination {
     pub s3_profile: Option<String>,
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: Option<bool>,
     pub attic_jobs: Option<i32>,
     pub parallel_uploads: Option<i32>,
@@ -121,6 +124,16 @@ impl CreateCacheDestination {
         // Type-specific validation
         match self.cache_type.as_str() {
             "Attic" => {
+                if self.push_to.is_none()
+                    || self
+                        .push_to
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err("push_to URL is required for Attic cache type".to_string());
+                }
+
                 if self.attic_cache_name.is_none()
                     || self
                         .attic_cache_name
@@ -129,6 +142,16 @@ impl CreateCacheDestination {
                         .unwrap_or(true)
                 {
                     return Err("attic_cache_name is required for Attic cache type".to_string());
+                }
+
+                if self.attic_public_key.is_none()
+                    || self
+                        .attic_public_key
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err("attic_public_key is required for Attic cache type".to_string());
                 }
             }
             "S3" | "Http" | "Nix" => {
@@ -161,8 +184,9 @@ mod tests {
         let create = CreateCacheDestination {
             name: "test".to_string(),
             cache_type: "Attic".to_string(),
-            push_to: None,
+            push_to: Some("https://attic.example.com".to_string()),
             attic_cache_name: None,
+            attic_public_key: None,
             enabled: None,
             signing_key_path: None,
             compression: None,
@@ -192,6 +216,7 @@ mod tests {
             cache_type: "S3".to_string(),
             push_to: None,
             attic_cache_name: None,
+            attic_public_key: None,
             enabled: None,
             signing_key_path: None,
             compression: None,
@@ -219,8 +244,9 @@ mod tests {
         let create = CreateCacheDestination {
             name: "test-attic".to_string(),
             cache_type: "Attic".to_string(),
-            push_to: None,
+            push_to: Some("https://attic.example.com".to_string()),
             attic_cache_name: Some("my-cache".to_string()),
+            attic_public_key: Some("cache.example.com-1:abc123".to_string()),
             enabled: None,
             signing_key_path: None,
             compression: None,
@@ -249,6 +275,7 @@ mod tests {
             cache_type: "InvalidType".to_string(),
             push_to: None,
             attic_cache_name: None,
+            attic_public_key: None,
             enabled: None,
             signing_key_path: None,
             compression: None,
@@ -278,6 +305,7 @@ mod tests {
             cache_type: "Nix".to_string(),
             push_to: Some("https://cache.example.com".to_string()),
             attic_cache_name: None,
+            attic_public_key: None,
             enabled: None,
             signing_key_path: None,
             compression: None,
