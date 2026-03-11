@@ -1,11 +1,11 @@
 ---
 id: TASK-42
 title: Create cache view
-status: In Progress
+status: Review
 assignee:
   - KimiK2.5
 created_date: '2026-02-17 04:43'
-updated_date: '2026-03-11 03:09'
+updated_date: '2026-03-11 03:27'
 labels:
   - ui
   - web-ui
@@ -594,6 +594,10 @@ Added authenticated S3 cache credential support end-to-end (migration 0095 plus 
 Verification run: nix develop -c bash -c "cd packages/default && SQLX_OFFLINE=true cargo check" (pass), nix develop -c bash -c "cd packages/web-ui && cargo check" (pass), nix develop -c bash -lc "nix run .#devScripts.db-only -- up -D && cd packages/default && cargo sqlx prepare" (prepare succeeded).
 
 Commit pushed: 13c1d199
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/155
+
+Moved to Review after implementation and verification commands were executed for backend, web-ui, sqlx prepare, and web-ui integration check screenshots.
 <!-- SECTION:NOTES:END -->
 
 ## Definition of Done
