@@ -261,6 +261,33 @@ fn CacheDestinationsList() -> Element {
                                 div {
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Server URL *" }
+                                        if !add_field_errors().contains_key("push_to") {
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Base URL for your Attic instance" }
+                                        }
+                                    }
+                                    input {
+                                        class: if add_field_errors().contains_key("push_to") {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
+                                        } else {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
+                                        },
+                                        placeholder: "https://attic.example.com",
+                                        value: add_push_to(),
+                                        oninput: move |evt| {
+                                            add_push_to.set(evt.value());
+                                            let mut errors = add_field_errors();
+                                            errors.remove("push_to");
+                                            add_field_errors.set(errors);
+                                        },
+                                    }
+                                    if let Some(err) = add_field_errors().get("push_to") {
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                    }
+                                }
+                                div {
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
                                         span { class: "text-[11px] {theme::text::MUTED}", "Authentication token for Attic cache server" }
                                     }
@@ -440,8 +467,13 @@ fn CacheDestinationsList() -> Element {
                                         errors.insert("attic_cache_name".to_string(), "Attic cache name is required".to_string());
                                     }
 
-                                    if cache_type != "Attic" && push_to.is_empty() {
-                                        errors.insert("push_to".to_string(), "Destination URL is required".to_string());
+                                    if push_to.is_empty() {
+                                        let message = if cache_type == "Attic" {
+                                            "Attic server URL is required"
+                                        } else {
+                                            "Destination URL is required"
+                                        };
+                                        errors.insert("push_to".to_string(), message.to_string());
                                     }
 
                                     // If there are validation errors, display them and stop
@@ -468,7 +500,11 @@ fn CacheDestinationsList() -> Element {
                                         let req = CreateCacheDestination {
                                             name,
                                             cache_type: cache_type.clone(),
-                                            push_to: if cache_type == "Attic" { None } else { Some(push_to) },
+                                            push_to: if push_to.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(push_to)
+                                            },
                                             enabled: Some(true),
                                             signing_key_path: if signing_key_path_val.trim().is_empty() { None } else { Some(signing_key_path_val.trim().to_string()) },
                                             compression: if compression_val.trim().is_empty() { None } else { Some(compression_val.trim().to_string()) },
@@ -745,6 +781,33 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                 div {
                                     div {
                                         class: "flex items-baseline justify-between gap-2",
+                                        label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Server URL *" }
+                                        if !edit_field_errors().contains_key("push_to") {
+                                            span { class: "text-[11px] {theme::text::MUTED}", "Base URL for your Attic instance" }
+                                        }
+                                    }
+                                    input {
+                                        class: if edit_field_errors().contains_key("push_to") {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::text::PRIMARY} cf-policy-modal-field-error focus:outline-none"
+                                        } else {
+                                            "w-full rounded-lg border px-3 py-2 text-sm {theme::interactive::INPUT} {theme::text::PRIMARY} focus:outline-none"
+                                        },
+                                        placeholder: "https://attic.example.com",
+                                        value: edit_push_to(),
+                                        oninput: move |evt| {
+                                            edit_push_to.set(evt.value());
+                                            let mut errors = edit_field_errors();
+                                            errors.remove("push_to");
+                                            edit_field_errors.set(errors);
+                                        },
+                                    }
+                                    if let Some(err) = edit_field_errors().get("push_to") {
+                                        p { class: "text-[11px] text-red-300 mt-1", "{err}" }
+                                    }
+                                }
+                                div {
+                                    div {
+                                        class: "flex items-baseline justify-between gap-2",
                                         label { class: "block text-sm {theme::text::SECONDARY} mb-1", "Attic Token (optional)" }
                                         span { class: "text-[11px] {theme::text::MUTED}", "Leave empty to keep existing or enter new token" }
                                     }
@@ -924,8 +987,13 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         errors.insert("attic_cache_name".to_string(), "Attic cache name is required".to_string());
                                     }
 
-                                    if cache_type != "Attic" && push_to.is_empty() {
-                                        errors.insert("push_to".to_string(), "Destination URL is required".to_string());
+                                    if push_to.is_empty() {
+                                        let message = if cache_type == "Attic" {
+                                            "Attic server URL is required"
+                                        } else {
+                                            "Destination URL is required"
+                                        };
+                                        errors.insert("push_to".to_string(), message.to_string());
                                     }
 
                                     // If there are validation errors, display them and stop
@@ -951,7 +1019,11 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                         let req = UpdateCacheDestination {
                                             name: Some(name),
                                             cache_type: Some(cache_type.clone()),
-                                            push_to: if cache_type == "Attic" { None } else { Some(push_to) },
+                                            push_to: if push_to.trim().is_empty() {
+                                                None
+                                            } else {
+                                                Some(push_to)
+                                            },
                                             enabled: None,
                                             signing_key_path: if signing_key_path_val.trim().is_empty() { None } else { Some(signing_key_path_val.trim().to_string()) },
                                             compression: if compression_val.trim().is_empty() { None } else { Some(compression_val.trim().to_string()) },
