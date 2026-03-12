@@ -33,59 +33,56 @@ pub fn TopBar(title: String) -> Element {
         });
     };
 
-    let toggle_drawer = move |_| {
-        is_mobile_drawer_open.set(!is_mobile_drawer_open());
-    };
-
-    let toggle_sidebar = move |_| {
-        let new_state = !is_collapsed();
-        is_collapsed.set(new_state);
-        // Persist to localStorage
-        if let Some(window) = web_sys::window() {
-            if let Ok(Some(storage)) = window.local_storage() {
-                let _ = storage.set_item(
-                    "cf-sidebar-collapsed",
-                    if new_state { "true" } else { "false" },
-                );
-            }
-        }
-    };
-
     rsx! {
         header {
             class: "flex items-center justify-between h-16 px-6 {theme::surface::SIDEBAR_BG}",
             style: "border-bottom: 1px solid var(--cf-card-border);",
             div {
                 class: "flex items-center gap-3",
-                // Hamburger button for mobile
+                // Mobile (<768px): Hamburger menu
+                // Desktop/Tablet (≥768px): Sidebar toggle
                 button {
-                    class: "md:hidden p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
-                    onclick: toggle_drawer,
-                    "aria-label": "Open menu",
+                    class: "p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
+                    onclick: move |_| {
+                        // On mobile: open drawer
+                        // On desktop: toggle sidebar
+                        if web_sys::window()
+                            .and_then(|w| w.inner_width().ok())
+                            .and_then(|w| w.as_f64())
+                            .unwrap_or(1024.0) < 768.0 {
+                            is_mobile_drawer_open.set(true);
+                        } else {
+                            let new_state = !is_collapsed();
+                            is_collapsed.set(new_state);
+                            if let Some(window) = web_sys::window() {
+                                if let Ok(Some(storage)) = window.local_storage() {
+                                    let _ = storage.set_item(
+                                        "cf-sidebar-collapsed",
+                                        if new_state { "true" } else { "false" },
+                                    );
+                                }
+                            }
+                        }
+                    },
+                    "aria-label": "Toggle navigation",
                     svg {
                         class: "w-6 h-6",
                         fill: "none",
                         stroke: "currentColor",
                         stroke_width: "2",
                         view_box: "0 0 24 24",
-                        path { d: "M4 6h16M4 12h16M4 18h16" }
-                    }
-                }
-
-                // Sidebar toggle for tablet and desktop
-                button {
-                    class: "hidden md:block p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
-                    onclick: toggle_sidebar,
-                    "aria-label": "Toggle sidebar",
-                    svg {
-                        class: "w-5 h-5",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        if is_collapsed() {
+                        // Show hamburger icon on mobile, chevron on desktop
+                        if web_sys::window()
+                            .and_then(|w| w.inner_width().ok())
+                            .and_then(|w| w.as_f64())
+                            .unwrap_or(1024.0) < 768.0 {
+                            // Hamburger icon
+                            path { d: "M4 6h16M4 12h16M4 18h16" }
+                        } else if is_collapsed() {
+                            // Expand icon (chevrons pointing right)
                             path { d: "M13 5l7 7-7 7M5 5l7 7-7 7" }
                         } else {
+                            // Collapse icon (chevrons pointing left)
                             path { d: "M11 19l-7-7 7-7M19 19l-7-7 7-7" }
                         }
                     }
