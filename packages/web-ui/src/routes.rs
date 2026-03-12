@@ -8,6 +8,7 @@ use crate::components::layout::AppShell;
 use crate::views::admin::AdminView;
 use crate::views::builders::BuildersView;
 use crate::views::builds::BuildsView;
+use crate::views::caches::CachesView;
 use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
 use crate::views::dev_login::DevLoginView;
@@ -56,6 +57,9 @@ pub enum Route {
     #[route("/builders")]
     BuildersView {},
 
+    #[route("/caches")]
+    CachesView {},
+
     #[route("/cves")]
     CvesView {},
 
@@ -98,6 +102,7 @@ impl Route {
                 format!("Evaluations · commit {commit_id}")
             }
             Route::BuildersView { .. } => "Builders".to_string(),
+            Route::CachesView { .. } => "Cache Management".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),

@@ -507,6 +507,112 @@ pub async fn fetch_builder_metrics(id: &Uuid) -> Result<Vec<BuilderMetrics>, Api
     fetch_json(&url).await
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache Management API
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// List cache destinations
+pub async fn fetch_cache_destinations(enabled_only: bool) -> Result<Vec<CacheDestination>, ApiClientError> {
+    let url = if enabled_only {
+        format!("{}/caches?enabled_only=true", base_url())
+    } else {
+        format!("{}/caches", base_url())
+    };
+    fetch_json(&url).await
+}
+
+/// Get a single cache destination by ID
+pub async fn fetch_cache_destination(id: i32) -> Result<CacheDestination, ApiClientError> {
+    let url = format!("{}/caches/{}", base_url(), id);
+    fetch_json(&url).await
+}
+
+/// Create a new cache destination
+pub async fn create_cache_destination(data: &CreateCacheDestination) -> Result<CacheDestination, ApiClientError> {
+    let url = format!("{}/caches", base_url());
+    send_json_with_csrf("POST", &url, Some(data)).await
+}
+
+/// Update an existing cache destination
+pub async fn update_cache_destination(id: i32, data: &UpdateCacheDestination) -> Result<CacheDestination, ApiClientError> {
+    let url = format!("{}/caches/{}", base_url(), id);
+    send_json_with_csrf("PUT", &url, Some(data)).await
+}
+
+/// Delete a cache destination
+pub async fn delete_cache_destination(id: i32) -> Result<(), ApiClientError> {
+    let url = format!("{}/caches/{}", base_url(), id);
+    send_empty_with_csrf::<()>("DELETE", &url, None).await
+}
+
+/// List cache push jobs with optional filtering
+pub async fn fetch_cache_push_jobs(status: Option<&str>, limit: i32, offset: i32) -> Result<Vec<CachePushJob>, ApiClientError> {
+    let mut url = format!("{}/cache-push-jobs?limit={}&offset={}", base_url(), limit, offset);
+    if let Some(s) = status {
+        url.push_str(&format!("&status={}", s));
+    }
+    fetch_json(&url).await
+}
+
+/// Get a single cache push job by ID
+pub async fn fetch_cache_push_job(id: i32) -> Result<CachePushJob, ApiClientError> {
+    let url = format!("{}/cache-push-jobs/{}", base_url(), id);
+    fetch_json(&url).await
+}
+
+/// Retry a failed cache push job
+pub async fn retry_cache_push_job(id: i32) -> Result<(), ApiClientError> {
+    let url = format!("{}/cache-push-jobs/{}/retry", base_url(), id);
+    send_empty_with_csrf::<()>("POST", &url, None).await
+}
+
+/// Cancel a pending cache push job
+pub async fn cancel_cache_push_job(id: i32) -> Result<(), ApiClientError> {
+    let url = format!("{}/cache-push-jobs/{}/cancel", base_url(), id);
+    send_empty_with_csrf::<()>("POST", &url, None).await
+}
+
+/// Bulk retry cache push jobs
+pub async fn bulk_retry_cache_push_jobs(job_ids: Vec<i32>) -> Result<(), ApiClientError> {
+    let url = format!("{}/cache-push-jobs/bulk-retry", base_url());
+    let data = BulkJobAction { job_ids };
+    send_empty_with_csrf("POST", &url, Some(&data)).await
+}
+
+/// Bulk cancel cache push jobs
+pub async fn bulk_cancel_cache_push_jobs(job_ids: Vec<i32>) -> Result<(), ApiClientError> {
+    let url = format!("{}/cache-push-jobs/bulk-cancel", base_url());
+    let data = BulkJobAction { job_ids };
+    send_empty_with_csrf("POST", &url, Some(&data)).await
+}
+
+// Cache environment assignment
+#[derive(Debug, serde::Serialize)]
+struct AssignEnvironmentsRequest {
+    environment_ids: Vec<Uuid>,
+}
+
+pub async fn get_cache_environments(cache_id: i32) -> Result<Vec<Uuid>, ApiClientError> {
+    let url = format!("{}/caches/{}/environments", base_url(), cache_id);
+    send_json_with_csrf("GET", &url, None::<&()>).await
+}
+
+pub async fn assign_cache_environments(
+    cache_id: i32,
+    environment_ids: Vec<Uuid>,
+) -> Result<(), ApiClientError> {
+    let url = format!("{}/caches/{}/environments", base_url(), cache_id);
+    let data = AssignEnvironmentsRequest { environment_ids };
+    send_empty_with_csrf("PUT", &url, Some(&data)).await
+}
+
+pub async fn get_environment_caches(
+    environment_id: Uuid,
+) -> Result<Vec<CacheDestination>, ApiClientError> {
+    let url = format!("{}/environments/{}/caches", base_url(), environment_id);
+    send_json_with_csrf("GET", &url, None::<&()>).await
+}
+
 /// Send JSON request with CSRF token from cookie.
 async fn send_json_with_csrf<T: serde::de::DeserializeOwned, B: serde::Serialize>(
     method: &str,

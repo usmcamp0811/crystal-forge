@@ -20,12 +20,14 @@ use crystal_forge::{
         agent_request::CFState,
         api::{
             admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, commits, dashboard, deployment_policies, environments, flakes, systems,
+            builders, caches, commits, dashboard, deployment_policies, environments, flakes,
+            systems,
         },
         status,
         webhook::webhook_handler,
     },
     queries::derivations::reset_non_terminal_derivations,
+    queries::cache_destinations::encrypt_plaintext_cache_secrets,
     queue::QueueNotifier,
     server::memory_monitor_task,
     server::spawn_background_tasks,
@@ -89,6 +91,13 @@ async fn main() -> anyhow::Result<()> {
     let pool = CrystalForgeConfig::db_pool().await?;
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
+    let encrypted_rows = encrypt_plaintext_cache_secrets(&pool).await?;
+    if encrypted_rows > 0 {
+        info!(
+            "Encrypted cache secret fields at rest for {} existing destination(s)",
+            encrypted_rows
+        );
+    }
     cfg.sync_systems_to_db(&pool).await?;
 
     // Initialize dev mode fixtures if AUTH_MODE=dev
@@ -315,6 +324,51 @@ async fn main() -> anyhow::Result<()> {
             delete(admin::delete_oidc_mapping),
         )
         .route("/api/v1/admin/audit-events", get(admin::list_audit_events))
+        // Cache management endpoints
+        .route(
+            "/api/v1/caches",
+            get(caches::list_cache_destinations).post(caches::create_cache_destination),
+        )
+        .route(
+            "/api/v1/caches/:id",
+            get(caches::get_cache_destination)
+                .put(caches::update_cache_destination)
+                .delete(caches::delete_cache_destination),
+        )
+        .route(
+            "/api/v1/cache-push-jobs",
+            get(caches::list_cache_push_jobs),
+        )
+        .route(
+            "/api/v1/cache-push-jobs/:id",
+            get(caches::get_cache_push_job),
+        )
+        .route(
+            "/api/v1/cache-push-jobs/:id/retry",
+            post(caches::retry_cache_push_job),
+        )
+        .route(
+            "/api/v1/cache-push-jobs/:id/cancel",
+            post(caches::cancel_cache_push_job),
+        )
+        .route(
+            "/api/v1/cache-push-jobs/bulk-retry",
+            post(caches::bulk_retry_cache_push_jobs),
+        )
+        .route(
+            "/api/v1/cache-push-jobs/bulk-cancel",
+            post(caches::bulk_cancel_cache_push_jobs),
+        )
+        // Cache environment assignment routes
+        .route(
+            "/api/v1/caches/:id/environments",
+            get(caches::get_cache_environments_handler)
+                .put(caches::assign_cache_environments_handler),
+        )
+        .route(
+            "/api/v1/environments/:id/caches",
+            get(caches::get_environment_caches_handler),
+        )
         // Auth context endpoint (publicly accessible)
         .route("/api/auth/whoami", get(auth_whoami::whoami))
         // Setup status endpoint (publicly accessible)
@@ -379,6 +433,7 @@ async fn main() -> anyhow::Result<()> {
         .allow_methods([
             Method::GET,
             Method::POST,
+            Method::PUT,
             Method::PATCH,
             Method::DELETE,
             Method::OPTIONS,

@@ -1,0 +1,484 @@
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sqlx::FromRow;
+
+/// Cache destination to environment assignment
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CacheDestinationEnvironment {
+    pub cache_destination_id: i32,
+    pub environment_id: uuid::Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Cache destination configuration stored in database
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CacheDestination {
+    pub id: i32,
+    pub name: String,
+    pub cache_type: String, // 'S3', 'Attic', 'Http', 'Nix'
+
+    // Common fields
+    pub push_to: Option<String>,
+    pub enabled: bool,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+
+    // S3-specific
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+
+    // Attic-specific
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+
+    // Performance tuning
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+
+    // Push behavior
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+
+    // Timestamps
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// DTO for creating a new cache destination
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateCacheDestination {
+    pub name: String,
+    pub cache_type: String,
+    pub push_to: Option<String>,
+    pub enabled: Option<bool>,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+    // Environment assignments (empty = global cache)
+    pub environment_ids: Option<Vec<uuid::Uuid>>,
+}
+
+/// DTO for updating an existing cache destination
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCacheDestination {
+    pub name: Option<String>,
+    pub cache_type: Option<String>,
+    pub push_to: Option<String>,
+    pub enabled: Option<bool>,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+    // Environment assignments (None = don't change, Some(vec) = update assignments)
+    pub environment_ids: Option<Vec<uuid::Uuid>>,
+}
+
+impl CreateCacheDestination {
+    /// Validate the cache destination based on cache type
+    pub fn validate(&self) -> Result<(), String> {
+        // Validate cache type
+        match self.cache_type.as_str() {
+            "S3" | "Attic" | "Http" | "Nix" => {}
+            _ => {
+                return Err(format!(
+                    "Invalid cache_type: {}. Must be one of: S3, Attic, Http, Nix",
+                    self.cache_type
+                ))
+            }
+        }
+
+        // Validate name is not empty
+        if self.name.trim().is_empty() {
+            return Err("Cache destination name cannot be empty".to_string());
+        }
+
+        // Type-specific validation
+        match self.cache_type.as_str() {
+            "Attic" => {
+                if self.push_to.is_none()
+                    || self
+                        .push_to
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err("push_to URL is required for Attic cache type".to_string());
+                }
+
+                if self.attic_cache_name.is_none()
+                    || self
+                        .attic_cache_name
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err("attic_cache_name is required for Attic cache type".to_string());
+                }
+
+                if self.attic_public_key.is_none()
+                    || self
+                        .attic_public_key
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err("attic_public_key is required for Attic cache type".to_string());
+                }
+
+                if self.attic_token.is_none()
+                    || self
+                        .attic_token
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err("attic_token is required for Attic cache type".to_string());
+                }
+            }
+            "S3" | "Http" | "Nix" => {
+                if self.push_to.is_none()
+                    || self
+                        .push_to
+                        .as_ref()
+                        .map(|s| s.trim().is_empty())
+                        .unwrap_or(true)
+                {
+                    return Err(format!(
+                        "push_to URL is required for {} cache type",
+                        self.cache_type
+                    ));
+                }
+
+                if self.cache_type == "S3" {
+                    if self.s3_region.is_none()
+                        || self
+                            .s3_region
+                            .as_ref()
+                            .map(|s| s.trim().is_empty())
+                            .unwrap_or(true)
+                    {
+                        return Err("s3_region is required for S3 cache type".to_string());
+                    }
+
+                    if self.s3_access_key_id.is_none()
+                        || self
+                            .s3_access_key_id
+                            .as_ref()
+                            .map(|s| s.trim().is_empty())
+                            .unwrap_or(true)
+                    {
+                        return Err("s3_access_key_id is required for S3 cache type".to_string());
+                    }
+
+                    if self.s3_secret_access_key.is_none()
+                        || self
+                            .s3_secret_access_key
+                            .as_ref()
+                            .map(|s| s.trim().is_empty())
+                            .unwrap_or(true)
+                    {
+                        return Err(
+                            "s3_secret_access_key is required for S3 cache type".to_string()
+                        );
+                    }
+
+                    if self.s3_endpoint_url.is_none()
+                        || self
+                            .s3_endpoint_url
+                            .as_ref()
+                            .map(|s| s.trim().is_empty())
+                            .unwrap_or(true)
+                    {
+                        return Err("s3_endpoint_url is required for S3 cache type".to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_attic_requires_cache_name() {
+        let create = CreateCacheDestination {
+            name: "test".to_string(),
+            cache_type: "Attic".to_string(),
+            push_to: Some("https://attic.example.com".to_string()),
+            attic_cache_name: None,
+            attic_public_key: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("attic_cache_name"));
+    }
+
+    #[test]
+    fn test_validate_attic_requires_token() {
+        let create = CreateCacheDestination {
+            name: "test".to_string(),
+            cache_type: "Attic".to_string(),
+            push_to: Some("https://attic.example.com".to_string()),
+            attic_cache_name: Some("my-cache".to_string()),
+            attic_public_key: Some("cache.example.com-1:abc123".to_string()),
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("attic_token"));
+    }
+
+    #[test]
+    fn test_validate_s3_requires_push_to() {
+        let create = CreateCacheDestination {
+            name: "test".to_string(),
+            cache_type: "S3".to_string(),
+            push_to: None,
+            attic_cache_name: None,
+            attic_public_key: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: Some("token".to_string()),
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("push_to"));
+    }
+
+    #[test]
+    fn test_validate_s3_requires_access_key_id() {
+        let create = CreateCacheDestination {
+            name: "test".to_string(),
+            cache_type: "S3".to_string(),
+            push_to: Some("s3://my-bucket".to_string()),
+            attic_cache_name: None,
+            attic_public_key: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: Some("us-east-1".to_string()),
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: Some("secret".to_string()),
+            s3_session_token: None,
+            s3_endpoint_url: Some("https://s3.us-east-1.amazonaws.com".to_string()),
+            attic_token: Some("token".to_string()),
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("s3_access_key_id"));
+    }
+
+    #[test]
+    fn test_validate_attic_succeeds_with_cache_name() {
+        let create = CreateCacheDestination {
+            name: "test-attic".to_string(),
+            cache_type: "Attic".to_string(),
+            push_to: Some("https://attic.example.com".to_string()),
+            attic_cache_name: Some("my-cache".to_string()),
+            attic_public_key: Some("cache.example.com-1:abc123".to_string()),
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: Some("token".to_string()),
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_cache_type() {
+        let create = CreateCacheDestination {
+            name: "test".to_string(),
+            cache_type: "InvalidType".to_string(),
+            push_to: None,
+            attic_cache_name: None,
+            attic_public_key: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid cache_type"));
+    }
+
+    #[test]
+    fn test_validate_rejects_empty_name() {
+        let create = CreateCacheDestination {
+            name: "   ".to_string(),
+            cache_type: "Nix".to_string(),
+            push_to: Some("https://cache.example.com".to_string()),
+            attic_cache_name: None,
+            attic_public_key: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        };
+
+        let result = create.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("name cannot be empty"));
+    }
+}

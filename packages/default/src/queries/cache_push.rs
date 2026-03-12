@@ -1,10 +1,11 @@
 use crate::builder::remove_gc_root;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 use sqlx::{FromRow, PgPool};
 use tracing::{debug, warn};
 
-#[derive(Debug, FromRow, Clone)]
+#[derive(Debug, FromRow, Clone, Serialize)]
 pub struct CachePushJob {
     pub id: i32,
     pub derivation_id: i32,
@@ -363,4 +364,163 @@ pub async fn cleanup_stale_cache_push_jobs(pool: &PgPool, timeout_minutes: i32) 
     }
 
     Ok(())
+}
+
+/// List cache push jobs with optional filtering
+pub async fn list_cache_push_jobs(
+    pool: &PgPool,
+    status_filter: Option<&str>,
+    cache_destination_filter: Option<&str>,
+    limit: Option<i32>,
+    offset: Option<i32>,
+) -> Result<Vec<CachePushJob>> {
+    let mut query = String::from(
+        r#"
+        SELECT 
+            cpj.id, cpj.derivation_id, cpj.status, cpj.store_path, cpj.scheduled_at, cpj.started_at, 
+            cpj.completed_at, cpj.attempts, cpj.error_message, cpj.push_size_bytes, 
+            cpj.push_duration_ms, cpj.cache_destination
+        FROM cache_push_jobs cpj
+        WHERE 1=1
+        "#,
+    );
+
+    let mut bind_idx = 1;
+    if status_filter.is_some() {
+        query.push_str(&format!(" AND cpj.status = ${}", bind_idx));
+        bind_idx += 1;
+    }
+    if cache_destination_filter.is_some() {
+        query.push_str(&format!(" AND cpj.cache_destination = ${}", bind_idx));
+        bind_idx += 1;
+    }
+
+    query.push_str(" ORDER BY cpj.scheduled_at DESC");
+    query.push_str(&format!(" LIMIT ${}", bind_idx));
+    bind_idx += 1;
+    query.push_str(&format!(" OFFSET ${}", bind_idx));
+
+    let mut q = sqlx::query_as::<_, CachePushJob>(&query);
+
+    if let Some(status) = status_filter {
+        q = q.bind(status);
+    }
+    if let Some(cache_dest) = cache_destination_filter {
+        q = q.bind(cache_dest);
+    }
+    q = q.bind(limit.unwrap_or(50) as i64);
+    q = q.bind(offset.unwrap_or(0) as i64);
+
+    let jobs = q.fetch_all(pool).await?;
+    Ok(jobs)
+}
+
+/// Get a single cache push job by ID with derivation details
+pub async fn get_cache_push_job_detail(pool: &PgPool, job_id: i32) -> Result<Option<CachePushJob>> {
+    let job = sqlx::query_as::<_, CachePushJob>(
+        "SELECT * FROM cache_push_jobs WHERE id = $1"
+    )
+    .bind(job_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(job)
+}
+
+/// Retry a failed cache push job (admin action)
+pub async fn retry_cache_push_job(pool: &PgPool, job_id: i32) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cache_push_jobs
+        SET 
+            status = 'pending',
+            error_message = NULL,
+            retry_after = NULL,
+            scheduled_at = NOW()
+        WHERE id = $1 AND status IN ('failed', 'permanently_failed', 'cancelled')
+        "#,
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    let retried = result.rows_affected() > 0;
+    if retried {
+        debug!("Manually retried cache push job {}", job_id);
+    }
+
+    Ok(retried)
+}
+
+/// Cancel a pending or failed cache push job (admin action)
+pub async fn cancel_cache_push_job(pool: &PgPool, job_id: i32) -> Result<bool> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cache_push_jobs
+        SET 
+            status = 'cancelled',
+            completed_at = NOW(),
+            error_message = 'Manually cancelled by administrator'
+        WHERE id = $1 AND status IN ('pending', 'failed')
+        "#,
+    )
+    .bind(job_id)
+    .execute(pool)
+    .await?;
+
+    let cancelled = result.rows_affected() > 0;
+    if cancelled {
+        debug!("Manually cancelled cache push job {}", job_id);
+    }
+
+    Ok(cancelled)
+}
+
+/// Bulk retry multiple cache push jobs
+pub async fn bulk_retry_cache_push_jobs(pool: &PgPool, job_ids: &[i32]) -> Result<i64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cache_push_jobs
+        SET 
+            status = 'pending',
+            error_message = NULL,
+            retry_after = NULL,
+            scheduled_at = NOW()
+        WHERE id = ANY($1) AND status IN ('failed', 'permanently_failed', 'cancelled')
+        "#,
+    )
+    .bind(job_ids)
+    .execute(pool)
+    .await?;
+
+    let count = result.rows_affected();
+    if count > 0 {
+        debug!("Bulk retried {} cache push jobs", count);
+    }
+
+    Ok(count as i64)
+}
+
+/// Bulk cancel multiple cache push jobs
+pub async fn bulk_cancel_cache_push_jobs(pool: &PgPool, job_ids: &[i32]) -> Result<i64> {
+    let result = sqlx::query(
+        r#"
+        UPDATE cache_push_jobs
+        SET 
+            status = 'cancelled',
+            completed_at = NOW(),
+            error_message = 'Bulk cancelled by administrator'
+        WHERE id = ANY($1) AND status IN ('pending', 'failed')
+        "#,
+    )
+    .bind(job_ids)
+    .execute(pool)
+    .await?;
+
+    let count = result.rows_affected();
+    if count > 0 {
+        debug!("Bulk cancelled {} cache push jobs", count);
+    }
+
+    Ok(count as i64)
 }

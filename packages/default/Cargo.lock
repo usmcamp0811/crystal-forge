@@ -675,6 +675,7 @@ dependencies = [
  "postgres",
  "rand 0.8.5",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "serial_test",

@@ -6,6 +6,7 @@ pub mod auth_session;
 pub mod auth_status;
 pub mod auth_whoami;
 pub mod builders;
+pub mod caches;
 pub mod commits;
 pub mod dashboard;
 pub mod deployment_policies;

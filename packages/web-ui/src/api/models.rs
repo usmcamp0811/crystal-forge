@@ -1168,3 +1168,120 @@ pub struct BuilderMetrics {
     pub system_memory_total_mb: Option<i64>,
     pub system_memory_used_mb: Option<i64>,
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cache Management
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Cache destination configuration
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CacheDestination {
+    pub id: i32,
+    pub name: String,
+    pub cache_type: String,
+    pub push_to: Option<String>,
+    pub enabled: bool,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Create cache destination request
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CreateCacheDestination {
+    pub name: String,
+    pub cache_type: String,
+    pub push_to: Option<String>,
+    pub enabled: Option<bool>,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+    pub environment_ids: Option<Vec<Uuid>>,
+}
+
+/// Update cache destination request
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct UpdateCacheDestination {
+    pub name: Option<String>,
+    pub cache_type: Option<String>,
+    pub push_to: Option<String>,
+    pub enabled: Option<bool>,
+    pub signing_key_path: Option<String>,
+    pub compression: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_profile: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_session_token: Option<String>,
+    pub s3_endpoint_url: Option<String>,
+    pub attic_token: Option<String>,
+    pub attic_cache_name: Option<String>,
+    pub attic_public_key: Option<String>,
+    pub attic_ignore_upstream_cache_filter: Option<bool>,
+    pub attic_jobs: Option<i32>,
+    pub parallel_uploads: Option<i32>,
+    pub max_retries: Option<i32>,
+    pub retry_delay_seconds: Option<i64>,
+    pub push_timeout_seconds: Option<i64>,
+    pub force_repush: Option<bool>,
+    pub require_sigs: Option<bool>,
+    pub environment_ids: Option<Vec<Uuid>>,
+}
+
+/// Cache push job status and details
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CachePushJob {
+    pub id: i32,
+    pub derivation_id: i32,
+    pub status: String,
+    pub store_path: Option<String>,
+    pub scheduled_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub attempts: i32,
+    pub error_message: Option<String>,
+    pub push_size_bytes: Option<i64>,
+    pub push_duration_ms: Option<i32>,
+    pub cache_destination: Option<String>,
+}
+
+/// Bulk job action request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BulkJobAction {
+    pub job_ids: Vec<i32>,
+}

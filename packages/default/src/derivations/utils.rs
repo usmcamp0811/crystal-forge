@@ -1,4 +1,4 @@
-use crate::config::BuildConfig;
+use crate::config::{BuildConfig, CacheConfig};
 use anyhow::Result;
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
@@ -110,6 +110,60 @@ pub fn apply_cache_env_to_command(cmd: &mut Command) {
         || std::env::var_os("S3_ENDPOINT").is_some();
     if has_custom_endpoint && std::env::var_os("AWS_EC2_METADATA_DISABLED").is_none() {
         cmd.env("AWS_EC2_METADATA_DISABLED", "true");
+    }
+}
+
+pub fn apply_cache_config_env_to_command(cmd: &mut Command, cache: &CacheConfig) {
+    if let Some(ref v) = cache.s3_access_key_id {
+        cmd.env("AWS_ACCESS_KEY_ID", v);
+    }
+    if let Some(ref v) = cache.s3_secret_access_key {
+        cmd.env("AWS_SECRET_ACCESS_KEY", v);
+    }
+    if let Some(ref v) = cache.s3_session_token {
+        cmd.env("AWS_SESSION_TOKEN", v);
+    }
+    if let Some(ref v) = cache.s3_region {
+        cmd.env("AWS_REGION", v);
+        cmd.env("AWS_DEFAULT_REGION", v);
+    }
+    if let Some(ref v) = cache.s3_profile {
+        cmd.env("AWS_PROFILE", v);
+    }
+    if let Some(ref v) = cache.s3_endpoint_url {
+        cmd.env("AWS_ENDPOINT_URL", v);
+        cmd.env("AWS_ENDPOINT_URL_S3", v);
+    }
+}
+
+pub fn apply_cache_config_env_for_scope(scoped: &mut Command, cache: &CacheConfig) {
+    if let Some(ref v) = cache.s3_access_key_id {
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_ACCESS_KEY_ID={v}"));
+    }
+    if let Some(ref v) = cache.s3_secret_access_key {
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_SECRET_ACCESS_KEY={v}"));
+    }
+    if let Some(ref v) = cache.s3_session_token {
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_SESSION_TOKEN={v}"));
+    }
+    if let Some(ref v) = cache.s3_region {
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_REGION={v}"));
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_DEFAULT_REGION={v}"));
+    }
+    if let Some(ref v) = cache.s3_profile {
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_PROFILE={v}"));
+    }
+    if let Some(ref v) = cache.s3_endpoint_url {
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_ENDPOINT_URL={v}"));
+        scoped.arg("--setenv");
+        scoped.arg(format!("AWS_ENDPOINT_URL_S3={v}"));
     }
 }
 

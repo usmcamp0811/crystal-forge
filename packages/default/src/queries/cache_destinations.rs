@@ -1,0 +1,773 @@
+use crate::models::cache_destination::{CacheDestination, CreateCacheDestination, UpdateCacheDestination};
+use crate::security::cache_secrets;
+use anyhow::Result;
+use sqlx::PgPool;
+use tracing::debug;
+
+/// List all cache destinations, optionally filtering by enabled status
+pub async fn list_cache_destinations(
+    pool: &PgPool,
+    enabled_only: bool,
+) -> Result<Vec<CacheDestination>> {
+    let sql = if enabled_only {
+        "SELECT * FROM cache_destinations WHERE enabled = true ORDER BY name"
+    } else {
+        "SELECT * FROM cache_destinations ORDER BY name"
+    };
+
+    let destinations = sqlx::query_as::<_, CacheDestination>(sql)
+        .fetch_all(pool)
+        .await?;
+
+    let destinations = destinations
+        .into_iter()
+        .map(decrypt_destination_secrets)
+        .collect::<Result<Vec<_>>>()?;
+
+    debug!("Listed {} cache destinations", destinations.len());
+    Ok(destinations)
+}
+
+/// Get a single cache destination by ID
+pub async fn get_cache_destination(pool: &PgPool, id: i32) -> Result<Option<CacheDestination>> {
+    let destination = sqlx::query_as::<_, CacheDestination>(
+        "SELECT * FROM cache_destinations WHERE id = $1"
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    destination.map(decrypt_destination_secrets).transpose()
+}
+
+/// Get a single cache destination by name
+pub async fn get_cache_destination_by_name(
+    pool: &PgPool,
+    name: &str,
+) -> Result<Option<CacheDestination>> {
+    let destination = sqlx::query_as::<_, CacheDestination>(
+        "SELECT * FROM cache_destinations WHERE name = $1"
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
+
+    destination.map(decrypt_destination_secrets).transpose()
+}
+
+fn decrypt_destination_secrets(mut destination: CacheDestination) -> Result<CacheDestination> {
+    destination.attic_token = cache_secrets::decrypt_optional(destination.attic_token.as_deref())?;
+    destination.s3_access_key_id =
+        cache_secrets::decrypt_optional(destination.s3_access_key_id.as_deref())?;
+    destination.s3_secret_access_key =
+        cache_secrets::decrypt_optional(destination.s3_secret_access_key.as_deref())?;
+    destination.s3_session_token =
+        cache_secrets::decrypt_optional(destination.s3_session_token.as_deref())?;
+    Ok(destination)
+}
+
+pub async fn encrypt_plaintext_cache_secrets(pool: &PgPool) -> Result<u64> {
+    let destinations = sqlx::query_as::<_, CacheDestination>("SELECT * FROM cache_destinations")
+        .fetch_all(pool)
+        .await?;
+
+    let mut updated: u64 = 0;
+    for destination in destinations {
+        let attic = destination.attic_token.as_deref();
+        let s3_access = destination.s3_access_key_id.as_deref();
+        let s3_secret = destination.s3_secret_access_key.as_deref();
+        let s3_session = destination.s3_session_token.as_deref();
+
+        let needs_update = attic.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || s3_access.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || s3_secret.is_some_and(|v| !cache_secrets::is_encrypted(v))
+            || s3_session.is_some_and(|v| !cache_secrets::is_encrypted(v));
+
+        if !needs_update {
+            continue;
+        }
+
+        let encrypted_attic = cache_secrets::encrypt_optional(attic)?;
+        let encrypted_s3_access = cache_secrets::encrypt_optional(s3_access)?;
+        let encrypted_s3_secret = cache_secrets::encrypt_optional(s3_secret)?;
+        let encrypted_s3_session = cache_secrets::encrypt_optional(s3_session)?;
+
+        sqlx::query(
+            "UPDATE cache_destinations
+             SET attic_token = $2,
+                 s3_access_key_id = $3,
+                 s3_secret_access_key = $4,
+                 s3_session_token = $5
+             WHERE id = $1",
+        )
+        .bind(destination.id)
+        .bind(encrypted_attic)
+        .bind(encrypted_s3_access)
+        .bind(encrypted_s3_secret)
+        .bind(encrypted_s3_session)
+        .execute(pool)
+        .await?;
+
+        updated += 1;
+    }
+
+    Ok(updated)
+}
+
+/// Create a new cache destination
+pub async fn create_cache_destination(
+    pool: &PgPool,
+    create: &CreateCacheDestination,
+) -> Result<CacheDestination> {
+    // Validate before inserting
+    create.validate().map_err(|e| anyhow::anyhow!(e))?;
+
+    // Start transaction
+    let mut tx = pool.begin().await?;
+
+    let encrypted_s3_access_key_id = cache_secrets::encrypt_optional(create.s3_access_key_id.as_deref())?;
+    let encrypted_s3_secret_access_key =
+        cache_secrets::encrypt_optional(create.s3_secret_access_key.as_deref())?;
+    let encrypted_s3_session_token = cache_secrets::encrypt_optional(create.s3_session_token.as_deref())?;
+    let encrypted_attic_token = cache_secrets::encrypt_optional(create.attic_token.as_deref())?;
+
+    let destination = sqlx::query_as::<_, CacheDestination>(
+        r#"
+        INSERT INTO cache_destinations (
+            name, cache_type, push_to, enabled, signing_key_path, compression,
+            s3_region, s3_profile, s3_access_key_id, s3_secret_access_key, s3_session_token, s3_endpoint_url,
+            attic_token, attic_cache_name, attic_public_key,
+            attic_ignore_upstream_cache_filter, attic_jobs,
+            parallel_uploads, max_retries, retry_delay_seconds, push_timeout_seconds,
+            force_repush, require_sigs
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
+        )
+        RETURNING *
+        "#,
+    )
+    .bind(&create.name)
+    .bind(&create.cache_type)
+    .bind(&create.push_to)
+    .bind(create.enabled.unwrap_or(true))
+    .bind(&create.signing_key_path)
+    .bind(&create.compression)
+    .bind(&create.s3_region)
+    .bind(&create.s3_profile)
+    .bind(&encrypted_s3_access_key_id)
+    .bind(&encrypted_s3_secret_access_key)
+    .bind(&encrypted_s3_session_token)
+    .bind(&create.s3_endpoint_url)
+    .bind(&encrypted_attic_token)
+    .bind(&create.attic_cache_name)
+    .bind(&create.attic_public_key)
+    .bind(create.attic_ignore_upstream_cache_filter)
+    .bind(create.attic_jobs)
+    .bind(create.parallel_uploads)
+    .bind(create.max_retries)
+    .bind(create.retry_delay_seconds)
+    .bind(create.push_timeout_seconds)
+    .bind(create.force_repush)
+    .bind(create.require_sigs)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    // Assign environments if provided
+    if let Some(ref env_ids) = create.environment_ids {
+        for env_id in env_ids {
+            sqlx::query(
+                "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
+                 VALUES ($1, $2)"
+            )
+            .bind(destination.id)
+            .bind(env_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+
+    let destination = decrypt_destination_secrets(destination)?;
+
+    debug!("Created cache destination: {} with {} environment assignments", 
+           destination.name,
+           create.environment_ids.as_ref().map(|e| e.len()).unwrap_or(0));
+    Ok(destination)
+}
+
+/// Update an existing cache destination
+pub async fn update_cache_destination(
+    pool: &PgPool,
+    id: i32,
+    update: &UpdateCacheDestination,
+) -> Result<Option<CacheDestination>> {
+    let Some(current) = get_cache_destination(pool, id).await? else {
+        return Ok(None);
+    };
+
+    validate_update_shape(&current, update)?;
+
+    // Build dynamic update query based on which fields are provided
+    let mut query = String::from("UPDATE cache_destinations SET ");
+    let mut updates = Vec::new();
+    let mut bind_count = 1;
+
+    if let Some(ref name) = update.name {
+        if name.trim().is_empty() {
+            return Err(anyhow::anyhow!("Cache destination name cannot be empty"));
+        }
+        updates.push(format!("name = ${}", bind_count));
+        bind_count += 1;
+    }
+    if let Some(ref cache_type) = update.cache_type {
+        if !matches!(cache_type.as_str(), "S3" | "Attic" | "Http" | "Nix") {
+            return Err(anyhow::anyhow!("Invalid cache_type: {}", cache_type));
+        }
+        updates.push(format!("cache_type = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.push_to.is_some() {
+        updates.push(format!("push_to = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.enabled.is_some() {
+        updates.push(format!("enabled = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.signing_key_path.is_some() {
+        updates.push(format!("signing_key_path = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.compression.is_some() {
+        updates.push(format!("compression = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_region.is_some() {
+        updates.push(format!("s3_region = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_profile.is_some() {
+        updates.push(format!("s3_profile = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_access_key_id.is_some() {
+        updates.push(format!("s3_access_key_id = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_secret_access_key.is_some() {
+        updates.push(format!("s3_secret_access_key = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_session_token.is_some() {
+        updates.push(format!("s3_session_token = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.s3_endpoint_url.is_some() {
+        updates.push(format!("s3_endpoint_url = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.attic_token.is_some() {
+        updates.push(format!("attic_token = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.attic_cache_name.is_some() {
+        updates.push(format!("attic_cache_name = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.attic_public_key.is_some() {
+        updates.push(format!("attic_public_key = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.attic_ignore_upstream_cache_filter.is_some() {
+        updates.push(format!("attic_ignore_upstream_cache_filter = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.attic_jobs.is_some() {
+        updates.push(format!("attic_jobs = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.parallel_uploads.is_some() {
+        updates.push(format!("parallel_uploads = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.max_retries.is_some() {
+        updates.push(format!("max_retries = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.retry_delay_seconds.is_some() {
+        updates.push(format!("retry_delay_seconds = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.push_timeout_seconds.is_some() {
+        updates.push(format!("push_timeout_seconds = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.force_repush.is_some() {
+        updates.push(format!("force_repush = ${}", bind_count));
+        bind_count += 1;
+    }
+    if update.require_sigs.is_some() {
+        updates.push(format!("require_sigs = ${}", bind_count));
+        bind_count += 1;
+    }
+
+    if updates.is_empty() && update.environment_ids.is_none() {
+        // No fields to update, just return the existing record
+        return Ok(Some(current));
+    }
+
+    // Start transaction for update + environment assignment
+    let mut tx = pool.begin().await?;
+
+    let destination = if !updates.is_empty() {
+        query.push_str(&updates.join(", "));
+        query.push_str(&format!(" WHERE id = ${} RETURNING *", bind_count));
+
+        let mut q = sqlx::query_as::<_, CacheDestination>(&query);
+
+    // Bind values in the same order as the updates
+    if let Some(ref name) = update.name {
+        q = q.bind(name);
+    }
+    if let Some(ref cache_type) = update.cache_type {
+        q = q.bind(cache_type);
+    }
+    if let Some(ref push_to) = update.push_to {
+        q = q.bind(push_to);
+    }
+    if let Some(enabled) = update.enabled {
+        q = q.bind(enabled);
+    }
+    if let Some(ref signing_key_path) = update.signing_key_path {
+        q = q.bind(signing_key_path);
+    }
+    if let Some(ref compression) = update.compression {
+        q = q.bind(compression);
+    }
+    if let Some(ref s3_region) = update.s3_region {
+        q = q.bind(s3_region);
+    }
+    if let Some(ref s3_profile) = update.s3_profile {
+        q = q.bind(s3_profile);
+    }
+    if let Some(ref s3_access_key_id) = update.s3_access_key_id {
+        let encrypted = cache_secrets::encrypt_secret(s3_access_key_id)?;
+        q = q.bind(encrypted);
+    }
+    if let Some(ref s3_secret_access_key) = update.s3_secret_access_key {
+        let encrypted = cache_secrets::encrypt_secret(s3_secret_access_key)?;
+        q = q.bind(encrypted);
+    }
+    if let Some(ref s3_session_token) = update.s3_session_token {
+        let encrypted = cache_secrets::encrypt_secret(s3_session_token)?;
+        q = q.bind(encrypted);
+    }
+    if let Some(ref s3_endpoint_url) = update.s3_endpoint_url {
+        q = q.bind(s3_endpoint_url);
+    }
+    if let Some(ref attic_token) = update.attic_token {
+        let encrypted = cache_secrets::encrypt_secret(attic_token)?;
+        q = q.bind(encrypted);
+    }
+    if let Some(ref attic_cache_name) = update.attic_cache_name {
+        q = q.bind(attic_cache_name);
+    }
+    if let Some(ref attic_public_key) = update.attic_public_key {
+        q = q.bind(attic_public_key);
+    }
+    if let Some(attic_ignore_upstream_cache_filter) = update.attic_ignore_upstream_cache_filter {
+        q = q.bind(attic_ignore_upstream_cache_filter);
+    }
+    if let Some(attic_jobs) = update.attic_jobs {
+        q = q.bind(attic_jobs);
+    }
+    if let Some(parallel_uploads) = update.parallel_uploads {
+        q = q.bind(parallel_uploads);
+    }
+    if let Some(max_retries) = update.max_retries {
+        q = q.bind(max_retries);
+    }
+    if let Some(retry_delay_seconds) = update.retry_delay_seconds {
+        q = q.bind(retry_delay_seconds);
+    }
+    if let Some(push_timeout_seconds) = update.push_timeout_seconds {
+        q = q.bind(push_timeout_seconds);
+    }
+    if let Some(force_repush) = update.force_repush {
+        q = q.bind(force_repush);
+    }
+    if let Some(require_sigs) = update.require_sigs {
+        q = q.bind(require_sigs);
+    }
+
+        // Bind the ID for WHERE clause
+        q = q.bind(id);
+
+        q.fetch_optional(&mut *tx).await?
+    } else {
+        // No fields to update, get existing
+        Some(current.clone())
+    };
+
+    // Update environment assignments if provided
+    if let Some(ref env_ids) = update.environment_ids {
+        // Delete existing assignments
+        sqlx::query("DELETE FROM cache_destination_environments WHERE cache_destination_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+
+        // Insert new assignments
+        for env_id in env_ids {
+            sqlx::query(
+                "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
+                 VALUES ($1, $2)"
+            )
+            .bind(id)
+            .bind(env_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    }
+
+    tx.commit().await?;
+
+    let destination = destination
+        .map(decrypt_destination_secrets)
+        .transpose()?;
+
+    if let Some(ref dest) = destination {
+        debug!("Updated cache destination: {}", dest.name);
+    }
+
+    Ok(destination)
+}
+
+fn validate_update_shape(current: &CacheDestination, update: &UpdateCacheDestination) -> Result<()> {
+    let merged = CreateCacheDestination {
+        name: update.name.clone().unwrap_or_else(|| current.name.clone()),
+        cache_type: update
+            .cache_type
+            .clone()
+            .unwrap_or_else(|| current.cache_type.clone()),
+        push_to: update.push_to.clone().or_else(|| current.push_to.clone()),
+        enabled: Some(update.enabled.unwrap_or(current.enabled)),
+        signing_key_path: update
+            .signing_key_path
+            .clone()
+            .or_else(|| current.signing_key_path.clone()),
+        compression: update
+            .compression
+            .clone()
+            .or_else(|| current.compression.clone()),
+        s3_region: update.s3_region.clone().or_else(|| current.s3_region.clone()),
+        s3_profile: update.s3_profile.clone().or_else(|| current.s3_profile.clone()),
+        s3_access_key_id: update
+            .s3_access_key_id
+            .clone()
+            .or_else(|| current.s3_access_key_id.clone()),
+        s3_secret_access_key: update
+            .s3_secret_access_key
+            .clone()
+            .or_else(|| current.s3_secret_access_key.clone()),
+        s3_session_token: update
+            .s3_session_token
+            .clone()
+            .or_else(|| current.s3_session_token.clone()),
+        s3_endpoint_url: update
+            .s3_endpoint_url
+            .clone()
+            .or_else(|| current.s3_endpoint_url.clone()),
+        attic_token: update
+            .attic_token
+            .clone()
+            .or_else(|| current.attic_token.clone()),
+        attic_cache_name: update
+            .attic_cache_name
+            .clone()
+            .or_else(|| current.attic_cache_name.clone()),
+        attic_public_key: update
+            .attic_public_key
+            .clone()
+            .or_else(|| current.attic_public_key.clone()),
+        attic_ignore_upstream_cache_filter: update
+            .attic_ignore_upstream_cache_filter
+            .or(current.attic_ignore_upstream_cache_filter),
+        attic_jobs: update.attic_jobs.or(current.attic_jobs),
+        parallel_uploads: update.parallel_uploads.or(current.parallel_uploads),
+        max_retries: update.max_retries.or(current.max_retries),
+        retry_delay_seconds: update.retry_delay_seconds.or(current.retry_delay_seconds),
+        push_timeout_seconds: update.push_timeout_seconds.or(current.push_timeout_seconds),
+        force_repush: update.force_repush.or(current.force_repush),
+        require_sigs: update.require_sigs.or(current.require_sigs),
+        environment_ids: None,
+    };
+
+    merged.validate().map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Delete a cache destination
+pub async fn delete_cache_destination(pool: &PgPool, id: i32) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM cache_destinations WHERE id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    let deleted = result.rows_affected() > 0;
+    if deleted {
+        debug!("Deleted cache destination with id: {}", id);
+    }
+
+    Ok(deleted)
+}
+
+/// Update the last_used_at timestamp for a cache destination
+pub async fn update_cache_destination_last_used(pool: &PgPool, name: &str) -> Result<()> {
+    sqlx::query(
+        "UPDATE cache_destinations SET last_used_at = NOW() WHERE name = $1"
+    )
+    .bind(name)
+    .execute(pool)
+    .await?;
+
+    debug!("Updated last_used_at for cache destination: {}", name);
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Environment Assignment Queries
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Assign environments to a cache destination (replaces existing assignments)
+pub async fn assign_environments_to_cache(
+    pool: &PgPool,
+    cache_id: i32,
+    environment_ids: &[uuid::Uuid],
+) -> Result<()> {
+    // Start transaction
+    let mut tx = pool.begin().await?;
+
+    // Delete existing assignments
+    sqlx::query("DELETE FROM cache_destination_environments WHERE cache_destination_id = $1")
+        .bind(cache_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Insert new assignments
+    for env_id in environment_ids {
+        sqlx::query(
+            "INSERT INTO cache_destination_environments (cache_destination_id, environment_id) 
+             VALUES ($1, $2)"
+        )
+        .bind(cache_id)
+        .bind(env_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+
+    debug!(
+        "Assigned {} environments to cache destination {}",
+        environment_ids.len(),
+        cache_id
+    );
+    Ok(())
+}
+
+pub async fn cache_destination_exists(pool: &PgPool, cache_id: i32) -> Result<bool> {
+    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM cache_destinations WHERE id = $1)")
+        .bind(cache_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(exists)
+}
+
+/// Get environment IDs assigned to a cache destination
+pub async fn get_cache_environments(pool: &PgPool, cache_id: i32) -> Result<Vec<uuid::Uuid>> {
+    let environment_ids = sqlx::query_scalar::<_, uuid::Uuid>(
+        "SELECT environment_id FROM cache_destination_environments 
+         WHERE cache_destination_id = $1 
+         ORDER BY environment_id"
+    )
+    .bind(cache_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(environment_ids)
+}
+
+/// Get cache destinations assigned to a specific environment (includes global caches)
+pub async fn get_caches_for_environment(
+    pool: &PgPool,
+    environment_id: uuid::Uuid,
+) -> Result<Vec<CacheDestination>> {
+    let caches = sqlx::query_as::<_, CacheDestination>(
+        "SELECT DISTINCT cd.* FROM cache_destinations cd
+         LEFT JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
+         WHERE cd.enabled = true
+           AND (cde.environment_id = $1 OR cde.environment_id IS NULL)
+         ORDER BY cd.name"
+    )
+    .bind(environment_id)
+    .fetch_all(pool)
+    .await?;
+
+    let caches = caches
+        .into_iter()
+        .map(decrypt_destination_secrets)
+        .collect::<Result<Vec<_>>>()?;
+
+    debug!(
+        "Found {} caches for environment {} (including global)",
+        caches.len(),
+        environment_id
+    );
+    Ok(caches)
+}
+
+/// Filter cache destinations by environment (excludes global if filter is applied)
+pub async fn filter_caches_by_environment(
+    pool: &PgPool,
+    environment_id: Option<uuid::Uuid>,
+) -> Result<Vec<CacheDestination>> {
+    let caches = match environment_id {
+        Some(env_id) => {
+            // Get caches specifically assigned to this environment
+            sqlx::query_as::<_, CacheDestination>(
+                "SELECT DISTINCT cd.* FROM cache_destinations cd
+                 INNER JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
+                 WHERE cde.environment_id = $1
+                 ORDER BY cd.name"
+            )
+            .bind(env_id)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(decrypt_destination_secrets)
+            .collect::<Result<Vec<_>>>()?
+        }
+        None => {
+            // Get all caches (no filter)
+            list_cache_destinations(pool, false).await?
+        }
+    };
+
+    Ok(caches)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn empty_update() -> UpdateCacheDestination {
+        UpdateCacheDestination {
+            name: None,
+            cache_type: None,
+            push_to: None,
+            enabled: None,
+            signing_key_path: None,
+            compression: None,
+            s3_region: None,
+            s3_profile: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_session_token: None,
+            s3_endpoint_url: None,
+            attic_token: None,
+            attic_cache_name: None,
+            attic_public_key: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            environment_ids: None,
+        }
+    }
+
+    fn base_destination() -> CacheDestination {
+        CacheDestination {
+            id: 1,
+            name: "cache-a".to_string(),
+            cache_type: "S3".to_string(),
+            push_to: Some("s3://bucket/path".to_string()),
+            enabled: true,
+            signing_key_path: None,
+            compression: None,
+            s3_region: Some("us-east-1".to_string()),
+            s3_profile: None,
+            s3_access_key_id: Some("AKIA...".to_string()),
+            s3_secret_access_key: Some("super-secret".to_string()),
+            s3_session_token: None,
+            s3_endpoint_url: Some("https://s3.amazonaws.com".to_string()),
+            attic_token: None,
+            attic_cache_name: None,
+            attic_public_key: None,
+            attic_ignore_upstream_cache_filter: None,
+            attic_jobs: None,
+            parallel_uploads: None,
+            max_retries: None,
+            retry_delay_seconds: None,
+            push_timeout_seconds: None,
+            force_repush: None,
+            require_sigs: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_used_at: None,
+        }
+    }
+
+    #[test]
+    fn validate_update_shape_rejects_invalid_attic_switch() {
+        let current = base_destination();
+        let mut update = empty_update();
+        update.cache_type = Some("Attic".to_string());
+
+        let err = validate_update_shape(&current, &update).expect_err("must reject invalid Attic shape");
+        assert!(
+            err.to_string().contains("attic_cache_name is required")
+                || err.to_string().contains("attic_public_key is required")
+                || err.to_string().contains("attic_token is required")
+        );
+    }
+
+    #[test]
+    fn validate_update_shape_accepts_valid_attic_switch() {
+        let current = base_destination();
+        let mut update = empty_update();
+        update.cache_type = Some("Attic".to_string());
+        update.push_to = Some("https://attic.example.com".to_string());
+        update.attic_cache_name = Some("binary-cache".to_string());
+        update.attic_public_key = Some("attic:pub:key".to_string());
+        update.attic_token = Some("attic-token".to_string());
+
+        validate_update_shape(&current, &update).expect("valid Attic update must pass");
+    }
+}
+
+/// Get global cache destinations (not assigned to any environment)
+pub async fn get_global_caches(pool: &PgPool) -> Result<Vec<CacheDestination>> {
+    let caches = sqlx::query_as::<_, CacheDestination>(
+        "SELECT cd.* FROM cache_destinations cd
+         LEFT JOIN cache_destination_environments cde ON cd.id = cde.cache_destination_id
+         WHERE cd.enabled = true
+           AND cde.cache_destination_id IS NULL
+         ORDER BY cd.name"
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let caches = caches
+        .into_iter()
+        .map(decrypt_destination_secrets)
+        .collect::<Result<Vec<_>>>()?;
+
+    debug!("Found {} global cache destinations", caches.len());
+    Ok(caches)
+}

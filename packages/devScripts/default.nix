@@ -52,6 +52,13 @@ let
         cf-keygen -f "$CF_KEY_DIR/builder.key"
       fi
 
+      # Generate a local cache encryption key if it doesn't exist
+      if [[ ! -f "$CF_KEY_DIR/cache-encryption.key" ]]; then
+        echo "Generating cache encryption key..."
+        head -c 48 /dev/urandom | base64 > "$CF_KEY_DIR/cache-encryption.key"
+        chmod 600 "$CF_KEY_DIR/cache-encryption.key"
+      fi
+
       # Prefer an address other machines can resolve (FQDN), fall back to short host.
       # If your LAN DNS doesn't resolve either, set CF_PUBLIC_HOST yourself before running.
       ACTUAL_HOST="''${CF_PUBLIC_HOST:-$(hostname -f 2>/dev/null || hostname -s)}"
@@ -73,6 +80,9 @@ let
 
   envExports = ''
     export CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
+    CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+    CACHE_ENCRYPTION_KEY="$(cat "$CF_KEY_DIR/cache-encryption.key")"
+    export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$CACHE_ENCRYPTION_KEY"
   '';
 
   configTemplate = tomlFormat.generate "crystal-forge-config-template.toml" {
@@ -191,10 +201,13 @@ let
 
   runServer = pkgs.writeShellApplication {
     name = "run-server";
-    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix ];
+    runtimeInputs = [ pkgs.nix pkgs.git pkgs.vulnix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      CACHE_ENCRYPTION_KEY="$(cat "$CF_KEY_DIR/cache-encryption.key")"
+      export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$CACHE_ENCRYPTION_KEY"
       if [[ "''${1:-}" == "--dev" ]]; then
         exec nix run .#server
       else
@@ -270,10 +283,13 @@ let
 
   runBuilder = pkgs.writeShellApplication {
     name = "run-builder";
-    runtimeInputs = [ pkgs.nix ];
+    runtimeInputs = [ pkgs.nix pkgs.coreutils ];
     text = ''
       CRYSTAL_FORGE_CONFIG="$(${generateConfig}/bin/generate-config)"
       export CRYSTAL_FORGE_CONFIG
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      CACHE_ENCRYPTION_KEY="$(cat "$CF_KEY_DIR/cache-encryption.key")"
+      export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$CACHE_ENCRYPTION_KEY"
 
       # Bootstrap the dev builder in the database before starting
       ${bootstrapDevBuilder}/bin/bootstrap-dev-builder
@@ -291,6 +307,15 @@ let
     runtimeInputs = with pkgs; [ nix python3 coreutils hostname ];
     text = ''
       set -euo pipefail
+
+      CF_KEY_DIR="''${XDG_DATA_HOME:-$HOME/.local/share}/crystal-forge/devkeys"
+      mkdir -p "$CF_KEY_DIR"
+      if [[ ! -f "$CF_KEY_DIR/cache-encryption.key" ]]; then
+        head -c 48 /dev/urandom | base64 > "$CF_KEY_DIR/cache-encryption.key"
+        chmod 600 "$CF_KEY_DIR/cache-encryption.key"
+      fi
+      CACHE_ENCRYPTION_KEY="$(cat "$CF_KEY_DIR/cache-encryption.key")"
+      export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$CACHE_ENCRYPTION_KEY"
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
       HOST="''${CF_PUBLIC_HOST:-$(hostname -f 2>/dev/null || hostname -s)}"

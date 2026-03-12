@@ -12,6 +12,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
@@ -47,6 +48,83 @@ pub struct PaginationParams {
 
 fn default_limit() -> i64 {
     100
+}
+
+fn validate_policy_config(policy_type: &str, config: &Value) -> Result<(), (StatusCode, String)> {
+    if config.is_null() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Policy config cannot be null".to_string(),
+        ));
+    }
+
+    let obj = config.as_object().ok_or((
+        StatusCode::BAD_REQUEST,
+        "Policy config must be a JSON object".to_string(),
+    ))?;
+
+    if let Some(strict) = obj.get("strict") {
+        if !strict.is_boolean() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "config.strict must be a boolean when provided".to_string(),
+            ));
+        }
+    }
+
+    match policy_type {
+        "require_cf_agent" => {
+            if let Some(false) = obj.get("strict").and_then(|v| v.as_bool()) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "require_cf_agent policy must enforce config.strict = true".to_string(),
+                ));
+            }
+        }
+        "require_packages" => {
+            let packages = obj
+                .get("packages")
+                .and_then(|v| v.as_array())
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "require_packages policy requires config.packages as a non-empty array"
+                        .to_string(),
+                ))?;
+
+            if packages.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "require_packages policy requires at least one package".to_string(),
+                ));
+            }
+
+            let all_valid = packages.iter().all(|entry| {
+                entry
+                    .as_str()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false)
+            });
+            if !all_valid {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    "config.packages must contain only non-empty strings".to_string(),
+                ));
+            }
+        }
+        "custom_check" => {
+            obj.get("expression")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or((
+                    StatusCode::BAD_REQUEST,
+                    "custom_check policy requires non-empty config.expression".to_string(),
+                ))?;
+        }
+        _ => {}
+    }
+
+    Ok(())
 }
 
 impl PaginationParams {
@@ -205,13 +283,7 @@ pub async fn create_deployment_policy(
         ));
     }
 
-    // Validate config is valid JSON (already parsed by serde, but check it's not null)
-    if request.config.is_null() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Policy config cannot be null".to_string(),
-        ));
-    }
+    validate_policy_config(&request.policy_type, &request.config)?;
 
     // Check if policy name already exists
     let name_exists = deployment_policies::check_policy_name_exists(&state.pool, &request.name, None)
@@ -257,6 +329,9 @@ pub async fn create_deployment_policy(
     // Core policy is always enabled
     if request.policy_type == "require_cf_agent" {
         request.enabled = Some(true);
+        if let Some(config_obj) = request.config.as_object_mut() {
+            config_obj.insert("strict".to_string(), Value::Bool(true));
+        }
     }
 
     // Create policy
@@ -313,7 +388,7 @@ pub async fn update_deployment_policy(
             "Deployment policy not found".to_string(),
         ))?;
 
-    // Core require_cf_agent policy is immutable except name/description/config updates.
+    // Core require_cf_agent policy is immutable except name/description updates.
     if existing.policy_type == "require_cf_agent" {
         if let Some(ref policy_type) = request.policy_type {
             if policy_type != "require_cf_agent" {
@@ -327,6 +402,12 @@ pub async fn update_deployment_policy(
             return Err((
                 StatusCode::CONFLICT,
                 "Core require_cf_agent policy is always enabled".to_string(),
+            ));
+        }
+        if request.config.is_some() {
+            return Err((
+                StatusCode::CONFLICT,
+                "Core require_cf_agent policy config cannot be changed".to_string(),
             ));
         }
         request.enabled = Some(true);
@@ -382,16 +463,6 @@ pub async fn update_deployment_policy(
         }
     }
 
-    // Validate config if provided
-    if let Some(ref config) = request.config {
-        if config.is_null() {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Policy config cannot be null".to_string(),
-            ));
-        }
-    }
-
     let candidate_policy_type = request
         .policy_type
         .clone()
@@ -400,6 +471,10 @@ pub async fn update_deployment_policy(
         .config
         .clone()
         .unwrap_or_else(|| existing.config.clone());
+
+    if request.policy_type.is_some() || request.config.is_some() {
+        validate_policy_config(&candidate_policy_type, &candidate_config)?;
+    }
 
     // Check for duplicate policy semantics (same type + same config)
     let content_exists = deployment_policies::check_policy_content_exists(
@@ -524,6 +599,39 @@ mod tests {
     use super::*;
     use crate::test_utils::db::test_pool;
     use sqlx::PgPool;
+
+    #[test]
+    fn validate_policy_config_rejects_require_packages_without_packages() {
+        let err = validate_policy_config("require_packages", &serde_json::json!({"strict": true}))
+            .expect_err("missing packages must be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("config.packages"));
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_custom_check_without_expression() {
+        let err = validate_policy_config("custom_check", &serde_json::json!({"strict": false}))
+            .expect_err("missing expression must be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("config.expression"));
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_non_strict_require_cf_agent() {
+        let err = validate_policy_config("require_cf_agent", &serde_json::json!({"strict": false}))
+            .expect_err("strict false must be rejected");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("strict = true"));
+    }
+
+    #[test]
+    fn validate_policy_config_accepts_valid_custom_check() {
+        validate_policy_config(
+            "custom_check",
+            &serde_json::json!({"expression": "config.services.ssh.enable", "strict": true}),
+        )
+        .expect("valid custom_check config must pass");
+    }
 
     async fn create_test_policy(pool: &PgPool, name: &str) -> Uuid {
         let request = CreateDeploymentPolicyRequest {
