@@ -1,7 +1,7 @@
 ---
 id: TASK-158
 title: Responsive Sidebar Navigation - Usable at All Screen Sizes
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-02 13:45'
 updated_date: '2026-03-12 01:28'
@@ -177,4 +177,6 @@ Low (UI/UX improvement, no backend changes)
 
 <!-- SECTION:NOTES:BEGIN -->
 User request: Refine the look of the sidebar and top bar where they come together - there's currently a visible line or something that doesn't look good. This should be addressed as part of the responsive implementation.
+
+LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-158-responsive-sidebar
 <!-- SECTION:NOTES:END -->
