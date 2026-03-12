@@ -28,7 +28,7 @@ pub fn SidebarNav() -> Element {
     let nav_width = if is_collapsed {
         "md:w-16 lg:w-16"
     } else {
-        "md:w-16 lg:w-64"
+        "md:w-64 lg:w-64"
     };
     let header_justify = if is_collapsed { "justify-center" } else { "" };
 
@@ -45,7 +45,7 @@ pub fn SidebarNav() -> Element {
                 }
                 if !is_collapsed {
                     div {
-                        class: "lg:block hidden",
+                        class: "md:block hidden",
                         h1 {
                             class: "text-xl font-bold {theme::text::PRIMARY}",
                             "Crystal Forge"
@@ -265,7 +265,7 @@ pub fn SidebarNav() -> Element {
             }
             if !is_collapsed {
                 div {
-                    class: "p-4 border-t text-xs {theme::text::MUTED} lg:block hidden",
+                    class: "p-4 border-t text-xs {theme::text::MUTED} md:block hidden",
                     style: "border-top-color: var(--cf-card-border);",
                     "v0.1.0"
                 }
@@ -596,7 +596,7 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
             }
             if !collapsed {
                 span {
-                    class: "lg:inline hidden",
+                    class: "md:inline hidden",
                     "{label}"
                 }
             }
