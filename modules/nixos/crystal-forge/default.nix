@@ -229,6 +229,15 @@ let
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
 
+    ${lib.optionalString (cfg.cache.encryption_key_file != null) ''
+      if [ -f "${cfg.cache.encryption_key_file}" ]; then
+        export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$(cat "${cfg.cache.encryption_key_file}")"
+      else
+        echo "ERROR: Cache encryption key file not found: ${cfg.cache.encryption_key_file}" >&2
+        exit 1
+      fi
+    ''}
+
     ${lib.optionalString (cfg.server.oidc.clientSecretFile != null) ''
       if [ -f "${cfg.server.oidc.clientSecretFile}" ]; then
         export CRYSTAL_FORGE_OIDC_CLIENT_SECRET="$(cat "${cfg.server.oidc.clientSecretFile}")"
@@ -246,6 +255,15 @@ let
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
     export TMPDIR="/var/lib/crystal-forge/tmp"
     export HOME="/var/lib/crystal-forge"
+
+    ${lib.optionalString (cfg.cache.encryption_key_file != null) ''
+      if [ -f "${cfg.cache.encryption_key_file}" ]; then
+        export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$(cat "${cfg.cache.encryption_key_file}")"
+      else
+        echo "ERROR: Cache encryption key file not found: ${cfg.cache.encryption_key_file}" >&2
+        exit 1
+      fi
+    ''}
 
     cleanup_old_builds() {
       find /var/lib/crystal-forge/workdir -name "result*" -type l -mtime +1 -delete 2>/dev/null || true
@@ -913,6 +931,12 @@ in {
         type = lib.types.nullOr lib.types.str;
         default = null;
         description = "AWS profile to use for S3 cache";
+      };
+      encryption_key_file = lib.mkOption {
+        type = lib.types.nullOr lib.types.path;
+        default = null;
+        description =
+          "Path to file containing CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY for encrypting cache credentials at rest";
       };
       # Attic-specific options
       attic_token = lib.mkOption {
@@ -1848,6 +1872,8 @@ in {
         User = "crystal-forge";
         Group = "crystal-forge";
         WorkingDirectory = "/var/lib/crystal-forge";
+
+        EnvironmentFile = [ "-${cfg.env-file}" ];
 
         # Filesystem permissions
         StateDirectory = "crystal-forge";
