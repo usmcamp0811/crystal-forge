@@ -26,25 +26,15 @@ pub fn SidebarNav() -> Element {
     let is_collapsed = (sidebar_ctx.is_collapsed)();
 
     // Responsive width logic:
-    // - Mobile (<768px): hidden, use drawer
-    // - Tablet/Desktop (≥768px): toggle between w-16 (collapsed) and w-64 (expanded)
+    // - Mobile (<640px): hidden, use drawer
+    // - Medium/Large (>=640px): toggle between w-16 (collapsed) and w-64 (expanded)
     let nav_classes = if is_collapsed {
-        "hidden md:flex w-16"
+        "hidden sm:flex w-16"
     } else {
-        "hidden md:flex w-64"
+        "hidden sm:flex w-64"
     };
 
     let header_justify = if is_collapsed { "justify-center" } else { "" };
-
-    // On desktop (lg), always show full content. On tablet (md), only when expanded
-    let show_text_desktop = true; // Always show on desktop
-    let show_text_tablet = !is_collapsed; // Only when expanded on tablet
-
-    let header_justify = if is_collapsed {
-        "md:justify-center lg:justify-start"
-    } else {
-        ""
-    };
 
     rsx! {
         nav {
@@ -306,13 +296,13 @@ pub fn MobileDrawer() -> Element {
     rsx! {
         // Backdrop overlay
         div {
-            class: "fixed inset-0 bg-black/50 z-40 md:hidden",
+            class: "fixed inset-0 bg-black/50 z-40 sm:hidden",
             onclick: move |_| is_mobile_drawer_open.set(false),
         }
 
         // Drawer
         nav {
-            class: "fixed left-0 top-0 bottom-0 w-64 {theme::surface::SIDEBAR_BG} z-50 flex flex-col md:hidden transform transition-transform duration-300",
+            class: "fixed left-0 top-0 bottom-0 w-64 {theme::surface::SIDEBAR_BG} z-50 flex flex-col sm:hidden transform transition-transform duration-300",
             style: "border-right: 1px solid var(--cf-card-border);",
 
             // Header with close button
