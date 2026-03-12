@@ -716,22 +716,33 @@ html, body {
   }
 }
 
-/* Sidebar section dividers */
+/* Sidebar section headers */
+.cf-nav-section {
+  /* Bleed past the px-3 parent padding to fill edge-to-edge */
+  margin-left: -0.75rem;
+  margin-right: -0.75rem;
+  margin-top: 0.5rem;
+  /* Subtle tinted wash — one step darker/lighter than sidebar bg */
+  background-color: var(--cf-subtle-bg);
+  /* Hairline borders top and bottom to frame the row */
+  border-top: 1px solid var(--cf-card-border);
+  border-bottom: 1px solid var(--cf-card-border);
+  min-height: 1.625rem;
+  display: flex;
+  align-items: center;
+  padding: 0 1rem;
+  margin-bottom: 0.25rem;
+}
+
 .cf-nav-section-label {
   display: block;
-  font-size: 0.65rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--cf-text-muted);
   white-space: nowrap;
   overflow: hidden;
-}
-
-.cf-nav-section-rule {
-  border: none;
-  border-top: 1px solid var(--cf-card-border);
-  margin: 0;
 }
 
 /* Sidebar edge toggle — fixed to viewport center-left, flush with sidebar edge */

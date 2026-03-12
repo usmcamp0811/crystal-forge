@@ -695,24 +695,19 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
     }
 }
 
-/// A labeled section divider in the sidebar nav.
+/// A labeled section header in the sidebar nav.
 ///
-/// When expanded: shows a hairline separator + muted uppercase label.
-/// When collapsed: shows only the hairline separator (label hidden, no room).
+/// When expanded: full-bleed shaded row with muted uppercase label.
+/// When collapsed: full-bleed tinted hairline rule only (no label at 4rem).
 #[component]
 fn NavSection(collapsed: bool, label: &'static str) -> Element {
     rsx! {
         div {
             class: "cf-nav-section",
-            style: if collapsed { "padding: 0.75rem 0.5rem 0.25rem;" } else { "padding: 0.75rem 0.75rem 0.25rem;" },
             if !collapsed {
                 span {
                     class: "cf-nav-section-label",
                     "{label}"
-                }
-            } else {
-                hr {
-                    class: "cf-nav-section-rule"
                 }
             }
         }
