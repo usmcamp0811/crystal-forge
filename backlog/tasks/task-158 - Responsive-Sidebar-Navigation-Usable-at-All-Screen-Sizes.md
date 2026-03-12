@@ -4,7 +4,7 @@ title: Responsive Sidebar Navigation - Usable at All Screen Sizes
 status: In Progress
 assignee: []
 created_date: '2026-03-02 13:45'
-updated_date: '2026-03-12 01:47'
+updated_date: '2026-03-12 01:48'
 labels:
   - frontend
   - ui
@@ -143,18 +143,18 @@ hidden (hide sidebar, show hamburger)
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 #1 Desktop (>1024px): Full sidebar with icon + label visible
-- [x] #2 #2 Tablet (768-1024px): Icons-only sidebar with tooltips on hover
-- [x] #3 #3 Mobile (<768px): Hamburger button in top bar
-- [x] #4 #4 Mobile: Slide-out drawer navigation on hamburger tap
-- [ ] #5 #5 Mobile drawer closes on X button, tap outside, swipe gesture
-- [x] #6 #6 Sidebar toggle button works at all sizes
-- [x] #7 #7 Smooth CSS transitions between states (200-300ms)
-- [ ] #8 #8 No horizontal scroll or overflow issues
-- [x] #9 #9 Touch-friendly tap targets (44px minimum)
-- [x] #10 #10 Active route clearly highlighted in all states
-- [x] #11 #11 Works in both dark and light modes
-- [ ] #12 #12 cargo fmt and cargo clippy pass
+- [x] #1 #1 #1 Desktop (>1024px): Full sidebar with icon + label visible
+- [x] #2 #2 #2 Tablet (768-1024px): Icons-only sidebar with tooltips on hover
+- [x] #3 #3 #3 Mobile (<768px): Hamburger button in top bar
+- [x] #4 #4 #4 Mobile: Slide-out drawer navigation on hamburger tap
+- [ ] #5 #5 #5 Mobile drawer closes on X button, tap outside, swipe gesture
+- [x] #6 #6 #6 Sidebar toggle button works at all sizes
+- [x] #7 #7 #7 Smooth CSS transitions between states (200-300ms)
+- [ ] #8 #8 #8 No horizontal scroll or overflow issues
+- [x] #9 #9 #9 Touch-friendly tap targets (44px minimum)
+- [x] #10 #10 #10 Active route clearly highlighted in all states
+- [x] #11 #11 #11 Works in both dark and light modes
+- [ ] #12 #12 #12 cargo fmt and cargo clippy pass
 
 ## Risk Level
 
@@ -223,7 +223,13 @@ Low (UI/UX improvement, no backend changes)
 User request: Refine the look of the sidebar and top bar where they come together - there's currently a visible line or something that doesn't look good. This should be addressed as part of the responsive implementation.
 
 LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-158-responsive-sidebar
+
+## Testing Notes - Implementation includes: Desktop responsive behavior with toggle, Tablet icons-only mode, Mobile hamburger menu and drawer, Smooth 300ms transitions, LocalStorage persistence, Active route highlighting, Touch-friendly 44px tap targets, Dark/light theme support, Visual junction fix between sidebar/topbar. Mobile drawer closes via: X button, Clicking backdrop overlay, Navigating to new route. Note: Swipe gesture was listed in AC #5 but not implemented - can be future enhancement.
+
+## Manual Testing Required: Verify responsive breakpoints (768px, 1024px), Test drawer slide-out animation on mobile, Verify no horizontal scroll at all sizes, Test sidebar toggle persists across reload, Verify tooltips appear on hover in collapsed mode, Test in both dark and light themes, Verify active route highlighting works, Test touch targets on mobile device
 <!-- SECTION:NOTES:END -->
+
+<!-- AC:END -->
 
 <!-- AC:END -->
 
