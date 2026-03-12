@@ -4,7 +4,7 @@ title: Responsive Sidebar Navigation - Usable at All Screen Sizes
 status: To Do
 assignee: []
 created_date: '2026-03-02 13:45'
-updated_date: '2026-03-09 01:42'
+updated_date: '2026-03-12 01:28'
 labels:
   - frontend
   - ui
@@ -162,6 +162,7 @@ Low (UI/UX improvement, no backend changes)
 <!-- SECTION:DESCRIPTION:END -->
 
 - [ ] #13 Tested on responsive design mode or real devices
+- [ ] #14 Sidebar and top bar junction is visually clean with no awkward visible lines or gaps
 <!-- AC:END -->
 
 ## Definition of Done
@@ -171,3 +172,9 @@ Low (UI/UX improvement, no backend changes)
 - [ ] #3 No layout shifts during transitions
 - [ ] #4 Visual design consistent with existing design system
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+User request: Refine the look of the sidebar and top bar where they come together - there's currently a visible line or something that doesn't look good. This should be addressed as part of the responsive implementation.
+<!-- SECTION:NOTES:END -->
