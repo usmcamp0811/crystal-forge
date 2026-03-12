@@ -27,19 +27,15 @@ pub fn SidebarNav() -> Element {
 
     // Responsive width logic:
     // - Mobile (<640px): hidden, use drawer
-    // - Medium/Large (>=640px): toggle between w-16 (collapsed) and w-64 (expanded)
-    let nav_classes = if is_collapsed {
-        "hidden sm:flex w-16"
-    } else {
-        "hidden sm:flex w-64"
-    };
+    // - Medium/Large (>=640px): toggle between 4rem and 16rem
+    let nav_width = if is_collapsed { "4rem" } else { "16rem" };
 
     let header_justify = if is_collapsed { "justify-center" } else { "" };
 
     rsx! {
         nav {
-            class: "{nav_classes} {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
-            style: "border-right: 1px solid var(--cf-card-border);",
+            class: "hidden sm:flex {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
+            style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
                 class: "p-6 flex items-center gap-3 min-h-[5rem] {header_justify}",
                 img {
