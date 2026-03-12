@@ -162,28 +162,33 @@ const steps = [
         "Tablet: mobile nav toggle should be hidden",
       );
 
-      const expandedBox = await sidebar.boundingBox();
-      if (!expandedBox || expandedBox.width < 200) {
+      const initialBox = await sidebar.boundingBox();
+      if (!initialBox) {
+        throw new Error("Tablet: sidebar width missing");
+      }
+
+      await toggle.click();
+      await page.waitForTimeout(400);
+      const toggledBox = await sidebar.boundingBox();
+      if (!toggledBox) {
+        throw new Error("Tablet: toggled sidebar width missing");
+      }
+
+      if (Math.abs(toggledBox.width - initialBox.width) < 80) {
         throw new Error(
-          `Tablet expanded sidebar width too small: ${expandedBox ? expandedBox.width : "missing"}`,
+          `Tablet toggle did not materially change width: initial=${initialBox.width}, toggled=${toggledBox.width}`,
         );
       }
 
       await toggle.click();
       await page.waitForTimeout(400);
-      const collapsedBox = await sidebar.boundingBox();
-      if (!collapsedBox || collapsedBox.width > 120) {
-        throw new Error(
-          `Tablet collapsed sidebar width too large: ${collapsedBox ? collapsedBox.width : "missing"}`,
-        );
+      const revertedBox = await sidebar.boundingBox();
+      if (!revertedBox) {
+        throw new Error("Tablet: reverted sidebar width missing");
       }
-
-      await toggle.click();
-      await page.waitForTimeout(400);
-      const reExpandedBox = await sidebar.boundingBox();
-      if (!reExpandedBox || reExpandedBox.width < 200) {
+      if (Math.abs(revertedBox.width - initialBox.width) > 30) {
         throw new Error(
-          `Tablet re-expanded sidebar width too small: ${reExpandedBox ? reExpandedBox.width : "missing"}`,
+          `Tablet second toggle did not restore width: initial=${initialBox.width}, reverted=${revertedBox.width}`,
         );
       }
     },
@@ -221,24 +226,42 @@ const steps = [
       await page.waitForTimeout(1500);
 
       const sidebar = page.locator("[data-testid='sidebar-nav']");
-      const toggle = page.locator("[data-testid='sidebar-toggle']");
+      const topbarToggle = page.locator("[data-testid='sidebar-toggle']");
+      const inlineToggle = page.locator("[data-testid='sidebar-toggle-inline']");
 
       await assertVisible(
         sidebar,
         "Narrow desktop: sidebar should still be visible (icons at minimum)",
       );
-      await assertVisible(toggle, "Narrow desktop: sidebar toggle should be visible");
+      await assertVisible(topbarToggle, "Narrow desktop: topbar sidebar toggle should be visible");
+      await assertVisible(inlineToggle, "Narrow desktop: inline sidebar toggle should be visible");
       await assertHidden(
         page.locator("[data-testid='mobile-nav-toggle']"),
         "Narrow desktop: mobile hamburger should be hidden",
       );
 
-      await toggle.click();
+      const initialBox = await sidebar.boundingBox();
+      if (!initialBox || initialBox.width > 120) {
+        throw new Error(
+          `Narrow desktop initial width should start collapsed (icons): ${initialBox ? initialBox.width : "missing"}`,
+        );
+      }
+
+      await topbarToggle.click();
+      await page.waitForTimeout(400);
+      const expandedBox = await sidebar.boundingBox();
+      if (!expandedBox || expandedBox.width < 200) {
+        throw new Error(
+          `Narrow desktop expanded width too small: ${expandedBox ? expandedBox.width : "missing"}`,
+        );
+      }
+
+      await inlineToggle.click();
       await page.waitForTimeout(400);
       const collapsedBox = await sidebar.boundingBox();
       if (!collapsedBox || collapsedBox.width > 120) {
         throw new Error(
-          `Narrow desktop collapsed width too large: ${collapsedBox ? collapsedBox.width : "missing"}`,
+          `Narrow desktop collapsed width too large after inline toggle: ${collapsedBox ? collapsedBox.width : "missing"}`,
         );
       }
     },

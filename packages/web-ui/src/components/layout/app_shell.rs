@@ -58,12 +58,22 @@ pub fn AppShell() -> Element {
     let is_mobile_drawer_open = use_signal(|| false);
     let is_collapsed = use_signal(|| {
         // Try to read from localStorage
-        web_sys::window()
+        let stored = web_sys::window()
             .and_then(|w| w.local_storage().ok())
             .flatten()
             .and_then(|storage| storage.get_item("cf-sidebar-collapsed").ok())
             .flatten()
-            .map(|v| v == "true")
+            .map(|v| v == "true");
+
+        if let Some(value) = stored {
+            return value;
+        }
+
+        // Default behavior: collapse on narrower desktops/tablets for more content room
+        web_sys::window()
+            .and_then(|w| w.inner_width().ok())
+            .and_then(|v| v.as_f64())
+            .map(|width| width < 1024.0)
             .unwrap_or(false)
     });
 

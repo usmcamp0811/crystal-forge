@@ -75,7 +75,7 @@ pub fn TopBar(title: String) -> Element {
                 // Narrow desktop/tablet and up (>=480px): sidebar collapse button
                 button {
                     "data-testid": "sidebar-toggle",
-                    class: "cf-desktop-only inline-flex items-center justify-center p-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
+                    class: "cf-desktop-only inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border-2 {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px]",
                     onclick: toggle_sidebar,
                     "aria-label": if is_collapsed() {
                         "Expand sidebar"
@@ -92,6 +92,14 @@ pub fn TopBar(title: String) -> Element {
                             path { d: "M13 5l7 7-7 7M5 5l7 7-7 7" }
                         } else {
                             path { d: "M11 19l-7-7 7-7M19 19l-7-7 7-7" }
+                        }
+                    }
+                    span {
+                        class: "hidden md:inline text-sm font-medium",
+                        if is_collapsed() {
+                            "Show"
+                        } else {
+                            "Hide"
                         }
                     }
                 }

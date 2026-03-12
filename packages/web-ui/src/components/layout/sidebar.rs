@@ -22,7 +22,7 @@ pub fn SidebarNav() -> Element {
     let show_admin = auth::is_admin(&auth_context);
 
     // Get sidebar context
-    let sidebar_ctx = use_context::<SidebarContext>();
+    let mut sidebar_ctx = use_context::<SidebarContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
 
     // Responsive width logic:
@@ -54,6 +54,39 @@ pub fn SidebarNav() -> Element {
                         p {
                             class: "text-xs {theme::text::MUTED} mt-1",
                             "Fleet Management"
+                        }
+                    }
+                }
+                button {
+                    "data-testid": "sidebar-toggle-inline",
+                    class: "cf-desktop-only ml-auto inline-flex items-center justify-center rounded-md p-2 {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    onclick: move |_| {
+                        let new_state = !(sidebar_ctx.is_collapsed)();
+                        sidebar_ctx.is_collapsed.set(new_state);
+                        if let Some(window) = web_sys::window() {
+                            if let Ok(Some(storage)) = window.local_storage() {
+                                let _ = storage.set_item(
+                                    "cf-sidebar-collapsed",
+                                    if new_state { "true" } else { "false" },
+                                );
+                            }
+                        }
+                    },
+                    "aria-label": if is_collapsed {
+                        "Expand sidebar"
+                    } else {
+                        "Collapse sidebar"
+                    },
+                    svg {
+                        class: "w-4 h-4",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        if is_collapsed {
+                            path { d: "M13 5l7 7-7 7M5 5l7 7-7 7" }
+                        } else {
+                            path { d: "M11 19l-7-7 7-7M19 19l-7-7 7-7" }
                         }
                     }
                 }
