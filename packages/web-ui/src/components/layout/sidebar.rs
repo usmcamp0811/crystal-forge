@@ -83,9 +83,11 @@ pub fn SidebarNav() -> Element {
             class: "cf-sidebar-shell relative z-20 {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
             style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
-                class: "p-6 flex items-center gap-3 min-h-[5rem] {header_justify}",
+                class: "flex items-center gap-3 min-h-[5rem] {header_justify}",
+                style: if is_collapsed { "padding: 1rem;" } else { "padding: 1.5rem;" },
                 img {
-                    class: "h-8 w-8 shrink-0 object-contain",
+                    class: "shrink-0 object-contain",
+                    style: "width: 2rem; height: 2rem;",
                     src: asset!("assets/crystal-forge-icon.png"),
                     alt: "Crystal Forge"
                 }
