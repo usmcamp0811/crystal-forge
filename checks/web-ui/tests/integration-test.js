@@ -135,8 +135,8 @@ const steps = [
         "Desktop: sidebar should be visible",
       );
       await assertVisible(
-        page.locator("[data-testid='sidebar-toggle']"),
-        "Desktop: sidebar toggle should be visible",
+        page.locator("[data-testid='sidebar-edge-toggle']"),
+        "Desktop: sidebar edge toggle should be visible",
       );
       await assertHidden(
         page.locator("[data-testid='mobile-nav-toggle']"),
@@ -153,7 +153,7 @@ const steps = [
       await page.waitForTimeout(1500);
 
       const sidebar = page.locator("[data-testid='sidebar-nav']");
-      const toggle = page.locator("[data-testid='sidebar-toggle']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
 
       await assertVisible(sidebar, "Tablet: sidebar should be visible");
       await assertVisible(toggle, "Tablet: sidebar toggle should be visible");
@@ -226,15 +226,13 @@ const steps = [
       await page.waitForTimeout(1500);
 
       const sidebar = page.locator("[data-testid='sidebar-nav']");
-      const topbarToggle = page.locator("[data-testid='sidebar-toggle']");
-      const inlineToggle = page.locator("[data-testid='sidebar-toggle-inline']");
+      const edgeToggle = page.locator("[data-testid='sidebar-edge-toggle']");
 
       await assertVisible(
         sidebar,
         "Narrow desktop: sidebar should still be visible (icons at minimum)",
       );
-      await assertVisible(topbarToggle, "Narrow desktop: topbar sidebar toggle should be visible");
-      await assertVisible(inlineToggle, "Narrow desktop: inline sidebar toggle should be visible");
+      await assertVisible(edgeToggle, "Narrow desktop: sidebar edge toggle should be visible");
       await assertHidden(
         page.locator("[data-testid='mobile-nav-toggle']"),
         "Narrow desktop: mobile hamburger should be hidden",
@@ -247,7 +245,7 @@ const steps = [
         );
       }
 
-      await topbarToggle.click();
+      await edgeToggle.click();
       await page.waitForTimeout(400);
       const expandedBox = await sidebar.boundingBox();
       if (!expandedBox || expandedBox.width < 200) {
@@ -256,7 +254,7 @@ const steps = [
         );
       }
 
-      await inlineToggle.click();
+      await edgeToggle.click();
       await page.waitForTimeout(400);
       const collapsedBox = await sidebar.boundingBox();
       if (!collapsedBox || collapsedBox.width > 120) {

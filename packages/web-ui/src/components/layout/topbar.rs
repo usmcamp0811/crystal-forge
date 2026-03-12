@@ -20,7 +20,6 @@ pub fn TopBar(title: String) -> Element {
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
-    let mut is_collapsed = sidebar_ctx.is_collapsed;
 
     let handle_logout = move |_| {
         spawn(async move {
@@ -35,19 +34,6 @@ pub fn TopBar(title: String) -> Element {
 
     let toggle_drawer = move |_| {
         is_mobile_drawer_open.set(!is_mobile_drawer_open());
-    };
-
-    let toggle_sidebar = move |_| {
-        let new_state = !is_collapsed();
-        is_collapsed.set(new_state);
-        if let Some(window) = web_sys::window() {
-            if let Ok(Some(storage)) = window.local_storage() {
-                let _ = storage.set_item(
-                    "cf-sidebar-collapsed",
-                    if new_state { "true" } else { "false" },
-                );
-            }
-        }
     };
 
     rsx! {
@@ -69,38 +55,6 @@ pub fn TopBar(title: String) -> Element {
                         stroke_width: "2",
                         view_box: "0 0 24 24",
                         path { d: "M4 6h16M4 12h16M4 18h16" }
-                    }
-                }
-
-                // Narrow desktop/tablet and up (>=480px): sidebar collapse button
-                button {
-                    "data-testid": "sidebar-toggle",
-                    class: "cf-desktop-only inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg border-2 {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px]",
-                    onclick: toggle_sidebar,
-                    "aria-label": if is_collapsed() {
-                        "Expand sidebar"
-                    } else {
-                        "Collapse sidebar"
-                    },
-                    svg {
-                        class: "w-6 h-6",
-                        fill: "none",
-                        stroke: "currentColor",
-                        stroke_width: "2",
-                        view_box: "0 0 24 24",
-                        if is_collapsed() {
-                            path { d: "M13 5l7 7-7 7M5 5l7 7-7 7" }
-                        } else {
-                            path { d: "M11 19l-7-7 7-7M19 19l-7-7 7-7" }
-                        }
-                    }
-                    span {
-                        class: "hidden md:inline text-sm font-medium",
-                        if is_collapsed() {
-                            "Show"
-                        } else {
-                            "Hide"
-                        }
                     }
                 }
 
