@@ -3,8 +3,8 @@
 use dioxus::prelude::*;
 
 use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
-use crate::components::layout::SidebarNav;
 use crate::components::layout::TopBar;
+use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
 use crate::components::layout::{BannerPlacement, DevModeBanner};
 use crate::routes::Route;
 use crate::state::app_state::{AppState, AuthFetchState};
@@ -53,6 +53,25 @@ pub fn AppShell() -> Element {
     let current_route = use_route::<Route>();
     let mut app_state = use_context::<Signal<AppState>>();
     let nav = navigator();
+
+    // Initialize sidebar state
+    let is_mobile_drawer_open = use_signal(|| false);
+    let is_collapsed = use_signal(|| {
+        // Try to read from localStorage
+        web_sys::window()
+            .and_then(|w| w.local_storage().ok())
+            .flatten()
+            .and_then(|storage| storage.get_item("cf-sidebar-collapsed").ok())
+            .flatten()
+            .map(|v| v == "true")
+            .unwrap_or(false)
+    });
+
+    // Provide sidebar context
+    use_context_provider(|| SidebarContext {
+        is_mobile_drawer_open,
+        is_collapsed,
+    });
 
     let state = app_state.read();
     let auth_fetch_state = state.auth_fetch_state.clone();
@@ -127,6 +146,7 @@ pub fn AppShell() -> Element {
                 class: "flex-1 flex min-h-0 overflow-x-hidden",
 
                 SidebarNav {}
+                MobileDrawer {}
 
                 div {
                     class: "flex-1 flex flex-col min-w-0",

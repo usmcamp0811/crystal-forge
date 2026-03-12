@@ -5,7 +5,7 @@
 
 use uuid::Uuid;
 
-use crate::api::client::{fetch_deployment_policies, ApiClientError};
+use crate::api::client::{ApiClientError, fetch_deployment_policies};
 use crate::api::models::DeploymentPolicyRecord;
 use crate::components::policy::PolicyDefinition;
 
@@ -17,7 +17,9 @@ use crate::components::policy::PolicyDefinition;
 pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
     match fetch_deployment_policies(Some(100), Some(0)).await {
         Ok(response) => {
-            web_sys::console::log_1(&format!("Loaded {} policies from API", response.policies.len()).into());
+            web_sys::console::log_1(
+                &format!("Loaded {} policies from API", response.policies.len()).into(),
+            );
             response
                 .policies
                 .into_iter()
@@ -28,19 +30,35 @@ pub async fn load_policies_with_fallback() -> Vec<PolicyDefinition> {
             // Only use mock fallback for server-side failures (5xx).
             // For auth/client errors (401/403/404/etc.), do not mask with mock data.
             if (500..600).contains(&code) {
-                web_sys::console::warn_1(&format!("API returned {}: {} - falling back to mock data", code, body).into());
+                web_sys::console::warn_1(
+                    &format!(
+                        "API returned {}: {} - falling back to mock data",
+                        code, body
+                    )
+                    .into(),
+                );
                 mock_policies()
             } else {
-                web_sys::console::warn_1(&format!("API returned {}: {} - showing empty policies", code, body).into());
+                web_sys::console::warn_1(
+                    &format!("API returned {}: {} - showing empty policies", code, body).into(),
+                );
                 Vec::new()
             }
         }
         Err(ApiClientError::Network(msg)) => {
-            web_sys::console::warn_1(&format!("Network error: {} - falling back to mock data", msg).into());
+            web_sys::console::warn_1(
+                &format!("Network error: {} - falling back to mock data", msg).into(),
+            );
             mock_policies()
         }
         Err(ApiClientError::Deserialize(msg)) => {
-            web_sys::console::error_1(&format!("Failed to deserialize API response: {} - showing empty policies", msg).into());
+            web_sys::console::error_1(
+                &format!(
+                    "Failed to deserialize API response: {} - showing empty policies",
+                    msg
+                )
+                .into(),
+            );
             Vec::new()
         }
     }
@@ -56,11 +74,13 @@ fn policy_record_to_definition(record: DeploymentPolicyRecord) -> PolicyDefiniti
         "config": record.config,
     }))
     .unwrap_or_else(|_| "{}".to_string());
-    
+
     PolicyDefinition {
         id: record.id,
         name: record.name,
-        description: record.description.unwrap_or_else(|| "No description".to_string()),
+        description: record
+            .description
+            .unwrap_or_else(|| "No description".to_string()),
         format: PolicyFormat::Json,
         body,
         policy_type: Some(record.policy_type),
@@ -70,7 +90,7 @@ fn policy_record_to_definition(record: DeploymentPolicyRecord) -> PolicyDefiniti
 /// Mock policies for fallback when API is unavailable.
 fn mock_policies() -> Vec<PolicyDefinition> {
     use crate::components::policy::PolicyFormat;
-    
+
     vec![
         PolicyDefinition {
             id: Uuid::from_u128(1),

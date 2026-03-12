@@ -9,7 +9,7 @@ use crate::api::{
     models::{EvalQueueItem, EvalQueueSummary},
 };
 use crate::components::layout::Card;
-use crate::hooks::websocket::{use_websocket_eval_stream, ConnectionState, SystemEvalStatus};
+use crate::hooks::websocket::{ConnectionState, SystemEvalStatus, use_websocket_eval_stream};
 use crate::theme;
 
 #[component]
@@ -671,9 +671,15 @@ fn MetricsStrip(summary: EvalQueueSummary) -> Element {
 #[component]
 fn StatCard(label: String, value: String, tone: &'static str) -> Element {
     let style = match tone {
-        "blue" => "background-color: rgba(23, 37, 84, 0.6); border-color: rgba(59, 130, 246, 0.5); color: rgb(219, 234, 254);",
-        "green" => "background-color: rgba(6, 78, 59, 0.6); border-color: rgba(16, 185, 129, 0.5); color: rgb(209, 250, 229);",
-        _ => "background-color: rgba(30, 41, 59, 0.8); border-color: rgb(71, 85, 105); color: rgb(241, 245, 249);",
+        "blue" => {
+            "background-color: rgba(23, 37, 84, 0.6); border-color: rgba(59, 130, 246, 0.5); color: rgb(219, 234, 254);"
+        }
+        "green" => {
+            "background-color: rgba(6, 78, 59, 0.6); border-color: rgba(16, 185, 129, 0.5); color: rgb(209, 250, 229);"
+        }
+        _ => {
+            "background-color: rgba(30, 41, 59, 0.8); border-color: rgb(71, 85, 105); color: rgb(241, 245, 249);"
+        }
     };
     rsx! {
         div {

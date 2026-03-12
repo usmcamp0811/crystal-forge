@@ -79,7 +79,7 @@ fn CacheDestinationsList() -> Element {
         let _nonce = refresh_nonce();
         async move { client::fetch_cache_destinations(false).await }
     });
-    
+
     let mut show_add_modal = use_signal(|| false);
     let mut add_name = use_signal(String::new);
     let mut add_type = use_signal(|| "Nix".to_string());
@@ -99,11 +99,9 @@ fn CacheDestinationsList() -> Element {
     let mut add_error = use_signal(|| None::<String>);
     let mut add_field_errors = use_signal(|| std::collections::HashMap::<String, String>::new());
     let mut add_submitting = use_signal(|| false);
-    
+
     // Fetch available environments for assignment
-    let environments = use_resource(|| async move {
-        client::fetch_environments().await
-    });
+    let environments = use_resource(|| async move { client::fetch_environments().await });
 
     rsx! {
         div {
@@ -159,7 +157,7 @@ fn CacheDestinationsList() -> Element {
                     }
                 },
             }
-            
+
             // Add modal
             if show_add_modal() {
                 div {
@@ -178,7 +176,7 @@ fn CacheDestinationsList() -> Element {
                         aria_modal: "true",
                         aria_labelledby: "add-cache-destination-modal-title",
                         onclick: move |e| e.stop_propagation(),
-                        
+
                         // Header
                         div {
                             class: "flex justify-between items-center mb-6 shrink-0",
@@ -196,7 +194,7 @@ fn CacheDestinationsList() -> Element {
                                 "✕"
                             }
                         }
-                        
+
                         // Scrollable body
                         div {
                             class: "flex-1 min-h-0 overflow-y-auto space-y-4 pr-1",
@@ -596,7 +594,7 @@ fn CacheDestinationsList() -> Element {
 
                                     // Validate and collect field errors
                                     let mut errors = std::collections::HashMap::new();
-                                    
+
                                     if name.is_empty() {
                                         errors.insert("name".to_string(), "Cache name is required".to_string());
                                     }
@@ -644,7 +642,7 @@ fn CacheDestinationsList() -> Element {
                                         add_error.set(Some("Please fix the errors above".to_string()));
                                         return;
                                     }
-                                    
+
                                     // Clear any previous errors
                                     add_field_errors.set(std::collections::HashMap::new());
                                     add_error.set(None);
@@ -695,10 +693,10 @@ fn CacheDestinationsList() -> Element {
                                             push_timeout_seconds: Some(3600),
                                             force_repush: Some(false),
                                             require_sigs: Some(true),
-                                            environment_ids: if add_environment_ids().is_empty() { 
-                                                None 
-                                            } else { 
-                                                Some(add_environment_ids()) 
+                                            environment_ids: if add_environment_ids().is_empty() {
+                                                None
+                                            } else {
+                                                Some(add_environment_ids())
                                             },
                                         };
 
@@ -742,16 +740,27 @@ fn CacheDestinationsList() -> Element {
 #[component]
 fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<()>) -> Element {
     let enabled_badge_class = if destination.enabled {
-        format!("{} bg-emerald-500/10 text-emerald-400 border-emerald-500/30", theme::presets::BADGE)
+        format!(
+            "{} bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+            theme::presets::BADGE
+        )
     } else {
-        format!("{} bg-gray-500/10 text-gray-400 border-gray-500/30", theme::presets::BADGE)
+        format!(
+            "{} bg-gray-500/10 text-gray-400 border-gray-500/30",
+            theme::presets::BADGE
+        )
     };
-    
-    let type_badge_class = format!("{} bg-blue-500/10 text-blue-400 border-blue-500/30", theme::presets::BADGE);
-    
-    let last_used_str = destination.last_used_at.map(|d| d.format("%Y-%m-%d %H:%M").to_string());
+
+    let type_badge_class = format!(
+        "{} bg-blue-500/10 text-blue-400 border-blue-500/30",
+        theme::presets::BADGE
+    );
+
+    let last_used_str = destination
+        .last_used_at
+        .map(|d| d.format("%Y-%m-%d %H:%M").to_string());
     let created_str = destination.created_at.format("%Y-%m-%d").to_string();
-    
+
     let mut show_delete_confirm = use_signal(|| false);
     let mut show_edit_modal = use_signal(|| false);
     let mut edit_name = use_signal(|| destination.name.clone());
@@ -761,16 +770,12 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
         use_signal(|| destination.attic_cache_name.clone().unwrap_or_default());
     let mut edit_attic_public_key =
         use_signal(|| destination.attic_public_key.clone().unwrap_or_default());
-    let mut edit_attic_token =
-        use_signal(|| destination.attic_token.clone().unwrap_or_default());
+    let mut edit_attic_token = use_signal(|| destination.attic_token.clone().unwrap_or_default());
     let mut edit_signing_key_path =
         use_signal(|| destination.signing_key_path.clone().unwrap_or_default());
-    let mut edit_compression =
-        use_signal(|| destination.compression.clone().unwrap_or_default());
-    let mut edit_s3_region =
-        use_signal(|| destination.s3_region.clone().unwrap_or_default());
-    let mut edit_s3_profile =
-        use_signal(|| destination.s3_profile.clone().unwrap_or_default());
+    let mut edit_compression = use_signal(|| destination.compression.clone().unwrap_or_default());
+    let mut edit_s3_region = use_signal(|| destination.s3_region.clone().unwrap_or_default());
+    let mut edit_s3_profile = use_signal(|| destination.s3_profile.clone().unwrap_or_default());
     let mut edit_s3_access_key_id =
         use_signal(|| destination.s3_access_key_id.clone().unwrap_or_default());
     let mut edit_s3_secret_access_key =
@@ -784,17 +789,17 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     let mut edit_submitting = use_signal(|| false);
     let edit_modal_title_id = format!("edit-cache-destination-modal-title-{}", destination.id);
     let delete_modal_title_id = format!("delete-cache-destination-modal-title-{}", destination.id);
-    
+
     // Fetch current environment assignments and available environments
     let cache_id = destination.id;
     let edit_environment_ids = use_resource(move || async move {
-        client::get_cache_environments(cache_id).await.unwrap_or_default()
+        client::get_cache_environments(cache_id)
+            .await
+            .unwrap_or_default()
     });
     let mut edit_selected_environments = use_signal(Vec::<Uuid>::new);
-    let edit_environments = use_resource(|| async move {
-        client::fetch_environments().await
-    });
-    
+    let edit_environments = use_resource(|| async move { client::fetch_environments().await });
+
     // Initialize selected environments when loaded
     use_effect(move || {
         if let Some(loaded_env_ids) = edit_environment_ids.read().as_ref() {
@@ -807,10 +812,10 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
     rsx! {
         div {
             class: "{theme::presets::CARD}",
-            
+
             div {
                 class: "flex justify-between items-start",
-                
+
                 div {
                     class: "flex-1",
                     div {
@@ -828,14 +833,14 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                             "{destination.cache_type}"
                         }
                     }
-                    
+
                     if let Some(ref url) = destination.push_to {
                         p {
                             class: "text-sm {theme::text::SECONDARY} mb-3",
                             "→ {url}"
                         }
                     }
-                    
+
                     div {
                         class: "flex gap-4 text-xs {theme::text::MUTED}",
                         if let Some(ref last_used) = last_used_str {
@@ -846,7 +851,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                         span { "Created: {created_str}" }
                     }
                 }
-                
+
                 div {
                     class: "flex gap-2",
                     button {
@@ -1300,7 +1305,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
 
                                     // Validate and collect field errors
                                     let mut errors = std::collections::HashMap::new();
-                                    
+
                                     if name.is_empty() {
                                         errors.insert("name".to_string(), "Cache name is required".to_string());
                                     }
@@ -1354,7 +1359,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                     edit_submitting.set(true);
                                     edit_error.set(None);
                                     let on_change = on_change.clone();
-                                    
+
                                     let attic_token_val = edit_attic_token();
                                     let signing_key_path_val = edit_signing_key_path();
                                     let compression_val = edit_compression();
@@ -1402,10 +1407,10 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                                             push_timeout_seconds: None,
                                             force_repush: None,
                                             require_sigs: None,
-                                            environment_ids: if edit_selected_environments().is_empty() { 
-                                                None 
-                                            } else { 
-                                                Some(edit_selected_environments()) 
+                                            environment_ids: if edit_selected_environments().is_empty() {
+                                                None
+                                            } else {
+                                                Some(edit_selected_environments())
                                             },
                                         };
 
@@ -1427,7 +1432,7 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                     }
                 }
             }
-            
+
             // Delete confirmation modal
             if show_delete_confirm() {
                 div {
@@ -1445,14 +1450,14 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
                         aria_modal: "true",
                         aria_labelledby: "{delete_modal_title_id}",
                         onclick: move |e| e.stop_propagation(),
-                        
+
                         h3 {
                             id: "{delete_modal_title_id}",
                             class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY} mb-4",
                             "Delete Cache Destination?"
                         }
                         p { class: "{theme::text::SECONDARY} mb-6", "Are you sure you want to delete \"{destination.name}\"? This action cannot be undone." }
-                        
+
                         div {
                             class: "flex gap-3 justify-end",
                             button {
@@ -1486,12 +1491,10 @@ fn CacheDestinationCard(destination: CacheDestination, on_change: EventHandler<(
 #[component]
 fn CachePushJobsList() -> Element {
     let mut status_filter = use_signal(|| None::<String>);
-    
+
     let jobs = use_resource(move || {
         let filter = status_filter();
-        async move {
-            client::fetch_cache_push_jobs(filter.as_deref(), 100, 0).await
-        }
+        async move { client::fetch_cache_push_jobs(filter.as_deref(), 100, 0).await }
     });
 
     rsx! {
@@ -1505,7 +1508,7 @@ fn CachePushJobsList() -> Element {
                     class: "{theme::typography::SECTION_TITLE} {theme::text::PRIMARY}",
                     "Cache Push Jobs"
                 }
-                
+
                 select {
                     class: "px-3 py-2 rounded-lg text-sm {theme::interactive::INPUT} {theme::text::PRIMARY}",
                     onchange: move |evt| {
@@ -1576,21 +1579,57 @@ fn CachePushJobsList() -> Element {
 #[component]
 fn CachePushJobRow(job: CachePushJob) -> Element {
     let (status_text, status_badge_class) = match job.status.as_str() {
-        "completed" => ("Completed", format!("{} bg-emerald-500/10 text-emerald-400 border-emerald-500/30", theme::presets::BADGE)),
-        "failed" | "permanently_failed" => ("Failed", format!("{} bg-red-500/10 text-red-400 border-red-500/30", theme::presets::BADGE)),
-        "in_progress" => ("In Progress", format!("{} bg-blue-500/10 text-blue-400 border-blue-500/30", theme::presets::BADGE)),
-        "pending" => ("Pending", format!("{} bg-yellow-500/10 text-yellow-400 border-yellow-500/30", theme::presets::BADGE)),
-        "cancelled" => ("Cancelled", format!("{} bg-gray-500/10 text-gray-400 border-gray-500/30", theme::presets::BADGE)),
-        _ => (&*job.status, format!("{} bg-gray-500/10 text-gray-400 border-gray-500/30", theme::presets::BADGE)),
+        "completed" => (
+            "Completed",
+            format!(
+                "{} bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
+                theme::presets::BADGE
+            ),
+        ),
+        "failed" | "permanently_failed" => (
+            "Failed",
+            format!(
+                "{} bg-red-500/10 text-red-400 border-red-500/30",
+                theme::presets::BADGE
+            ),
+        ),
+        "in_progress" => (
+            "In Progress",
+            format!(
+                "{} bg-blue-500/10 text-blue-400 border-blue-500/30",
+                theme::presets::BADGE
+            ),
+        ),
+        "pending" => (
+            "Pending",
+            format!(
+                "{} bg-yellow-500/10 text-yellow-400 border-yellow-500/30",
+                theme::presets::BADGE
+            ),
+        ),
+        "cancelled" => (
+            "Cancelled",
+            format!(
+                "{} bg-gray-500/10 text-gray-400 border-gray-500/30",
+                theme::presets::BADGE
+            ),
+        ),
+        _ => (
+            &*job.status,
+            format!(
+                "{} bg-gray-500/10 text-gray-400 border-gray-500/30",
+                theme::presets::BADGE
+            ),
+        ),
     };
-    
+
     let scheduled_str = job.scheduled_at.format("%Y-%m-%d %H:%M").to_string();
 
     rsx! {
         tr {
             class: "border-t {theme::surface::DIVIDER} hover:{theme::surface::SUBTLE_BG}",
             td { class: "{theme::spacing::TABLE_CELL} text-sm {theme::text::PRIMARY}", "{job.id}" }
-            td { 
+            td {
                 class: "{theme::spacing::TABLE_CELL}",
                 span { class: "{status_badge_class} border", "{status_text}" }
             }

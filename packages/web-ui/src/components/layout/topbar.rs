@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::api::client;
+use crate::components::layout::sidebar::SidebarContext;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::state::theme::UiTheme;
@@ -17,6 +18,10 @@ pub fn TopBar(title: String) -> Element {
     let auth_context = app_state.read().auth.clone();
     let nav = navigator();
 
+    let sidebar_ctx = use_context::<SidebarContext>();
+    let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
+    let mut is_collapsed = sidebar_ctx.is_collapsed;
+
     let handle_logout = move |_| {
         spawn(async move {
             if let Ok(()) = client::logout().await {
@@ -28,11 +33,64 @@ pub fn TopBar(title: String) -> Element {
         });
     };
 
+    let toggle_drawer = move |_| {
+        is_mobile_drawer_open.set(!is_mobile_drawer_open());
+    };
+
+    let toggle_sidebar = move |_| {
+        let new_state = !is_collapsed();
+        is_collapsed.set(new_state);
+        // Persist to localStorage
+        if let Some(window) = web_sys::window() {
+            if let Ok(Some(storage)) = window.local_storage() {
+                let _ = storage.set_item(
+                    "cf-sidebar-collapsed",
+                    if new_state { "true" } else { "false" },
+                );
+            }
+        }
+    };
+
     rsx! {
         header {
-            class: "flex items-center justify-between h-16 px-6 border-b {theme::surface::CARD_BORDER} {theme::surface::SIDEBAR_BG}",
+            class: "flex items-center justify-between h-16 px-6 {theme::surface::SIDEBAR_BG}",
+            style: "border-bottom: 1px solid var(--cf-card-border);",
             div {
                 class: "flex items-center gap-3",
+                // Hamburger button for mobile
+                button {
+                    class: "md:hidden p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
+                    onclick: toggle_drawer,
+                    "aria-label": "Open menu",
+                    svg {
+                        class: "w-6 h-6",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M4 6h16M4 12h16M4 18h16" }
+                    }
+                }
+
+                // Sidebar toggle for desktop/tablet
+                button {
+                    class: "hidden md:block p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    onclick: toggle_sidebar,
+                    "aria-label": "Toggle sidebar",
+                    svg {
+                        class: "w-5 h-5",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        if is_collapsed() {
+                            path { d: "M13 5l7 7-7 7M5 5l7 7-7 7" }
+                        } else {
+                            path { d: "M11 19l-7-7 7-7M19 19l-7-7 7-7" }
+                        }
+                    }
+                }
+
                 h1 {
                     class: "text-lg font-semibold",
                     "{title}"
