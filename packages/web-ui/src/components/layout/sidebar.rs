@@ -47,7 +47,7 @@ pub fn SidebarNav() -> Element {
     rsx! {
         nav {
             "data-testid": "sidebar-nav",
-            class: "cf-sidebar-shell relative {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
+            class: "cf-sidebar-shell relative z-20 overflow-visible {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
             style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
                 class: "p-6 flex items-center gap-3 min-h-[5rem] {header_justify}",
@@ -72,7 +72,7 @@ pub fn SidebarNav() -> Element {
             }
             button {
                 "data-testid": "sidebar-edge-toggle",
-                class: "cf-desktop-only absolute top-20 -right-3 z-20 inline-flex h-8 w-6 items-center justify-center rounded-r-md border border-l-0 {theme::surface::CARD_BORDER} {theme::surface::SIDEBAR_BG} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+                class: "absolute top-1/2 -right-3 -translate-y-1/2 z-30 inline-flex h-10 w-6 items-center justify-center rounded-r-md border border-l-0 shadow-sm {theme::surface::CARD_BORDER} {theme::surface::SIDEBAR_BG} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
                 onclick: toggle_sidebar,
                 "aria-label": if is_collapsed {
                     "Expand sidebar"
