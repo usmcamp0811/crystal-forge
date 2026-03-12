@@ -143,18 +143,18 @@ hidden (hide sidebar, show hamburger)
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Desktop (>1024px): Full sidebar with icon + label visible
-- [ ] #2 Tablet (768-1024px): Icons-only sidebar with tooltips on hover
-- [ ] #3 Mobile (<768px): Hamburger button in top bar
-- [ ] #4 Mobile: Slide-out drawer navigation on hamburger tap
-- [ ] #5 Mobile drawer closes on X button, tap outside, swipe gesture
-- [ ] #6 Sidebar toggle button works at all sizes
-- [ ] #7 Smooth CSS transitions between states (200-300ms)
-- [ ] #8 No horizontal scroll or overflow issues
-- [ ] #9 Touch-friendly tap targets (44px minimum)
-- [ ] #10 Active route clearly highlighted in all states
-- [ ] #11 Works in both dark and light modes
-- [ ] #12 cargo fmt and cargo clippy pass
+- [x] #1 #1 Desktop (>1024px): Full sidebar with icon + label visible
+- [x] #2 #2 Tablet (768-1024px): Icons-only sidebar with tooltips on hover
+- [x] #3 #3 Mobile (<768px): Hamburger button in top bar
+- [x] #4 #4 Mobile: Slide-out drawer navigation on hamburger tap
+- [ ] #5 #5 Mobile drawer closes on X button, tap outside, swipe gesture
+- [x] #6 #6 Sidebar toggle button works at all sizes
+- [x] #7 #7 Smooth CSS transitions between states (200-300ms)
+- [ ] #8 #8 No horizontal scroll or overflow issues
+- [x] #9 #9 Touch-friendly tap targets (44px minimum)
+- [x] #10 #10 Active route clearly highlighted in all states
+- [x] #11 #11 Works in both dark and light modes
+- [ ] #12 #12 cargo fmt and cargo clippy pass
 
 ## Risk Level
 
@@ -224,6 +224,8 @@ User request: Refine the look of the sidebar and top bar where they come togethe
 
 LOCK: agent-claude on gray in ~/code/crystal-forge/TASK-158-responsive-sidebar
 <!-- SECTION:NOTES:END -->
+
+<!-- AC:END -->
 
 - [ ] #13 Tested on responsive design mode or real devices
 - [ ] #14 Sidebar and top bar junction is visually clean with no awkward visible lines or gaps
