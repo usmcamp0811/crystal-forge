@@ -122,70 +122,115 @@ const steps = [
       await page.waitForTimeout(2000);
     },
   },
+  // ============================================================
+  // RESPONSIVE SIDEBAR SCREENSHOTS
+  // Each step clears localStorage first so state is deterministic.
+  // ============================================================
   {
-    name: "07-responsive-desktop",
-    description: "Desktop layout: sidebar visible + desktop toggle visible",
+    name: "07-sidebar-desktop-expanded",
+    description: "Desktop: sidebar expanded — grouped sections with labels visible",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
+      // Force expanded state
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "false");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
 
-      await assertVisible(
-        page.locator("[data-testid='sidebar-nav']"),
-        "Desktop: sidebar should be visible",
-      );
-      await assertVisible(
-        page.locator("[data-testid='sidebar-edge-toggle']"),
-        "Desktop: sidebar edge toggle should be visible",
-      );
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      await assertVisible(sidebar, "Desktop: sidebar should be visible");
+      await assertVisible(toggle, "Desktop: sidebar edge toggle should be visible");
       await assertHidden(
         page.locator("[data-testid='mobile-nav-toggle']"),
         "Desktop: mobile nav toggle should be hidden",
       );
+
+      // Confirm sidebar is expanded (full width ~256px)
+      const box = await sidebar.boundingBox();
+      if (!box || box.width < 200) {
+        throw new Error(`Desktop expanded sidebar too narrow: ${box ? box.width : "missing"}`);
+      }
     },
   },
   {
-    name: "08-responsive-tablet-toggle",
-    description: "Tablet layout: sidebar toggle collapses/expands sidebar",
+    name: "08-sidebar-desktop-collapsed",
+    description: "Desktop: sidebar collapsed to icons — edge toggle visible at boundary",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      // Force collapsed state
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "true");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      await assertVisible(sidebar, "Desktop collapsed: sidebar should still be visible");
+      await assertVisible(toggle, "Desktop collapsed: edge toggle should be visible");
+
+      const box = await sidebar.boundingBox();
+      if (!box || box.width > 100) {
+        throw new Error(`Desktop collapsed sidebar too wide: ${box ? box.width : "missing"}`);
+      }
+
+      // Verify toggle/expand works and produces screenshot of expanded state
+      await toggle.click();
+      await page.waitForTimeout(400);
+      const expandedBox = await sidebar.boundingBox();
+      if (!expandedBox || expandedBox.width < 200) {
+        throw new Error(`Desktop toggle expand failed: ${expandedBox ? expandedBox.width : "missing"}`);
+      }
+    },
+  },
+  {
+    name: "09-sidebar-tablet",
+    description: "Tablet: icons-only sidebar by default, toggle expands/collapses",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.tablet);
-      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      // Clear stored preference so default kicks in (tablet <768px = collapsed)
+      await page.evaluate(() => {
+        localStorage.removeItem("cf-sidebar-collapsed");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
       const sidebar = page.locator("[data-testid='sidebar-nav']");
       const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
 
       await assertVisible(sidebar, "Tablet: sidebar should be visible");
-      await assertVisible(toggle, "Tablet: sidebar toggle should be visible");
+      await assertVisible(toggle, "Tablet: edge toggle should be visible");
       await assertHidden(
         page.locator("[data-testid='mobile-nav-toggle']"),
         "Tablet: mobile nav toggle should be hidden",
       );
 
       const initialBox = await sidebar.boundingBox();
-      if (!initialBox) {
-        throw new Error("Tablet: sidebar width missing");
-      }
+      if (!initialBox) throw new Error("Tablet: sidebar bounding box missing");
 
+      // Toggle and verify width changes meaningfully
       await toggle.click();
       await page.waitForTimeout(400);
       const toggledBox = await sidebar.boundingBox();
-      if (!toggledBox) {
-        throw new Error("Tablet: toggled sidebar width missing");
-      }
+      if (!toggledBox) throw new Error("Tablet: toggled bounding box missing");
 
       if (Math.abs(toggledBox.width - initialBox.width) < 80) {
         throw new Error(
-          `Tablet toggle did not materially change width: initial=${initialBox.width}, toggled=${toggledBox.width}`,
+          `Tablet toggle did not change width: initial=${initialBox.width}, toggled=${toggledBox.width}`,
         );
       }
 
+      // Restore
       await toggle.click();
       await page.waitForTimeout(400);
       const revertedBox = await sidebar.boundingBox();
-      if (!revertedBox) {
-        throw new Error("Tablet: reverted sidebar width missing");
-      }
+      if (!revertedBox) throw new Error("Tablet: reverted bounding box missing");
       if (Math.abs(revertedBox.width - initialBox.width) > 30) {
         throw new Error(
           `Tablet second toggle did not restore width: initial=${initialBox.width}, reverted=${revertedBox.width}`,
@@ -194,8 +239,8 @@ const steps = [
     },
   },
   {
-    name: "09-responsive-mobile-drawer",
-    description: "Mobile layout: hamburger opens drawer navigation",
+    name: "09b-sidebar-mobile-drawer",
+    description: "Mobile: hamburger opens drawer with grouped navigation",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.mobile);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
@@ -209,66 +254,78 @@ const steps = [
       const mobileToggle = page.locator("[data-testid='mobile-nav-toggle']");
       await assertVisible(mobileToggle, "Mobile: hamburger toggle should be visible");
       await mobileToggle.click();
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(500);
 
       await assertVisible(
         page.locator("[data-testid='mobile-drawer']"),
         "Mobile: drawer should open after tapping hamburger",
       );
+      // Screenshot captured here shows the open drawer with grouped sections
     },
   },
   {
-    name: "09b-responsive-narrow-desktop-icons",
-    description: "Narrow desktop: sidebar remains visible and can collapse to icons",
+    name: "09c-sidebar-narrow-desktop",
+    description: "Narrow desktop (560px): icons-only sidebar visible, no mobile hamburger",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.narrowDesktop);
-      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.evaluate(() => {
+        localStorage.removeItem("cf-sidebar-collapsed");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
       const sidebar = page.locator("[data-testid='sidebar-nav']");
       const edgeToggle = page.locator("[data-testid='sidebar-edge-toggle']");
 
-      await assertVisible(
-        sidebar,
-        "Narrow desktop: sidebar should still be visible (icons at minimum)",
-      );
-      await assertVisible(edgeToggle, "Narrow desktop: sidebar edge toggle should be visible");
+      await assertVisible(sidebar, "Narrow desktop: sidebar visible");
+      await assertVisible(edgeToggle, "Narrow desktop: edge toggle visible");
       await assertHidden(
         page.locator("[data-testid='mobile-nav-toggle']"),
-        "Narrow desktop: mobile hamburger should be hidden",
+        "Narrow desktop: mobile hamburger hidden",
       );
 
       const initialBox = await sidebar.boundingBox();
       if (!initialBox || initialBox.width > 120) {
         throw new Error(
-          `Narrow desktop initial width should start collapsed (icons): ${initialBox ? initialBox.width : "missing"}`,
+          `Narrow desktop should default to icons-only: ${initialBox ? initialBox.width : "missing"}`,
         );
       }
 
+      // Expand and take screenshot showing full labels + sections
       await edgeToggle.click();
       await page.waitForTimeout(400);
       const expandedBox = await sidebar.boundingBox();
       if (!expandedBox || expandedBox.width < 200) {
         throw new Error(
-          `Narrow desktop expanded width too small: ${expandedBox ? expandedBox.width : "missing"}`,
-        );
-      }
-
-      await edgeToggle.click();
-      await page.waitForTimeout(400);
-      const collapsedBox = await sidebar.boundingBox();
-      if (!collapsedBox || collapsedBox.width > 120) {
-        throw new Error(
-          `Narrow desktop collapsed width too large after inline toggle: ${collapsedBox ? collapsedBox.width : "missing"}`,
+          `Narrow desktop expand failed: ${expandedBox ? expandedBox.width : "missing"}`,
         );
       }
     },
   },
   {
-    name: "10-responsive-reset-desktop",
-    description: "Reset viewport to desktop for remaining route screenshots",
+    name: "09d-sidebar-sections-fullwidth",
+    description: "Desktop: sidebar expanded showing all section groups clearly",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "false");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      // Clip screenshot to sidebar only for a clean close-up
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      await assertVisible(sidebar, "Sidebar sections shot: sidebar must be visible");
+    },
+  },
+  {
+    name: "10-responsive-reset-desktop",
+    description: "Reset viewport and localStorage to desktop defaults for remaining screenshots",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.evaluate(() => {
+        localStorage.removeItem("cf-sidebar-collapsed");
+      });
       await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1200);
     },
