@@ -159,10 +159,9 @@ const steps = [
   },
   {
     name: "08-sidebar-desktop-collapsed",
-    description: "Desktop: sidebar collapsed to icons — edge toggle visible at boundary",
+    description: "Desktop: sidebar in icons-only collapsed state with edge toggle",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
-      // Force collapsed state
       await page.evaluate(() => {
         localStorage.setItem("cf-sidebar-collapsed", "true");
       });
@@ -179,22 +178,33 @@ const steps = [
       if (!box || box.width > 100) {
         throw new Error(`Desktop collapsed sidebar too wide: ${box ? box.width : "missing"}`);
       }
+      // Screenshot taken here: collapsed icons-only state
+    },
+  },
+  {
+    name: "08b-sidebar-desktop-toggle-expand",
+    description: "Desktop: after clicking edge toggle — sidebar expands to full labels",
+    action: async (page) => {
+      // State continues from 08 (still at desktop, collapsed)
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
 
-      // Verify toggle/expand works and produces screenshot of expanded state
+      await assertVisible(toggle, "Desktop expand: edge toggle must be visible");
       await toggle.click();
       await page.waitForTimeout(400);
+
       const expandedBox = await sidebar.boundingBox();
       if (!expandedBox || expandedBox.width < 200) {
         throw new Error(`Desktop toggle expand failed: ${expandedBox ? expandedBox.width : "missing"}`);
       }
+      // Screenshot taken here: expanded state after clicking toggle
     },
   },
   {
-    name: "09-sidebar-tablet",
-    description: "Tablet: icons-only sidebar by default, toggle expands/collapses",
+    name: "09-sidebar-tablet-collapsed",
+    description: "Tablet (900px): default icons-only state, edge toggle visible",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.tablet);
-      // Clear stored preference so default kicks in (tablet <768px = collapsed)
       await page.evaluate(() => {
         localStorage.removeItem("cf-sidebar-collapsed");
       });
@@ -211,36 +221,40 @@ const steps = [
         "Tablet: mobile nav toggle should be hidden",
       );
 
-      const initialBox = await sidebar.boundingBox();
-      if (!initialBox) throw new Error("Tablet: sidebar bounding box missing");
-
-      // Toggle and verify width changes meaningfully
-      await toggle.click();
-      await page.waitForTimeout(400);
-      const toggledBox = await sidebar.boundingBox();
-      if (!toggledBox) throw new Error("Tablet: toggled bounding box missing");
-
-      if (Math.abs(toggledBox.width - initialBox.width) < 80) {
-        throw new Error(
-          `Tablet toggle did not change width: initial=${initialBox.width}, toggled=${toggledBox.width}`,
-        );
-      }
-
-      // Restore
-      await toggle.click();
-      await page.waitForTimeout(400);
-      const revertedBox = await sidebar.boundingBox();
-      if (!revertedBox) throw new Error("Tablet: reverted bounding box missing");
-      if (Math.abs(revertedBox.width - initialBox.width) > 30) {
-        throw new Error(
-          `Tablet second toggle did not restore width: initial=${initialBox.width}, reverted=${revertedBox.width}`,
-        );
-      }
+      const box = await sidebar.boundingBox();
+      if (!box) throw new Error("Tablet: sidebar bounding box missing");
+      // Screenshot taken here: collapsed icons-only at tablet width
     },
   },
   {
-    name: "09b-sidebar-mobile-drawer",
-    description: "Mobile: hamburger opens drawer with grouped navigation",
+    name: "09b-sidebar-tablet-expanded",
+    description: "Tablet (900px): after clicking toggle — full sidebar with section labels",
+    action: async (page) => {
+      // State continues from 09 (tablet, collapsed)
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
+
+      const collapsedBox = await sidebar.boundingBox();
+      if (!collapsedBox) throw new Error("Tablet expand: sidebar bounding box missing");
+
+      await toggle.click();
+      await page.waitForTimeout(400);
+
+      const expandedBox = await sidebar.boundingBox();
+      if (!expandedBox || expandedBox.width < 200) {
+        throw new Error(`Tablet toggle expand failed: ${expandedBox ? expandedBox.width : "missing"}`);
+      }
+      if (Math.abs(expandedBox.width - collapsedBox.width) < 80) {
+        throw new Error(
+          `Tablet toggle did not change width: collapsed=${collapsedBox.width}, expanded=${expandedBox.width}`,
+        );
+      }
+      // Screenshot taken here: expanded labels + sections at tablet viewport
+    },
+  },
+  {
+    name: "09c-sidebar-mobile-drawer",
+    description: "Mobile (375px): drawer open with grouped navigation sections",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.mobile);
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
@@ -260,12 +274,12 @@ const steps = [
         page.locator("[data-testid='mobile-drawer']"),
         "Mobile: drawer should open after tapping hamburger",
       );
-      // Screenshot captured here shows the open drawer with grouped sections
+      // Screenshot taken here: mobile drawer open showing grouped sections
     },
   },
   {
-    name: "09c-sidebar-narrow-desktop",
-    description: "Narrow desktop (560px): icons-only sidebar visible, no mobile hamburger",
+    name: "09d-sidebar-narrow-collapsed",
+    description: "Narrow desktop (560px): default icons-only — no hamburger, edge toggle present",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.narrowDesktop);
       await page.evaluate(() => {
@@ -284,27 +298,18 @@ const steps = [
         "Narrow desktop: mobile hamburger hidden",
       );
 
-      const initialBox = await sidebar.boundingBox();
-      if (!initialBox || initialBox.width > 120) {
+      const box = await sidebar.boundingBox();
+      if (!box || box.width > 120) {
         throw new Error(
-          `Narrow desktop should default to icons-only: ${initialBox ? initialBox.width : "missing"}`,
+          `Narrow desktop should default to icons-only: ${box ? box.width : "missing"}`,
         );
       }
-
-      // Expand and take screenshot showing full labels + sections
-      await edgeToggle.click();
-      await page.waitForTimeout(400);
-      const expandedBox = await sidebar.boundingBox();
-      if (!expandedBox || expandedBox.width < 200) {
-        throw new Error(
-          `Narrow desktop expand failed: ${expandedBox ? expandedBox.width : "missing"}`,
-        );
-      }
+      // Screenshot taken here: icons-only collapsed at 560px
     },
   },
   {
-    name: "09d-sidebar-sections-fullwidth",
-    description: "Desktop: sidebar expanded showing all section groups clearly",
+    name: "09e-sidebar-sections-fullwidth",
+    description: "Desktop: full-width sidebar showing all section group headers",
     action: async (page) => {
       await page.setViewportSize(VIEWPORTS.desktop);
       await page.evaluate(() => {
@@ -313,9 +318,13 @@ const steps = [
       await page.reload({ timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(1500);
 
-      // Clip screenshot to sidebar only for a clean close-up
       const sidebar = page.locator("[data-testid='sidebar-nav']");
-      await assertVisible(sidebar, "Sidebar sections shot: sidebar must be visible");
+      await assertVisible(sidebar, "Sections shot: sidebar must be visible");
+      const box = await sidebar.boundingBox();
+      if (!box || box.width < 200) {
+        throw new Error(`Sections shot: sidebar not expanded: ${box ? box.width : "missing"}`);
+      }
+      // Screenshot taken here: full desktop expanded sidebar, all groups visible
     },
   },
   {

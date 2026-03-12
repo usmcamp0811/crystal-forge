@@ -158,10 +158,12 @@ in pkgs.testers.runNixOSTest {
       "06-dashboard",
       "07-sidebar-desktop-expanded",
       "08-sidebar-desktop-collapsed",
-      "09-sidebar-tablet",
-      "09b-sidebar-mobile-drawer",
-      "09c-sidebar-narrow-desktop",
-      "09d-sidebar-sections-fullwidth",
+      "08b-sidebar-desktop-toggle-expand",
+      "09-sidebar-tablet-collapsed",
+      "09b-sidebar-tablet-expanded",
+      "09c-sidebar-mobile-drawer",
+      "09d-sidebar-narrow-collapsed",
+      "09e-sidebar-sections-fullwidth",
     ]
     failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
     if failed_critical:
