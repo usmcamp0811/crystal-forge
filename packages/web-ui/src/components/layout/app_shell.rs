@@ -71,11 +71,11 @@ pub fn AppShell() -> Element {
             return value;
         }
 
-        // Default behavior: collapse on narrower desktops/tablets for more content room
+        // Default behavior: collapse only on genuinely small screens (<768px)
         web_sys::window()
             .and_then(|w| w.inner_width().ok())
             .and_then(|v| v.as_f64())
-            .map(|width| width < 1024.0)
+            .map(|width| width < 768.0)
             .unwrap_or(false)
     });
 

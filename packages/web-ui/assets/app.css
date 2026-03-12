@@ -716,23 +716,30 @@ html, body {
   }
 }
 
-/* Sidebar edge toggle — sits at the boundary of sidebar and content area */
+/* Sidebar edge toggle — fixed to viewport center-left, straddling sidebar boundary */
 .cf-sidebar-edge-toggle {
-  position: absolute;
-  top: 50%;
+  position: fixed;
+  top: 50vh;
   transform: translate(-50%, -50%);
-  z-index: 30;
+  z-index: 50;
   display: none; /* hidden on mobile, shown by cf-sidebar-shell media query */
   height: 2.5rem;
   width: 1.5rem;
   align-items: center;
   justify-content: center;
   border-radius: 0 0.375rem 0.375rem 0;
-  border: 2px solid var(--cf-card-border);
+  border: 2px solid var(--cf-brand-purple);
   border-left: none;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-  transition: left 0.3s ease-in-out;
+  background-color: var(--cf-brand-purple);
+  color: #ffffff;
+  box-shadow: 2px 0 12px rgba(0,0,0,0.4);
+  transition: left 0.3s ease-in-out, background-color 0.15s ease;
   cursor: pointer;
+}
+
+.cf-sidebar-edge-toggle:hover {
+  background-color: var(--cf-brand-purple-hover);
+  border-color: var(--cf-brand-purple-hover);
 }
 
 /* Responsive navigation controls and sidebar visibility */

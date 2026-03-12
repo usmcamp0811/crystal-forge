@@ -39,7 +39,7 @@ pub fn SidebarEdgeToggle() -> Element {
     rsx! {
         button {
             "data-testid": "sidebar-edge-toggle",
-            class: "cf-sidebar-shell cf-sidebar-edge-toggle {theme::surface::SIDEBAR_BG} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+            class: "cf-sidebar-shell cf-sidebar-edge-toggle",
             style: "left: {nav_width};",
             onclick: toggle_sidebar,
             "aria-label": if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
