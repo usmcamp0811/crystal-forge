@@ -26,8 +26,8 @@ pub fn SidebarNav() -> Element {
     let is_collapsed = (sidebar_ctx.is_collapsed)();
 
     // Responsive width logic:
-    // - Mobile (<640px): hidden, use drawer
-    // - Medium/Large (>=640px): toggle between 4rem and 16rem
+    // - Mobile (<480px): hidden, use drawer
+    // - Narrow desktop/tablet and up (>=480px): toggle between 4rem and 16rem
     let nav_width = if is_collapsed { "4rem" } else { "16rem" };
 
     let header_justify = if is_collapsed { "justify-center" } else { "" };

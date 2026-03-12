@@ -159,6 +159,7 @@ in pkgs.testers.runNixOSTest {
       "07-responsive-desktop",
       "08-responsive-tablet-toggle",
       "09-responsive-mobile-drawer",
+      "09b-responsive-narrow-desktop-icons",
     ]
     failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
     if failed_critical:

@@ -30,6 +30,7 @@ const LOAD_TIMEOUT = 10000;
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
   tablet: { width: 900, height: 900 },
+  narrowDesktop: { width: 560, height: 900 },
   mobile: { width: 375, height: 812 },
 };
 
@@ -209,6 +210,37 @@ const steps = [
         page.locator("[data-testid='mobile-drawer']"),
         "Mobile: drawer should open after tapping hamburger",
       );
+    },
+  },
+  {
+    name: "09b-responsive-narrow-desktop-icons",
+    description: "Narrow desktop: sidebar remains visible and can collapse to icons",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.narrowDesktop);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-toggle']");
+
+      await assertVisible(
+        sidebar,
+        "Narrow desktop: sidebar should still be visible (icons at minimum)",
+      );
+      await assertVisible(toggle, "Narrow desktop: sidebar toggle should be visible");
+      await assertHidden(
+        page.locator("[data-testid='mobile-nav-toggle']"),
+        "Narrow desktop: mobile hamburger should be hidden",
+      );
+
+      await toggle.click();
+      await page.waitForTimeout(400);
+      const collapsedBox = await sidebar.boundingBox();
+      if (!collapsedBox || collapsedBox.width > 120) {
+        throw new Error(
+          `Narrow desktop collapsed width too large: ${collapsedBox ? collapsedBox.width : "missing"}`,
+        );
+      }
     },
   },
   {

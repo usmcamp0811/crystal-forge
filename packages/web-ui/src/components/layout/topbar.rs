@@ -56,7 +56,7 @@ pub fn TopBar(title: String) -> Element {
             style: "border-bottom: 1px solid var(--cf-card-border);",
             div {
                 class: "flex items-center gap-3",
-                // Mobile (<640px): hamburger drawer button
+                // Mobile (<480px): hamburger drawer button
                 button {
                     "data-testid": "mobile-nav-toggle",
                     class: "cf-mobile-only inline-flex items-center justify-center p-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
@@ -72,7 +72,7 @@ pub fn TopBar(title: String) -> Element {
                     }
                 }
 
-                // Medium/Large (>=640px): sidebar collapse button
+                // Narrow desktop/tablet and up (>=480px): sidebar collapse button
                 button {
                     "data-testid": "sidebar-toggle",
                     class: "cf-desktop-only inline-flex items-center justify-center p-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
