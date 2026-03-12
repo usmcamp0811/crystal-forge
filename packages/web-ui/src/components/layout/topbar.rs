@@ -72,9 +72,9 @@ pub fn TopBar(title: String) -> Element {
                     }
                 }
 
-                // Sidebar toggle for desktop/tablet
+                // Sidebar toggle for tablet only (desktop is always full width)
                 button {
-                    class: "hidden md:block p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    class: "hidden md:block lg:hidden p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
                     onclick: toggle_sidebar,
                     "aria-label": "Toggle sidebar",
                     svg {
