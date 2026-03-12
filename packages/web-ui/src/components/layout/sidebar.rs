@@ -44,10 +44,10 @@ pub fn SidebarEdgeToggle() -> Element {
             onclick: toggle_sidebar,
             "aria-label": if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
             svg {
-                class: "w-3.5 h-3.5",
+                class: "w-3 h-3",
                 fill: "none",
                 stroke: "currentColor",
-                stroke_width: "2",
+                stroke_width: "2.5",
                 view_box: "0 0 24 24",
                 if is_collapsed {
                     path { d: "M13 5l7 7-7 7M5 5l7 7-7 7" }

@@ -716,7 +716,7 @@ html, body {
   }
 }
 
-/* Sidebar edge toggle — fixed to viewport center-left, grows out of sidebar edge */
+/* Sidebar edge toggle — fixed to viewport center-left, flush with sidebar edge */
 .cf-sidebar-edge-toggle {
   position: fixed;
   top: 50vh;
@@ -727,34 +727,25 @@ html, body {
   width: 1.125rem;
   align-items: center;
   justify-content: center;
-  /* Pill shape — fully rounded on the right, flush on the left */
+  /* Pill shape — fully rounded on right, square flush on left */
   border-radius: 0 999px 999px 0;
-  border: none;
-  /* Gradient: sidebar color on far-left edge fading to brand purple */
-  background: linear-gradient(
-    to right,
-    var(--cf-sidebar-bg) 0%,
-    var(--cf-brand-purple) 40%
-  );
-  color: #ffffff;
-  /* Soft glow to the right only — no hard box shadow */
-  box-shadow: 3px 0 10px -2px rgba(130, 105, 155, 0.55),
-              1px 0 0 0 var(--cf-brand-purple);
-  transition: left 0.3s ease-in-out, opacity 0.15s ease, width 0.15s ease;
+  /* Matches sidebar exactly at rest — blends in */
+  background-color: var(--cf-sidebar-bg);
+  color: var(--cf-text-muted);
+  /* Subtle border on the non-sidebar edges only */
+  border-top: 1px solid var(--cf-card-border);
+  border-right: 1px solid var(--cf-card-border);
+  border-bottom: 1px solid var(--cf-card-border);
+  border-left: none;
+  transition: left 0.3s ease-in-out, background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
   cursor: pointer;
-  opacity: 0.85;
 }
 
 .cf-sidebar-edge-toggle:hover {
-  opacity: 1;
-  width: 1.375rem;
-  background: linear-gradient(
-    to right,
-    var(--cf-sidebar-bg) 0%,
-    var(--cf-brand-purple-hover) 40%
-  );
-  box-shadow: 4px 0 14px -2px rgba(130, 105, 155, 0.7),
-              1px 0 0 0 var(--cf-brand-purple-hover);
+  background-color: var(--cf-brand-purple);
+  color: #ffffff;
+  border-color: var(--cf-brand-purple);
+  box-shadow: 2px 0 8px -1px rgba(130, 105, 155, 0.5);
 }
 
 /* Responsive navigation controls and sidebar visibility */
