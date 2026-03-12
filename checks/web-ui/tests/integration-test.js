@@ -27,6 +27,26 @@ const TEST_USER = {
 // Timeout for page loads (don't use networkidle as it can hang)
 const LOAD_TIMEOUT = 10000;
 
+const VIEWPORTS = {
+  desktop: { width: 1440, height: 900 },
+  tablet: { width: 900, height: 900 },
+  mobile: { width: 375, height: 812 },
+};
+
+async function assertVisible(locator, message) {
+  const visible = await locator.isVisible({ timeout: 5000 }).catch(() => false);
+  if (!visible) {
+    throw new Error(message);
+  }
+}
+
+async function assertHidden(locator, message) {
+  const visible = await locator.isVisible({ timeout: 1500 }).catch(() => false);
+  if (visible) {
+    throw new Error(message);
+  }
+}
+
 // Screenshot steps - executed in order
 const steps = [
   // ============================================================
@@ -102,7 +122,106 @@ const steps = [
     },
   },
   {
-    name: "07-user-menu",
+    name: "07-responsive-desktop",
+    description: "Desktop layout: sidebar visible + desktop toggle visible",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      await assertVisible(
+        page.locator("[data-testid='sidebar-nav']"),
+        "Desktop: sidebar should be visible",
+      );
+      await assertVisible(
+        page.locator("[data-testid='sidebar-toggle']"),
+        "Desktop: sidebar toggle should be visible",
+      );
+      await assertHidden(
+        page.locator("[data-testid='mobile-nav-toggle']"),
+        "Desktop: mobile nav toggle should be hidden",
+      );
+    },
+  },
+  {
+    name: "08-responsive-tablet-toggle",
+    description: "Tablet layout: sidebar toggle collapses/expands sidebar",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.tablet);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      const sidebar = page.locator("[data-testid='sidebar-nav']");
+      const toggle = page.locator("[data-testid='sidebar-toggle']");
+
+      await assertVisible(sidebar, "Tablet: sidebar should be visible");
+      await assertVisible(toggle, "Tablet: sidebar toggle should be visible");
+      await assertHidden(
+        page.locator("[data-testid='mobile-nav-toggle']"),
+        "Tablet: mobile nav toggle should be hidden",
+      );
+
+      const expandedBox = await sidebar.boundingBox();
+      if (!expandedBox || expandedBox.width < 200) {
+        throw new Error(
+          `Tablet expanded sidebar width too small: ${expandedBox ? expandedBox.width : "missing"}`,
+        );
+      }
+
+      await toggle.click();
+      await page.waitForTimeout(400);
+      const collapsedBox = await sidebar.boundingBox();
+      if (!collapsedBox || collapsedBox.width > 120) {
+        throw new Error(
+          `Tablet collapsed sidebar width too large: ${collapsedBox ? collapsedBox.width : "missing"}`,
+        );
+      }
+
+      await toggle.click();
+      await page.waitForTimeout(400);
+      const reExpandedBox = await sidebar.boundingBox();
+      if (!reExpandedBox || reExpandedBox.width < 200) {
+        throw new Error(
+          `Tablet re-expanded sidebar width too small: ${reExpandedBox ? reExpandedBox.width : "missing"}`,
+        );
+      }
+    },
+  },
+  {
+    name: "09-responsive-mobile-drawer",
+    description: "Mobile layout: hamburger opens drawer navigation",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.mobile);
+      await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
+      await assertHidden(
+        page.locator("[data-testid='sidebar-nav']"),
+        "Mobile: sidebar should be hidden",
+      );
+
+      const mobileToggle = page.locator("[data-testid='mobile-nav-toggle']");
+      await assertVisible(mobileToggle, "Mobile: hamburger toggle should be visible");
+      await mobileToggle.click();
+      await page.waitForTimeout(400);
+
+      await assertVisible(
+        page.locator("[data-testid='mobile-drawer']"),
+        "Mobile: drawer should open after tapping hamburger",
+      );
+    },
+  },
+  {
+    name: "10-responsive-reset-desktop",
+    description: "Reset viewport to desktop for remaining route screenshots",
+    action: async (page) => {
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.goto(`${baseUrl}/`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1200);
+    },
+  },
+  {
+    name: "11-user-menu",
     description: "User dropdown menu",
     action: async (page) => {
       // Click user menu if visible
@@ -114,7 +233,7 @@ const steps = [
     },
   },
   {
-    name: "08-systems",
+    name: "12-systems",
     description: "Systems list",
     action: async (page) => {
       await page.goto(`${baseUrl}/systems`, { timeout: LOAD_TIMEOUT });
@@ -122,7 +241,7 @@ const steps = [
     },
   },
   {
-    name: "09-flakes",
+    name: "13-flakes",
     description: "Flakes registry",
     action: async (page) => {
       await page.goto(`${baseUrl}/flakes`, { timeout: LOAD_TIMEOUT });
@@ -130,7 +249,7 @@ const steps = [
     },
   },
   {
-    name: "10-environments",
+    name: "14-environments",
     description: "Environments registry",
     action: async (page) => {
       await page.goto(`${baseUrl}/environments`, { timeout: LOAD_TIMEOUT });
@@ -138,7 +257,7 @@ const steps = [
     },
   },
   {
-    name: "11-builds",
+    name: "15-builds",
     description: "Builds page",
     action: async (page) => {
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
@@ -146,7 +265,7 @@ const steps = [
     },
   },
   {
-    name: "12-cves",
+    name: "16-cves",
     description: "CVE dashboard",
     action: async (page) => {
       await page.goto(`${baseUrl}/cves`, { timeout: LOAD_TIMEOUT });
@@ -154,7 +273,7 @@ const steps = [
     },
   },
   {
-    name: "13-style-guide",
+    name: "17-style-guide",
     description: "Style guide",
     action: async (page) => {
       await page.goto(`${baseUrl}/style-guide`, { timeout: LOAD_TIMEOUT });
@@ -162,7 +281,7 @@ const steps = [
     },
   },
   {
-    name: "14-policies",
+    name: "18-policies",
     description: "Policies view",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
@@ -171,7 +290,7 @@ const steps = [
     },
   },
   {
-    name: "15-policies-new-modal-basic",
+    name: "19-policies-new-modal-basic",
     description: "Policies new modal in basic mode",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
@@ -184,7 +303,7 @@ const steps = [
     },
   },
   {
-    name: "16-policies-new-modal-advanced",
+    name: "20-policies-new-modal-advanced",
     description: "Policies new modal in advanced mode",
     action: async (page) => {
       await page.goto(`${baseUrl}/deployment-policies`, { timeout: LOAD_TIMEOUT });
@@ -201,7 +320,7 @@ const steps = [
     },
   },
   {
-    name: "17-caches",
+    name: "21-caches",
     description: "Cache management view",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
@@ -209,7 +328,7 @@ const steps = [
     },
   },
   {
-    name: "18-caches-modal-nix",
+    name: "22-caches-modal-nix",
     description: "Add cache modal with Nix type selected",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
@@ -226,7 +345,7 @@ const steps = [
     },
   },
   {
-    name: "19-caches-modal-http",
+    name: "23-caches-modal-http",
     description: "Add cache modal with Http type selected",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
@@ -243,7 +362,7 @@ const steps = [
     },
   },
   {
-    name: "20-caches-modal-s3",
+    name: "24-caches-modal-s3",
     description: "Add cache modal with S3 type selected",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
@@ -260,7 +379,7 @@ const steps = [
     },
   },
   {
-    name: "21-caches-modal-attic",
+    name: "25-caches-modal-attic",
     description: "Add cache modal with Attic type selected",
     action: async (page) => {
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });

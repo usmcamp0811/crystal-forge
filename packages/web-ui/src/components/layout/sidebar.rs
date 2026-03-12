@@ -34,7 +34,8 @@ pub fn SidebarNav() -> Element {
 
     rsx! {
         nav {
-            class: "hidden sm:flex {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
+            "data-testid": "sidebar-nav",
+            class: "cf-sidebar-shell {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
             style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
                 class: "p-6 flex items-center gap-3 min-h-[5rem] {header_justify}",
@@ -292,13 +293,15 @@ pub fn MobileDrawer() -> Element {
     rsx! {
         // Backdrop overlay
         div {
-            class: "fixed inset-0 bg-black/50 z-40 sm:hidden",
+            "data-testid": "mobile-drawer-backdrop",
+            class: "cf-mobile-overlay fixed inset-0 bg-black/50 z-40",
             onclick: move |_| is_mobile_drawer_open.set(false),
         }
 
         // Drawer
         nav {
-            class: "fixed left-0 top-0 bottom-0 w-64 {theme::surface::SIDEBAR_BG} z-50 flex flex-col sm:hidden transform transition-transform duration-300",
+            "data-testid": "mobile-drawer",
+            class: "cf-mobile-drawer fixed left-0 top-0 bottom-0 w-64 {theme::surface::SIDEBAR_BG} z-50 flex flex-col transform transition-transform duration-300",
             style: "border-right: 1px solid var(--cf-card-border);",
 
             // Header with close button
@@ -323,6 +326,7 @@ pub fn MobileDrawer() -> Element {
                     }
                 }
                 button {
+                    "data-testid": "mobile-drawer-close",
                     class: "p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
                     onclick: move |_| is_mobile_drawer_open.set(false),
                     "aria-label": "Close menu",

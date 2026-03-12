@@ -150,10 +150,18 @@ in pkgs.testers.runNixOSTest {
     if ok_count == 0:
         raise Exception("All screenshots failed")
 
-    # Fail if critical auth flow tests failed
-    auth_tests = ["01-login-page", "02-registration", "03-post-register-login", "04-dashboard"]
-    failed_auth = [r['name'] for r in results if r['name'] in auth_tests and not r.get('ok')]
-    if failed_auth:
-        raise Exception(f"Critical auth flow tests failed: {failed_auth}")
+    # Fail if critical auth + navigation checks failed
+    critical_tests = [
+      "01-login-page",
+      "02-registration",
+      "05-login-submit",
+      "06-dashboard",
+      "07-responsive-desktop",
+      "08-responsive-tablet-toggle",
+      "09-responsive-mobile-drawer",
+    ]
+    failed_critical = [r['name'] for r in results if r['name'] in critical_tests and not r.get('ok')]
+    if failed_critical:
+        raise Exception(f"Critical web UI checks failed: {failed_critical}")
   '';
 }

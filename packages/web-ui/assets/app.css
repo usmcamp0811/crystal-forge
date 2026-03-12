@@ -715,3 +715,40 @@ html, body {
     grid-template-columns: 1fr;
   }
 }
+
+/* Responsive navigation controls and sidebar visibility */
+.cf-sidebar-shell {
+  display: none;
+}
+
+.cf-mobile-only {
+  display: inline-flex;
+}
+
+.cf-desktop-only {
+  display: none;
+}
+
+.cf-mobile-overlay,
+.cf-mobile-drawer {
+  display: flex;
+}
+
+@media (min-width: 640px) {
+  .cf-sidebar-shell {
+    display: flex;
+  }
+
+  .cf-mobile-only {
+    display: none;
+  }
+
+  .cf-desktop-only {
+    display: inline-flex;
+  }
+
+  .cf-mobile-overlay,
+  .cf-mobile-drawer {
+    display: none;
+  }
+}
