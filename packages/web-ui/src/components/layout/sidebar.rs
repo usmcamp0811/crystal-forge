@@ -72,7 +72,7 @@ pub fn SidebarNav() -> Element {
             }
             button {
                 "data-testid": "sidebar-edge-toggle",
-                class: "absolute top-1/2 -right-3 -translate-y-1/2 z-30 inline-flex h-10 w-6 items-center justify-center rounded-r-md border border-l-0 shadow-sm {theme::surface::CARD_BORDER} {theme::surface::SIDEBAR_BG} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+                class: "absolute top-1/2 right-0 translate-x-1/2 -translate-y-1/2 z-40 inline-flex h-10 w-6 items-center justify-center rounded-r-md border-2 border-l-0 shadow-md {theme::surface::CARD_BORDER} {theme::surface::SIDEBAR_BG} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
                 onclick: toggle_sidebar,
                 "aria-label": if is_collapsed {
                     "Expand sidebar"
