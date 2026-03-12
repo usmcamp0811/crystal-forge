@@ -27,13 +27,14 @@ pub fn SidebarNav() -> Element {
 
     // Responsive width logic:
     // - Mobile (<768px): hidden, use drawer
-    // - Tablet (768-1023px): w-16 by default, w-64 when manually expanded
-    // - Desktop (≥1024px): w-64 always (ignore collapse state)
+    // - Tablet/Desktop (≥768px): toggle between w-16 (collapsed) and w-64 (expanded)
     let nav_classes = if is_collapsed {
-        "hidden md:flex md:w-16 lg:w-64"
+        "hidden md:flex w-16"
     } else {
-        "hidden md:flex md:w-64 lg:w-64"
+        "hidden md:flex w-64"
     };
+
+    let header_justify = if is_collapsed { "justify-center" } else { "" };
 
     // On desktop (lg), always show full content. On tablet (md), only when expanded
     let show_text_desktop = true; // Always show on desktop
@@ -56,16 +57,17 @@ pub fn SidebarNav() -> Element {
                     src: asset!("assets/crystal-forge-icon.png"),
                     alt: "Crystal Forge"
                 }
-                // Show text on desktop (lg) always, on tablet (md) only when not collapsed
-                div {
-                    class: if is_collapsed { "hidden lg:block" } else { "" },
-                    h1 {
-                        class: "text-xl font-bold {theme::text::PRIMARY}",
-                        "Crystal Forge"
-                    }
-                    p {
-                        class: "text-xs {theme::text::MUTED} mt-1",
-                        "Fleet Management"
+                // Show text only when sidebar is expanded
+                if !is_collapsed {
+                    div {
+                        h1 {
+                            class: "text-xl font-bold {theme::text::PRIMARY}",
+                            "Crystal Forge"
+                        }
+                        p {
+                            class: "text-xs {theme::text::MUTED} mt-1",
+                            "Fleet Management"
+                        }
                     }
                 }
             }
@@ -275,11 +277,13 @@ pub fn SidebarNav() -> Element {
                     )
                 }
             }
-            // Show footer on desktop (lg) always, on tablet (md) only when not collapsed
-            div {
-                class: if is_collapsed { "hidden lg:block p-4 border-t text-xs {theme::text::MUTED}" } else { "p-4 border-t text-xs {theme::text::MUTED}" },
-                style: "border-top-color: var(--cf-card-border);",
-                "v0.1.0"
+            // Show footer only when not collapsed
+            if !is_collapsed {
+                div {
+                    class: "p-4 border-t text-xs {theme::text::MUTED}",
+                    style: "border-top-color: var(--cf-card-border);",
+                    "v0.1.0"
+                }
             }
         }
     }
@@ -605,10 +609,11 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
                 class: "shrink-0",
                 {icon}
             }
-            // Show label on desktop (lg) always, on tablet (md) only when not collapsed
-            span {
-                class: if collapsed { "hidden lg:inline" } else { "" },
-                "{label}"
+            // Show label only when not collapsed
+            if !collapsed {
+                span {
+                    "{label}"
+                }
             }
         }
     }
