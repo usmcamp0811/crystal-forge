@@ -3,7 +3,9 @@
 use dioxus::prelude::*;
 
 use crate::api::models::{AuthContext, AuthMode, AuthUser, Role};
-use crate::components::layout::sidebar::{MobileDrawer, SidebarContext, SidebarNav};
+use crate::components::layout::sidebar::{
+    MobileDrawer, SidebarContext, SidebarEdgeToggle, SidebarNav,
+};
 use crate::components::layout::TopBar;
 use crate::components::layout::{BannerPlacement, DevModeBanner};
 use crate::routes::Route;
@@ -153,9 +155,10 @@ pub fn AppShell() -> Element {
             DevModeBanner { placement: BannerPlacement::Top }
 
             div {
-                class: "flex-1 flex min-h-0 overflow-x-visible",
+                class: "flex-1 flex min-h-0 relative",
 
                 SidebarNav {}
+                SidebarEdgeToggle {}
                 MobileDrawer {}
 
                 div {

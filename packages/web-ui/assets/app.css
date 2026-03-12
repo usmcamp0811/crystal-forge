@@ -716,6 +716,25 @@ html, body {
   }
 }
 
+/* Sidebar edge toggle — sits at the boundary of sidebar and content area */
+.cf-sidebar-edge-toggle {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 30;
+  display: none; /* hidden on mobile, shown by cf-sidebar-shell media query */
+  height: 2.5rem;
+  width: 1.5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0 0.375rem 0.375rem 0;
+  border: 2px solid var(--cf-card-border);
+  border-left: none;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+  transition: left 0.3s ease-in-out;
+  cursor: pointer;
+}
+
 /* Responsive navigation controls and sidebar visibility */
 .cf-sidebar-shell {
   display: none;
@@ -737,6 +756,10 @@ html, body {
 @media (min-width: 480px) {
   .cf-sidebar-shell {
     display: flex;
+  }
+
+  .cf-sidebar-edge-toggle {
+    display: inline-flex;
   }
 
   .cf-mobile-only {

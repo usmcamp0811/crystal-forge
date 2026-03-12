@@ -14,23 +14,13 @@ pub struct SidebarContext {
     pub is_collapsed: Signal<bool>,
 }
 
-/// Sidebar navigation for primary routes.
+/// Sidebar edge toggle button — rendered as a sibling of SidebarNav in the shell,
+/// absolutely positioned to straddle the sidebar/content boundary.
 #[component]
-pub fn SidebarNav() -> Element {
-    let app_state = use_context::<Signal<AppState>>();
-    let auth_context = app_state.read().auth.clone();
-    let show_admin = auth::is_admin(&auth_context);
-
-    // Get sidebar context
+pub fn SidebarEdgeToggle() -> Element {
     let mut sidebar_ctx = use_context::<SidebarContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
 
-    // Responsive width logic:
-    // - Mobile (<480px): hidden, use drawer
-    // - Narrow desktop/tablet and up (>=480px): toggle between 4rem and 16rem
-    let nav_width = if is_collapsed { "4rem" } else { "16rem" };
-
-    let header_justify = if is_collapsed { "justify-center" } else { "" };
     let toggle_sidebar = move |_| {
         let new_state = !(sidebar_ctx.is_collapsed)();
         sidebar_ctx.is_collapsed.set(new_state);
@@ -44,10 +34,53 @@ pub fn SidebarNav() -> Element {
         }
     };
 
+    let nav_width = if is_collapsed { "4rem" } else { "16rem" };
+
+    rsx! {
+        button {
+            "data-testid": "sidebar-edge-toggle",
+            class: "cf-sidebar-shell cf-sidebar-edge-toggle {theme::surface::SIDEBAR_BG} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
+            style: "left: {nav_width};",
+            onclick: toggle_sidebar,
+            "aria-label": if is_collapsed { "Expand sidebar" } else { "Collapse sidebar" },
+            svg {
+                class: "w-3.5 h-3.5",
+                fill: "none",
+                stroke: "currentColor",
+                stroke_width: "2",
+                view_box: "0 0 24 24",
+                if is_collapsed {
+                    path { d: "M13 5l7 7-7 7M5 5l7 7-7 7" }
+                } else {
+                    path { d: "M11 19l-7-7 7-7M19 19l-7-7 7-7" }
+                }
+            }
+        }
+    }
+}
+
+/// Sidebar navigation for primary routes.
+#[component]
+pub fn SidebarNav() -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let auth_context = app_state.read().auth.clone();
+    let show_admin = auth::is_admin(&auth_context);
+
+    // Get sidebar context
+    let sidebar_ctx = use_context::<SidebarContext>();
+    let is_collapsed = (sidebar_ctx.is_collapsed)();
+
+    // Responsive width logic:
+    // - Mobile (<480px): hidden, use drawer
+    // - Narrow desktop/tablet and up (>=480px): toggle between 4rem and 16rem
+    let nav_width = if is_collapsed { "4rem" } else { "16rem" };
+
+    let header_justify = if is_collapsed { "justify-center" } else { "" };
+
     rsx! {
         nav {
             "data-testid": "sidebar-nav",
-            class: "cf-sidebar-shell relative z-20 overflow-visible {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
+            class: "cf-sidebar-shell relative z-20 {theme::surface::SIDEBAR_BG} flex-col transition-all duration-300 ease-in-out",
             style: "border-right: 1px solid var(--cf-card-border); width: {nav_width};",
             div {
                 class: "p-6 flex items-center gap-3 min-h-[5rem] {header_justify}",
@@ -67,28 +100,6 @@ pub fn SidebarNav() -> Element {
                             class: "text-xs {theme::text::MUTED} mt-1",
                             "Fleet Management"
                         }
-                    }
-                }
-            }
-            button {
-                "data-testid": "sidebar-edge-toggle",
-                class: "absolute top-1/2 right-0 translate-x-1/2 -translate-y-1/2 z-40 inline-flex h-10 w-6 items-center justify-center rounded-r-md border-2 border-l-0 shadow-md {theme::surface::CARD_BORDER} {theme::surface::SIDEBAR_BG} {theme::text::SECONDARY} {theme::interactive::HOVER_BG}",
-                onclick: toggle_sidebar,
-                "aria-label": if is_collapsed {
-                    "Expand sidebar"
-                } else {
-                    "Collapse sidebar"
-                },
-                svg {
-                    class: "w-3.5 h-3.5",
-                    fill: "none",
-                    stroke: "currentColor",
-                    stroke_width: "2",
-                    view_box: "0 0 24 24",
-                    if is_collapsed {
-                        path { d: "M13 5l7 7-7 7M5 5l7 7-7 7" }
-                    } else {
-                        path { d: "M11 19l-7-7 7-7M19 19l-7-7 7-7" }
                     }
                 }
             }
