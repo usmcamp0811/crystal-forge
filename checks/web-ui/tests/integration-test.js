@@ -183,13 +183,24 @@ const steps = [
   },
   {
     name: "08b-sidebar-desktop-toggle-expand",
-    description: "Desktop: after clicking edge toggle — sidebar expands to full labels",
+    description: "Desktop: sidebar expanded via toggle click — full labels and sections",
     action: async (page) => {
-      // State continues from 08 (still at desktop, collapsed)
+      // Self-contained: force collapsed, reload, then click toggle to expand
+      await page.setViewportSize(VIEWPORTS.desktop);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "true");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
       const sidebar = page.locator("[data-testid='sidebar-nav']");
       const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
 
-      await assertVisible(toggle, "Desktop expand: edge toggle must be visible");
+      const collapsedBox = await sidebar.boundingBox();
+      if (!collapsedBox || collapsedBox.width > 100) {
+        throw new Error(`Desktop expand: expected collapsed start: ${collapsedBox ? collapsedBox.width : "missing"}`);
+      }
+
       await toggle.click();
       await page.waitForTimeout(400);
 
@@ -228,14 +239,23 @@ const steps = [
   },
   {
     name: "09b-sidebar-tablet-expanded",
-    description: "Tablet (900px): after clicking toggle — full sidebar with section labels",
+    description: "Tablet (900px): sidebar expanded via toggle — section labels visible",
     action: async (page) => {
-      // State continues from 09 (tablet, collapsed)
+      // Self-contained: force collapsed, reload, then click toggle to expand
+      await page.setViewportSize(VIEWPORTS.tablet);
+      await page.evaluate(() => {
+        localStorage.setItem("cf-sidebar-collapsed", "true");
+      });
+      await page.reload({ timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(1500);
+
       const sidebar = page.locator("[data-testid='sidebar-nav']");
       const toggle = page.locator("[data-testid='sidebar-edge-toggle']");
 
       const collapsedBox = await sidebar.boundingBox();
-      if (!collapsedBox) throw new Error("Tablet expand: sidebar bounding box missing");
+      if (!collapsedBox || collapsedBox.width > 100) {
+        throw new Error(`Tablet expand: expected collapsed start: ${collapsedBox ? collapsedBox.width : "missing"}`);
+      }
 
       await toggle.click();
       await page.waitForTimeout(400);
@@ -243,11 +263,6 @@ const steps = [
       const expandedBox = await sidebar.boundingBox();
       if (!expandedBox || expandedBox.width < 200) {
         throw new Error(`Tablet toggle expand failed: ${expandedBox ? expandedBox.width : "missing"}`);
-      }
-      if (Math.abs(expandedBox.width - collapsedBox.width) < 80) {
-        throw new Error(
-          `Tablet toggle did not change width: collapsed=${collapsedBox.width}, expanded=${expandedBox.width}`,
-        );
       }
       // Screenshot taken here: expanded labels + sections at tablet viewport
     },
