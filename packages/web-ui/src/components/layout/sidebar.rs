@@ -45,7 +45,6 @@ pub fn SidebarNav() -> Element {
                 }
                 if !is_collapsed {
                     div {
-                        class: "md:block hidden",
                         h1 {
                             class: "text-xl font-bold {theme::text::PRIMARY}",
                             "Crystal Forge"
@@ -265,7 +264,7 @@ pub fn SidebarNav() -> Element {
             }
             if !is_collapsed {
                 div {
-                    class: "p-4 border-t text-xs {theme::text::MUTED} md:block hidden",
+                    class: "p-4 border-t text-xs {theme::text::MUTED}",
                     style: "border-top-color: var(--cf-card-border);",
                     "v0.1.0"
                 }
@@ -596,7 +595,6 @@ fn NavLink(collapsed: bool, to: Route, label: &'static str, icon: Element) -> El
             }
             if !collapsed {
                 span {
-                    class: "md:inline hidden",
                     "{label}"
                 }
             }
