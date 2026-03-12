@@ -716,6 +716,24 @@ html, body {
   }
 }
 
+/* Sidebar section dividers */
+.cf-nav-section-label {
+  display: block;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--cf-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.cf-nav-section-rule {
+  border: none;
+  border-top: 1px solid var(--cf-card-border);
+  margin: 0;
+}
+
 /* Sidebar edge toggle — fixed to viewport center-left, flush with sidebar edge */
 .cf-sidebar-edge-toggle {
   position: fixed;
