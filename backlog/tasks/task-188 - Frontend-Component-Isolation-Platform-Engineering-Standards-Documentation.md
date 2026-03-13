@@ -4,6 +4,7 @@ title: Frontend Component Isolation Platform + Engineering Standards Documentati
 status: Backlog
 assignee: []
 created_date: '2026-03-13 01:40'
+updated_date: '2026-03-13 01:52'
 labels:
   - frontend
   - ux
@@ -119,3 +120,15 @@ Medium — broad touch area in frontend structure and conventions, but primarily
 - [ ] #12 Verification instructions are included in docs for running and reviewing the isolation surface locally in Nix dev environment.
 - [ ] #13 Existing full-page views continue to function after extraction (no regression in dashboard/build/systems pages).
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Split into child tasks for execution and parallelization:
+
+- TASK-188.1: Component Isolation Surface + Fixture Foundation (foundation first)
+
+- TASK-188.2: Extract and Showcase Initial High-Value UI Components (depends on TASK-188.1)
+
+- TASK-188.3: Document Frontend Isolation Standards and Contribution Workflow (depends on TASK-188.1 and TASK-188.2)
+<!-- SECTION:NOTES:END -->
