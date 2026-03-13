@@ -1,10 +1,10 @@
 ---
 id: TASK-188.1
 title: Component Isolation Surface + Fixture Foundation
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-03-13 01:51'
-updated_date: '2026-03-13 02:56'
+updated_date: '2026-03-13 12:24'
 labels:
   - frontend
   - ux
@@ -107,4 +107,20 @@ Verification run:
 - `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
 
 - `nix build .#checks.x86_64-linux.web-ui` ✅
+
+MR opened: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/162
+
+Branch: `TASK-188.1-component-isolation-foundation`
+
+Commit: `72aa84ef`
+
+Verification executed:
+
+- `nix develop -c cargo check --manifest-path packages/web-ui/Cargo.toml` ✅
+
+- `nix build .#checks.x86_64-linux.web-ui` ✅
+
+- `nix flake check` ✅
+
+UI screenshot attached to MR via GitLab uploads API (`13-style-guide.png`).
 <!-- SECTION:NOTES:END -->
