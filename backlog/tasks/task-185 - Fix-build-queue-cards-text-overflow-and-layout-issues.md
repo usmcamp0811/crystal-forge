@@ -1,10 +1,10 @@
 ---
 id: TASK-185
 title: Fix build queue cards - text overflow and layout issues
-status: Review
+status: To Do
 assignee: []
 created_date: '2026-03-13 01:01'
-updated_date: '2026-03-13 01:50'
+updated_date: '2026-03-13 12:15'
 labels:
   - web-ui
   - ux
@@ -13,6 +13,7 @@ labels:
   - responsive
 dependencies: []
 priority: high
+ordinal: 3000
 ---
 
 ## Description
