@@ -1,9 +1,10 @@
 ---
 id: TASK-184
 title: Add authenticated runtime cache credentials flow for agent cache pulls
-status: Backlog
+status: Done
 assignee: []
 created_date: '2026-03-12 00:13'
+updated_date: '2026-03-13 00:53'
 labels:
   - security
   - agent
@@ -47,3 +48,41 @@ High (security-sensitive secret handling, tenant boundary enforcement).
 - [ ] #5 Automated tests cover positive pull path and negative cross-environment credential access attempts.
 - [ ] #6 Existing builder cache push path remains functional.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Implementation Found
+
+This task was already implemented in commit c78b1e2f (merged to dev on 2026-03-10):
+
+```
+feat(cache): add attic public key and runtime cache delivery to agents
+
+- Add attic_public_key field to cache destinations with migration and backend CRUD wiring
+- Require Attic push URL, cache name, and public key in backend validation
+- Include environment-scoped runtime cache configuration in /agent/heartbeat response
+- Update agent deployment flow to use server-provided runtime cache config at deploy time
+- Pass trusted-public-keys to nix copy when runtime cache public key is available
+- Add Attic Public Key field + validation in cache Add/Edit modals
+
+Closes: TASK-42
+```
+
+Implementation:
+- Server delivers runtime cache config (URL, type, public key) via heartbeat response
+- Agents use server-provided cache config for deployment pulls
+- Environment-scoped credential delivery (agents only receive authorized cache info)
+- Public key included in cache pull operations
+
+Files changed:
+- migration: add attic_public_key field
+- packages/default/src/deployment/agent.rs (+84 lines)
+- packages/default/src/handlers/agent/heartbeat.rs (+46 lines)
+- packages/default/src/models/cache_destination.rs (+32 lines)
+- packages/default/src/queries/cache_destinations.rs (+12 lines)
+- packages/web-ui/src/api/models.rs (+3 lines)
+- packages/web-ui/src/views/caches.rs (+78 lines)
+
+Task marked Done (already merged).
+<!-- SECTION:NOTES:END -->
