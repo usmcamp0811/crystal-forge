@@ -143,6 +143,31 @@ const steps = [
     action: async (page) => {
       await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
       await page.waitForTimeout(2000);
+
+      const queueCards = page.locator("[data-testid='build-queue-card']");
+      const queueCardCount = await queueCards.count();
+      if (queueCardCount > 0) {
+        const overflowingCards = await queueCards.evaluateAll((cards) =>
+          cards.filter((card) => card.scrollWidth > card.clientWidth + 1).length,
+        );
+        if (overflowingCards > 0) {
+          throw new Error(`Build queue has ${overflowingCards} overflowing cards`);
+        }
+      }
+    },
+  },
+  {
+    name: "11b-builds-queue-card-focus",
+    description: "Build queue card layout focus",
+    action: async (page) => {
+      await page.goto(`${baseUrl}/builds`, { timeout: LOAD_TIMEOUT });
+      await page.waitForTimeout(2000);
+
+      const firstQueueCard = page.locator("[data-testid='build-queue-card']").first();
+      if (await firstQueueCard.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await firstQueueCard.click();
+        await page.waitForTimeout(700);
+      }
     },
   },
   {
