@@ -300,16 +300,14 @@ fn SetupProgressBar(
                         WizardStep::Agent => ("Agent", progress.agent_acknowledged),
                     };
                     let is_active = current_step == step;
-                    let step_num = step.idx() + 1;
 
                     // Use explicit inline styles so colours are guaranteed
                     // visible on the dark #111827 card background regardless
                     // of Tailwind JIT purging or opacity stacking.
-                    let (card_style, badge_style, label_style, indicator) = if is_active {
+                    let (card_style, label_style, indicator) = if is_active {
                         (
                             // Violet: solid border + noticeable bg fill
                             "border: 2px solid #7c3aed; background: rgba(109,40,217,0.35); box-shadow: 0 0 0 1px rgba(139,92,246,0.4);",
-                            "background:#7c3aed; color:#fff;",
                             "color:#e9d5ff; font-weight:600;",
                             "→",
                         )
@@ -317,7 +315,6 @@ fn SetupProgressBar(
                         (
                             // Emerald: visible green tint
                             "border: 1px solid rgba(16,185,129,0.6); background: rgba(6,95,70,0.35);",
-                            "background:rgba(16,185,129,0.7); color:#fff;",
                             "color:#6ee7b7; font-weight:500;",
                             "✓",
                         )
@@ -325,7 +322,6 @@ fn SetupProgressBar(
                         (
                             // Muted: just enough to distinguish from page bg
                             "border: 1px solid rgba(100,116,139,0.5); background: rgba(30,41,59,0.6);",
-                            "background:#334155; color:#94a3b8;",
                             "color:#94a3b8; font-weight:500;",
                             "",
                         )
@@ -338,17 +334,10 @@ fn SetupProgressBar(
                             role: "button",
                             onclick: move |_| on_step_click.call(step),
                             div { class: "flex items-center justify-between gap-1",
-                                div { class: "flex items-center gap-1.5 min-w-0",
-                                    span {
-                                        class: "flex-shrink-0 w-4 h-4 rounded-full text-[10px] font-bold flex items-center justify-center",
-                                        style: "{badge_style}",
-                                        "{step_num}"
-                                    }
-                                    span {
-                                        class: "truncate text-xs md:text-sm",
-                                        style: "{label_style}",
-                                        "{label}"
-                                    }
+                                span {
+                                    class: "truncate text-xs md:text-sm",
+                                    style: "{label_style}",
+                                    "{label}"
                                 }
                                 if !indicator.is_empty() {
                                     span {
@@ -432,9 +421,71 @@ fn StepPanel(props: StepPanelProps) -> Element {
             }
 
             if props.step == WizardStep::Agent {
-                pre {
-                    class: "text-xs rounded-lg border {theme::surface::CARD_BORDER} bg-slate-950 text-slate-100 p-3 overflow-auto leading-relaxed",
-                    "{AGENT_SNIPPET}"
+                // IDE-style code block with syntax highlighting
+                div {
+                    style: "background:#1e1e1e; border:1px solid #3e3e42; border-radius:8px; overflow:hidden; font-family:'JetBrains Mono','Fira Code','Cascadia Code',Consolas,monospace; font-size:13px; line-height:1.6;",
+                    // Title bar
+                    div {
+                        style: "background:#2d2d30; padding:6px 12px; display:flex; align-items:center; gap:8px; border-bottom:1px solid #3e3e42;",
+                        span { style: "width:12px;height:12px;border-radius:50%;background:#ff5f57;display:inline-block;", "" }
+                        span { style: "width:12px;height:12px;border-radius:50%;background:#febc2e;display:inline-block;", "" }
+                        span { style: "width:12px;height:12px;border-radius:50%;background:#28c840;display:inline-block;", "" }
+                        span { style: "margin-left:8px; color:#858585; font-size:11px;", "configuration.nix" }
+                    }
+                    // Code area
+                    div {
+                        style: "padding:16px; overflow-x:auto;",
+                        // Line 1: services.crystal-forge.client = {
+                        div { style: "display:flex; gap:16px;",
+                            span { style: "color:#4e4e4e; user-select:none; min-width:16px; text-align:right;", "1" }
+                            span {
+                                span { style: "color:#9cdcfe;", "services" }
+                                span { style: "color:#cccccc;", "." }
+                                span { style: "color:#9cdcfe;", "crystal-forge" }
+                                span { style: "color:#cccccc;", "." }
+                                span { style: "color:#9cdcfe;", "client" }
+                                span { style: "color:#cccccc;", " = {{" }
+                            }
+                        }
+                        // Line 2: enable = true;
+                        div { style: "display:flex; gap:16px;",
+                            span { style: "color:#4e4e4e; user-select:none; min-width:16px; text-align:right;", "2" }
+                            span {
+                                span { style: "color:#cccccc;", "  " }
+                                span { style: "color:#9cdcfe;", "enable" }
+                                span { style: "color:#cccccc;", " = " }
+                                span { style: "color:#569cd6;", "true" }
+                                span { style: "color:#cccccc;", ";" }
+                            }
+                        }
+                        // Line 3: serverUrl = '...';
+                        div { style: "display:flex; gap:16px;",
+                            span { style: "color:#4e4e4e; user-select:none; min-width:16px; text-align:right;", "3" }
+                            span {
+                                span { style: "color:#cccccc;", "  " }
+                                span { style: "color:#9cdcfe;", "serverUrl" }
+                                span { style: "color:#cccccc;", " = " }
+                                span { style: "color:#ce9178;", "'https://your-crystal-forge.example'" }
+                                span { style: "color:#cccccc;", ";" }
+                            }
+                        }
+                        // Line 4: signingKeyFile = '...';
+                        div { style: "display:flex; gap:16px;",
+                            span { style: "color:#4e4e4e; user-select:none; min-width:16px; text-align:right;", "4" }
+                            span {
+                                span { style: "color:#cccccc;", "  " }
+                                span { style: "color:#9cdcfe;", "signingKeyFile" }
+                                span { style: "color:#cccccc;", " = " }
+                                span { style: "color:#ce9178;", "'/var/lib/crystal-forge/signing-key'" }
+                                span { style: "color:#cccccc;", ";" }
+                            }
+                        }
+                        // Line 5: };
+                        div { style: "display:flex; gap:16px;",
+                            span { style: "color:#4e4e4e; user-select:none; min-width:16px; text-align:right;", "5" }
+                            span { style: "color:#cccccc;", "}};" }
+                        }
+                    }
                 }
 
                 button {
@@ -445,8 +496,8 @@ fn StepPanel(props: StepPanelProps) -> Element {
             } else {
                 a {
                     class: "inline-flex rounded-lg px-3 py-2 text-sm font-medium text-white {theme::interactive::PRIMARY_BTN}",
-                    href: "{href}",
-                    "Open related page"
+                    href: "{href}?from=setup",
+                    "Open related page →"
                 }
             }
 
