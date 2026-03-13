@@ -51,7 +51,11 @@ fn api_base_url() -> String {
 }
 
 #[component]
-fn EnvironmentBanner(placement: BannerPlacement, title: &'static str, message: &'static str) -> Element {
+fn EnvironmentBanner(
+    placement: BannerPlacement,
+    title: &'static str,
+    message: &'static str,
+) -> Element {
     let (edge_style, border_style) = if placement == BannerPlacement::Top {
         ("top: 0;", "border-bottom: 2px solid #9a3412;")
     } else {
@@ -123,8 +127,9 @@ pub fn DevModeBanner(placement: BannerPlacement) -> Element {
                                         if let Ok(status) =
                                             serde_json::from_str::<EvalQueueModeProbe>(&text_str)
                                         {
-                                            is_mock_mode
-                                                .set(status.execution_mode.eq_ignore_ascii_case("mock"));
+                                            is_mock_mode.set(
+                                                status.execution_mode.eq_ignore_ascii_case("mock"),
+                                            );
                                         }
                                     }
                                 }

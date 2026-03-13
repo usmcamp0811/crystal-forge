@@ -3,12 +3,12 @@
 use dioxus::prelude::*;
 
 use crate::components::layout::Card;
-use crate::hooks::websocket::{use_websocket_build_stream, ConnectionState};
+use crate::hooks::websocket::{ConnectionState, use_websocket_build_stream};
 use crate::theme;
 
 use super::helpers::{
-    build_status_badge_class, event_level_class, mock_artifacts, mock_events, mock_logs,
-    BuildAction, BuildItem, PendingAction,
+    BuildAction, BuildItem, PendingAction, build_status_badge_class, event_level_class,
+    mock_artifacts, mock_events, mock_logs,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

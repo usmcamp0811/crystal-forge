@@ -3,6 +3,7 @@
 use dioxus::prelude::*;
 
 use crate::api::client;
+use crate::components::layout::sidebar::SidebarContext;
 use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::state::theme::UiTheme;
@@ -17,6 +18,9 @@ pub fn TopBar(title: String) -> Element {
     let auth_context = app_state.read().auth.clone();
     let nav = navigator();
 
+    let sidebar_ctx = use_context::<SidebarContext>();
+    let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
+
     let handle_logout = move |_| {
         spawn(async move {
             if let Ok(()) = client::logout().await {
@@ -28,11 +32,32 @@ pub fn TopBar(title: String) -> Element {
         });
     };
 
+    let toggle_drawer = move |_| {
+        is_mobile_drawer_open.set(!is_mobile_drawer_open());
+    };
+
     rsx! {
         header {
-            class: "flex items-center justify-between h-16 px-6 border-b {theme::surface::CARD_BORDER} {theme::surface::SIDEBAR_BG}",
+            class: "flex items-center justify-between h-16 px-6 {theme::surface::SIDEBAR_BG}",
+            style: "border-bottom: 1px solid var(--cf-card-border);",
             div {
                 class: "flex items-center gap-3",
+                // Mobile (<480px): hamburger drawer button
+                button {
+                    "data-testid": "mobile-nav-toggle",
+                    class: "cf-mobile-only inline-flex items-center justify-center p-2 rounded-lg border {theme::surface::CARD_BORDER} {theme::interactive::HOVER_BG} {theme::text::SECONDARY} min-h-[44px] min-w-[44px]",
+                    onclick: toggle_drawer,
+                    "aria-label": "Open navigation menu",
+                    svg {
+                        class: "w-6 h-6",
+                        fill: "none",
+                        stroke: "currentColor",
+                        stroke_width: "2",
+                        view_box: "0 0 24 24",
+                        path { d: "M4 6h16M4 12h16M4 18h16" }
+                    }
+                }
+
                 h1 {
                     class: "text-lg font-semibold",
                     "{title}"

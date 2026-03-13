@@ -2,4 +2,4 @@
 
 pub mod websocket;
 
-pub use websocket::{use_websocket_logs, SystemMetrics};
+pub use websocket::{SystemMetrics, use_websocket_logs};

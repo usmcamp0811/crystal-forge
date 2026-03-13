@@ -30,7 +30,9 @@ pub(crate) async fn fetch_setup_status(ui_check_mode: bool) -> Option<SetupStatu
     opts.set_method("GET");
 
     let request = web_sys::Request::new_with_str_and_init("/api/auth/setup-status", &opts).ok()?;
-    let resp_value = JsFuture::from(window.fetch_with_request(&request)).await.ok()?;
+    let resp_value = JsFuture::from(window.fetch_with_request(&request))
+        .await
+        .ok()?;
     let resp = resp_value.dyn_into::<web_sys::Response>().ok()?;
     if !resp.ok() {
         return None;
@@ -46,8 +48,8 @@ pub(crate) async fn register_user(payload: &RegisterRequest) -> Result<(), Strin
     let mut opts = web_sys::RequestInit::new();
     opts.set_method("POST");
 
-    let json_body = serde_json::to_string(payload)
-        .map_err(|e| format!("Failed to serialize request: {e}"))?;
+    let json_body =
+        serde_json::to_string(payload).map_err(|e| format!("Failed to serialize request: {e}"))?;
     opts.set_body(&JsValue::from_str(&json_body));
 
     let request = web_sys::Request::new_with_str_and_init("/api/auth/local/register", &opts)
