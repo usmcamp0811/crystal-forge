@@ -4,14 +4,14 @@ title: Implement Flake Sync From Source Button Behavior
 status: Done
 assignee: []
 created_date: '2026-02-26 08:45'
-updated_date: '2026-03-07 23:14'
+updated_date: '2026-03-13 01:24'
 labels:
   - ui
   - flakes
   - sync
 dependencies: []
 priority: high
-ordinal: 82000
+ordinal: 79000
 ---
 
 ## Problem

@@ -5,7 +5,7 @@ status: Done
 assignee:
   - KimiK2.5
 created_date: '2026-02-11 10:00'
-updated_date: '2026-02-21 03:28'
+updated_date: '2026-03-13 01:24'
 labels:
   - ui
   - nix
@@ -14,7 +14,7 @@ milestone: m-3
 dependencies: []
 parent_task_id: TASK-8
 priority: high
-ordinal: 43000
+ordinal: 51000
 ---
 
 ## Description
@@ -43,11 +43,11 @@ Expected: Running `nix develop` gives you everything needed to `trunk serve` a D
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 #1 trunk available in nix develop shell
-- [x] #2 #2 wasm-bindgen-cli available in nix develop shell (v0.2.108)
-- [x] #3 #3 wasm-opt (binaryen) available in nix develop shell
-- [x] #4 #4 Minimal trunk/dx build succeeds in nix develop (cargo wasm32 compilation verified)
-- [x] #5 #5 No manual rustup/cargo-install steps required
+- [x] #1 #1 #1 #1 trunk available in nix develop shell
+- [x] #2 #2 #2 #2 wasm-bindgen-cli available in nix develop shell (v0.2.108)
+- [x] #3 #3 #3 #3 wasm-opt (binaryen) available in nix develop shell
+- [x] #4 #4 #4 #4 Minimal trunk/dx build succeeds in nix develop (cargo wasm32 compilation verified)
+- [x] #5 #5 #5 #5 No manual rustup/cargo-install steps required
 
 ## Implementation Notes
 

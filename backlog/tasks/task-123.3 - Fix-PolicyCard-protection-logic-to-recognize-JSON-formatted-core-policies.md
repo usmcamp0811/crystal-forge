@@ -1,10 +1,10 @@
 ---
 id: TASK-123.3
 title: Fix PolicyCard protection logic to recognize JSON-formatted core policies
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-09 22:47'
-updated_date: '2026-03-09 22:51'
+updated_date: '2026-03-13 01:24'
 labels:
   - frontend
   - web-ui
@@ -15,6 +15,7 @@ milestone: m-13
 dependencies: []
 parent_task_id: TASK-123
 priority: high
+ordinal: 6000
 ---
 
 ## Description

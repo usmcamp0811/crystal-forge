@@ -1,10 +1,10 @@
 ---
 id: TASK-123.2
 title: Fix paginated list total field to return actual total count
-status: Review
+status: Done
 assignee: []
 created_date: '2026-03-09 20:59'
-updated_date: '2026-03-09 21:03'
+updated_date: '2026-03-13 01:24'
 labels:
   - backend
   - api
@@ -14,6 +14,7 @@ milestone: m-13
 dependencies: []
 parent_task_id: TASK-123
 priority: high
+ordinal: 5000
 ---
 
 ## Description

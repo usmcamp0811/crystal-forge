@@ -4,14 +4,14 @@ title: Fix process-compose server-stack for dev auth mode
 status: Done
 assignee: []
 created_date: '2026-02-20 14:27'
-updated_date: '2026-02-23 03:15'
+updated_date: '2026-03-13 01:24'
 labels:
   - devex
   - infra
   - auth
 dependencies: []
 priority: high
-ordinal: 55000
+ordinal: 56000
 ---
 
 ## Description

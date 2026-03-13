@@ -4,11 +4,11 @@ title: Split nix flake check into per-check GitLab CI jobs
 status: Done
 assignee: []
 created_date: '2026-02-27 02:31'
-updated_date: '2026-03-07 23:14'
+updated_date: '2026-03-13 01:24'
 labels: []
 dependencies: []
 priority: high
-ordinal: 85000
+ordinal: 82000
 ---
 
 ## Description

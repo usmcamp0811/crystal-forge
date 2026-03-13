@@ -4,14 +4,14 @@ title: Preserve policy editor state when toggling Basic/Advanced views
 status: Done
 assignee: []
 created_date: '2026-03-09 01:23'
-updated_date: '2026-03-13 00:51'
+updated_date: '2026-03-13 01:24'
 labels:
   - web-ui
   - policy-editor
   - ux
 dependencies: []
 priority: high
-ordinal: 2000
+ordinal: 8000
 ---
 
 ## Description

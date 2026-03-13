@@ -4,7 +4,7 @@ title: 'HIGH PRIORITY: Make builder concurrency limit enforcement race-free'
 status: Done
 assignee: []
 created_date: '2026-03-01 02:28'
-updated_date: '2026-03-07 23:14'
+updated_date: '2026-03-13 01:24'
 labels:
   - security
   - high-priority
@@ -13,7 +13,7 @@ labels:
   - concurrency
 dependencies: []
 priority: high
-ordinal: 92000
+ordinal: 89000
 ---
 
 ## Description
