@@ -300,47 +300,62 @@ fn SetupProgressBar(
                         WizardStep::Agent => ("Agent", progress.agent_acknowledged),
                     };
                     let is_active = current_step == step;
-                    let card_class = if is_active {
-                        // Active step: violet ring + solid background
-                        "rounded-lg border-2 px-3 py-2 text-xs md:text-sm border-violet-400 bg-violet-500/20 ring-1 ring-violet-400/40 cursor-pointer"
-                    } else if complete {
-                        // Completed (not active): emerald tint
-                        "rounded-lg border px-3 py-2 text-xs md:text-sm border-emerald-600/50 bg-emerald-900/20 cursor-pointer hover:border-emerald-500/70 hover:bg-emerald-900/30 transition-colors"
-                    } else {
-                        // Incomplete (not active): muted
-                        "rounded-lg border px-3 py-2 text-xs md:text-sm border-slate-700 bg-slate-900/20 cursor-pointer hover:border-slate-500 hover:bg-slate-800/30 transition-colors"
-                    };
-                    let label_class = if is_active {
-                        "font-semibold text-violet-200"
-                    } else if complete {
-                        "font-medium text-emerald-300"
-                    } else {
-                        "font-medium cf-text-secondary"
-                    };
                     let step_num = step.idx() + 1;
+
+                    // Use explicit inline styles so colours are guaranteed
+                    // visible on the dark #111827 card background regardless
+                    // of Tailwind JIT purging or opacity stacking.
+                    let (card_style, badge_style, label_style, indicator) = if is_active {
+                        (
+                            // Violet: solid border + noticeable bg fill
+                            "border: 2px solid #7c3aed; background: rgba(109,40,217,0.35); box-shadow: 0 0 0 1px rgba(139,92,246,0.4);",
+                            "background:#7c3aed; color:#fff;",
+                            "color:#e9d5ff; font-weight:600;",
+                            "→",
+                        )
+                    } else if complete {
+                        (
+                            // Emerald: visible green tint
+                            "border: 1px solid rgba(16,185,129,0.6); background: rgba(6,95,70,0.35);",
+                            "background:rgba(16,185,129,0.7); color:#fff;",
+                            "color:#6ee7b7; font-weight:500;",
+                            "✓",
+                        )
+                    } else {
+                        (
+                            // Muted: just enough to distinguish from page bg
+                            "border: 1px solid rgba(100,116,139,0.5); background: rgba(30,41,59,0.6);",
+                            "background:#334155; color:#94a3b8;",
+                            "color:#94a3b8; font-weight:500;",
+                            "",
+                        )
+                    };
+
                     rsx! {
                         div {
-                            class: "{card_class}",
+                            class: "rounded-lg px-3 py-2 text-xs md:text-sm cursor-pointer transition-all",
+                            style: "{card_style}",
                             role: "button",
                             onclick: move |_| on_step_click.call(step),
                             div { class: "flex items-center justify-between gap-1",
                                 div { class: "flex items-center gap-1.5 min-w-0",
                                     span {
-                                        class: if is_active {
-                                            "flex-shrink-0 w-4 h-4 rounded-full bg-violet-500 text-white text-[10px] font-bold flex items-center justify-center"
-                                        } else if complete {
-                                            "flex-shrink-0 w-4 h-4 rounded-full bg-emerald-600/60 text-emerald-200 text-[10px] font-bold flex items-center justify-center"
-                                        } else {
-                                            "flex-shrink-0 w-4 h-4 rounded-full bg-slate-700 text-slate-400 text-[10px] font-bold flex items-center justify-center"
-                                        },
+                                        class: "flex-shrink-0 w-4 h-4 rounded-full text-[10px] font-bold flex items-center justify-center",
+                                        style: "{badge_style}",
                                         "{step_num}"
                                     }
-                                    span { class: "{label_class} truncate", "{label}" }
+                                    span {
+                                        class: "truncate text-xs md:text-sm",
+                                        style: "{label_style}",
+                                        "{label}"
+                                    }
                                 }
-                                if complete {
-                                    span { class: "flex-shrink-0 text-emerald-400 text-sm", "✓" }
-                                } else if is_active {
-                                    span { class: "flex-shrink-0 text-violet-300 text-sm", "→" }
+                                if !indicator.is_empty() {
+                                    span {
+                                        class: "flex-shrink-0 text-sm",
+                                        style: if complete { "color:#34d399;" } else { "color:#a78bfa;" },
+                                        "{indicator}"
+                                    }
                                 }
                             }
                         }
