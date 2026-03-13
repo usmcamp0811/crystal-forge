@@ -3,7 +3,7 @@ id: TASK-189
 title: >-
   Reapply MR !156 responsive sidebar changes to dev after branch history
   divergence
-status: To Do
+status: In Progress
 assignee: []
 created_date: '2026-03-13 02:17'
 updated_date: '2026-03-13 02:17'
@@ -73,3 +73,9 @@ Safely reapply the functional changes from MR `!156` onto current `dev` and open
 - [ ] #5 `nix build .#checks.x86_64-linux.web-ui` succeeds.
 - [ ] #6 A new MR targeting `dev` is opened with explanation that this is a recovery reapply of missing `!156` content.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: codex on reckless in ~/code/crystal-forge/TASK-189-reapply-mr-156-sidebar
+<!-- SECTION:NOTES:END -->
