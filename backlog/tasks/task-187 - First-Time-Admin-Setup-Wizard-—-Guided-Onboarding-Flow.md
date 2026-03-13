@@ -4,7 +4,7 @@ title: First-Time Admin Setup Wizard — Guided Onboarding Flow
 status: In Progress
 assignee: []
 created_date: '2026-03-13 01:16'
-updated_date: '2026-03-13 12:09'
+updated_date: '2026-03-13 12:58'
 labels:
   - frontend
   - backend
@@ -167,4 +167,14 @@ Moved to To Do by maintainer request on 2026-03-13 for immediate execution next.
 LOCK: OpenCode on reckless in ~/code/crystal-forge/TASK-187-first-time-admin-setup-wizard
 
 Sprint-Ready review: task includes objective ACs, non-goals, architecture constraints, verification plan, impact areas, and risk/dependency notes. Proceeding with implementation.
+
+Implementation progress update (OpenCode, reckless): Added `/setup` wizard view + route, admin-only backend progress/dismiss/ack endpoints, login/register redirect behavior, and Admin 'Re-run Setup Wizard' control.
+
+Added migration `0097_add_setup_wizard_user_flags.sql` with `users.setup_wizard_dismissed` and `users.setup_wizard_agent_acknowledged`; added users query helpers and API DTOs/client methods.
+
+Verification run: `nix develop -c env SQLX_OFFLINE=true cargo check -p crystal-forge` (pass), `nix develop -c cargo check` in `packages/web-ui` (pass), `nix develop -c env SQLX_OFFLINE=true cargo test -p crystal-forge setup_wizard` (4 tests pass), `nix flake check` (pass).
+
+SQLx sync completed: started DB with `nix run .#devScripts.db-only -- -D up`, then `nix develop -c cargo sqlx prepare` in `packages/default` (pass).
+
+Known verification caveats: `cargo fmt -- --check` reports extensive pre-existing formatting diffs outside task scope; `cargo clippy -D warnings` currently not a clean gate in this branch/environment due existing repository warning baseline and toolchain/cache inconsistencies.
 <!-- SECTION:NOTES:END -->
