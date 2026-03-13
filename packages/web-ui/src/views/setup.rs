@@ -209,6 +209,7 @@ pub fn SetupView() -> Element {
                     SetupProgressBar {
                         current_step: step,
                         progress: progress_data.clone(),
+                        on_step_click: move |s| current_step.set(s),
                     }
 
                     if all_done {
@@ -281,7 +282,11 @@ pub fn SetupView() -> Element {
 }
 
 #[component]
-fn SetupProgressBar(current_step: WizardStep, progress: SetupWizardProgressResponse) -> Element {
+fn SetupProgressBar(
+    current_step: WizardStep,
+    progress: SetupWizardProgressResponse,
+    on_step_click: EventHandler<WizardStep>,
+) -> Element {
     rsx! {
         div { class: "grid gap-2 md:grid-cols-6",
             for step in WizardStep::all() {
@@ -294,18 +299,48 @@ fn SetupProgressBar(current_step: WizardStep, progress: SetupWizardProgressRespo
                         WizardStep::System => ("System", progress.system.complete),
                         WizardStep::Agent => ("Agent", progress.agent_acknowledged),
                     };
-                    let card_class = if current_step == step {
-                        "rounded-lg border px-3 py-2 text-xs md:text-sm border-violet-400 bg-violet-500/10"
+                    let is_active = current_step == step;
+                    let card_class = if is_active {
+                        // Active step: violet ring + solid background
+                        "rounded-lg border-2 px-3 py-2 text-xs md:text-sm border-violet-400 bg-violet-500/20 ring-1 ring-violet-400/40 cursor-pointer"
+                    } else if complete {
+                        // Completed (not active): emerald tint
+                        "rounded-lg border px-3 py-2 text-xs md:text-sm border-emerald-600/50 bg-emerald-900/20 cursor-pointer hover:border-emerald-500/70 hover:bg-emerald-900/30 transition-colors"
                     } else {
-                        "rounded-lg border px-3 py-2 text-xs md:text-sm border-slate-700 bg-slate-900/20"
+                        // Incomplete (not active): muted
+                        "rounded-lg border px-3 py-2 text-xs md:text-sm border-slate-700 bg-slate-900/20 cursor-pointer hover:border-slate-500 hover:bg-slate-800/30 transition-colors"
                     };
+                    let label_class = if is_active {
+                        "font-semibold text-violet-200"
+                    } else if complete {
+                        "font-medium text-emerald-300"
+                    } else {
+                        "font-medium cf-text-secondary"
+                    };
+                    let step_num = step.idx() + 1;
                     rsx! {
                         div {
                             class: "{card_class}",
-                            div { class: "flex items-center justify-between gap-2",
-                                span { class: "font-medium {theme::text::PRIMARY}", "{label}" }
+                            role: "button",
+                            onclick: move |_| on_step_click.call(step),
+                            div { class: "flex items-center justify-between gap-1",
+                                div { class: "flex items-center gap-1.5 min-w-0",
+                                    span {
+                                        class: if is_active {
+                                            "flex-shrink-0 w-4 h-4 rounded-full bg-violet-500 text-white text-[10px] font-bold flex items-center justify-center"
+                                        } else if complete {
+                                            "flex-shrink-0 w-4 h-4 rounded-full bg-emerald-600/60 text-emerald-200 text-[10px] font-bold flex items-center justify-center"
+                                        } else {
+                                            "flex-shrink-0 w-4 h-4 rounded-full bg-slate-700 text-slate-400 text-[10px] font-bold flex items-center justify-center"
+                                        },
+                                        "{step_num}"
+                                    }
+                                    span { class: "{label_class} truncate", "{label}" }
+                                }
                                 if complete {
-                                    span { class: "text-emerald-400", "✓" }
+                                    span { class: "flex-shrink-0 text-emerald-400 text-sm", "✓" }
+                                } else if is_active {
+                                    span { class: "flex-shrink-0 text-violet-300 text-sm", "→" }
                                 }
                             }
                         }
@@ -361,7 +396,11 @@ fn StepPanel(props: StepPanelProps) -> Element {
             "Enable and configure the Crystal Forge agent module on target hosts, then confirm you understand this step.",
             "/systems",
             props.progress.agent_acknowledged,
-            if props.progress.agent_acknowledged { 1 } else { 0 },
+            if props.progress.agent_acknowledged {
+                1
+            } else {
+                0
+            },
         ),
     };
 
@@ -379,7 +418,7 @@ fn StepPanel(props: StepPanelProps) -> Element {
 
             if props.step == WizardStep::Agent {
                 pre {
-                    class: "text-xs rounded-lg border {theme::surface::CARD_BORDER} bg-slate-950 p-3 overflow-auto",
+                    class: "text-xs rounded-lg border {theme::surface::CARD_BORDER} bg-slate-950 text-slate-100 p-3 overflow-auto leading-relaxed",
                     "{AGENT_SNIPPET}"
                 }
 
